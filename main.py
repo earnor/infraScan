@@ -98,9 +98,9 @@ def print_hi(name):
 
 
     # Define area that is protected for constructing highway links
-    #get_protected_area(limits=limits_corridor)
-    #get_unproductive_area(limits=limits_corridor)
-    #landuse(limits=limits_corridor)
+    get_protected_area(limits=limits_corridor)
+    get_unproductive_area(limits=limits_corridor)
+    landuse(limits=limits_corridor)
 
     # Tif file of all unsuitable land cover and protected areas
     # File is stored to 'data\landuse_landcover\processed\zone_no_infra\protected_area_{suffix}.tif'
@@ -330,11 +330,11 @@ def print_hi(name):
 
     # Compute the elevation profile for each generated highway routing based on the elevation model
     links_temp = get_road_elevation_profile()
-    links_temp.to_csv(r"data\Network\processed\new_links_realistic_woTunnel.csv")
+    #links_temp.to_csv(r"data\Network\processed\new_links_realistic_woTunnel.csv")
 
     # Based on the elevation profile of each links compute the required amount of bridges and tunnels
     # Safe the dataset to "data\Network\processed\new_links_realistic_tunnel.gpkg"
-    get_tunnel_candidates(links_temp)
+    #get_tunnel_candidates(links_temp)
     tunnel_bridges(links_temp)
 
     runtimes["Optimize eleavtion profile of links to find need for tunnel and bridges"] = time.time() - st
@@ -461,16 +461,16 @@ def print_hi(name):
     st = time.time()
 
 
-    #tt_optimization_status_quo()
+    tt_optimization_status_quo()
 
     # check if flow are possible
-    #link_traffic_to_map()
-
+    link_traffic_to_map()
+    print('Flag: link_traffic_to_map is complete')
     # Run travel time optimization for infrastructure developments and all scenarios
-    #tt_optimization_all_developments()
-
+    tt_optimization_all_developments()
+    print('Flag: tt_optimization_all_developments is complete')
     # Monetize travel time savings
-    #monetize_tts(VTTS=VTTS, duration=travel_time_duration)
+    monetize_tts(VTTS=VTTS, duration=travel_time_duration)
 
     ##################################################################################
     # Aggregate the single cost elements to one dataframe
@@ -498,8 +498,6 @@ def print_hi(name):
     # VISUALIZE THE RESULTS
 
     print("\nVISUALIZE THE RESULTS \n")
-
-    gdf_costs.breeeeeee
 
     # Import layers to plot
     tif_path_plot = r"data\landuse_landcover\processed\zone_no_infra\protected_area_corridor.tif"
@@ -549,7 +547,7 @@ def print_hi(name):
     # Plot uncertainty
     gdf_costs['mean_costs'] = gdf_costs[["total_low", "total_medium", "total_high"]].mean(axis=1)
     gdf_costs["std"] = gdf_costs[["total_low", "total_medium", "total_high"]].std(axis=1)
-    gdf_costs['cv'] = gdf_costs[["total_low", "total_medium", "total_high"]].std(axis=1) / abs(gdf_costs.mean(axis=1))
+    gdf_costs['cv'] = gdf_costs[["total_low", "total_medium", "total_high"]].std(axis=1) / abs(gdf_costs['mean_costs'])
     gdf_costs['cv'] = gdf_costs['cv'] * 10000000
 
     plot_cost_uncertainty(df_costs=gdf_costs, banned_area=tif_path_plot,
@@ -580,10 +578,8 @@ def print_hi(name):
                                          labels=["construction and maintenance", "access costs", "highway travel time",
                                                  "external costs"], plot_name="single_components",
                                          legend_title="Scoring components")
-    gdf_costs.snoowwwwwww
-
     #todo plot the uncertainty
-    plot_best_worse(df=gdf_costs)
+    #plot_best_worse(df=gdf_costs)
 
 
     # Plot influence of discounting

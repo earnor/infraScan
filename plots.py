@@ -611,9 +611,9 @@ def plot_benefit_distribution_line_multi(df_costs, columns, labels, plot_name, l
     bin_width = 100
     # Automatically calculate bin edges and create a new column 'bin'
     # Calculate the desired bin edges
-    min_value = df_costs[columns].min().min().astype(int)
+    min_value = df_costs[columns].min().min()
     min_value = math.floor(min_value / bin_width) * bin_width - bin_width * 2
-    max_value = df_costs[columns].max().max().astype(int)
+    max_value = df_costs[columns].max().max()
     max_value = math.ceil(max_value / bin_width) * bin_width + bin_width*4
 
     num_bins = int((max_value - min_value) / bin_width)

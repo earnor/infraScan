@@ -1138,10 +1138,10 @@ def tunnel_bridges(df):
     #print(bridge_gdf.head(10).to_string())
     #print(df.head().to_string())
     # safe file as geopackage
-    #df.to_file(r"data\Network\processed\new_links_realistic_tunnel_adjusted.gpkg")
-    #tunnel_gdf.to_file(r"data\Network\processed\edges_tunnels.gpkg")
-    #bridge_gdf.to_file(r"data\Network\processed\edges_bridges.gpkg")
-    #road_gdf.to_file(r"data\Network\processed\edges_roads.gpkg")
+    df.to_file(r"data\Network\processed\new_links_realistic_tunnel_adjusted.gpkg")
+    tunnel_gdf.to_file(r"data\Network\processed\edges_tunnels.gpkg")
+    bridge_gdf.to_file(r"data\Network\processed\edges_bridges.gpkg")
+    road_gdf.to_file(r"data\Network\processed\edges_roads.gpkg")
 
     """
     def slope_constrained_curve_fit(x, y):

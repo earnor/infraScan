@@ -959,7 +959,8 @@ def multiple_shp_to_one(gdf_list, names_list, path, limits):
 
     # Clip the GeoDataFrame using the bounding box
     combined_gdf_frame = gpd.clip(combined_gdf, frame_box)
-    combined_gdf_frame.to_file(fr"data\landuse_landcover\Schutzzonen\{path}_frame.gpgk")
+    #combined_gdf_frame.to_file(fr"data\landuse_landcover\Schutzzonen\{path}_frame.gpkg")
+    combined_gdf_frame.to_file(fr"data\landuse_landcover\processed\{path}_frame.gpkg")
 
 
 def all_protected_area_to_raster(suffix=""):

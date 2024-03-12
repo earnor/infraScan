@@ -2,6 +2,7 @@ import os
 import glob
 import time
 import geopandas as gpd
+import pandas as pd
 import networkx as nx
 import rasterio
 import rasterio.features
@@ -440,7 +441,9 @@ def travel_cost_developments(frame):
 
             # Append new row to target_gdf
             temp_points = points.copy()
-            temp_points = temp_points.append(new_row, ignore_index=True)
+            #temp_points = temp_points.append(new_row, ignore_index=True)
+            # geometries.append(tempgeom)
+            temp_points = gpd.GeoDataFrame(pd.concat([temp_points, pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
 
             # Convert real-world coordinates to raster indices
             sources_indices = [~transform * (x, y) for x, y in zip(temp_points.geometry.x, temp_points.geometry.y)]
