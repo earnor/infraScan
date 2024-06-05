@@ -678,7 +678,8 @@ def get_tunnel_candidates(df):
             #dlg.wait_window()
     df["elevation_profile"]=df["elevation_profile"].astype('string')
     print(df)
-    df.to_file(r"data\Network\processed\new_links_realistic_tunnel.gpkg")
+    #df.to_file(r"data\Network\processed\new_links_realistic_tunnel.gpkg")
+    df.to_file(r"data\Network\processed\new_links_realistic_tunnel-terminal.gpkg")
 
 
 def tunnel_bridges(df):

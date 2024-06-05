@@ -23,11 +23,11 @@ class CustomBasemap:
 
         # Plot cantonal border
         if canton==True:
-            canton = gpd.read_file(r"data\Scenario\Boundaries\Gemeindegrenzen\UP_KANTON_F.shp")
+            canton = gpd.read_file(r"data/Scenario/Boundaries/Gemeindegrenzen/UP_KANTON_F.shp")
             canton[canton["KANTON"] == 'Zürich'].boundary.plot(ax=self.ax, color="black", lw=2)
 
         # Plot lakes
-        lakes = gpd.read_file(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
+        lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
         lakes.plot(ax=self.ax, color="lightblue")
 
         # Add scale bar
@@ -39,7 +39,7 @@ class CustomBasemap:
         if isinstance(access_points, gpd.GeoDataFrame):
             access_points.plot(ax=self.ax, color="black", markersize=50)
 
-        location = gpd.read_file(r'data\manually_gathered_data\cities.shp', crs="epsg:2056")
+        location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
         # Plot the location as points
         location.plot(ax=self.ax, color="black", markersize=75)
         # Add city names to the plot
@@ -90,7 +90,7 @@ class CustomBasemap:
         gdf_voronoi["ID"] = gdf_voronoi["ID"].astype(int)
         #print(gdf_voronoi[gdf_voronoi["ID"] == id].head(9).to_string())
         gdf_voronoi[gdf_voronoi["ID"] == id].plot(ax=self.ax, edgecolor='red', facecolor='none' , lw=2)
-        plt.savefig(r"plot\Voronoi\developments\dev_" + str(id) + ".png", dpi=400)
+        plt.savefig(r"plot/Voronoi/developments/dev_" + str(id) + ".png", dpi=400)
 
 
 def plot_cost_result(df_costs, banned_area, title_bar, boundary=None, network=None, access_points=None, plot_name=False, col="total_medium"):
@@ -138,7 +138,7 @@ def plot_cost_result(df_costs, banned_area, title_bar, boundary=None, network=No
     cmap = LinearSegmentedColormap.from_list("custom_colormap", all_colors)
     fig, ax = plt.subplots(figsize=(15, 10))
     # Plot lakes
-    lakes = gpd.read_file(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
+    lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
     lakes.plot(ax=ax, color="lightblue", zorder=9)
 
     # Add scale bar
@@ -150,7 +150,7 @@ def plot_cost_result(df_costs, banned_area, title_bar, boundary=None, network=No
     if isinstance(access_points, gpd.GeoDataFrame):
         access_points.plot(ax=ax, color="black", markersize=50, zorder=12)
 
-    location = gpd.read_file(r'data\manually_gathered_data\cities.shp', crs="epsg:2056")
+    location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
     # Plot the location as points
     location.plot(ax=ax, color="black", markersize=75, zorder=13)
     # Add city names to the plot
@@ -182,7 +182,7 @@ def plot_cost_result(df_costs, banned_area, title_bar, boundary=None, network=No
     cbar = plt.colorbar(heatmap, cax=cax)
 
     # Add and rotate the colorbar title
-    cbar.set_label(f'Net benefits in {title_bar} [Mio. CHF]\n(Construction, maintenance, highway travel time, access time and external effects)', rotation=90,
+    cbar.set_label(f'Net benefits in {title_bar} [Mio. CHF]/n(Construction, maintenance, highway travel time, access time and external effects)', rotation=90,
                     labelpad=30, fontsize=16)
 
     # Set the font size of the colorbar's tick labels
@@ -225,7 +225,7 @@ def plot_cost_result(df_costs, banned_area, title_bar, boundary=None, network=No
 
     if plot_name != False:
         plt.tight_layout()
-        plt.savefig(fr"plot\results\04_{plot_name}.png", dpi=300)
+        plt.savefig(fr"plot/results/04_{plot_name}.png", dpi=300)
 
     plt.show()
     return
@@ -280,7 +280,7 @@ def plot_single_cost_result(df_costs, banned_area , title_bar, boundary=None, ne
     # Initialize the plot
     fig, ax = plt.subplots(figsize=(15, 10))
     # Plot lakes
-    lakes = gpd.read_file(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
+    lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
     lakes.plot(ax=ax, color="lightblue", zorder=9)
 
     # Add scale bar
@@ -292,7 +292,7 @@ def plot_single_cost_result(df_costs, banned_area , title_bar, boundary=None, ne
     if isinstance(access_points, gpd.GeoDataFrame):
         access_points.plot(ax=ax, color="black", markersize=50, zorder=12)
 
-    location = gpd.read_file(r'data\manually_gathered_data\cities.shp', crs="epsg:2056")
+    location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
     # Plot the location as points
     location.plot(ax=ax, color="black", markersize=75, zorder=13)
     # Add city names to the plot
@@ -358,7 +358,7 @@ def plot_single_cost_result(df_costs, banned_area , title_bar, boundary=None, ne
 
     if plot_name != False:
         plt.tight_layout()
-        plt.savefig(fr"plot\results\04_{plot_name}.png", dpi=300)
+        plt.savefig(fr"plot/results/04_{plot_name}.png", dpi=300)
 
     plt.show()
     return
@@ -407,7 +407,7 @@ def plot_cost_uncertainty(df_costs, banned_area, col, legend_title, boundary=Non
     cmap = LinearSegmentedColormap.from_list("custom_colormap", all_colors)
     fig, ax = plt.subplots(figsize=(20, 10))
     # Plot lakes
-    lakes = gpd.read_file(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
+    lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
     lakes.plot(ax=ax, color="lightblue", zorder=9)
 
     # Add scale bar
@@ -419,7 +419,7 @@ def plot_cost_uncertainty(df_costs, banned_area, col, legend_title, boundary=Non
     if isinstance(access_points, gpd.GeoDataFrame):
         access_points.plot(ax=ax, color="black", markersize=50, zorder=12)
 
-    location = gpd.read_file(r'data\manually_gathered_data\cities.shp', crs="epsg:2056")
+    location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
     # Plot the location as points
     location.plot(ax=ax, color="black", markersize=75, zorder=13)
     # Add city names to the plot
@@ -537,7 +537,7 @@ def plot_cost_uncertainty(df_costs, banned_area, col, legend_title, boundary=Non
 
     if plot_name != False:
         plt.tight_layout()
-        plt.savefig(fr"plot\results\04_{plot_name}.png", dpi=300)
+        plt.savefig(fr"plot/results/04_{plot_name}.png", dpi=300)
 
     plt.show()
     return
@@ -600,7 +600,7 @@ def plot_benefit_distribution_bar_single(df_costs, column):
     plt.tight_layout()
 
     # Safe figure
-    plt.savefig(r"plot\results\benefit_distribution.png", dpi=500)
+    plt.savefig(r"plot/results/benefit_distribution.png", dpi=500)
 
     # Show the plot
     plt.show()
@@ -688,7 +688,7 @@ def plot_benefit_distribution_line_multi(df_costs, columns, labels, plot_name, l
     plt.grid(axis='y', linestyle='--', alpha=0.7, zorder=1)
 
     plt.tight_layout()
-    plt.savefig(fr"plot\results\04_distribution_line_{plot_name}.png", dpi=500)
+    plt.savefig(fr"plot/results/04_distribution_line_{plot_name}.png", dpi=500)
     plt.show()
 
 
@@ -771,7 +771,7 @@ def boxplot(df, nbr):
     plt.xticks(fontsize=18)
     plt.yticks(fontsize=18)
     plt.tight_layout()
-    plt.savefig(r"plot\results\04_boxplot.png", dpi=500)
+    plt.savefig(r"plot/results/04_boxplot.png", dpi=500)
     plt.show()
 
 
@@ -827,20 +827,20 @@ def plot_2x3_subplots(gdf, limits, network, location):
                   horizontalalignment='center', verticalalignment='center')
 
     # Show the plot
-    plt.savefig(r"plot\Scenario\5_all_scen.png", dpi=450, bbox_inches='tight', pad_inches=0.1)
+    plt.savefig(r"plot/Scenario/5_all_scen.png", dpi=450, bbox_inches='tight', pad_inches=0.1)
     plt.show()
 
 
 def plot_points_gen(points, edges, banned_area, points_2=None, boundary=None, network=None, access_points=None, plot_name=False, all_zones=False):
 
     # Import other zones
-    schutzzonen = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD\FNS_SCHUTZZONE_F.shp")
-    forest = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Waldareal_-OGD\WALD_WALDAREAL_F.shp")
-    fff = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Fruchtfolgeflachen_-OGD\FFF_F.shp")
+    schutzzonen = gpd.read_file(r"data/landuse_landcover/Schutzzonen/Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD/FNS_SCHUTZZONE_F.shp")
+    forest = gpd.read_file(r"data/landuse_landcover/Schutzzonen/Waldareal_-OGD/WALD_WALDAREAL_F.shp")
+    fff = gpd.read_file(r"data/landuse_landcover/Schutzzonen/Fruchtfolgeflachen_-OGD/FFF_F.shp")
 
     fig, ax = plt.subplots(figsize=(13,9))
     # Plot lakes
-    lakes = gpd.read_file(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
+    lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
     lakes.plot(ax=ax, color="lightblue", zorder=9)
 
     # Add scale bar
@@ -852,7 +852,7 @@ def plot_points_gen(points, edges, banned_area, points_2=None, boundary=None, ne
     if isinstance(access_points, gpd.GeoDataFrame):
         access_points.plot(ax=ax, color="black", markersize=50, zorder=12)
 
-    location = gpd.read_file(r'data\manually_gathered_data\cities.shp', crs="epsg:2056")
+    location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
     # Plot the location as points
     location.plot(ax=ax, color="black", markersize=75, zorder=200)
     # Add city names to the plot
@@ -925,7 +925,7 @@ def plot_points_gen(points, edges, banned_area, points_2=None, boundary=None, ne
     plt.tight_layout()
     if plot_name != False:
         plt.tight_layout()
-        plt.savefig(fr"plot\results\04_{plot_name}.png", dpi=500, bbox_inches='tight')
+        plt.savefig(fr"plot/results/04_{plot_name}.png", dpi=500, bbox_inches='tight')
 
     plt.show()
     return
@@ -934,7 +934,7 @@ def plot_points_gen(points, edges, banned_area, points_2=None, boundary=None, ne
 def plot_voronoi_comp(eucledian, traveltime, boundary=None, network=None, access_points=None, plot_name=False, all_zones=False):
     fig, ax = plt.subplots(figsize=(13, 9))
     # Plot lakes
-    lakes = gpd.read_file(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
+    lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
     lakes.plot(ax=ax, color="lightblue", zorder=4)
 
     # Add scale bar
@@ -946,7 +946,7 @@ def plot_voronoi_comp(eucledian, traveltime, boundary=None, network=None, access
     if isinstance(access_points, gpd.GeoDataFrame):
         access_points.plot(ax=ax, color="black", markersize=50, zorder=12)
 
-    location = gpd.read_file(r'data\manually_gathered_data\cities.shp', crs="epsg:2056")
+    location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
     # Plot the location as points
     location.plot(ax=ax, color="black", markersize=75, zorder=200)
     # Add city names to the plot
@@ -1003,7 +1003,7 @@ def plot_voronoi_comp(eucledian, traveltime, boundary=None, network=None, access
 
     if plot_name != False:
         plt.tight_layout()
-        plt.savefig(fr"plot\results\04_{plot_name}.png", dpi=500)
+        plt.savefig(fr"plot/results/04_{plot_name}.png", dpi=500)
 
     plt.show()
     return
@@ -1012,7 +1012,7 @@ def plot_voronoi_comp(eucledian, traveltime, boundary=None, network=None, access
 def plot_voronoi_development(statusquo, development_voronoi, development_point, boundary=None, network=None, access_points=None, plot_name=False, all_zones=False):
     fig, ax = plt.subplots(figsize=(13, 9))
     # Plot lakes
-    lakes = gpd.read_file(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
+    lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
     lakes.plot(ax=ax, color="lightblue", zorder=4)
 
     # Add scale bar
@@ -1024,7 +1024,7 @@ def plot_voronoi_development(statusquo, development_voronoi, development_point, 
     if isinstance(access_points, gpd.GeoDataFrame):
         access_points.plot(ax=ax, color="black", markersize=50, zorder=12)
 
-    location = gpd.read_file(r'data\manually_gathered_data\cities.shp', crs="epsg:2056")
+    location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
     # Plot the location as points
     location.plot(ax=ax, color="black", markersize=75, zorder=200)
     # Add city names to the plot
@@ -1089,7 +1089,7 @@ def plot_voronoi_development(statusquo, development_voronoi, development_point, 
 
     if plot_name != False:
         plt.tight_layout()
-        plt.savefig(fr"plot\results\04_{plot_name}.png", dpi=500)
+        plt.savefig(fr"plot/results/04_{plot_name}.png", dpi=500)
 
     plt.show()
     return
