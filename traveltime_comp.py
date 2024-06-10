@@ -101,7 +101,7 @@ def get_nw_data():
     ### Check for 2050
 
     # Import OD matrix and flatten it (D_od)
-    OD_matrix = pd.read_csv(r"data\traffic_flow\od\od_matrix_2020.csv", sep=",", index_col=0) #todo is this od_matrix_2020?
+    OD_matrix = pd.read_csv(r"data\traffic_flow\od\od_matrix_2020.csv", sep=",", index_col=0)
     print(OD_matrix.head(5).to_string())
     # Import polygons of the corridor
     #voronoi_OD = gpd.read_file(r"data\traffic_flow\od\OD_voronoidf.gpkg")
