@@ -86,10 +86,11 @@ def fill_raster_dataframe(df, rastersize=100):
     # Create a new DataFrame with all combinations of X and Y
     new_x, new_y = np.meshgrid(x_grid, y_grid)
     new_data = pd.DataFrame({'E_COORD': new_x.ravel(), 'N_COORD': new_y.ravel()})
-
+    df = df.astype({'E_COORD': 'int'})
+    df = df.astype({'N_COORD': 'int'})
     # Merge the new DataFrame with the existing data and fill missing values with NaN
-    merged_data = pd.merge(new_data, df, on=['E_COORD', 'N_COORD'], how='left')
-
+    #merged_data = pd.merge(new_data, df, on=['E_COORD', 'N_COORD'], how='left')
+    merged_data = new_data.merge(df, on=['E_COORD', 'N_COORD'], how='left')
     return merged_data
 
 
@@ -188,6 +189,7 @@ def load_nw():
     node_table = pd.read_csv(r"data\Network\Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
     node_table = node_table[['NR','XKOORD','YKOORD']]
     #link_attribute = pd.read_csv(r"data\Network\Road_LinkType.csv", sep=";")
+    change_table = pd.read_csv(r"data\Network\Rail-Service_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
 
     # Add coordinates of the origin node of each link by merging nodes and links through the node ID
     #edge_table = edge_table.join(node_table,on="FromNode").rename({'XKOORD': 'E_KOORD_O', 'YKOORD': 'N_KOORD_O'}, axis=1)
@@ -201,9 +203,9 @@ def load_nw():
     edge_ID = pd.DataFrame(temp_dict)
     edge_table = pd.concat([edge_ID,edge_table],axis=1)
     # Keep only relevant attributes for the edges
-    edge_table = edge_table[['Link NR','FromNode', 'ToNode', 'FromStation', 'ToStation', 'FromCode', 'ToCode',
-       'Service', 'Direction', 'Via', 'TotalPeakCapacity', 'TravelTime','InVehWait', 'FromGde', 'ToGde', 'E_KOORD_O',
-       'N_KOORD_O', 'E_KOORD_D', 'N_KOORD_D']]
+    #edge_table = edge_table[['Link NR','FromNode', 'ToNode', 'FromStation', 'ToStation', 'FromCode', 'ToCode',
+    #   'Service', 'Direction', 'Via', 'TotalPeakCapacity', 'TravelTime','InVehWait', 'FromGde', 'ToGde', 'E_KOORD_O',
+    #   'N_KOORD_O', 'E_KOORD_D', 'N_KOORD_D']]
 
     #edge_table = edge_table[['Link NR', 'From Node', 'To Node', 'Link Typ', 'Length (meter)', 'Number of Lanes',
     #                         'Capacity per day', 'V0IVFreeflow speed', 'Opening Year', 'E_KOORD_O', 'N_KOORD_O',
@@ -248,8 +250,12 @@ def map_access_points_on_network(current_points, network):
     # As the access points were collected manually they do not match the infrastructure perfectly all the time. Thus,
     # each point is projected to the closest network segment
     # Create an empty GeoPandas dataframe to store the adjusted points
-    current_points = gpd.GeoDataFrame(current_points, geometry=gpd.points_from_xy(current_points["x"], current_points["y"]),
-                                  crs="epsg:2056")
+    #current_points = gpd.GeoDataFrame(current_points, geometry=gpd.points_from_xy(current_points["x"], current_points["y"]),
+    #                              crs="epsg:2056")
+    current_points = gpd.GeoDataFrame(current_points,
+                                      geometry=gpd.points_from_xy(current_points["XKOORD"], current_points["YKOORD"]),
+                                      crs="epsg:21781")
+    current_points = current_points.to_crs("epsg:2056")
     adjusted_points_gdf = gpd.GeoDataFrame(columns=current_points.columns)
 
     # Iterate over each point
@@ -273,16 +279,16 @@ def map_access_points_on_network(current_points, network):
 
 
     #adjusted_points_gdf["point_name"] = gdf_access["name"]
-    adjusted_points_gdf['x'] = adjusted_points_gdf.geometry.x
-    adjusted_points_gdf['y'] = adjusted_points_gdf.geometry.y
+    adjusted_points_gdf['XKOORD'] = adjusted_points_gdf.geometry.x
+    adjusted_points_gdf['YKOORD'] = adjusted_points_gdf.geometry.y
     #adjusted_points_gdf.columns = adjusted_points_gdf.columns.astype(str)
     #adjusted_points_gdf = adjusted_points_gdf.drop('0')
     #adjusted_points_gdf = adjusted_points_gdf.dropna(subset=['geometry'])
-    adjusted_points_gdf.to_file(r"data\Network\processed\access_highway_matched.gpkg")
+    adjusted_points_gdf.to_file(r"data\Network\processed\railway_matched.gpkg") #access_highway_matched
     return
 
 
-def reformat_network():
+def reformat_highway_network():
     # Import points and nodes
     #points_gdf = gpd.read_file(r"data\access_highway_correct.shp")
     current_points = pd.read_csv(r"data\manually_gathered_data\highway_access.csv", sep=";")
@@ -597,22 +603,332 @@ def reformat_network():
 
     filtered_edges.to_file(r"data\Network\processed\edges.gpkg")
 
+def reformat_rail_network():
+    # Import points and nodes
+    #points_gdf = gpd.read_file(r"data\access_highway_correct.shp")
+    current_points = pd.read_csv(r"data\Network\Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
+    current_points = gpd.GeoDataFrame(current_points,
+                                      geometry=gpd.points_from_xy(current_points["XKOORD"], current_points["YKOORD"]),
+                                      crs="epsg:21781")
+    current_points = current_points.to_crs("epsg:2056")
+    edges_gdf = gpd.read_file(r"data/temp/network_railway-services.gpkg")
+
+    for index, row in edges_gdf.iterrows():
+        coords = [(coords) for coords in list(row['geometry'].coords)]
+        first_coord, last_coord = [coords[i] for i in (0, -1)]
+        edges_gdf.at[index, 'first'] = Point(first_coord)
+        edges_gdf.at[index, 'last'] = Point(last_coord)
+
+    edges_gdf['x_origin'] = edges_gdf["first"].apply(lambda p: p.x)
+    edges_gdf['y_origin'] = edges_gdf["first"].apply(lambda p: p.y)
+    edges_gdf['x_dest'] = edges_gdf["last"].apply(lambda p: p.x)
+    edges_gdf['y_dest'] = edges_gdf["last"].apply(lambda p: p.y)
+
+    """
+    edges_gdf['E_KOORD_O'], edges_gdf['N_KOORD_O'], edges_gdf['E_KOORD_D'], edges_gdf['N_KOORD_D'] = \
+        np.where(edges_gdf['E_KOORD_O'] < edges_gdf['E_KOORD_D'],
+                 (edges_gdf['E_KOORD_O'], edges_gdf['N_KOORD_O'], edges_gdf['E_KOORD_D'], edges_gdf['N_KOORD_D']),
+                 (edges_gdf['E_KOORD_D'], edges_gdf['N_KOORD_D'], edges_gdf['E_KOORD_O'], edges_gdf['N_KOORD_O']))
+    edges_gdf = edges_gdf.drop_duplicates(subset=['E_KOORD_O', 'E_KOORD_D', 'N_KOORD_O', 'N_KOORD_D'], keep="first")
+    """
+
+    # Create a list of unique coordinates (x, y) for both source and target
+    # Create an empty set to store unique coordinates
+    unique_coords = set()
+
+    # Iterate through the DataFrame and add unique source coordinates to the set
+    for index, row in edges_gdf.iterrows():
+        source_coord = (row['x_origin'], row['y_origin'])
+        unique_coords.add(source_coord)
+
+    # Iterate through the DataFrame and add unique target coordinates to the set
+    for index, row in edges_gdf.iterrows():
+        target_coord = (row['x_dest'], row['y_dest'])
+        unique_coords.add(target_coord)
+    #unique_coords = pd.concat([edges_gdf[['E_KOORD_O', 'N_KOORD_O']], edges_gdf[['E_KOORD_D', 'N_KOORD_D']]]).values
+
+    # Create a dictionary to store the count of edges for each coordinate
+    coord_count = {}
+
+    # Iterate through the unique coordinates and count their appearances in the DataFrame
+    for coord in unique_coords:
+        count = ((edges_gdf['x_origin'] == coord[0]) & (edges_gdf['y_origin'] == coord[1])).sum() + \
+                ((edges_gdf['x_dest'] == coord[0]) & (edges_gdf['y_dest'] == coord[1])).sum()
+        coord_count[tuple(coord)] = count
+
+    # Find coordinates where three edges connect
+    #result_coords = [coord for coord, count in coord_count.items() if count >= 3]
+
+    #geometry = [Point(x, y) for x, y in result_coords]
+    #crossing_nodes = gpd.GeoDataFrame(geometry=geometry, columns=['geometry'], crs="epsg:2056")
+    #crossing_nodes = crossing_nodes.to_crs("epsg:2056")
+    # print(crossing_nodes.head(20).to_string())
+
+    ### Here I have all points that connect more than 3 links, these are junction in the network
+
+
+    ### Now I want to group these point to a new one in order to replace the coordiantes
+    #buffered = crossing_nodes.copy()
+    #buffered['geometry'] = crossing_nodes.buffer(1000)
+    #joined = gpd.sjoin(buffered, crossing_nodes, how='left', predicate='intersects')
+    #mean_coords = joined.groupby('index_right')['geometry'].apply(lambda x: cascaded_union(x).centroid)
+    #crossing_nodes['new_geometry'] = crossing_nodes.apply(lambda row: mean_coords.get(row.name, row.geometry), axis=1)
+    #print(crossing_nodes.head(20).to_string())
+    #print("Number of nodes at highway junctions: ", crossing_nodes.shape[0])
+    #print(crossing_nodes.shape)
+
+    # dataframe showing the nodes that are highway junctions and store their new coordinates
+    #crossing_nodes_simple = gpd.GeoDataFrame(crossing_nodes["new_geometry"], geometry="new_geometry")
+    # delete if multiple times the same point
+    #crossing_nodes_simple = crossing_nodes_simple.drop_duplicates(subset='new_geometry')
+
+
+    #edges_gdf["origin"], edges_gdf["destination"] = edges_gdf["geometry"][0], edges_gdf["geometry"][1]
+    #edges_gdf["origin"] = Point(edges_gdf["geometry"].coords[0])
+
+
+    ## if both geometries then delete (both geometries -> new_geometry)
+    #df_first = edges_gdf.set_geometry("first")
+    #overlay_f = gpd.sjoin(df_first, crossing_nodes, how='left', predicate='intersects', lsuffix="first", rsuffix="geometry")
+    #overlay_f['first'] = np.where(overlay_f['new_geometry'].notna(), overlay_f['new_geometry'], overlay_f['first'])
+    #overlay_f['one'] = np.where(overlay_f['new_geometry'].notna(), True, False)
+    #new_edges = overlay_f.drop(columns=["new_geometry", "index_geometry"])
+
+    #df_last = new_edges.set_geometry("last")
+    #overlay_l = gpd.sjoin(df_last, crossing_nodes, how='left', predicate='intersects', lsuffix="last", rsuffix="geometry")
+    #overlay_l['two'] = np.where(overlay_l['new_geometry'].notna(), True, False)
+    #overlay_l['last'] = np.where(overlay_l['new_geometry'].notna(), overlay_l['new_geometry'], overlay_l['last'])
+
+    #new_edges = overlay_l.drop(columns=["new_geometry", "index_geometry"])
+    #print(new_edges.shape)
+    #new_edges = new_edges[~(new_edges['one'] & new_edges['two'])]
+    #print(new_edges.shape)
+    #new_edges['geometry'] = new_edges.apply(lambda row: LineString([row["first"], row['last']]), axis=1)
+    #new_edges = new_edges.set_geometry("geometry")
+
+    #print(new_edges.head(20).to_string())
+    #overlay_f = overlay_f[["Link NR", "From Node", "To Node", "geometry", "first", "new_geometry"]]
+    #overlay_l = overlay_l[["Link NR", "From Node", "To Node", "geometry", "last", "new_geometry"]]
+
+    #print(edges_gdf.head(20).to_string())
+    #new_edges = new_edges.set_crs("epsg:2056")
+    #new_edges = new_edges.drop(columns=["first", "last"])
+    #new_edges.to_file(r"data\temp\edges_simple.gpkg")
+
+    # delete some edges that cannot deleted automatically
+    # task made in Qgis
+
+
+    # Convert the MultiLineString to a single LineString
+    #single_line = new_edges['geometry'].unary_union
+    #merged_line = linemerge(single_line)
+    #gpd.GeoDataFrame({'geometry': [single_line]}).to_file(r"data\temp\single_lines_n.gpkg")
+
+
+    # Define the locations where you want to split the MultiLineString
+
+    ##################################################################################################
+    # Add connect points (new geometries)
+    split_points = list(current_points['geometry'])
+    multi_point = MultiPoint(current_points['geometry'])
+
+    """
+    # project points on the network, to have exact position
+    projected_points = []
+    print(len(projected_points))
+    for point in multi_point.geoms:
+        if not merged_line.contains(point):
+            # If the point is not on the LineString, project it onto the LineString
+            projected_point = merged_line.interpolate(merged_line.project(point))
+            projected_points.append(projected_point)
+        else:
+            # The point is already on the LineString
+            projected_points.append(point)
+            print("Point on line")
+    print(len(projected_points))
+    """
+    #points_intersection = crossing_nodes_simple['new_geometry'].tolist()
+    #projected_points_cross = projected_points + crossing_nodes_simple['new_geometry'].tolist()
+
+    # Calculate the bounding box for points in list1
+    #multipoint_access = MultiPoint(projected_points)
+    #bounding_box = multipoint_access.envelope
+    # Filter points in list2 to keep only those within the bounding box
+    #points_intersection = [point for point in points_intersection if bounding_box.contains(point)]
+    #projected_points_extended = projected_points + points_intersection
+
+    #pointzz = MultiPoint(projected_points_extended)
+    # for i in multipoint split single_line
+    #splitted_line = split(snap(merged_line, pointzz, 0.1), pointzz)
+    #splitted_line = split(merged_line, MultiPoint(projected_points))
+
+    #print(splitted_line)
+
+
+    """
+    def split_line_by_point(line, point, tolerance: float = 1.0e-12):
+        return split(line, point)
+
+    for point in split_points:
+        single_line_gdf = (single_line_gdf.assign(geometry=single_line_gdf.apply(lambda x: split_line_by_point(
+                x.geometry, point), axis=1))
+        .explode()
+        .reset_index(drop=True))
+
+    print("Results", single_line_gdf)
+    """
+    # Create an empty list to store individual geometries
+    #individual_geometries = []
+    # Iterate through the geometries in the GeometryCollection
+    #for geom in splitted_line.geoms:
+    #    individual_geometries.append(geom)
+
+    # Create a GeoSeries from the list of projected points
+    #geometry = gpd.GeoSeries(projected_points_extended)
+    # Create a GeoDataFrame with the GeoSeries as the geometry column
+    #points_gdf = gpd.GeoDataFrame(geometry, columns=['geometry'])
+    #points_gdf["intersection"] = 0
+    #print(crossing_nodes_simple.head(20).to_string())
+
+    #crossing_nodes_simple['geometry'] = crossing_nodes_simple['new_geometry'].buffer(0.01)
+    # Perform a spatial join
+    #temp = gpd.sjoin(points_gdf, crossing_nodes_simple, how='left')
+
+    # Update "False" to "True" for matched points
+    #points_gdf.loc[~temp['index_right'].isna(), 'intersection'] = 1
+    #points_gdf = points_gdf.rename(columns={"geometry_left":"geometry"})
+    # Remove unnecessary columns
+    #points_gdf = points_gdf[['geometry', 'intersection']]
+    #print(points_gdf['intersection'].sum())
+    #points_gdf = points_gdf.set_crs("epsg:2056")
+    #points_gdf["intersection"] = points_gdf["intersection"].astype(int)
+    #points_gdf.to_file(r"data\Network\processed\points.gpkg")
+
+    current_points.to_file(r"data\Network\processed\points.gpkg") #replaces the commented out stuff above.
+    points_gdf = current_points
+    points_gdf = points_gdf.rename(columns={"NR":"ID_point"})
+
+    # Create a GeoDataFrame with one geometry object per row
+    #gdf = gpd.GeoDataFrame({'geometry': individual_geometries})
+    #gdf.to_file(r"data\temp\splited_lines.shp")
+
+    # Create two new columns for start and end points
+    #gdf['start'] = gdf['geometry'].apply(lambda line: Point(line.coords[0]))
+    #gdf['end'] = gdf['geometry'].apply(lambda line: Point(line.coords[-1]))
+
+    #print(gdf.shape)
+
+    ## Create 100-meter buffers around the points in `nodes_A`
+    #points_gdf['buffered_geometry'] = points_gdf['geometry'].buffer(100)
+
+    # Check if both the start and end points are within the 100-meter buffer of any point in `nodes_A`
+    #gdf['start_access'] = gdf['start'].apply(
+    #    lambda point: any(point.within(buffer) for buffer in points_gdf['buffered_geometry']))
+    #gdf['end_access'] = gdf['end'].apply(
+    #    lambda point: any(point.within(buffer) for buffer in points_gdf['buffered_geometry']))
+
+    # Filter the GeoDataFrame to include only the lines that start and end with points from nodes_A
+    #filtered_gdf = gdf[(gdf['start_access'] or gdf['end_access'])]
+    #filtered_edges = gdf[gdf[['start_access', 'end_access']].any(axis=1)]
+    #filtered_edges = filtered_edges.set_geometry("geometry")
+    #print(filtered_gdf.head(20).to_string())
+
+    #filtered_gdf  = filtered_gdf.drop(columns=["start", "end"])
+    #filtered_gdf.crs = "epsg:2056"
+
+    #filtered_edges = filtered_edges.set_crs("epsg:2056")
+    #filtered_gdf.plot()
+    #plt.show()
+    #filtered_gdf.to_file(r"data\Network\processed\splited_edges_filtered.gpkg")
+    #filtered_gdf.to_file(r"data\Network\processed\edges.gpkg")
+
+
+
+    ## SOme more operations
+    #points_gdf["ID_point"] = points_gdf.index
+
+    #print(filtered_edges.head(10).to_string())
+
+    # Create a temporary GeoDataFrame with buffered points this is to avoid rounding errors when checking if a point is
+    # within the polygon
+    #points_temp = points_gdf.copy()
+    #points_temp['buffered_points'] = points_temp['geometry'].buffer(1e-6)
+    #points_temp = points_temp.set_geometry("buffered_points")
+
+    # Check if all endpoints of the edges are points in points gdf. If not add them to the points dataframe
+    # Extract endpoints from edges
+    #endpoints = [Point(edge.coords[0]) for edge in filtered_edges.geometry] + [Point(edge.coords[-1]) for edge in filtered_edges.geometry]
+    # Convert endpoints to a GeoDataFrame
+    #endpoints_gdf = gpd.GeoDataFrame(geometry=endpoints, crs="epsg:2056")
+
+    # Perform a spatial join to find endpoints not in the buffered points
+    #joined = gpd.sjoin(endpoints_gdf, points_temp, how='left', predicate='within')
+    #missing_points = joined[joined['index_right'].isnull()]
+
+    # Drop duplicates and unnecessary columns
+    #missing_points = missing_points.rename(columns={'geometry_left': 'geometry'}).drop(
+    #    columns=['index_right', 'geometry_right'])
+    #missing_points = missing_points.drop_duplicates(subset=['geometry'])
+
+    # Append missing points to points_gdf
+    # Generate new IDs for missing points
+    #max_existing_id = points_gdf['ID_point'].max()
+    #missing_points['ID_point'] = range(max_existing_id + 1, max_existing_id + 1 + len(missing_points))
+    #missing_points["intersection"] = 0
+
+    # Initialize the 'open_ends' column in points_gdf as False
+    #points_gdf['open_ends'] = False
+    # Set 'open_ends' as True for missing points
+    #missing_points['open_ends'] = True
+    # Append missing points to points_gdf
+    #points_completed = points_gdf.append(missing_points, ignore_index=True)
+    #points_completed = gpd.GeoDataFrame(pd.concat([pd.DataFrame(points_gdf), pd.DataFrame(missing_points)], ignore_index=True))
+    #points_completed = points_completed.drop(columns=['buffered_geometry']).set_geometry('geometry')
+    # Drop points with ID_point = 97 and 98
+    #points_completed = points_completed[~points_completed['ID_point'].isin([96, 97])]
+    #points_completed["ID_point"] = points_completed.index
+
+    points_gdf.to_file(r"data\Network\processed\points.gpkg")
+
+    # Create a temporary GeoDataFrame with buffered points this is to avoid rounding errors
+    #points_temp = points_completed.copy()
+    #points_temp['buffered_points'] = points_temp['geometry'].buffer(1e-6)
+    #points_temp = points_temp.set_geometry("buffered_points")
+
+    # Replace the point values in edges "start" and "end" by the ID_point of the point gdf based on geometry (ensure there are no errors from roundign)
+    # Create temporary GeoDataFrames for 'start' and 'end' points in edges
+    #start_points_gdf = gpd.GeoDataFrame(geometry=filtered_edges['start'], crs=filtered_edges.crs)
+    #end_points_gdf = gpd.GeoDataFrame(geometry=filtered_edges['end'], crs=filtered_edges.crs)
+
+    # Perform spatial joins to map the 'ID_point' from points to start_points_gdf and end_points_gdf
+    #start_joined = sjoin(start_points_gdf, points_temp, how='left', predicate='intersects')
+    #end_joined = sjoin(end_points_gdf, points_temp, how='left', predicate='intersects')
+
+    # Replace the 'start' and 'end' points in edges with the 'ID_point' from points
+    #filtered_edges['start'] = start_joined['ID_point']
+    #filtered_edges['end'] = end_joined['ID_point']
+
+    #print(filtered_edges.head(100).to_string())
+
+    #filtered_edges.to_file(r"data\Network\processed\edges.gpkg")
+    edges_gdf = edges_gdf.drop(['first', 'last'],axis=1)
+    edges_gdf.to_file(r"data\Network\processed\edges.gpkg")
 
 def required_manipulations_on_network():
     # This function is introduced to add/remoce some parts of the network enable some computations
     # Import the network
-    edges = gpd.read_file(r"data/Network/processed/edges_with_attribute.gpkg")
-    points = gpd.read_file(r"data/Network/processed/points_with_attribute.gpkg")
+    edges = gpd.read_file(r"data\Network\processed\edges_with_attribute.gpkg")
+    points = gpd.read_file(r"data\Network\processed\points_with_attribute.gpkg")
     print(edges.head(10).to_string())
     print(points.head(10).to_string())
 
 
-
+    """
     # Add one row ro points with ID_point max_id+1
     max_id = points["ID_point"].max()
     #intersection = 0, ID_point = max_id+1, within_corridor = False, on_corridor_border = False, generate_traffic = False, geometry = Point(2676958, 1243990)
     new_row_data = {
-        'intersection': 0,
+        #'intersection': 0,
         'ID_point': max_id + 1,
         'within_corridor': False,
         'on_corridor_border': False,
@@ -652,7 +968,7 @@ def required_manipulations_on_network():
     # Add a set of new edges connecting following nodes: 89 to 90, 172 to 70, 94 to max_id+1, 146 to max_id+1, 89 to max_id+1
     # Define the pairs of points to connect
     pairs_to_connect = [(152, 168), (89, 90), (172, 70), (94, max_id + 1), (146, max_id + 1), (89, max_id + 1)]
-
+    """
     def get_coords(point_id):
         return points.loc[points['ID_point'] == point_id, 'geometry'].iloc[0].coords[0]
 
@@ -682,7 +998,7 @@ def required_manipulations_on_network():
         edges = gpd.GeoDataFrame(pd.concat([pd.DataFrame(edges), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
 
 
-
+    """
     # Add one edge which is not a highway but a cantonal road point 39 to 6
     # Create a new LineString
     new_line = LineString([get_coords(39), get_coords(6)])
@@ -703,7 +1019,7 @@ def required_manipulations_on_network():
     # Append the new row to edges_df
     #edges = edges.append(new_row, ignore_index=True)
     edges = gpd.GeoDataFrame(pd.concat([pd.DataFrame(edges), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
-
+    """
     # Store the updated edges DataFrame
     edges.to_file(r"data/Network/processed/edges_with_attribute.gpkg")
     points.to_file(r"data/Network/processed/points_with_attribute.gpkg")
@@ -711,10 +1027,10 @@ def required_manipulations_on_network():
 
 
 def get_edge_attributes():
-    edges_raw = gpd.read_file(r"data/temp/network_highway.gpkg")
+    #edges_raw = gpd.read_file(r"data/temp/network_highway.gpkg")
     edges_process = gpd.read_file(r"data/Network/processed/edges_with_attribute.gpkg")
 
-
+    """
     # Step 1: Create a buffer around the edges in df2
     buffer_distance = 50
     edges_process['buffered'] = edges_process.geometry.buffer(buffer_distance)
@@ -733,22 +1049,24 @@ def get_edge_attributes():
 
             return mean_capacity, mean_speed
         return None, None, None, None
-
+    """
     # Step 4 & 5: Apply the function to each edge in df2
-    edges_process['capacity'], edges_process['ffs'] = zip(*edges_process.apply(lambda x: get_min_attributes(x, edges_raw), axis=1))
+    edges_process=edges_process.rename(columns={'Link NR':'ID_edge','TotalPeakCapacity':'capacity','TravelTime':'tt'})
+    edges_process=edges_process.drop(['FromStation','ToStation','FromCode','ToCode','FromGde','ToGde','E_KOORD_O','E_KOORD_D','N_KOORD_O','N_KOORD_D'],axis=1)
+    #edges_process['capacity'], edges_process['ffs'] = zip(*edges_process.apply(lambda x: get_min_attributes(x, edges_raw), axis=1))
 
     # Drop the buffered column if not needed
-    edges_process.drop(columns=['buffered'], inplace=True)
+    #edges_process.drop(columns=['buffered'], inplace=True)
 
     # Store values as integer
     # Drop rows with None values
     edges_process.dropna(inplace=True)
     edges_process['capacity'] = edges_process['capacity'].astype(int)
-    edges_process['ffs'] = edges_process['ffs'].astype(int)
+    edges_process['tt'] = edges_process['tt'].astype(int)
 
     # Check if there are None values in the capacity and ffs columns
     print(edges_process[edges_process['capacity'].isnull()])
-    print(edges_process[edges_process['ffs'].isnull()])
+    print(edges_process[edges_process['tt'].isnull()])
 
     edges_process["ID_edge"] = edges_process.index
 
@@ -757,9 +1075,9 @@ def get_edge_attributes():
     edges_process.to_file(r"data\Network\processed\edges_with_attribute.gpkg")
 
 
-def network_in_corridor(polygon):
+def network_in_corridor(poly):
     # polygon to Geopandas dataframe
-    polygon = gpd.GeoDataFrame({'geometry': [polygon]})
+    polygon = gpd.GeoDataFrame({'geometry': [poly]})
     polygon.crs = "epsg:2056"
 
     edges = gpd.read_file(r"data\Network\processed\edges.gpkg")
@@ -782,7 +1100,8 @@ def network_in_corridor(polygon):
 
     # get edges within the polygon
     edges_corridor = gpd.sjoin(edges, polygon, how="inner")
-    edges_corridor = edges_corridor.drop(columns=["start_access", "end_access", "index_right"])
+    #edges_corridor = edges_corridor.drop(columns=["start_access", "end_access", "index_right"])
+    edges_corridor = edges_corridor.drop(columns=["index_right"])
     edges_corridor.to_file(r"data\Network\processed\edges_in_corridor.gpkg")
 
     # Get edges crossed by polygon frame
@@ -819,9 +1138,10 @@ def network_in_corridor(polygon):
     # Perform the spatial join and create a temporary DataFrame
     temp_joined = gpd.sjoin(points_temp, edges_crossing_polygon, how="left", predicate="intersects", lsuffix="left",
                             rsuffix="right")
+    temp_joined = temp_joined.drop_duplicates('ID_point')
     # Add 'on_corridor_border' attribute to points
     # A point is on the corridor border if it has a match in the spatial join (non-null index_right)
-    points['on_corridor_border'] = temp_joined['index_right'].notnull()
+    points['on_corridor_border'] = temp_joined['index_right'].notna()
 
     # Link the point ID (from points) to each endpoint of the edges
     # Create a temporary DataFrame with the endpoints of the edges
@@ -877,6 +1197,7 @@ def only_links_to_corridor():
     print(access_corridor.head(50).to_string())
 
     # only keep the links that connect to a access point on the highway corridor that is considered
+    all_links = all_links.astype({'ID_current': 'int'})
     links_corridor = all_links.merge(right=access_corridor[["cor_1", "ID_point"]], left_on="ID_current", right_index=True) #right_on="ID_point")
     print("Links connected to access points within the corridor: ", links_corridor.shape[0], " of ", all_links.shape[0])
     links_corridor = links_corridor.drop(columns=["ID_current"])

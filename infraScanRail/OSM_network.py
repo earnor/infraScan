@@ -417,10 +417,10 @@ def travel_cost_developments(frame):
 
     points = gpd.read_file(r"data\Network\processed\points_attribute.gpkg")
     # Need the node id as ID_point
-    points = points[points["intersection"] == 0]
+    #points = points[points["intersection"] == 0]
     points = points.cx[frame[0]:frame[2], frame[1]:frame[3]]
 
-    generated_points = gpd.read_file(r"data\Network\processed\generated_nodes.gpkg")
+    generated_points = gpd.read_file(r"data\Network\processed\generated_nodeset.gpkg")
 
     # travel speed
     raster_file = r"data\Network\OSM_tif\speed_limit_raster.tif"

@@ -96,13 +96,13 @@ def print_hi(name):
     #get_lake_data()
 
     # Import the file containing the locations to be ploted
-    #import_locations()
+    import_locations()
 
 
     # Define area that is protected for constructing highway links
-    get_protected_area(limits=limits_corridor)
-    get_unproductive_area(limits=limits_corridor)
-    landuse(limits=limits_corridor)
+#    get_protected_area(limits=limits_corridor)
+#    get_unproductive_area(limits=limits_corridor)
+#    landuse(limits=limits_corridor)
 
     # Tif file of all unsuitable land cover and protected areas
     # File is stored to 'data\landuse_landcover\processed\zone_no_infra\protected_area_{suffix}.tif'
@@ -132,7 +132,8 @@ def print_hi(name):
     # Import manually gathered access points and map them on the highway infrastructure
     # The same point but with adjusted coordinate are saved to "data\access_highway_matched.gpkg"
     #df_access = pd.read_csv(r"data/manually_gathered_data/highway_access.csv", sep=";")
-    #map_access_points_on_network(current_points=df_access, network=network)
+    df_access = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
+    map_access_points_on_network(current_points=df_access, network=network)
 
     runtimes["Import network data"] = time.time() - st
     st = time.time()
@@ -151,14 +152,15 @@ def print_hi(name):
     # Edges are stored in "data\Network\processed\edges.gpkg"
     # Points in simplified network can be intersections ("intersection"==1) or access points ("intersection"==0)
     # Points are stored in "data\Network\processed\points.gpkg"
-    #reformat_network()
+    #reformat_highway_network()
+    reformat_rail_network()
 
 
     # Filter the infrastructure elements that lie within a given polygon
     # Points within the corridor are stored in "data\Network\processed\points_corridor.gpkg"
     # Edges within the corridor are stored in "data\Network\processed\edges_corridor.gpkg"
     # Edges crossing the corridor border are stored in "data\Network\processed\edges_on_corridor.gpkg"
-    #network_in_corridor(polygon=outerboundary)
+    network_in_corridor(poly=outerboundary)
 
 
 
@@ -167,7 +169,7 @@ def print_hi(name):
     #map_values_to_nodes()
 
     # Add attributes to the edges
-    #get_edge_attributes()
+    get_edge_attributes()
 
     # Add specific elements to the network
     #required_manipulations_on_network()
@@ -181,23 +183,14 @@ def print_hi(name):
     # Make random points within the perimeter (extent) and filter them, so they do not fall within protected or
     # unsuitable area
     # The resulting dataframe of generated nodes is stored in "data\Network\processed\generated_nodes.gpkg"
-    num_rand = 1000
-    random_gdf = generated_access_points(extent=innerboundary, number=num_rand)
-    filter_access_points(random_gdf)
+    #generate_highway_access_points(n=1000,filter=True)
+    #
+    generate_rail_edges(n=5,radius=20)
+
     #filtered_gdf.to_file(r"data/Network/processed/generated_nodes.gpkg")
 
+
     # Import the generated points as dataframe
-    generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
-
-    # Import current points as dataframe and filter only access points (no intersection points)
-    current_points = gpd.read_file(r"data/Network/processed/points_corridor_attribute.gpkg")
-    current_access_points = current_points.loc[current_points["intersection"] == 0]
-
-    # Connect the generated points to the existing access points
-    # New lines are stored in "data/Network/processed/new_links.gpkg"
-    filtered_rand_temp = connect_points_to_network(generated_points, current_access_points)
-    nearest_gdf = create_nearest_gdf(filtered_rand_temp)
-    create_lines(generated_points, nearest_gdf)
 
     # Filter the generated links that connect to one of the access point within the considered corridor
     # These access points are defined in the manually defined list of access points
@@ -278,7 +271,7 @@ def print_hi(name):
     # Aggregate the the scenario data to over the voronoi polygons, here euclidian polygons
     # Store the resulting file to "data/Voronoi/voronoi_developments_euclidian_values.shp"
     polygons_gdf = gpd.read_file(r"data/Voronoi/voronoi_developments_euclidian.gpkg")
-    scenario_to_voronoi(polygons_gdf, euclidean=True)
+    #scenario_to_voronoi(polygons_gdf, euclidean=True)
 
     # Convert multiple tif files to one same tif with multiple bands
     stack_tif_files(var="empl")
@@ -311,7 +304,7 @@ def print_hi(name):
     ##################################################################################
     # 2) Import road network from OSM and rasterize it
     # Import the road network from OSM and rasterize it
-    nw_from_osm(limits_variables) #todo this requires data under data/Network/OSM_road that is not available.
+    #nw_from_osm(limits_variables)
     osm_nw_to_raster(limits_variables)
     runtimes["Import and rasterize local road network from OSM"] = time.time() - st
     st = time.time()

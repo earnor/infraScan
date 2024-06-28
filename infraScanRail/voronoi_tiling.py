@@ -91,15 +91,23 @@ def voronoi_finite_polygons_2d(vor, radius=None):
 
     # Remove infinite vertices
     # finite_vertices = [v for i, v in enumerate(new_vertices) if i not in vor.vertices]
+    new_new_regions =[]
+    # remove too small regions
+    for i in range(0,len(new_regions)):
+        region = new_regions[i]
+        ln = len(region)
+        if ln > 3:
+            new_new_regions.append(region)
 
-    return new_regions, np.asarray(new_vertices)
+
+    return new_new_regions, np.asarray(new_vertices)
 
 
 def get_voronoi_status_quo():
     existing_nodes = gpd.read_file(r"data\Network\processed\points.gpkg")
     existing_nodes = existing_nodes.set_crs("epsg:2056")
 
-    existing_nodes = existing_nodes[existing_nodes["intersection"] == 0]
+    #existing_nodes = existing_nodes[existing_nodes["intersection"] == 0]
 
     existing_temp = existing_nodes["geometry"]
     coordinates_array = np.array(existing_temp.apply(lambda geom: (geom.x, geom.y)).tolist())
@@ -119,9 +127,10 @@ def get_voronoi_status_quo():
 
 
 def get_voronoi_all_developments():
-    existing_nodes = gpd.read_file(r"data\Network\processed\points.gpkg")
-    existing_nodes = existing_nodes.set_crs("epsg:2056")
-    new_nodes = gpd.read_file(r"data\Network\processed\generated_nodes.gpkg")
+    existing_nodes = gpd.read_file(r"data\Network\processed\endnodes.gpkg")
+    existing_nodes = existing_nodes.set_crs("epsg:2056",allow_override=True)
+    new_nodes = gpd.read_file(r"data\Network\processed\generated_nodeset.gpkg")
+    new_nodes = new_nodes.drop_duplicates("ID_new")
 
     voronoi_developments = pd.DataFrame(columns=['ID', 'geometry'])
     voronoi_developments = gpd.GeoDataFrame(voronoi_developments, geometry="geometry", crs="epsg:2056")
@@ -279,20 +288,23 @@ def osm_nw_to_raster(limits):
     # Add comment
 
     # Folder containing all the geopackages
-    gpkg_folder = "data/Network/OSM_road"
+    gpkg_folder = "data/Network/Buslines/Linien_des_offentlichen_Verkehrs_-OGD"
+    pt_layer = 'ZVV_LINIEN_GEN_L'
 
     # List all geopackage files in the folder
     gpkg_files = [os.path.join(gpkg_folder, f) for f in os.listdir(gpkg_folder) if f.endswith('.gpkg')]
 
     # Combine all geopackages into one GeoDataFrame
-    gdf_combined = gpd.GeoDataFrame(pd.concat([gpd.read_file(f) for f in gpkg_files], ignore_index=True))
+    gdf_combined = gpd.GeoDataFrame(pd.concat([gpd.read_file(f,layer=pt_layer) for f in gpkg_files], ignore_index=True))
+    gdf_combined = gdf_combined[gdf_combined['VERKEHRSMITTEL']=='Bus']
+    gdf_combined = gdf_combined[gdf_combined['LINIENNUMMER'].str.find("N") == -1]
     # Assuming 'speed' is the column with speed limits
     # Convert speeds to numeric, handling non-numeric values
-    gdf_combined['speed'] = pd.to_numeric(gdf_combined['speed_kph'], errors='coerce')
+    gdf_combined['speed_kph'] = np.nan
 
     # Drop NaN values or replace them with 0, depending on how you want to handle them
     #gdf_combined.dropna(subset=['speed_kph'], inplace=True)
-    gdf_combined['speed_kph'].fillna(30, inplace=True)
+    gdf_combined['speed_kph'].fillna(25, inplace=True)
     # print(gdf_combined.crs)
     # print(gdf_combined.head(10).to_string())
     gdf_combined.to_file('data/Network/OSM_tif/nw_speed_limit.gpkg')
@@ -315,6 +327,7 @@ def osm_nw_to_raster(limits):
     # Initialize the raster with 4 = minimal travel speed (or np.nan for no-data value)
     #raster = np.zeros((num_rows, num_cols), dtype=np.float32)
     raster = np.full((num_rows, num_cols), 4, dtype=np.float32)
+    print(sum(sum(raster)))
 
     # Define the transform
     transform = from_origin(west=minx, north=maxy, xsize=resolution, ysize=resolution)
@@ -325,7 +338,7 @@ def osm_nw_to_raster(limits):
 
     print("ready to fill")
 
-    tot_num = num_cols * num_cols
+    tot_num = num_rows * num_cols
     count=0
 
     for row in range(num_rows):
@@ -349,6 +362,7 @@ def osm_nw_to_raster(limits):
             if not intersecting_roads.empty:
                 max_speed = intersecting_roads['speed_kph'].max()
                 raster[row, col] = max_speed
+                #print(max_speed)
 
             # Print the progress
             count += 1
@@ -366,7 +380,7 @@ def osm_nw_to_raster(limits):
         else:
             print("Network raster and unproductive area are not overalpping!!!!!")
 
-
+    print(sum(sum(raster)))
     with rasterio.open(
             'data/Network/OSM_tif/speed_limit_raster.tif',
             'w',

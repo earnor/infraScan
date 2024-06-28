@@ -176,10 +176,83 @@ def filter_access_points(gdf):
     newgdf = newgdf.rename(columns={"ID": "ID_new"})
     newgdf = newgdf.to_crs("epsg:2056")
 
-    newgdf.to_file(r"data\Network\processed\generated_nodes.gpkg")
+    return newgdf
 
+def generate_highway_access_points(n,filter=False):
+    num_rand=n
+    random_gdf = generated_access_points(extent=innerboundary, number=num_rand)
+    if filter ==False:
+        random_gdf.to_file(r"data\Network\processed\generated_nodes.gpkg")
+    else:
+        filtered_gdf = filter_access_points(random_gdf)
+        filtered_gdf.to_file(r"data\Network\processed\generated_nodes.gpkg")
+    generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
+    # Import current points as dataframe and filter only access points (no intersection points)
+    current_points = gpd.read_file(r"data/Network/processed/points_corridor_attribute.gpkg")
+    current_access_points = current_points.loc[current_points["intersection"] == 0]
+
+
+
+    # Connect the generated points to the existing access points
+    # New lines are stored in "data/Network/processed/new_links.gpkg"
+    filtered_rand_temp = connect_points_to_network(generated_points, current_access_points)
+    filtered_rand_temp.to_file(r"data\Network\temp\filtered_nodes.gpkg")
+    link_new_access_points_to_highway(generated_points,filtered_rand_temp)
+    return
+def link_new_access_points_to_highway(generated_points,filtered_rand_temp):
+    nearest_gdf = create_nearest_gdf(filtered_rand_temp)
+    create_lines(generated_points, nearest_gdf)
     return
 
+def generate_rail_edges(n,radius=50):
+    # Step 1 : Identify all service end point nodes
+    current_points = gpd.read_file(r"data/Network/processed/points.gpkg")
+    raw_edges = gpd.read_file(r"data/temp/network_railway-services.gpkg")
+    endpoints=[]
+    for index, edge in raw_edges[raw_edges['ToEnd'] == True].iterrows():
+        value = edge.FromNode
+        endpoints.append(value)
+    for index, edge in raw_edges[raw_edges['ToEnd'] == True].iterrows():
+        value = edge.ToNode
+        endpoints.append(value)
+    endpoints = list(set(endpoints)) #to get unique values
+    endnodes_gdf = current_points[current_points['ID_point'].isin(endpoints)]
+
+    # Step 2 : for each end point, make a r km buffer and include the set of all other rail stations
+    radius = radius*1000 #converting to m instead of km
+    set_gdf = endnodes_gdf.head(0)
+    set_gdf['current'] = None
+
+    # Step 2: Iterate over all rows in endnodes_gdf
+    for idx, endnode in endnodes_gdf.iterrows():
+        # Create a buffer of r km around the endnode
+        buffer = endnode.geometry.buffer(radius)  # using 0.5 degrees for simplicity, convert if necessary
+        temp_gdf = current_points[current_points.within(buffer)]
+        temp_gdf['current'] = endnode['ID_point']
+        temp_gdf['geometry_current'] = endnode['geometry']
+
+        # Step 3: If there are more than n stations_gdf in the buffer, only select the n closest
+        if len(temp_gdf) > n:
+            temp_gdf['distance'] = temp_gdf.geometry.apply(lambda x: endnode.geometry.distance(x))
+            temp_gdf = temp_gdf.nsmallest(5, 'distance').drop(columns=['distance'])
+
+        # Append to set_gdf
+        set_gdf = gpd.GeoDataFrame(
+            pd.concat([set_gdf, temp_gdf], ignore_index=True))
+        #set_gdf = set_gdf.append(temp_gdf)
+
+    #set_gdf.to_file(r"data\Network\processed\generated_nodeset.gpkg")
+    generated_points = set_gdf[['ID_point','XKOORD','YKOORD','HST','geometry']]
+    generated_points = generated_points.rename(columns={'ID_point':'ID_new','HST':'index'})
+    generated_points['index'].values[:] = 0
+    nearest_gdf = gpd.GeoDataFrame(set_gdf[['ID_point', 'current', 'geometry_current']],geometry = 'geometry_current')
+    nearest_gdf=nearest_gdf.rename(columns={'ID_point': 'ID_new'})
+    nearest_gdf=nearest_gdf.rename(columns={'current': 'ID_point'})
+    generated_points.to_file(r"data\Network\processed\generated_nodeset.gpkg")
+    nearest_gdf.to_file(r"data\Network\processed\endnodes.gpkg")
+
+    create_lines(generated_points, nearest_gdf)
+    return
 
 def get_idx_todrop(pt, filename):
     #with fiona.open(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp") as input:
@@ -241,16 +314,16 @@ def create_nearest_gdf(filtered_rand_gdf):
     return nearest_gdf
 
 
-def create_lines(rand_pts_gdf, nearest_highway_pt_gdf):
-    rand_pts_gdf = rand_pts_gdf.sort_values(by="ID_new")
-    points = rand_pts_gdf.geometry
-    nearest_highway_pt_gdf = nearest_highway_pt_gdf.sort_values(by="ID_new")
-    nearest_points = nearest_highway_pt_gdf.geometry
+def create_lines(gen_pts_gdf, nearest_infra_pt_gdf):
+    gen_pts_gdf = gen_pts_gdf.sort_values(by="ID_new")
+    points = gen_pts_gdf.geometry
+    nearest_infra_pt_gdf = nearest_infra_pt_gdf.sort_values(by="ID_new")
+    nearest_points = nearest_infra_pt_gdf.geometry
 
-    line_geometries = [LineString([points.iloc[i], nearest_points.iloc[i]]) for i in range(len(rand_pts_gdf))]
+    line_geometries = [LineString([points.iloc[i], nearest_points.iloc[i]]) for i in range(len(gen_pts_gdf))]
     line_gdf = gpd.GeoDataFrame(geometry=line_geometries)
-    line_gdf["ID_new"] = rand_pts_gdf["ID_new"]
-    line_gdf["ID_current"] = nearest_highway_pt_gdf["ID_point"]
+    line_gdf["ID_new"] = gen_pts_gdf["ID_new"]
+    line_gdf["ID_current"] = nearest_infra_pt_gdf["ID_point"]
 
     line_gdf = line_gdf.set_crs("epsg:2056")
     line_gdf.to_file(r"data\Network\processed\new_links.gpkg")
@@ -342,10 +415,14 @@ def routing_raster(raster_path):
     df_links = generated_links.dropna(subset=['new_geometry'])
 
     df_links = gpd.GeoDataFrame(df_links)
+    listattempt = df_links['new_geometry'].apply(lambda x: len(x)) > 1
+    df_links = df_links[listattempt]
     # Assuming 'df' is your DataFrame and it has a column 'coords' with coordinate arrays
     # Step 1: Convert to LineStrings
     #df_links['geometry'] = df_links['new_geometry'].apply(lambda x: LineString(x))
     #df_links2 = df_links
+    tempgeom = df_links['new_geometry'].head(0)
+
     for index, row in df_links.iterrows():
         try:
             tempgeom = df_links['new_geometry'].apply(lambda x: LineString(x))

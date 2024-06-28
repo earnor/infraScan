@@ -547,7 +547,7 @@ def accessibility_status_quo(VTT_h, duration):
     # print(voronoi_gdf.sum()["s1_pop"])
     voronoi_gdf = voronoi_gdf.drop(columns=['geometry'])
     return voronoi_gdf.sum()
-
+"""
 
 def nw_from_osm(limits):
     # Split the area into smaller polygons
@@ -594,13 +594,12 @@ def nw_from_osm(limits):
 
 
 def split_area(limits, num_splits):
-    """
+    
     Split the given area defined by 'limits' into 'num_splits' smaller polygons.
 
     :param limits: Tuple of (min_x, max_x, min_y, max_y) in LV95 coordinates.
     :param num_splits: The number of splits along each axis (total areas = num_splits^2).
     :return: List of shapely Polygon objects representing the smaller areas.
-    """
     min_x, min_y, max_x, max_y = limits
     width = (max_x - min_x) / num_splits
     height = (max_y - min_y) / num_splits
@@ -619,7 +618,6 @@ def split_area(limits, num_splits):
             sub_polygons.append(sub_polygon)
 
     return sub_polygons
-
 
 def osm_nw_to_raster(limits):
     # Add comment
@@ -722,7 +720,7 @@ def osm_nw_to_raster(limits):
             transform=transform,
     ) as dst:
         dst.write(raster, 1)
-
+"""
 
 def tif_to_vector(raster_path, vector_path):
     # Step 1: Read the raster data
@@ -1550,6 +1548,39 @@ def convert_data_to_input(points, edges):
 
     return nodes_lv95, nodes_wgs84, links, link_length_i, nlinks, par
 
+def create_rail_graph(points,edges,changes):
+    # Create an empty NetworkX graph
+    G = nx.MultiGraph()
+    # print(points.head(5).to_string())
+    # Add nodes with IDs to the graph
+    for node_id, row in points.iterrows():
+        G.add_node(node_id, pos=(row['geometry'].x, row['geometry'].y), demand=row['generate_demand'])
+    # For every node, we will create sub-nodes A and B for every service Sx (e.g., S5).
+    # In direction A, transit passengers will arrive at sub-node A and depart from sub-node A. The edge between
+    # A and B will be the in-vehicle wait time (default 0) or change time between services (default 6).
+    # Passengers accessing or egressing the service at the station are allocated to the original node defined above.
+    # Access/egress time is defined as 12 minutes, to ensure routing logic, whereby 24 minutes are subtracted at the end.
+
+    for idx, row in edges.iterrows():
+        temp_from_x = str(row['FromNode']) + "_" + str(row['Service']) + "_" + row['Direction'] +"_dep"
+        G.add_node(temp_from_x, pos=(row['FromGeometry'].x, row['FromGeometry'].y), demand=False)
+        G.add_edge(row['FromNode'], temp_from_x, key=(str(row['ID_edge'])+temp_from_x), fftt=.2)
+        temp_to_y = str(row['ToNode']) + "_" + str(row['Service']) + "_" + row['Direction'] +"_arr"
+        G.add_node( temp_to_y, pos=(row['ToGeometry'].x, row['ToGeometry'].y), demand=False)
+        G.add_edge(temp_to_y, row['ToNode'], key=(str(row['ID_edge'])+temp_to_y), fftt=.2)
+
+        G.add_edge(temp_from_x, temp_to_y, key=row['ID_edge'], fftt=pd.to_numeric(row['TravelTime']))
+
+    for idx, row in changes.iterrows():
+        temp_arr_x = str(row['FromNode']) + "_" + str(row['Service']) + "_" + row['Direction'] +"_arr"
+        dep = row[6:11][row[9:14] != '9000']
+        for depidx, depvalue in dep.items():
+            temp_dep_i = str(row['FromNode']) + "_" + str(depidx.split("-")[0]) + "_A"+ "_dep"
+            G.add_edge(temp_arr_x, temp_dep_i, key=(temp_arr_x + "_" + temp_dep_i), fftt=depvalue)
+            temp_dep_i = str(row['FromNode']) + "_" + str(depidx.split("-")[0]) + "_B" + "_dep"
+            G.add_edge(temp_arr_x, temp_dep_i, key=(temp_arr_x + "_" + temp_dep_i), fftt=depvalue)
+
+    return G
 
 def get_nw_data(OD_matrix, points, voronoi_gdf, edges):
     # Adapt OD matrix
@@ -1599,18 +1630,9 @@ def get_nw_data(OD_matrix, points, voronoi_gdf, edges):
     # Map the coordinates to the edges DataFrame
     # Set the index of the nodes DataFrame to be the 'ID_point' column
     points.set_index('ID_point', inplace=True)
+    #todo automate the way that these changes are generated.
 
-    # Create an empty NetworkX graph
-    G = nx.MultiGraph()
-    # print(points.head(5).to_string())
-    # Add nodes with IDs to the graph
-    for node_id, row in points.iterrows():
-        G.add_node(node_id, pos=(row['geometry'].x, row['geometry'].y), demand=row['generate_demand'])
-
-    # Add edges to the graph
-    # Make sure 'start' and 'end' in edges_gdf refer to the node IDs, add attribute
-    for idx, row in edges.iterrows():
-        G.add_edge(row['start'], row['end'], key=row['ID_edge'], fftt=pd.to_numeric(row['ffs']) / row.geometry.length)
+    G = create_rail_graph(points,edges,changes)
     """
     # Plot graph small points with coordinates as position and color based on demand attribute
     nx.draw(G, pos=nx.get_node_attributes(G, 'pos'), node_size=3, node_color=list(nx.get_node_attributes(G, 'demand').values()), edge_color='black', width=0.5)
@@ -2057,7 +2079,7 @@ def Commonality(betaCom, delta_ir, delta_odr, fftt_i, fftt_r):
 def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
     ## READING DATA AND FITTING THE MODEL
 
-    """
+
     # print for all variable ist daty structure and the data itselve
     print("nodes: ", type(nodes), nodes)
     print("links: ", type(links), links)
@@ -2065,7 +2087,7 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
     print("linklength_i: ", type(linklength_i), linklength_i)
     print("par: ", type(par), par)
     print("typeroad_i: ", type(typeroad_i), typeroad_i)
-    """
+
 
     # Same with own data
     nodes_lv95, nodes_wgs84, links, link_length_i, nlinks, par = convert_data_to_input(points=points, edges=edges)
@@ -2112,7 +2134,7 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
         # var_labs{i}=sprintf('L_{#-.0f}',i);
     """
 
-    done = 0  # calculate iterations
+    done = 1  # calculate iterations  ## changed this to 1 for rail, because no increase in travel time due to congestion
     factor = 0.01  # fftt and capacity will be multiplied bu this factor
 
     ## CALCULATION OF INCREASE OF TOTAL TRAVEL COST
@@ -2192,7 +2214,7 @@ def tt_optimization_all_developments():
     for dev in tqdm(developments):
         # Import generated links
         # links_developments = gpd.read_file(fr"data/Network/processed/new_links_realistic_costs.gpkg")
-        links_developments = gpd.read_file(fr"data/costs/construction.gpkg")
+        links_developments = gpd.read_file(fr"data/costs/construction.gpkg") #todo is this correcT?
         # Check "dev" is in links_developments['ID_new']
         if dev not in links_developments['ID_new'].values:
             print(f"Development {dev} not in links_developments['ID_new'] - skipping")

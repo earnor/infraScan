@@ -143,7 +143,7 @@ def scenario_to_raster(frame=False):
 
     growth_to_tif(scenario_polygon, path=path_pop, columns=growth_rate_columns_pop)
     growth_to_tif(scenario_polygon, path=path_empl, columns=growth_rate_columns_empl)
-
+    print('Scenario_To_Raster complete')
     return
 
 
@@ -177,7 +177,7 @@ def growth_to_tif(polygons, path, columns):
 
 
 def scenario_to_voronoi(polygons_gdf, euclidean=False):
-
+    print('Scenario_To_Voronoi started')
     # List of your raster files
     raster_path = r"data\independent_variable\processed\scenario"
     raster_files = ['s1_empl.tif', 's2_empl.tif', 's3_empl.tif', 's1_pop.tif', 's2_pop.tif', 's3_pop.tif']
@@ -204,5 +204,5 @@ def scenario_to_voronoi(polygons_gdf, euclidean=False):
         polygons_gdf.to_file(r"data\Voronoi\voronoi_developments_euclidian_values.shp")
     else:
         polygons_gdf.to_file(r"data\Voronoi\voronoi_developments_tt_values.shp")
-
+    print('Scenario_To_Voronoi complete')
     return
