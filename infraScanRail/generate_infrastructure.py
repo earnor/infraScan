@@ -17,6 +17,7 @@ from tqdm import tqdm
 import pulp
 import requests
 import zipfile
+import rasterio
 
 from data_import import *
 

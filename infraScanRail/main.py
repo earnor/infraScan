@@ -134,6 +134,7 @@ def print_hi(name):
     #df_access = pd.read_csv(r"data/manually_gathered_data/highway_access.csv", sep=";")
     df_access = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
     map_access_points_on_network(current_points=df_access, network=network)
+    #current_access_points = df_access
 
     runtimes["Import network data"] = time.time() - st
     st = time.time()
@@ -324,13 +325,13 @@ def print_hi(name):
     st = time.time()
 
     # Compute the elevation profile for each generated highway routing based on the elevation model
-    links_temp = get_road_elevation_profile()
+    #links_temp = get_road_elevation_profile()
     #links_temp.to_csv(r"data/Network/processed/new_links_realistic_woTunnel.csv")
 
     # Based on the elevation profile of each links compute the required amount of bridges and tunnels
     # Safe the dataset to "data/Network/processed/new_links_realistic_tunnel.gpkg"
     #get_tunnel_candidates(links_temp)
-    tunnel_bridges(links_temp)
+    #tunnel_bridges(links_temp)
 
     runtimes["Optimize eleavtion profile of links to find need for tunnel and bridges"] = time.time() - st
     st = time.time()
@@ -408,7 +409,7 @@ def print_hi(name):
     # The raster file showing the ID of the closest access point is stored in 'data/Network/travel_time/developments/dev{id_new}_source_id_raster.tif'
     # Aggregating all cells with same closest access point is equivalent to a travel time based voronoi tiling. This is
     # stored as vector file in "data/Network/travel_time/developments/dev{id_new}_Voronoi.gpkg"
-    travel_cost_developments(limits_variables)
+    #travel_cost_developments(limits_variables) %todo - make sure this works
 
     runtimes["Voronoi tiling: Compute travel time from each raster cell to the closest access point"] = time.time() - st
     st = time.time()
@@ -417,13 +418,15 @@ def print_hi(name):
     # perimeter. Before the polygons are store in an individual dataset for each development
     # The resulting dataframe is stored to "data/Voronoi/combined_developments.gpkg"
     folder_path = "data/Network/travel_time/developments"
-    single_tt_voronoi_ton_one(folder_path)
+    #single_tt_voronoi_ton_one(folder_path)
 
     # Based on the scenario and the travel time based Voronoi tiling, compute the predicted population and employment
     # in each polygon and for each scenario
     # Resulting dataset is stored to "data/Voronoi/voronoi_developments_tt_values.shp"
-    polygon_gdf = gpd.read_file(r"data/Voronoi/combined_developments.gpkg")
-    scenario_to_voronoi(polygon_gdf, euclidean=False)
+    #polygon_gdf = gpd.read_file(r"data/Voronoi/combined_developments.gpkg")
+    polygon_gdf = gpd.read_file(r"data/Network/travel_time/Voronoi_statusquo.gpkg") #todo - this is definitely wrong
+    #scenario_to_voronoi(polygon_gdf, euclidean=False)
+    scenario_to_voronoi(polygon_gdf, euclidean=True)
 
     runtimes["Aggregate scenarios by Voronoi polygons"] = time.time() - st
     st = time.time()
@@ -437,11 +440,11 @@ def print_hi(name):
     # Compute the benefit in accessibility for each development compared to the status quo
     # The accessibility for each polygon for every development is store in "data/Voronoi/voronoi_developments_local_accessibility.gpkg"
     # The benefit of each development compared to the status quo is stored in 'data/costs/local_accessibility.csv'
-    accessibility_developments(accessib_status_quo, VTT_h=VTTS, duration=travel_time_duration)  # make this more efficient in terms of for loops and open files
+    # accessibility_developments(accessib_status_quo, VTT_h=VTTS, duration=travel_time_duration)  #todo make this more efficient in terms of for loops and open files
 
     runtimes["Compute highway access time benefits"] = time.time() - st
     st = time.time()
-
+    """
     #################################################################################
     # Travel time delay on highway
 
@@ -466,7 +469,7 @@ def print_hi(name):
     print('Flag: tt_optimization_all_developments is complete')
     # Monetize travel time savings
     monetize_tts(VTTS=VTTS, duration=travel_time_duration)
-
+    """
     ##################################################################################
     # Aggregate the single cost elements to one dataframe
     # New dataframe is stored in "data/costs/total_costs.gpkg"
@@ -504,11 +507,11 @@ def print_hi(name):
     generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
     # Get a gpd df with points have an ID_new that is not in links_realistic ID_new
     filtered_rand_gdf = generated_points[~generated_points["ID_new"].isin(links_realistic["ID_new"])]
-    #plot_points_gen(points=generated_points, edges=links_beeline, banned_area=tif_path_plot, boundary=boundary_plot, network=network, all_zones=True, plot_name="gen_nodes_beeline")
+    plot_points_gen(points=generated_points, edges=links_beeline, banned_area=tif_path_plot, boundary=boundary_plot, network=network, all_zones=True, plot_name="gen_nodes_beeline")
     #plot_points_gen(points=generated_points, points_2=filtered_rand_gdf, edges=links_realistic, banned_area=tif_path_plot, boundary=boundary_plot, network=network, all_zones=False, plot_name="gen_links_realistic")
 
-    voronoi_dev_2 = gpd.read_file(r"data/Network/travel_time/developments/dev779_Voronoi.gpkg")
-    plot_voronoi_development(voronoi_tt, voronoi_dev_2, generated_points, boundary=innerboundary, network=network, access_points=current_access_points, plot_name="new_voronoi")
+    #voronoi_dev_2 = gpd.read_file(r"data/Network/travel_time/developments/dev779_Voronoi.gpkg")
+    #plot_voronoi_development(voronoi_tt, voronoi_dev_2, generated_points, boundary=innerboundary, network=network, access_points=current_access_points, plot_name="new_voronoi")
 
     #plot_voronoi_comp(voronoi_status_quo, voronoi_tt, boundary=boundary_plot, network=network, access_points=current_access_points, plot_name="voronoi")
 

@@ -1,8 +1,8 @@
-Initialize variables: 0.0009970664978027344
-Import land use and land cover data: 0.10723686218261719
-Import network data: 1.3660221099853516
-Preprocess the network: 2.2396929264068604
-Generate infrastructure developments: 94.16175770759583
-Import variable for scenario (population and employment): 22.072580814361572
-Generate the scenarios: 6080.110219478607
-Import and rasterize local road network from OSM: 184.8937439918518
+Initialize variables: 0.0010020732879638672
+Import land use and land cover data: 0.1516427993774414
+Import network data: 2.569395065307617
+Preprocess the network: 4.560501575469971
+Generate infrastructure developments: 181.53672218322754
+Import variable for scenario (population and employment): 61.93339824676514
+Generate the scenarios: 14.618402481079102
+Import and rasterize local road network from OSM: 314.27223205566406
