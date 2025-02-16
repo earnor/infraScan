@@ -1,8 +1,8 @@
-Initialize variables: 0.0010020732879638672
-Import land use and land cover data: 0.1516427993774414
-Import network data: 2.569395065307617
-Preprocess the network: 4.560501575469971
-Generate infrastructure developments: 181.53672218322754
-Import variable for scenario (population and employment): 61.93339824676514
-Generate the scenarios: 14.618402481079102
-Import and rasterize local road network from OSM: 314.27223205566406
+Initialize variables: 0.11994147300720215
+Import land use and land cover data: 0.35745692253112793
+Import network data: 0.060688018798828125
+Preprocess the network: 2.6170499324798584
+Generate infrastructure developments: 45.16321802139282
+Generate The Catchement based on the Bus network: 107.82594919204712
+Generate the scenarios: 15.702262163162231
+Calculate Traveltimes for all OD_ for all developments: 54.52378034591675

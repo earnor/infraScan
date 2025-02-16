@@ -204,4 +204,4 @@ dependencies:
       - threadpoolctl==3.1.0
       - tifffile==2023.9.26
       - tobler==0.9.0
-prefix: C:\ProgramData\anaconda3\envs\infraScan
+prefix: C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail

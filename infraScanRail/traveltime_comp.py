@@ -15,8 +15,8 @@ import matplotlib.pyplot as plt
 from scipy.sparse.csgraph import connected_components
 import data_import
 
-#os.chdir(r"C:\Users\Fabrice\Desktop\HS23\Thesis\Code")
-os.chdir(r"C:\Users\spadmin\PycharmProjects\infraScan")
+#os.chdir(r"C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail")
+os.chdir(r"C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail")
 ## INPUT TRAFFIC NETWORK
 #--- Options
 output_lab='Portugal'
@@ -27,10 +27,13 @@ figureoption=1 #0: no figures, otherwise, 1
 def convert_data_to_input():
     # Import gpkg file with the network points
     points = gpd.read_file(r"data\Network\processed\points_with_attribute.gpkg")
+
+
     #point_in_corridor = gpd.read_file(r"data\Network\processed\points_corridor.gpkg")
     #points_on_border = gpd.read_file(r"data\Network\processed\points_corridor_border.gpkg")
     # Import gpkg file with the network edges
     edges = gpd.read_file(r"data\Network\processed\edges_with_attribute.gpkg")
+
 
     # Set crs for points and edges to epsg:2056
     points = points.set_crs("epsg:2056", allow_override=True)

@@ -53,11 +53,11 @@ def GetCommuneEmployment(y0): # we find employment in each commune.
 
 
 def GetHighwayPHDemandPerCommune():
-    # now we extract an od matrix for private motrised vehicle traffic from year 2019
-    # we then modify the OD matrix to fit our needs of expressing peak hour highway travel demand
+    # now we extract an od matrix for pt from year 2019
+    # we then modify the OD matrix to fit our needs of expressing peak hour pt travel demand
     y0 = 2019
     rawod = pd.read_excel('data\_basic_data\KTZH_00001982_00003903.xlsx')
-    communalOD = rawod.loc[(rawod['jahr']==2018) & (rawod['kategorie']=='Verkehrsaufkommen') & (rawod['verkehrsmittel']=='miv')]
+    communalOD = rawod.loc[(rawod['jahr']==2018) & (rawod['kategorie']=='Verkehrsaufkommen') & (rawod['verkehrsmittel']=='oev')]
     #communalOD = data.drop(['jahr','quelle_name','quelle_gebietart','ziel_name','ziel_gebietart',"kategorie","verkehrsmittel","einheit","gebietsstand_jahr","zeit_dimension"],axis=1)
     #sum(communalOD['wert'])
     # 1 Who will go on highway?
@@ -106,6 +106,56 @@ def GetCommuneShapes(raster_path): #todo this might be unnecessary if you alread
     commune_raster = np.array(rasterized_image)
 
     return commune_raster, communedf
+
+def  GetCatchmentold(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path):
+
+    return
+
+def compute_TT():
+
+    # Change working directory
+    os.chdir(r"C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail")
+
+    # Directories containing CSV files (relative paths since the working directory is now set)
+    directories = [
+        r"data\traffic_flow\od\rail",
+        r"data\Network\travel_time\developments"
+    ]
+
+    # Loop through each directory
+    for directory in directories:
+        if os.path.exists(directory):  # Check if directory exists
+            # List all CSV files in the directory
+            csv_files = [file for file in os.listdir(directory) if file.endswith(".csv")]
+            
+            # Read each CSV file and assign as a DataFrame variable
+            for csv_file in csv_files:
+                file_path = os.path.join(directory, csv_file)
+                try:
+                    # Create a variable name from the CSV file name without the extension
+                    var_name = csv_file.replace(".csv", "")
+                    
+                    # Load the CSV as a DataFrame
+                    df = pd.read_csv(file_path)
+                    
+                    # Filter and rename columns
+                    df_filtered = df[['OriginStation', 'Destination', 'TotalTravelTime']].rename(
+                        columns={'OriginStation': 'from_id', 'Destination': 'to_id', 'TotalTravelTime': 'time'}
+                    )
+                    
+                    # Assign the filtered DataFrame to the dynamically created variable
+                    globals()[var_name] = df_filtered
+                    
+                    print(f"Loaded and processed {csv_file} as {var_name}")
+                except Exception as e:
+                    print(f"Error reading or processing {csv_file}: {e}")
+        else:
+            print(f"Directory not found: {directory}")
+
+    # Example: access the processed DataFrame by its variable name (if applicable)
+    # For example, if there was a file '100000.csv', it will be accessible as `100000`
+
+
 
 
 def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path):
@@ -590,5 +640,93 @@ def GetVoronoiOD_multi_old(scen_empl_path, scen_pop_path, voronoi_tif_path):
         # Save pd df to csv
         od_grouped.to_csv(fr"data\traffic_flow\od\developments\od_matrix_dev{xx}.csv")
         #odmat.to_csv(r"data\traffic_flow\od\od_matrix_raw.csv")
+
+    return
+
+def GetCatchmentOD_old():
+    # Other parts of the function remain unchanged...
+
+    # for each of these scenarios make an own copy of od_matrix named od_matrix+scen
+    for scen in pop_empl_scenarios:
+        print(f"Processing scenario {scen}")
+        od_matrix_temp = od_matrix.copy()
+
+        for polygon_id, row in tqdm(pop_empl.iterrows(), desc='Allocating pop and empl to OD matrix'):
+            # Multiply all values in the row/column
+            od_matrix_temp.loc[polygon_id] *= row[f'{scen}']
+            od_matrix_temp.loc[:, polygon_id] *= row[f'{scen}']
+
+        # Save the ungrouped OD matrix as a CSV
+        ungrouped_od_matrix_path = fr"data/traffic_flow/od/rail/od_matrix_temp_{scen}.csv"
+        od_matrix_temp.to_csv(ungrouped_od_matrix_path)
+        print(f"Saved ungrouped OD matrix for scenario {scen} at {ungrouped_od_matrix_path}")
+
+        ###############################################################################################################################
+        # Step 4: Group the OD matrix by polygon_id
+        # Reset the index to turn the MultiIndex into columns
+        od_matrix_reset = od_matrix_temp.reset_index()
+
+        # Sum the values by 'polygon_id' for both the rows and columns
+        od_grouped = od_matrix_reset.groupby('catchment_id').sum()
+
+        # Now od_grouped has 'polygon_id' as the index, but we still need to group the columns
+        # First, transpose the DataFrame to apply the same operation on the columns
+        od_grouped = od_grouped.T
+
+        # Again group by 'polygon_id' and sum, then transpose back
+        od_grouped = od_grouped.groupby('catchment_id').sum().T
+
+        # Drop column commune_id
+        od_grouped = od_grouped.drop(columns='commune_id')
+
+        # Set diagonal values to 0
+        temp_sum = od_grouped.sum().sum()
+        np.fill_diagonal(od_grouped.values, 0)
+        # Compute the sum after changing the diagonal
+        temp_sum2 = od_grouped.sum().sum()
+        # Print difference
+        print(f"Sum of OD matrix before {temp_sum} and after {temp_sum2} removing diagonal values")
+
+        # Save the grouped OD matrix
+        grouped_od_matrix_path = fr"data/traffic_flow/od/rail/od_matrix_{scen}.csv"
+        od_grouped.to_csv(grouped_od_matrix_path)
+        print(f"Saved grouped OD matrix for scenario {scen} at {grouped_od_matrix_path}")
+
+        # Print sum of all values in od df
+        # Sum over all values in pd df
+        sum_com = odmat.sum().sum()
+        sum_poly = od_grouped.sum().sum()
+        sum_com_frame = odmat_frame.sum().sum()
+        print(
+            f"Total trips before {sum_com_frame} ({odmat_frame.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
+        print(
+            f"Total trips before {sum_com} ({odmat.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
+
+        # Sum all columns of od_grouped
+        origin = od_grouped.sum(axis=1).reset_index()
+        origin.colum = ["catchment_id", "origin"]
+        # Sum all rows of od_grouped
+        destination = od_grouped.sum(axis=0)
+        destination = destination.reset_index()
+
+        # merge origin and destination to catchmentdf based on catchment_id
+        # Make a copy of catchmentdf
+        catchmentdf_temp = catchmentdf.copy()
+        catchmentdf_temp.rename(columns={'id': 'ID_point'}, inplace=True)
+        catchmentdf_temp = catchmentdf_temp.merge(origin, how='left', left_on='ID_point', right_on='catchment_id')
+        catchmentdf_temp = catchmentdf_temp.merge(destination, how='left', left_on='ID_point', right_on='catchment_id')
+        catchmentdf_temp = catchmentdf_temp.rename(columns={'0_x': 'origin', '0_y': 'destination'})
+        catchmentdf_temp.to_file(fr"data/traffic_flow/od/catchment_id_{scen}.gpkg", driver="GPKG")
+
+        # Same for odmat and commune_df
+        if scen == "20":
+            origin_commune = odmat_frame.sum(axis=1).reset_index()
+            origin_commune.colum = ["commune_id", "origin"]
+            destination_commune = odmat_frame.sum(axis=0).reset_index()
+            destination_commune.colum = ["commune_id", "destination"]
+            commune_df = commune_df.merge(origin_commune, how='left', left_on='BFS', right_on='quelle_code')
+            commune_df = commune_df.merge(destination_commune, how='left', left_on='BFS', right_on='ziel_code')
+            commune_df = commune_df.rename(columns={'0_x': 'origin', '0_y': 'destination'})
+            commune_df.to_file(r"data/traffic_flow/od/OD_commune_filtered.gpkg", driver="GPKG")
 
     return
