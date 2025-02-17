@@ -1,77 +1,67 @@
 {
+    "Metadata": {
+        "version": "0.0.1",
+        "date_created": "17.02.2025",
+        "time_created": "21:00:00"
+    },
     "General": {
         "working_directory": ""
     },
     "Road": {
         "Construction Costs": {
-            "c_openhighway": 15200,
-            "c_tunnel": 416000,
-            "c_bridge": 63900,
-            "ramp": 102000000
+            "c_openhighway": { "value": 15200, "unit": "CHF/m" },
+            "c_tunnel": { "value": 416000, "unit": "CHF/m" },
+            "c_bridge": { "value": 63900, "unit": "CHF/m" },
+            "ramp": { "value": 102000000, "unit": "CHF" }
         },
         "Value of Travel Time Savings": {
-            "VTTS": 32.2,
-            "travel_time_duration": 50
+            "VTTS": { "value": 32.2, "unit": "CHF/h" },
+            "travel_time_duration": { "value": 50, "unit": "min" }
         },
         "Noise Costs": {
-            "noise_distance": [
-                0,
-                10,
-                20,
-                40,
-                80,
-                160,
-                320,
-                640,
-                1280,
-                2560
-            ],
-            "noise_values": [
-                7254,
-                5536,
-                4055,
-                2812,
-                1799,
-                1019,
-                467,
-                130,
-                20
-            ],
-            "noise_duration": 50
+            "noise_distance": {
+                "value": [0, 10, 20, 40, 80, 160, 320, 640, 1280, 2560],
+                "unit": "m"
+            },
+            "noise_values": {
+                "value": [7254, 5536, 4055, 2812, 1799, 1019, 467, 130, 20],
+                "unit": "CHF"
+            },
+            "noise_duration": { "value": 50, "unit": "years" }
         },
         "Climate Effects": {
-            "co2_highway": 2780,
-            "co2_tunnel": 3750
+            "co2_highway": { "value": 2780, "unit": "kg/km" },
+            "co2_tunnel": { "value": 3750, "unit": "kg/km" }
         },
         "Nature and Landscape": {
-            "fragmentation": 165.6,
-            "fragmentation_duration": 50,
-            "habitat_loss": 33.6,
-            "habitat_loss_duration": 30
+            "fragmentation": { "value": 165.6, "unit": "km²" },
+            "fragmentation_duration": { "value": 50, "unit": "years" },
+            "habitat_loss": { "value": 33.6, "unit": "ha" },
+            "habitat_loss_duration": { "value": 30, "unit": "years" }
         },
         "Land Reallocation": {
-            "forest_reallocation": 0.889,
-            "meadow_reallocation": 0.1014,
-            "reallocation_duration": 50
+            "forest_reallocation": { "value": 0.889, "unit": "%" },
+            "meadow_reallocation": { "value": 0.1014, "unit": "%" },
+            "reallocation_duration": { "value": 50, "unit": "years" }
         }
     },
     "Rail": {
         "Value of Travel Time Savings": {
-            "VTTS": 14.8
+            "VTTS": { "value": 14.8, "unit": "CHF/h" }
         },
         "Construction Costs": {
-            "cost_per_meter": 33250,
-            "tunnel_cost_per_meter": 104000,
-            "bridge_cost_per_meter": 70000
+            "cost_per_meter": { "value": 33250, "unit": "CHF/m" },
+            "tunnel_cost_per_meter": { "value": 104000, "unit": "CHF/m" },
+            "bridge_cost_per_meter": { "value": 70000, "unit": "CHF/m" }
         },
         "Maintenance Costs": {
-            "track_maintenance_cost": 132,
-            "tunnel_maintenance_cost": 132,
-            "bridge_maintenance_cost": 368.8
+            "track_maintenance_cost": { "value": 132, "unit": "CHF/m/yr" },
+            "tunnel_maintenance_cost": { "value": 132, "unit": "CHF/m/yr" },
+            "bridge_maintenance_cost": { "value": 368.8, "unit": "CHF/m/yr" }
         },
         "Durations": {
-            "duration": 50,
-            "travel_time_duration": 50
+            "duration": { "value": 50, "unit": "years" },
+            "travel_time_duration": { "value": 50, "unit": "min" }
         }
     }
 }

@@ -89,19 +89,11 @@ class InfraGUI:
             self.data["General"]["working_directory"] = directory
 
     def create_settings_tab(self, tab, category):
-        # Create a scrollable canvas for settings
         canvas = tk.Canvas(tab)
         scrollbar = ttk.Scrollbar(tab, orient="vertical", command=canvas.yview)
         scroll_frame = ttk.Frame(canvas)
 
-        # Configure the scrollable frame
-        scroll_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(
-                scrollregion=canvas.bbox("all")
-            )
-        )
-
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -109,29 +101,38 @@ class InfraGUI:
         scrollbar.pack(side="right", fill="y")
 
         self.entries[category] = {}
-        
-        # Populate the settings tab with entries
+
         for subcategory, values in self.data[category].items():
             frame = ttk.LabelFrame(scroll_frame, text=subcategory, padding=5)
             frame.pack(fill="x", padx=10, pady=5)
             self.entries[category][subcategory] = {}
+
             for key, value in values.items():
                 row = ttk.Frame(frame)
                 row.pack(fill="x", padx=5, pady=2)
-                ttk.Label(row, text=key, width=25).pack(side="left")
-                entry = ttk.Entry(row, width=50)
-                entry.insert(0, str(value))
+
+                display_value = value["value"]
+                unit = value["unit"]
+
+                label_text = f"{key} ({unit})" if unit else key
+                ttk.Label(row, text=label_text, width=35).pack(side="left")
+
+                entry = ttk.Entry(row, width=40)
+                entry.insert(0, str(display_value))
                 entry.pack(side="right", expand=True)
                 entry.bind("<FocusOut>", lambda e, k=key, s=subcategory, c=category, en=entry: self.update_data(k, s, c, en))
+                
                 self.entries[category][subcategory][key] = entry
 
+
     def update_data(self, key, subcategory, category, entry):
-        # Update the data dictionary when an entry loses focus
         try:
             value = json.loads(entry.get())
-            self.data[category][subcategory][key] = value
+            self.data[category][subcategory][key] = value  # Fallback for older formats
+                
         except json.JSONDecodeError:
             messagebox.showerror("Input Error", f"Invalid input for {key}. Please enter a valid number.")
+
 
     def run_script(self, script):
         # Run a script in the working directory
@@ -172,7 +173,10 @@ class InfraGUI:
             messagebox.showinfo("Success", "Configuration loaded successfully.")
 
     def export_json(self):
-        # Export the current configuration to a JSON file
+        # Update metadata before exporting
+        self.data["Metadata"]["date_created"] = datetime.now().strftime("%Y-%m-%d")
+        self.data["Metadata"]["time_created"] = datetime.now().strftime("%H:%M:%S")
+
         file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON Files", "*.json")])
         if file_path:
             with open(file_path, "w") as file:
