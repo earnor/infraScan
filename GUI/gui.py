@@ -5,7 +5,12 @@ import json # For data operation
 import subprocess # For running sub moduls (e.g. road.py, rail.py)
 import os
 os.environ['USE_PYGEOS'] = '0'  # Force GeoPandas to use Shapely
+import sys
+import multiprocessing # For running sub moduls (e.g. road, rail)
 import logging # For logging
+logging.basicConfig(level=logging.INFO) # Set logging level
+from icecream import ic # For debugging
+
 from datetime import datetime # For time operation
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -13,6 +18,17 @@ from shapely.geometry import box
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.patches as mpatches
 import contextily as ctx
+
+# Get the parent directory of GUI (i.e., InfraScan)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+# Import the Rail and Road classes
+try:
+    from infraScanRail.rail import Rail
+    from infraScanRoad.road import Road
+except ImportError as e:
+    logging.error(f"Error importing scripts: {e}")
+    messagebox.showerror("Import Error", f"Failed to import Rail or Road script.\n{e}")
 
 # Load base configuration from JSON file
 BASE_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "base_config.json")
@@ -25,6 +41,16 @@ if os.path.exists(BASE_CONFIG_PATH):
 else:
     messagebox.showerror("Error", "Base configuration file not found!")
     config = {}
+
+
+def start_process(process_class, config):
+    """Runs the given process class in a separate process."""
+    try:
+        process = process_class(config)  # Create an instance with config data
+        process.run()  # Start execution
+        print(f"{process_class.__name__} process completed.")
+    except Exception as e:
+        print(f"Error running {process_class.__name__}: {e}")
 
 class InfraGUI:
     def __init__(self, root):
@@ -112,8 +138,8 @@ class InfraGUI:
         control_frame.pack(fill="x", padx=10, pady=5)
         # Run labelframe
         run_frame = ttk.LabelFrame(self.general_tab, text="Run")
-        ttk.Button(run_frame, text="Run Road", command=lambda: self.run_script("road.py")).pack(pady=5)
-        ttk.Button(run_frame, text="Run Rail", command=lambda: self.run_script("rail.py")).pack(pady=5)
+        ttk.Button(run_frame, text="Run Road", command=lambda: self.run_script("road")).pack(pady=5)
+        ttk.Button(run_frame, text="Run Rail", command=lambda: self.run_script("rail")).pack(pady=5)
         ttk.Button(run_frame, text="Run Both", command=self.run_both).pack(pady=5)
         run_frame.pack(fill="x", padx=10, pady=5)
 
@@ -306,7 +332,7 @@ class InfraGUI:
             n_max_plot = n_center + (max_dim / 2) + buffer_size
             
             # Add basemap from Contextily
-            ctx.add_basemap(self.ax, source=ctx.providers.SwissFederalGeoportal.NationalMapColor)
+            #ctx.add_basemap(self.ax, source=ctx.providers.SwissFederalGeoportal.NationalMapColor)
 
             # Set limits to enforce square plot
             self.ax.set_xlim(e_min_plot, e_max_plot)
@@ -348,56 +374,42 @@ class InfraGUI:
             self.refresh_ui()
             messagebox.showinfo("Reset", "Configuration has been reset to default values.")
 
-
     def run_script(self, script: str):
         """
-        Runs a specified script in the working directory and passes JSON data via stdin.
+        Runs the Rail or Road class in a separate process.
 
         Parameters:
-        script (str): The name of the script to run (e.g., "road.py" or "rail.py").
-
-        Returns:
-        None
+        script (str): The name of the script ("rail" or "road").
         """
-        # Safe config in past_runs directory with the function save_config and with timestamp
+        logging.info(f"Starting {script} process...")
+
+        # Save configuration before running
         working_dir = self.data["General"].get("working_directory", "")
         save_path = os.path.join(working_dir, "GUI", "past_runs", f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-        print(save_path)
         self.save_config(save_path)
 
-        # Check if the script exists in the working directory
-        working_dir = os.path.join(working_dir, f"infraScan{os.path.splitext(script)[0].capitalize()}")
-
-        script_path = os.path.join(working_dir, script)
-        if not os.path.exists(script_path):
-            messagebox.showerror("Error", f"{script} not found in working directory.")
+        # Select the appropriate class
+        if script == "rail":
+            process_class = Rail
+        elif script == "road":
+            process_class = Road
+        else:
+            messagebox.showerror("Error", f"Unknown script: {script}")
             return
 
-        config_json = json.dumps(self.data)  # Convert current config to JSON string
-
-        process = subprocess.Popen(
-            ["python", script_path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        stdout, stderr = process.communicate(config_json)
-
-        if stderr:
-            messagebox.showerror("Error", f"Script encountered an error:\n{stderr}")
-        else:
-            messagebox.showinfo("Running", f"Script Output:\n{stdout}")
+        # Start the process using multiprocessing
+        process = multiprocessing.Process(target=start_process, args=(process_class, self.data))
+        process.start()
 
     def run_both(self):
         """
-        Executes two scripts: road.py and rail.py.
+        Executes two scripts: road and rail.
 
-        This method sequentially runs the scripts road.py and rail.py by calling the run_script method for each script.
+        This method sequentially runs the scripts road.py and rail by calling the run_script method for each script.
         """
-        # Run both road.py and rail.py scripts
-        self.run_script("road.py")
-        self.run_script("rail.py")
+        # Run both road and rail scripts
+        self.run_script("road")
+        self.run_script("rail")
 
     def save_config(self, file_path: str):
         """

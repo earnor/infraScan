@@ -1,6 +1,9 @@
 # Import Package
 import os # For file operation
+os.environ['USE_PYGEOS'] = '0'
 import sys # For system operation
+# Force stdout to be unbuffered
+sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 import time # For time operation
 
 import pandas as pd # For data manipulation
@@ -14,15 +17,17 @@ import warnings # For warning
 warnings.simplefilter(action='ignore', category=pd.errors.SettingWithCopyWarning) # Ignore specific pandas warning
 
 # Import Module
+# Ensure this File is in `sys.path`
+sys.path.insert(0, os.path.dirname(__file__))
 import data_import
-# import catchement_pt
+import catchement_pt
 import scenarios
 import plots
 import generate_infrastructure
 import scoring
 import traveltime_delay
-# import TT_Delay
-# import display_results
+import TT_Delay
+import display_results
 
 
 # Main Class
@@ -63,7 +68,12 @@ class Rail:
         self.initialize_variables()
         self.import_raw_data()
         self.infrastructure_network_import()
-
+        self.infrastructure_network_process()
+        self.infrastructure_network_generate_development()
+        self.infrastructure_network_catchment()
+        self.scenarios_cantonal_predictions()
+        self.scoring_traveltime_savings()
+        self.scoring_construction_cost()
    
     def initialize_variables (self):
         # Initialize Variables
@@ -259,10 +269,10 @@ class Rail:
         self.runtimes["Generate infrastructure developments"] = time.time() - st
         logging.info(f"Runtime: {self.runtimes['Generate infrastructure developments']} seconds")
 
-        def infrastructure_network_catchment(self):
-            # Generate catchment area
-            logging.info("INFRASTRUCTURE NETWORK CATCHMENT")
-            st = time.time()
+    def infrastructure_network_catchment(self):
+        # Generate catchment area
+        logging.info("INFRASTRUCTURE NETWORK CATCHMENT")
+        st = time.time()
 
         ## PRO did comment the lines below raster and routing_raster() out
         '''
@@ -461,22 +471,28 @@ class Rail:
         logging.info(f"Runtime: {self.runtimes['Scoring construction cost']} seconds")
 
 
+def has_stdin_input():
+    """Check if there's data available in sys.stdin (to detect GUI mode)."""
+    return not sys.stdin.isatty()  # True if input is piped (GUI mode)
+
 if __name__ == "__main__":
     logging.info("Starting InfraScanRail")
-    logging.debug("sys.argv: %s", len(sys.argv))
-    if len(sys.argv) == 1: # No arguments passed which means no JSON input
-        logging.warning("No JSON input, Running with default configuration")
+    logging.debug("sys.argv: %s", sys.argv)
+
+    try:
+        if has_stdin_input():
+            logging.info("Reading configuration from GUI (stdin)...")
+            config_data = json.load(sys.stdin)
+        else:
+            logging.warning("No valid JSON received, using default configuration.")
+            cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            with open(os.path.join(cwd, "GUI", "base_config.json"), "r") as f:
+                config_data = json.load(f)
+    except json.JSONDecodeError:
+        logging.error("Failed to parse JSON. Using default configuration.")
         cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(cwd, "GUI", "base_config.json"), "r") as f:
             config_data = json.load(f)
-    else:
-        try: # Read JSON from stdin
-            config_data = json.load(sys.stdin)  # Read JSON from stdin
-        except json.JSONDecodeError:
-            print("Failed to decode JSON")
-            sys.exit(1)
-
-    logging.debug("config_data: %s", config_data)
 
     scanner = Rail(config_data)
     scanner.run()
