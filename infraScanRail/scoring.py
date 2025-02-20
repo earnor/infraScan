@@ -29,7 +29,7 @@ from itertools import islice
 import requests
 from shapely.geometry import LineString
 import pyproj  # For coordinate transformation
-from googlemaps import Client as GoogleMapsClient
+# from googlemaps import Client as GoogleMapsClient
 from rasterio.warp import reproject, Resampling
 from shapely.geometry import mapping
 import shutil
@@ -181,10 +181,10 @@ def utm_to_latlng(easting, northing):
 # Function to calculate travel time from Google Maps API
 def get_google_travel_time(origin_coords, destination_coords, api_key, mode="transit"):
     """Fetch the travel time using Google Maps API."""
-    gmaps = GoogleMapsClient(key=api_key)
+    #gmaps = GoogleMapsClient(key=api_key)
     try:
         # Request travel time via train (transit mode)
-        directions = gmaps.directions(origin_coords, destination_coords, mode=mode, transit_mode="train")
+        #directions = gmaps.directions(origin_coords, destination_coords, mode=mode, transit_mode="train")
         
         if directions:
             # Extract travel time from the API response (convert seconds to minutes)

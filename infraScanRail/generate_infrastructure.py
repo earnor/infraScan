@@ -395,7 +395,6 @@ def delete_connections_back(file_path_updated, file_path_raw_edges, output_path)
 
 def calculate_new_service_time():
     # Set up working directory and file paths
-    os.chdir(r"C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail")
     s_bahn_lines_path = r"data/Network/Buslines/Linien_des_offentlichen_Verkehrs_-OGD.gpkg"
     layer_name_segmented = 'ZVV_S_BAHN_Linien_L'
     stops_path = r"data/Network/Buslines/Haltestellen_des_offentlichen_Verkehrs_-OGD.gpkg"

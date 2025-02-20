@@ -11,7 +11,7 @@ from rasterio.features import shapes, rasterize
 from shapely.geometry import shape, Polygon
 from geopandas.tools import sjoin
 from shapely.geometry import MultiPoint
-import alphashape
+#import alphashape
 import rasterio
 from rasterio.features import rasterize
 import geopandas as gpd

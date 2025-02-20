@@ -5,7 +5,17 @@
         "time_created": "21:00:00"
     },
     "General": {
-        "working_directory": ""
+        "working_directory": "d:/OneDrive/ETH/FS25/01_Master_Project/20_Code/infraScan",
+        "Logging": {
+            "log_file": "log.txt",
+            "log_level": 20
+        },
+        "Spatial Limits": {
+            "e_min": 2687000,
+            "e_max": 2708000,
+            "n_min": 1237000,
+            "n_max": 1254000
+        }
     },
     "Road": {
         "Construction Costs": {
@@ -16,7 +26,7 @@
         },
         "Value of Travel Time Savings": {
             "VTTS": { "value": 32.2, "unit": "CHF/h" },
-            "travel_time_duration": { "value": 50, "unit": "min" }
+            "travel_time_duration": { "value": 50, "unit": "years" }
         },
         "Noise Costs": {
             "noise_distance": {

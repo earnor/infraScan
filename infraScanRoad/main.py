@@ -4,6 +4,8 @@ import math
 import time
 
 import pandas as pd
+import warnings
+warnings.simplefilter(action='ignore', category=pd.errors.SettingWithCopyWarning)
 
 from data_import import *
 from voronoi_tiling import *
@@ -21,9 +23,10 @@ def print_hi(name):
     # Use a breakpoint in the code line below to debug your script.
     #os.chdir(r"C:\Users\Fabrice\Desktop\HS23\Thesis\Code")
     #os.chdir(r"G:\IM\09 - Teaching\11 - Masters - Projects\2023 - FS\Marggi\04_Submission\Submission\FS2023 - MScProject - Marggi\06 - Developments\01 - Code\01 - Python")
-    os.chdir(r"C:/Users/spadmin/PycharmProjects/infraScan/infraScanRoad")
-#    os.chdir(r"/local/home/earnor/infraScan/")
+    #os.chdir(r"C:/Users/spadmin/PycharmProjects/infraScan/infraScanRoad")
+    #os.chdir(r"/local/home/earnor/infraScan/")
     #os.chdir(r"/home/earnor/infraScan/")
+    os.chdir(r"D:/OneDrive/ETH/FS25/01_Master_Project/20_Code/infraScan/infraScanRoad")
 
     runtimes = {}
 
@@ -100,6 +103,8 @@ def print_hi(name):
 
 
     # Define area that is protected for constructing highway links
+
+    # !!!!!!!!!!!!!!!!!!!!!! Due to Missing data the following functions are not executed
     get_protected_area(limits=limits_corridor)
     get_unproductive_area(limits=limits_corridor)
     landuse(limits=limits_corridor)
@@ -183,7 +188,10 @@ def print_hi(name):
     # The resulting dataframe of generated nodes is stored in "data\Network\processed\generated_nodes.gpkg"
     num_rand = 1000
     random_gdf = generated_access_points(extent=innerboundary, number=num_rand)
-    filter_access_points(random_gdf)
+
+    # !!!!!!!!!!!!!!!!!!!!!! Due to Missing data the following functions are not executed
+    #filter_access_points(random_gdf)
+
     #filtered_gdf.to_file(r"data/Network/processed/generated_nodes.gpkg")
 
     # Import the generated points as dataframe
@@ -210,7 +218,9 @@ def print_hi(name):
     # The new links are stored in "data/Network/processed/new_links_realistic.gpkg"
     # If a point is not accessible due to the banned zoned it is stored in "data/Network/processed/points_inaccessible.csv"
     raster = r'data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif'
-    routing_raster(raster_path=raster)
+
+    # !!!!!!!!!!!!!!!!!!!!!! Due to Missing data the following functions are not executed
+    #routing_raster(raster_path=raster)
 
     """
     #plot_corridor(network, limits=limits_corridor, location=location, new_nodes=filtered_rand_gdf, access_link=True)
@@ -250,7 +260,10 @@ def print_hi(name):
     # Import the raw data, reshape it partially and store it as tif
     # Tif are stored to "data/independent_variable/processed/raw/pop20.tif"
     # File name indicates population (pop) and employment (empl), the year (20), and the extent swisswide (_ch) or only for corridor (no suffix)
-    import_data(limits_variables)
+
+    # !!!!!!!!!!!!!!!!!!!!!! Due to Missing data the following functions are not executed
+    # import_data(limits_variables)
+
     runtimes["Import variable for scenario (population and employment)"] = time.time() - st
     st = time.time()
     ##################################################################################
@@ -267,7 +280,10 @@ def print_hi(name):
 
     # Define the relative growth per scenario and district
     # The growth rates are stored in "data/temp/data_scenario_n.shp"
-    future_scenario_zuerich_2022(scenario_zh)
+
+    # !!!!!!!!!!!!!!!!!!!!!! Due to Missing data the following functions are not executed
+    #future_scenario_zuerich_2022(scenario_zh)
+    
     # Plot the growth rates as computed above for population and employment and over three scenarios
     #plot_2x3_subplots(scenario_polygon, outerboundary, network, location)
 

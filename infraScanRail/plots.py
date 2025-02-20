@@ -26,16 +26,16 @@ from matplotlib.lines import Line2D
 from matplotlib_scalebar.scalebar import ScaleBar
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import seaborn as sns
-import contextily as ctx
-import contextily as cx
-from geo_northarrow import add_north_arrow
+#import contextily as ctx
+#import contextily as cx
+#from geo_northarrow import add_north_arrow
 from matplotlib import patches as mpatches
 from matplotlib.colors import LinearSegmentedColormap
 
 
 
 # Pyrosm for OpenStreetMap Data
-from pyrosm import get_data, OSM
+#from pyrosm import get_data, OSM
 
 
 def plotting(input_file, output_file, node_file):
@@ -189,14 +189,14 @@ def plot_developments_and_table_for_scenarios(osm_file, input_dir, output_dir):
     pbf_file = "data/_basic_data/planet_8.4,47.099_9.376,47.492.osm.pbf"
 
     # Load the OSM data
-    osm = OSM(pbf_file)
+    #osm = OSM(pbf_file)
 
     # Extract desired network data (e.g., roads, paths, waterways)
-    roads = osm.get_network(network_type="all")  # Options: "driving", "walking", etc.
+    #roads = osm.get_network(network_type="all")  # Options: "driving", "walking", etc.
 
     # Save the roads data as a GeoPackage
     output_gpkg = "data/osm_map.gpkg"
-    roads.to_file(output_gpkg, driver="GPKG")
+    #roads.to_file(output_gpkg, driver="GPKG")
     print(f"Converted OSM data saved to {output_gpkg}")
     
     # Set a grey theme for the OSM map
@@ -213,7 +213,7 @@ def plot_developments_and_table_for_scenarios(osm_file, input_dir, output_dir):
             
             # Set up the plot for the map
             fig, ax = plt.subplots(1, 1, figsize=(12, 10))
-            osm.plot(ax=ax, color=osm_color, edgecolor='white', linewidth=0.5)
+            #osm.plot(ax=ax, color=osm_color, edgecolor='white', linewidth=0.5)
 
             # Plot developments
             gdf.plot(ax=ax, color='red', edgecolor='black', linewidth=1, alpha=0.8)
@@ -297,7 +297,7 @@ def plot_bus_network(G, pos, e_min, e_max, n_min, n_max):
     ax.set_ylim(n_min, n_max)
 
     # Add OpenStreetMap background
-    ctx.add_basemap(ax, crs="EPSG:2056", source=ctx.providers.OpenStreetMap.Mapnik)
+    #ctx.add_basemap(ax, crs="EPSG:2056", source=ctx.providers.OpenStreetMap.Mapnik)
 
     # Display the plot
     plt.show()
@@ -1867,7 +1867,7 @@ def plot_develompments_rail():
                     textcoords="offset points", fontsize=12, color="black", zorder=7)
 
     # Add north arrow
-    add_north_arrow(ax, scale=.75, xlim_pos=.9025, ylim_pos=.835, color='#000', text_scaler=4, text_yT=-1.25)
+    #add_north_arrow(ax, scale=.75, xlim_pos=.9025, ylim_pos=.835, color='#000', text_scaler=4, text_yT=-1.25)
 
     # Add a scale bar
     scalebar = ScaleBar(dx=1, units="m", location="lower left", scale_loc="bottom")
