@@ -2,6 +2,12 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import pandas as pd
 import os
+import sys
+
+# Get the parent directory
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 
 def create_scenario_analysis_viewer(csv_file):
@@ -127,8 +133,8 @@ def create_scenario_analysis_viewer(csv_file):
 if __name__ == "__main__":
     # set the working directory o this file
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    # Print working directory
-    print("Current working directory:", os.getcwd())
+    # logger.verbose working directory
+    logger.verbose("Current working directory:", os.getcwd())
     
     # Specify the path to your CSV file
     csv_file_path = "data/costs/total_costs_with_geometry.csv"

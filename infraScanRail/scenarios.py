@@ -9,12 +9,18 @@ from rasterio.session import AWSSession
 from shapely.geometry import Polygon
 import os
 import rasterio
+import sys
 
 
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import Polygon
 
+
+# Get the parent directory
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 ################################################################################################################################################
 #########################################################################################################################################################################
@@ -139,7 +145,7 @@ def scenario_to_raster_pop(frame=False):
         bounding_poly = box(frame[0], frame[1], frame[2], frame[3])
         len = (frame[2]-frame[0])/100
         width = (frame[3]-frame[1])/100
-        print(f"frame: {len, width} it should be 377, 437")
+        logger.verbose(f"frame: {len, width} it should be 377, 437")
 
         # Calculate the difference polygon
         # This will be the area in the bounding box not covered by existing polygons
@@ -167,7 +173,7 @@ def scenario_to_raster_pop(frame=False):
                    'pop_urba_2': scenario_polygon['pop_urba_2'].mean(),
                    'pop_equa_2': scenario_polygon['pop_equa_2'].mean(),
                    'pop_rura_2': scenario_polygon['pop_rura_2'].mean()}
-        print("New row added")
+        logger.verbose("New row added")
         scenario_polygon = gpd.GeoDataFrame(pd.concat([pd.DataFrame(scenario_polygon), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
 
     growth_rate_columns_pop = ["pop_urban_", "pop_equal_", "pop_rural_",
@@ -182,7 +188,7 @@ def scenario_to_raster_pop(frame=False):
 
     growth_to_tif(scenario_polygon, path=path_pop, columns=growth_rate_columns_pop)
     #growth_to_tif(scenario_polygon, path=path_empl, columns=growth_rate_columns_empl)
-    print('Scenario_To_Raster complete')
+    logger.verbose('Scenario_To_Raster complete')
 
 
     base_path = r"data/independent_variable/processed/scenario"
@@ -325,7 +331,7 @@ def scenario_to_raster_emp(frame=False):
         bounding_poly = box(frame[0], frame[1], frame[2], frame[3])
         len = (frame[2]-frame[0])/100
         width = (frame[3]-frame[1])/100
-        print(f"frame: {len, width} it should be 377, 437")
+        logger.verbose(f"frame: {len, width} it should be 377, 437")
 
         # Calculate the difference polygon
         # This will be the area in the bounding box not covered by existing polygons
@@ -353,7 +359,7 @@ def scenario_to_raster_emp(frame=False):
                    'empl_urb_2': scenario_polygon['empl_urb_2'].mean(),
                    'empl_equ_2': scenario_polygon['empl_equ_2'].mean(),
                    'empl_rur_2': scenario_polygon['empl_rur_2'].mean()}
-        print("New row added")
+        logger.verbose("New row added")
         scenario_polygon = gpd.GeoDataFrame(pd.concat([pd.DataFrame(scenario_polygon), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
 
     growth_rate_columns_empl = ["empl_urban", "empl_equal", "empl_rural",
@@ -365,7 +371,7 @@ def scenario_to_raster_emp(frame=False):
 
     growth_to_tif(scenario_polygon, path=path_empl, columns=growth_rate_columns_empl)
     #growth_to_tif(scenario_polygon, path=path_empl, columns=growth_rate_columns_empl)
-    print('Scenario_To_Raster complete')
+    logger.verbose('Scenario_To_Raster complete')
 
 
     base_path = r"data/independent_variable/processed/scenario"
@@ -437,11 +443,11 @@ def create_single_tif_with_bands(base_path, file_names, output_file):
                 if meta is None:
                     meta = src.meta
 
-                print(f"Band from {file_name} added.")
+                logger.verbose(f"Band from {file_name} added.")
         except FileNotFoundError:
-            print(f"File not found: {input_file}")
+            logger.verbose(f"File not found: {input_file}")
         except Exception as e:
-            print(f"Error processing {input_file}: {e}")
+            logger.verbose(f"Error processing {input_file}: {e}")
 
     if meta is not None and bands_data:
         # Update metadata for multi-band file
@@ -452,8 +458,8 @@ def create_single_tif_with_bands(base_path, file_names, output_file):
             for i, band in enumerate(bands_data, start=1):
                 dst.write(band, i)  # Write each band to the respective index
 
-        print(f"All bands combined and saved as: {output_file}")
+        logger.verbose(f"All bands combined and saved as: {output_file}")
     else:
-        print("No bands were processed. Check input files.")
+        logger.verbose("No bands were processed. Check input files.")
 
 

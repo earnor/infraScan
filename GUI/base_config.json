@@ -6,6 +6,7 @@
     },
     "General": {
         "working_directory": "d:/OneDrive/ETH/FS25/01_Master_Project/20_Code/infraScan",
+        "config_file_name": "base_config.json",
         "Logging": {
             "log_file": "log.txt",
             "log_level": 20

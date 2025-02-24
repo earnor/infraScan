@@ -4,12 +4,18 @@ import numpy as np
 import rasterio
 from rasterio.features import rasterize
 import os
+import sys
 import re
 from rasterstats.io import bounds_window
 from rasterio.windows import bounds
 
 from rasterio.merge import merge
 from tqdm import tqdm
+
+# Get the parent directory
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 def stack_tif_files(var):
 
@@ -146,11 +152,11 @@ def compute_TT():
                     # Assign the filtered DataFrame to the dynamically created variable
                     globals()[var_name] = df_filtered
                     
-                    print(f"Loaded and processed {csv_file} as {var_name}")
+                    logger.verbose(f"Loaded and processed {csv_file} as {var_name}")
                 except Exception as e:
-                    print(f"Error reading or processing {csv_file}: {e}")
+                    logger.verbose(f"Error reading or processing {csv_file}: {e}")
         else:
-            print(f"Directory not found: {directory}")
+            logger.verbose(f"Directory not found: {directory}")
 
     # Example: access the processed DataFrame by its variable name (if applicable)
     # For example, if there was a file '100000.csv', it will be accessible as `100000`
@@ -173,7 +179,7 @@ def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path)
     commune_raster, commune_df = GetCommuneShapes(raster_path=voronoi_tif_path)
 
     if jobvec.shape[0] != odmat.shape[0]:
-        print("Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
+        logger.verbose("Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
     #com_idx = np.unique(od['quelle_code']) # previously od_mat
 
     #todo the following line setting up rasterdf. We could probably pick a better GDF to start with. Most important is to have the raster, location of raster cells
@@ -278,10 +284,10 @@ def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path)
             else:
                 continue
 
-    # Print array shapes to compare
-    print(f"cout_r: {cout_r.shape}")
-    print(f"pairs: {pairs.shape}")
-    print(f"pop_empl: {pop_empl.shape}")
+    # logger.verbose array shapes to compare
+    logger.verbose(f"cout_r: {cout_r.shape}")
+    logger.verbose(f"pairs: {pairs.shape}")
+    logger.verbose(f"pop_empl: {pop_empl.shape}")
 
     # Step 3 complete exploded matrix
     # Initialize the OD matrix DataFrame with zeros or NaNs
@@ -347,7 +353,7 @@ def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path)
     """
     # Allocate values to the OD matrix
     for idx, value in tqdm(cout_r.iterrows(), desc='Allocating unit_values to OD matrix'):
-        print(value, idx)
+        logger.verbose(value, idx)
         commune_id = idx
         # Update the OD matrix using the commune_id
         od_matrix.loc[pd.IndexSlice[:, commune_id], pd.IndexSlice[:, commune_id]] += value
@@ -381,20 +387,20 @@ def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path)
     np.fill_diagonal(od_grouped.values, 0)
     # Compute the sum after changing the diagonal
     temp_sum2 = od_grouped.sum().sum()
-    # Print difference
-    print(f"Sum of OD matrix before {temp_sum} and after {temp_sum2}")
+    # logger.verbose difference
+    logger.verbose(f"Sum of OD matrix before {temp_sum} and after {temp_sum2}")
 
     # Save pd df to csv
     od_grouped.to_csv(r"data\traffic_flow\od\od_matrix_2020.csv")
     #odmat.to_csv(r"data\traffic_flow\od\od_matrix_raw.csv")
 
-    # Print sum of all values in od df
+    # logger.verbose sum of all values in od df
     # Sum over all values in pd df
     sum_com = odmat.sum().sum()
     sum_poly = od_grouped.sum().sum()
     sum_com_frame = odmat_frame.sum().sum()
-    print(f"Total trips before {sum_com_frame} ({odmat_frame.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
-    print(f"Total trips before {sum_com} ({odmat.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
+    logger.verbose(f"Total trips before {sum_com_frame} ({odmat_frame.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
+    logger.verbose(f"Total trips before {sum_com} ({odmat.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
 
     # Sum all columns of od_grouped
     origin = od_grouped.sum(axis=1).reset_index()
@@ -507,7 +513,7 @@ def GetVoronoiOD_multi_old(scen_empl_path, scen_pop_path, voronoi_tif_path):
     commune_raster, commune_df = GetCommuneShapes(raster_path=voronoi_tif_path)
 
     if jobvec.shape[0] != odmat.shape[0]:
-        print("Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
+        logger.verbose("Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
 
     # Open scenario (medium) raster data    (low = band 2, high = band 3)
     with rasterio.open(scen_pop_path) as src:
@@ -542,7 +548,7 @@ def GetVoronoiOD_multi_old(scen_empl_path, scen_pop_path, voronoi_tif_path):
 
     # Convert values to integers if needed
     xx_values = [int(xx) for xx in xx_values]
-    # print(xx_values)
+    # logger.verbose(xx_values)
 
     for xx in tqdm(xx_values, desc='Processing Voronoi IDs'):
         # Construct the file path
@@ -648,7 +654,7 @@ def GetCatchmentOD_old():
 
     # for each of these scenarios make an own copy of od_matrix named od_matrix+scen
     for scen in pop_empl_scenarios:
-        print(f"Processing scenario {scen}")
+        logger.verbose(f"Processing scenario {scen}")
         od_matrix_temp = od_matrix.copy()
 
         for polygon_id, row in tqdm(pop_empl.iterrows(), desc='Allocating pop and empl to OD matrix'):
@@ -659,7 +665,7 @@ def GetCatchmentOD_old():
         # Save the ungrouped OD matrix as a CSV
         ungrouped_od_matrix_path = fr"data/traffic_flow/od/rail/od_matrix_temp_{scen}.csv"
         od_matrix_temp.to_csv(ungrouped_od_matrix_path)
-        print(f"Saved ungrouped OD matrix for scenario {scen} at {ungrouped_od_matrix_path}")
+        logger.verbose(f"Saved ungrouped OD matrix for scenario {scen} at {ungrouped_od_matrix_path}")
 
         ###############################################################################################################################
         # Step 4: Group the OD matrix by polygon_id
@@ -684,22 +690,22 @@ def GetCatchmentOD_old():
         np.fill_diagonal(od_grouped.values, 0)
         # Compute the sum after changing the diagonal
         temp_sum2 = od_grouped.sum().sum()
-        # Print difference
-        print(f"Sum of OD matrix before {temp_sum} and after {temp_sum2} removing diagonal values")
+        # logger.verbose difference
+        logger.verbose(f"Sum of OD matrix before {temp_sum} and after {temp_sum2} removing diagonal values")
 
         # Save the grouped OD matrix
         grouped_od_matrix_path = fr"data/traffic_flow/od/rail/od_matrix_{scen}.csv"
         od_grouped.to_csv(grouped_od_matrix_path)
-        print(f"Saved grouped OD matrix for scenario {scen} at {grouped_od_matrix_path}")
+        logger.verbose(f"Saved grouped OD matrix for scenario {scen} at {grouped_od_matrix_path}")
 
-        # Print sum of all values in od df
+        # logger.verbose sum of all values in od df
         # Sum over all values in pd df
         sum_com = odmat.sum().sum()
         sum_poly = od_grouped.sum().sum()
         sum_com_frame = odmat_frame.sum().sum()
-        print(
+        logger.verbose(
             f"Total trips before {sum_com_frame} ({odmat_frame.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
-        print(
+        logger.verbose(
             f"Total trips before {sum_com} ({odmat.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
 
         # Sum all columns of od_grouped

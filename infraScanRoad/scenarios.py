@@ -7,6 +7,11 @@ import boto3
 import rasterio as rio
 from rasterio.session import AWSSession
 
+# Get the parent directory of GUI (i.e., InfraScan)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
+
 
 def future_scenario_zuerich_2022(df_input):
     """

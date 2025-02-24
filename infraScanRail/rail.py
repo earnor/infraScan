@@ -10,11 +10,18 @@ import pandas as pd # For data manipulation
 import geopandas as gpd # For geospatial data manipulation
 import json # For JSON operation
 
-import icecream as ic # For debugging
-import logging # For logging and debugging
+import tkinter as tk # For GUI
+import tkinter.ttk as ttk # For GUI
+
+from icecream import ic # For debugging
 
 import warnings # For warning
 warnings.simplefilter(action='ignore', category=pd.errors.SettingWithCopyWarning) # Ignore specific pandas warning
+
+# Get the parent directory of GUI (i.e., InfraScan)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 # Import Module
 # Ensure this File is in `sys.path`
@@ -43,41 +50,85 @@ class Rail:
         # runtime
         self.runtimes = {} # For saving runtime of each step
 
-        # Set Logging Level Dynamically
-        logging_level = self.config["General"]["Logging"].get("log_level", logging.INFO)
+        # Start GUI
+        self.progress_bar_init("Rail Modul", 100) # Initialize Progress Bar
 
-        if not isinstance(logging_level, int):
-            raise ValueError(f'Invalid log level: {logging_level}')
+    def progress_bar_init(self, title, total: int):
+        # Initialize Progress Bar in tkinter GUI
+        self.root = tk.Tk()
+        self.root.title(title)
 
-        # Ensure the logger is properly configured
-        logger = logging.getLogger()
-        logger.setLevel(logging_level)  # Dynamically change log level
+        self.progress = ttk.Progressbar(self.root, orient="horizontal", length=300, mode="determinate")
+        self.progress.pack(pady=10)
 
-        # Remove existing handlers to avoid duplicate logs
-        if logger.hasHandlers():
-            logger.handlers.clear()
+        self.label_config = tk.Label(self.root, text=f"Config: {self.config['General']['config_file_name']}")
+        self.label_config.pack(pady=5)
 
-        # Reconfigure logging with new settings
-        logging.basicConfig(level=logging_level, format='%(levelname)s: %(message)s')
+        self.label_start_time = tk.Label(self.root, text=f"Start Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        self.label_start_time.pack(pady=5)
 
-        logging.info("Logging level set to: %s", logging_level)
+        self.label_estimated_completion_time = tk.Label(self.root, text="Estimated Completion Time: Calculating...")
+        self.label_estimated_completion_time.pack(pady=5)
+
+        self.label_current_process = tk.Label(self.root, text="Current Process: Initializing...")
+        self.label_current_process.pack(pady=5)
+
+        self.total_steps = total
+        self.progress["maximum"] = total
+
+        # cancle button
+        self.button = tk.Button(self.root, text="Cancel", command=self.root.quit)
+        self.button.pack(pady=5)
+
+        self.root.update()
+        pass
+
+    def progress_bar_update(self, process: str, current: int = None):
+        # Update Progress Bar in tkinter GUI
+        if current is not None:
+            self.progress["value"] = current
+        self.label_current_process["text"] = f"Current Process: {process}"
+        self.root.update()
+        pass
 
     def run(self):
         # Run the process based on the configuration
 
+        self.progress_bar_update("Initialize Variables", 1)
         self.initialize_variables()
+
+        self.progress_bar_update("Import Raw Data", 2)
         self.import_raw_data()
+
+        self.progress_bar_update("Infrastructure Network Import", 20)
         self.infrastructure_network_import()
+
+        self.progress_bar_update("Infrastructure Network Process", 30)
         self.infrastructure_network_process()
+
+        self.progress_bar_update("Infrastructure Network Generate Development", 40)
         self.infrastructure_network_generate_development()
+
+        self.progress_bar_update("Infrastructure Network Catchment", 50)
         self.infrastructure_network_catchment()
+
+        self.progress_bar_update("Scenarios Cantonal Predictions", 60)
         self.scenarios_cantonal_predictions()
+
+        self.progress_bar_update("Scoring Travel Time Savings", 70)
         self.scoring_traveltime_savings()
+
+        self.progress_bar_update("Scoring Construction Cost", 80)
         self.scoring_construction_cost()
+
+        self.progress_bar_update("Display Results", 90)
+        self.plots_and_results()
+
+        self.progress_bar_update("Finish", 100)
    
     def initialize_variables (self):
         # Initialize Variables
-        logging.info("INITIALIZE VARIABLES")
+        logger.rail("INITIALIZE VARIABLES")
         st = time.time()
 
         # Define variables for monetisation
@@ -136,11 +187,11 @@ class Rail:
 
         # Save runtime
         self.runtimes["initialize variables"] = time.time() - st
-        logging.info(f"Runtime: {self.runtimes['initialize variables']} seconds")
+        logger.rail(f"Runtime: {self.runtimes['initialize variables']} seconds")
 
     def import_raw_data(self):
         # Import raw data
-        logging.info("IMPORT RAW DATA")
+        logger.rail("IMPORT RAW DATA")
         st = time.time()
 
         # Define area that is protected for constructing railway links
@@ -153,11 +204,11 @@ class Rail:
 
         # Save runtime
         self.runtimes["Import land use and land cover data"] = time.time() - st
-        logging.info(f"Runtime: {self.runtimes['import_raw_data']} seconds")
+        logger.rail(f"Runtime: {self.runtimes['Import land use and land cover data']} seconds")
 
     def infrastructure_network_import(self):
         # Import infrastructure network
-        logging.info("INFRASTRUCTURE NETWORK IMPORT")
+        logger.rail("INFRASTRUCTURE NETWORK IMPORT")
         st = time.time()
 
         # Import the railway network and preprocess it
@@ -177,11 +228,11 @@ class Rail:
 
         # Save runtime
         self.runtimes["Import network data"] = time.time() - st
-        logging.info(f"Runtime: {self.runtimes['Import network data']} seconds")
+        logger.rail(f"Runtime: {self.runtimes['Import network data']} seconds")
 
     def infrastructure_network_process(self):
         # Process infrastructure network
-        logging.info("INFRASTRUCTURE NETWORK PROCESS")
+        logger.rail("INFRASTRUCTURE NETWORK PROCESS")
         st = time.time()
 
         # Simplify the physical topology of the network
@@ -212,11 +263,11 @@ class Rail:
 
         # Save runtime
         self.runtimes["Preprocess the network"] = time.time() - st
-        logging.info(f"Runtime: {self.runtimes['Preprocess the network']} seconds")
+        logger.rail(f"Runtime: {self.runtimes['Preprocess the network']} seconds")
 
     def infrastructure_network_generate_development(self):
         # Generate infrastructure network development
-        logging.info("INFRASTRUCTURE NETWORK GENERATE DEVELOPMENT")
+        logger.rail("INFRASTRUCTURE NETWORK GENERATE DEVELOPMENT")
         st = time.time()
 
         #Identifies railway service endpoints, creates a buffer around them, and selects nearby stations within a specified radius and count (n). 
@@ -267,11 +318,11 @@ class Rail:
 
         # Save runtime
         self.runtimes["Generate infrastructure developments"] = time.time() - st
-        logging.info(f"Runtime: {self.runtimes['Generate infrastructure developments']} seconds")
+        logger.rail(f"Runtime: {self.runtimes['Generate infrastructure developments']} seconds")
 
     def infrastructure_network_catchment(self):
         # Generate catchment area
-        logging.info("INFRASTRUCTURE NETWORK CATCHMENT")
+        logger.rail("INFRASTRUCTURE NETWORK CATCHMENT")
         st = time.time()
 
         ## PRO did comment the lines below raster and routing_raster() out
@@ -299,11 +350,11 @@ class Rail:
 
         # Save runtime
         self.runtimes["Generate The Catchement based on the Bus network"] = time.time() - st
-        logging.info(f"Runtime: {self.runtimes['Generate The Catchement based on the Bus network']} seconds")
+        logger.rail(f"Runtime: {self.runtimes['Generate The Catchement based on the Bus network']} seconds")
 
     def scenarios_cantonal_predictions(self):
         # Define scenario based on cantonal predictions
-        logging.info("SCORING CANTONAL PREDICTIONS")
+        logger.rail("SCORING CANTONAL PREDICTIONS")
         st = time.time()
 
         # Import the predicted scenario defined by the canton of Zürich
@@ -342,11 +393,11 @@ class Rail:
 
         # Save runtime
         self.runtimes["Generate the scenarios"] = time.time() - st
-        logging.info(f"Runtime: {self.runtimes['Generate the scenarios']} seconds")
+        logger.rail(f"Runtime: {self.runtimes['Generate the scenarios']} seconds")
 
     def scoring_traveltime_savings(self):
         # Scoring travel time savings
-        logging.info("SCORING TRAVEL TIME SAVINGS")
+        logger.rail("SCORING TRAVEL TIME SAVINGS")
         st = time.time()
 
         # 1) Calculate Traveltimes for all OD_ for all developments
@@ -415,8 +466,8 @@ class Rail:
         final_result = TT_Delay.analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od_nodes)
 
         # Display the result
-        print("\nFinal Travel Times and Delta Times:")
-        print(final_result)
+        logger.rail("\nFinal Travel Times and Delta Times:")
+        logger.rail(final_result)
 
 
         '''
@@ -444,10 +495,10 @@ class Rail:
 
         # Save runtime
         self.runtimes["Scoring travel time savings"] = time.time() - st
-        logging.info(f"Runtime: {self.runtimes['Scoring travel time savings']} seconds")
+        logger.rail(f"Runtime: {self.runtimes['Scoring travel time savings']} seconds")
 
     def scoring_construction_cost(self):
-        logging.info("SCORING CONSTRUCTION COST")
+        logger.rail("SCORING CONSTRUCTION COST")
         st = time.time()
 
         ##here a check for capacity could be added
@@ -468,7 +519,58 @@ class Rail:
         
         # Save runtime
         self.runtimes["Scoring construction cost"] = time.time() - st
-        logging.info(f"Runtime: {self.runtimes['Scoring construction cost']} seconds")
+        logger.rail(f"Runtime: {self.runtimes['Scoring construction cost']} seconds")
+
+    def plots_and_results(self):
+
+        logger.rail("\nVISUALIZE THE RESULTS \n")
+
+
+        plots.plotting(input_file="data/costs/total_costs_with_geometry.gpkg",
+                output_file="data/costs/processed_costs.gpkg",
+                node_file="data/Network/Rail_Node.xlsx")
+
+
+        #make a plot of the developments
+        plots.plot_develompments_rail()
+
+        # plot the scenarios
+        plots.plot_scenarios()
+
+        # make a plot of the catchement with id and times
+        plots.create_plot_catchement()
+        plots.create_catchement_plot_time()
+
+        # plot the empl and pop with the comunal boarders and the catchment
+        # to visualize the OD-Transformation 
+        plots.plot_catchment_and_distributions(
+            s_bahn_lines_path="data/Network/processed/split_s_bahn_lines.gpkg",
+            water_bodies_path="data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp",
+            catchment_raster_path="data/catchment_pt/catchement.tif",
+            communal_borders_path="data/_basic_data/Gemeindegrenzen/UP_GEMEINDEN_F.shp",
+            population_raster_path="data/independent_variable/processed/raw/pop20.tif",
+            employment_raster_path="data/independent_variable/processed/raw/empl20.tif",
+            extent_path="data/_basic_data/innerboundary.shp"
+        )
+
+        # Load the dataset and generate plots:
+        # - Enhanced boxplot and strip plot for monetized savings by development.
+        # Plots are saved in the 'plots' directory.
+        results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
+        plots.create_and_save_plots(results_raw)
+
+        '''
+        plot_developments_and_table_for_scenarios(
+        osm_file="data/osm_map.gpkg",  # Use the converted GeoPackage file
+        input_dir="data/costs",
+        output_dir="data/plots")
+        '''
+
+        # Run the display results function to launch the GUI
+        # Specify the path to your CSV file
+        csv_file_path = "data/costs/total_costs_with_geometry.csv"
+        # Call the function to create and display the GUI
+        display_results.create_scenario_analysis_viewer(csv_file_path)
 
 
 def has_stdin_input():
@@ -476,20 +578,20 @@ def has_stdin_input():
     return not sys.stdin.isatty()  # True if input is piped (GUI mode)
 
 if __name__ == "__main__":
-    logging.info("Starting InfraScanRail")
-    logging.debug("sys.argv: %s", sys.argv)
+    logger.rail("Starting InfraScanRail")
+    logger.rail("sys.argv: %s", sys.argv)
 
     try:
         if has_stdin_input():
-            logging.info("Reading configuration from GUI (stdin)...")
+            logger.rail("Reading configuration from GUI (stdin)...")
             config_data = json.load(sys.stdin)
         else:
-            logging.warning("No valid JSON received, using default configuration.")
+            logger.rail("No valid JSON received, using default configuration.")
             cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             with open(os.path.join(cwd, "GUI", "base_config.json"), "r") as f:
                 config_data = json.load(f)
     except json.JSONDecodeError:
-        logging.error("Failed to parse JSON. Using default configuration.")
+        logger.rail("Failed to parse JSON. Using default configuration.")
         cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(cwd, "GUI", "base_config.json"), "r") as f:
             config_data = json.load(f)

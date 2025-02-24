@@ -4,12 +4,18 @@ import numpy as np
 import rasterio
 from rasterio.features import rasterize
 import os
+import sys
 import re
 from rasterstats.io import bounds_window
 from rasterio.windows import bounds
 
 from rasterio.merge import merge
 from tqdm import tqdm
+
+# Get the parent directory of GUI (i.e., InfraScan)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 def stack_tif_files(var):
 

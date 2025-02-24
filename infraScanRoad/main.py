@@ -104,7 +104,6 @@ def print_hi(name):
 
     # Define area that is protected for constructing highway links
 
-    # !!!!!!!!!!!!!!!!!!!!!! Due to Missing data the following functions are not executed
     get_protected_area(limits=limits_corridor)
     get_unproductive_area(limits=limits_corridor)
     landuse(limits=limits_corridor)
@@ -189,8 +188,7 @@ def print_hi(name):
     num_rand = 1000
     random_gdf = generated_access_points(extent=innerboundary, number=num_rand)
 
-    # !!!!!!!!!!!!!!!!!!!!!! Due to Missing data the following functions are not executed
-    #filter_access_points(random_gdf)
+    filter_access_points(random_gdf)
 
     #filtered_gdf.to_file(r"data/Network/processed/generated_nodes.gpkg")
 
@@ -219,8 +217,7 @@ def print_hi(name):
     # If a point is not accessible due to the banned zoned it is stored in "data/Network/processed/points_inaccessible.csv"
     raster = r'data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif'
 
-    # !!!!!!!!!!!!!!!!!!!!!! Due to Missing data the following functions are not executed
-    #routing_raster(raster_path=raster)
+    routing_raster(raster_path=raster)
 
     """
     #plot_corridor(network, limits=limits_corridor, location=location, new_nodes=filtered_rand_gdf, access_link=True)
@@ -261,8 +258,7 @@ def print_hi(name):
     # Tif are stored to "data/independent_variable/processed/raw/pop20.tif"
     # File name indicates population (pop) and employment (empl), the year (20), and the extent swisswide (_ch) or only for corridor (no suffix)
 
-    # !!!!!!!!!!!!!!!!!!!!!! Due to Missing data the following functions are not executed
-    # import_data(limits_variables)
+    import_data(limits_variables)
 
     runtimes["Import variable for scenario (population and employment)"] = time.time() - st
     st = time.time()
@@ -281,8 +277,7 @@ def print_hi(name):
     # Define the relative growth per scenario and district
     # The growth rates are stored in "data/temp/data_scenario_n.shp"
 
-    # !!!!!!!!!!!!!!!!!!!!!! Due to Missing data the following functions are not executed
-    #future_scenario_zuerich_2022(scenario_zh)
+    future_scenario_zuerich_2022(scenario_zh)
     
     # Plot the growth rates as computed above for population and employment and over three scenarios
     #plot_2x3_subplots(scenario_polygon, outerboundary, network, location)

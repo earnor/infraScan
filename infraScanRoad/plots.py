@@ -6,6 +6,7 @@ from matplotlib.colors import ListedColormap, LinearSegmentedColormap
 from matplotlib_scalebar.scalebar import ScaleBar
 import rasterio.plot
 import os
+import sys
 os.environ['USE_PYGEOS'] = '0'
 import geopandas as gpd
 import pandas as pd
@@ -15,6 +16,10 @@ from matplotlib.patches import FancyArrowPatch
 import math
 import matplotlib.lines as mlines
 
+# Get the parent directory of GUI (i.e., InfraScan)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 class CustomBasemap:
     def __init__(self, boundary=None, network=None, access_points=None, frame=None, canton=False):

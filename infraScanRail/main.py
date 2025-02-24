@@ -14,8 +14,8 @@ from plots import *
 from generate_infrastructure import *
 from scoring import *
 from traveltime_delay import *
-# from TT_Delay import *
-# from display_results import *
+from TT_Delay import *
+from display_results import *
 
 
 
@@ -88,6 +88,9 @@ def print_hi(name):
     # Import and prepare raw data
     print("\nIMPORT RAW DATA \n")
 
+    # Import the required data for the analysis
+    #import_data(limits=limits_corridor)
+
     # Import shapes of lake for plots
     #get_lake_data()
 
@@ -96,9 +99,9 @@ def print_hi(name):
 
 
     # Define area that is protected for constructing railway links
-    #   get_protected_area(limits=limits_corridor)
-    #   get_unproductive_area(limits=limits_corridor)
-    #   landuse(limits=limits_corridor)
+    get_protected_area(limits=limits_corridor)
+    get_unproductive_area(limits=limits_corridor)
+    landuse(limits=limits_corridor)
 
     # Tif file of all unsuitable land cover and protected areas
     # File is stored to 'data\landuse_landcover\processed\zone_no_infra\protected_area_{suffix}.tif'
@@ -288,8 +291,9 @@ def print_hi(name):
     # For each scenario, adjusts total growth and distributes it among municipalities with urban, equal, and rural biases.
     # Merges growth results with spatial boundaries to form a GeoDataFrame of growth projections for mapping.
     # Saves the resulting GeoDataFrame to a shapefile.
-    future_scenario_pop(n=3)
-    future_scenario_empl(n=3)
+    # !!!!!!!!!!!!!!!!!!! data missing:
+    #future_scenario_pop(n=3)
+    #future_scenario_empl(n=3)
 
 
     # Compute the predicted amount of population and employment in each raster cell (hectar) for each scenario

@@ -2,6 +2,7 @@ import networkx as nx
 import geopandas as gpd
 import networkx as nx
 import os
+import sys
 import numpy as np
 from shapely.geometry import Point, Polygon
 import geopandas as gpd
@@ -25,6 +26,10 @@ from shapely import wkt
 import rasterio
 from rasterio.transform import from_origin
 
+# Get the parent directory
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 def create_directed_graph(df):
     G = nx.DiGraph()

@@ -1,5 +1,6 @@
 # Core Libraries
 import os
+import sys
 import math
 import re
 import numpy as np
@@ -32,10 +33,13 @@ import seaborn as sns
 from matplotlib import patches as mpatches
 from matplotlib.colors import LinearSegmentedColormap
 
-
-
 # Pyrosm for OpenStreetMap Data
 #from pyrosm import get_data, OSM
+
+# Get the parent directory
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 
 def plotting(input_file, output_file, node_file):
@@ -55,9 +59,9 @@ def plotting(input_file, output_file, node_file):
     # Step 2: Normalize `dev_id` in mapping_file
     mapping_file['dev_numeric'] = (mapping_file['dev_id'] - 100000 + 1).astype(int)
 
-    # Debug: Print unique numeric values before merging
-    print("Numeric values in gdf['dev_numeric']:", gdf['dev_numeric'].unique())
-    print("Numeric values in mapping_file['dev_numeric']:", mapping_file['dev_numeric'].unique())
+    # Debug: logger.verbose unique numeric values before merging
+    logger.verbose("Numeric values in gdf['dev_numeric']:", gdf['dev_numeric'].unique())
+    logger.verbose("Numeric values in mapping_file['dev_numeric']:", mapping_file['dev_numeric'].unique())
 
     # Step 3: Merge `from_ID_new` and `to_ID` into `gdf`
     gdf = gdf.merge(
@@ -107,8 +111,8 @@ def plotting(input_file, output_file, node_file):
     'Target_Name': 'Target_Name'}, inplace=True)
 
     # Debug: Check if the merge succeeded
-    print("After merge, NULL values in 'Source_ID':", gdf['Source_ID'].isnull().sum())
-    print("After merge, NULL values in 'Target_ID':", gdf['Target_ID'].isnull().sum())
+    logger.verbose("After merge, NULL values in 'Source_ID':", gdf['Source_ID'].isnull().sum())
+    logger.verbose("After merge, NULL values in 'Target_ID':", gdf['Target_ID'].isnull().sum())
 
     # Filter columns containing 'construction_cost' in their name
     construction_costs_columns = [col for col in gdf.columns if 'construction_cost' in col]
@@ -170,9 +174,9 @@ def plotting(input_file, output_file, node_file):
             # Save the scenario DataFrame to a file
             if not scenario_df.empty:
                 scenario_df.to_file(scenario_output_file, driver='GPKG')
-                print(f"Saved: {scenario_output_file}")
+                logger.verbose(f"Saved: {scenario_output_file}")
             else:
-                print(f"No data to save for {scenario_name}")
+                logger.verbose(f"No data to save for {scenario_name}")
     
 
 def plot_developments_and_table_for_scenarios(osm_file, input_dir, output_dir):
@@ -197,7 +201,7 @@ def plot_developments_and_table_for_scenarios(osm_file, input_dir, output_dir):
     # Save the roads data as a GeoPackage
     output_gpkg = "data/osm_map.gpkg"
     #roads.to_file(output_gpkg, driver="GPKG")
-    print(f"Converted OSM data saved to {output_gpkg}")
+    logger.verbose(f"Converted OSM data saved to {output_gpkg}")
     
     # Set a grey theme for the OSM map
     osm_color = '#d9d9d9'
@@ -264,8 +268,8 @@ def plot_developments_and_table_for_scenarios(osm_file, input_dir, output_dir):
             plt.savefig(output_table, dpi=300)
             plt.close()
 
-            print(f"Map saved to {output_map}")
-            print(f"Table saved to {output_table}")
+            logger.verbose(f"Map saved to {output_map}")
+            logger.verbose(f"Table saved to {output_table}")
 
 
 def plot_bus_network(G, pos, e_min, e_max, n_min, n_max):
@@ -366,26 +370,26 @@ class CustomBasemap:
 
     def new_development(self, new_links=None, new_nodes=None):
         if isinstance(new_links, gpd.GeoDataFrame):
-            print("ploting links")
+            logger.verbose("ploting links")
             new_links.plot(ax=self.ax, color="darkgray", lw=2)
 
         if isinstance(new_nodes, gpd.GeoDataFrame):
-            print("ploting nodes")
+            logger.verbose("ploting nodes")
             new_nodes.plot(ax=self.ax, color="blue", markersize=50)
 
 
     def single_development(self, id ,new_links=None, new_nodes=None):
         if isinstance(new_links, gpd.GeoDataFrame):
-            #print("ploting links")
+            #logger.verbose("ploting links")
             new_links[new_links["ID_new"] == id].plot(ax=self.ax, color="darkgray", lw=2)
 
         if isinstance(new_nodes, gpd.GeoDataFrame):
-            #print("ploting nodes")
+            #logger.verbose("ploting nodes")
             new_nodes[new_nodes["ID"] == id].plot(ax=self.ax, color="blue", markersize=50)
 
     def voronoi(self, id, gdf_voronoi):
         gdf_voronoi["ID"] = gdf_voronoi["ID"].astype(int)
-        #print(gdf_voronoi[gdf_voronoi["ID"] == id].head(9).to_string())
+        #logger.verbose(gdf_voronoi[gdf_voronoi["ID"] == id].head(9).to_string())
         gdf_voronoi[gdf_voronoi["ID"] == id].plot(ax=self.ax, edgecolor='red', facecolor='none' , lw=2)
         plt.savefig(r"plot/Voronoi/developments/dev_" + str(id) + ".png", dpi=400)
 
@@ -535,7 +539,7 @@ def plot_single_cost_result(df_costs, banned_area , title_bar, boundary=None, ne
     min_val = df_costs[col].min()
     max_val = df_costs[col].max()
 
-    print(f"min: {min_val}, max: {max_val}")
+    logger.verbose(f"min: {min_val}, max: {max_val}")
 
     # Number of color intervals
     n_intervals = 256
@@ -927,11 +931,11 @@ def plot_benefit_distribution_line_multi(df_costs, columns, labels, plot_name, l
         column_counts = df_costs.groupby(f'bin_{column}')[column].count()
         bin_counts[f'bin_{column}'] = column_counts
 
-    print(bin_counts.head(10).to_string())
+    logger.verbose(bin_counts.head(10).to_string())
     # Define labels
     # Check if labels len is same as columns len
     if len(labels) != len(columns):
-        print("Labels and columns length are not the same")
+        logger.verbose("Labels and columns length are not the same")
     else:
         # Create a dict with column names as keys and labels as values
         legend_labels = dict(zip(columns, labels))
@@ -996,7 +1000,7 @@ def plot_best_worse(df):
     df_bottom5 = df.nsmallest(5, 'total_medium')
 
     # Specify the columns to plot
-    print(df.columns)
+    logger.verbose(df.columns)
     columns_to_plot = ['building_costs', 'local_s1', 'externalities', 'tt_medium', 'noise_s1']
 
     # Create a figure with two subplots
@@ -1498,7 +1502,7 @@ def plot_scenarios():
     # Save the plot to file
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Plot saved to {output_path}")
+    logger.verbose(f"Plot saved to {output_path}")
 
 
 
@@ -1531,8 +1535,8 @@ def create_plot_catchement():
         unique_ids = [val for val in unique_values if val != -1]  # Exclude NoData
         unique_ids.sort()  # Ensure the IDs are sorted
 
-        print("Unique values in the raster:", unique_values)  # Debugging
-        print("Unique values (excluding NoData):", unique_ids)  # Debugging
+        logger.verbose("Unique values in the raster:", unique_values)  # Debugging
+        logger.verbose("Unique values (excluding NoData):", unique_ids)  # Debugging
 
         # Define specific colors
         nodata_color = (0.678, 0.847, 0.902, 1.0)  # Soft blue for NoData
@@ -1637,7 +1641,7 @@ def create_plot_catchement():
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
         plt.close()
 
-    print(f"Plot saved at {output_path}")
+    logger.verbose(f"Plot saved at {output_path}")
 
 def create_catchement_plot_time():
     # File paths
@@ -1787,7 +1791,7 @@ def create_catchement_plot_time():
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 
-    print(f"Plot saved at {output_path}")
+    logger.verbose(f"Plot saved at {output_path}")
 
 
 def plot_develompments_rail():
@@ -1908,7 +1912,7 @@ def plot_develompments_rail():
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 
-    print(f"Plot saved at {output_path}")
+    logger.verbose(f"Plot saved at {output_path}")
 
 
 def create_and_save_plots(df, plot_directory="plots"):
@@ -2116,7 +2120,7 @@ def plot_catchment_and_distributions(
     output_path = f"{output_dir}catchment_and_distributions_larger_titles.png"
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
-    print(f"Plots saved to {output_path}")
+    logger.verbose(f"Plots saved to {output_path}")
 
 
 

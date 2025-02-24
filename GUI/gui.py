@@ -7,9 +7,8 @@ import os
 os.environ['USE_PYGEOS'] = '0'  # Force GeoPandas to use Shapely
 import sys
 import multiprocessing # For running sub moduls (e.g. road, rail)
-import logging # For logging
-logging.basicConfig(level=logging.INFO) # Set logging level
 from icecream import ic # For debugging
+import logging
 
 from datetime import datetime # For time operation
 import geopandas as gpd
@@ -22,7 +21,10 @@ import contextily as ctx
 # Get the parent directory of GUI (i.e., InfraScan)
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
-# Import the Rail and Road classes
+# Import the Rail and Road classes (they are outside the GUI directory)
+# For that reason, we need to add the parent directory to the Python path
+# And go back in the directory structure to import the classes
+from logging_config import logger  # Import central logger
 try:
     from infraScanRail.rail import Rail
     from infraScanRoad.road import Road
@@ -48,9 +50,9 @@ def start_process(process_class, config):
     try:
         process = process_class(config)  # Create an instance with config data
         process.run()  # Start execution
-        print(f"{process_class.__name__} process completed.")
+        logger.notice(f"{process_class.__name__} process completed.")
     except Exception as e:
-        print(f"Error running {process_class.__name__}: {e}")
+        logger.error(f"Error running {process_class.__name__}: {e}")
 
 class InfraGUI:
     def __init__(self, root):
@@ -332,7 +334,7 @@ class InfraGUI:
             n_max_plot = n_center + (max_dim / 2) + buffer_size
             
             # Add basemap from Contextily
-            #ctx.add_basemap(self.ax, source=ctx.providers.SwissFederalGeoportal.NationalMapColor)
+            ctx.add_basemap(self.ax, source=ctx.providers.SwissFederalGeoportal.NationalMapColor)
 
             # Set limits to enforce square plot
             self.ax.set_xlim(e_min_plot, e_max_plot)
@@ -381,11 +383,15 @@ class InfraGUI:
         Parameters:
         script (str): The name of the script ("rail" or "road").
         """
-        logging.info(f"Starting {script} process...")
+        logger.notice(f"Starting {script} process...")
 
         # Save configuration before running
         working_dir = self.data["General"].get("working_directory", "")
         save_path = os.path.join(working_dir, "GUI", "past_runs", f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        # Set Config File Name in json itself (if name is base_config.json, it will be overwritten)
+        if self.data["General"]["config_file_name"] == "base_config.json":
+            self.data["General"]["config_file_name"] = os.path.basename(save_path)
+        # Save the configuration to a JSON file
         self.save_config(save_path)
 
         # Select the appropriate class
@@ -449,6 +455,7 @@ class InfraGUI:
             # Update metadata before exporting
             self.data["Metadata"]["date_created"] = datetime.now().strftime("%Y-%m-%d")
             self.data["Metadata"]["time_created"] = datetime.now().strftime("%H:%M:%S")
+            self.data["General"]["config_file_name"] = os.path.basename(file_path)
 
             # Ensure units are correctly stored before saving
             for category, subcategories in self.entries.items():

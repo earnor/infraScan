@@ -13,7 +13,10 @@ from geopandas.tools import sjoin
 
 from plots import *
 
-
+# Get the parent directory of GUI (i.e., InfraScan)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 
 def import_data(limits):
@@ -892,7 +895,7 @@ def get_protected_area(limits):
     hochmoore = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Hochmoor\Hochmoor_LV95\hochmoor.shp")
     bundesinventar_auen = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Bundesinventar_auen\N2017_Revision_Auengebiete_20171101_20221122.shp")
     ramsar = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Ramsar\Ramsar_LV95\ra.shp")
-    naturschutz = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Inventar_der_Natur-_und_Landsch...uberkommunaler_Bedeutung_-OGD\INV80_NATURSCHUTZOBJEKTE_F.shp")
+    #naturschutz = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Inventar_der_Natur-_und_Landsch...uberkommunaler_Bedeutung_-OGD\INV80_NATURSCHUTZOBJEKTE_F.shp")
     wald = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Waldareal_-OGD\WALD_WALDAREAL_F.shp")
     fruchtfolgeflaeche = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Fruchtfolgeflachen_-OGD\FFF_F.shp")
 
@@ -903,7 +906,7 @@ def get_protected_area(limits):
         hochmoore,
         bundesinventar_auen,
         ramsar,
-        naturschutz
+        #naturschutz
     ]
     names_fully_protected = [
         'bln',
@@ -912,7 +915,7 @@ def get_protected_area(limits):
         'hochmoore',
         'bundesinventar_auen',
         'ramsar',
-        'naturschutz'
+        #'naturschutz'
     ]
 
     gdf_partly_protected = [

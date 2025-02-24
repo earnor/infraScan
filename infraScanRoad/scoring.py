@@ -25,6 +25,11 @@ import re
 import networkx as nx
 from itertools import islice
 
+# Get the parent directory of GUI (i.e., InfraScan)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
+
 
 def import_elevation_model_old():
     # Replace with your actual file path list

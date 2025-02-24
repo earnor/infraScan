@@ -6,6 +6,7 @@ import numpy as np
 from scipy.optimize import minimize, Bounds, least_squares
 import timeit
 import os
+import sys
 os.environ['USE_PYGEOS'] = '0'
 import geopandas as gpd
 from shapely.geometry import Point
@@ -14,6 +15,11 @@ from itertools import islice
 import matplotlib.pyplot as plt
 from scipy.sparse.csgraph import connected_components
 import data_import
+
+# Get the parent directory
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 #os.chdir(r"C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail")
 os.chdir(r"C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail")
@@ -38,9 +44,9 @@ def convert_data_to_input():
     # Set crs for points and edges to epsg:2056
     points = points.set_crs("epsg:2056", allow_override=True)
     edges = edges.set_crs("epsg:2056", allow_override=True)
-    # Print crs of points and edges
-    print(f"Points crs: {points.crs}")
-    print(f"Edges crs: {edges.crs}")
+    # logger.verbose crs of points and edges
+    logger.verbose(f"Points crs: {points.crs}")
+    logger.verbose(f"Edges crs: {edges.crs}")
 
     # Change "corridor_border" to False if "within_corridor" is True
     points.loc[points["within_corridor"] == True, "on_corridor_border"] = False
@@ -105,11 +111,11 @@ def get_nw_data():
 
     # Import OD matrix and flatten it (D_od)
     OD_matrix = pd.read_csv(r"data\traffic_flow\od\od_matrix_2020.csv", sep=",", index_col=0)
-    print(OD_matrix.head(5).to_string())
+    logger.verbose(OD_matrix.head(5).to_string())
     # Import polygons of the corridor
     #voronoi_OD = gpd.read_file(r"data\traffic_flow\od\OD_voronoidf.gpkg")
     voronoi_OD = gpd.read_file(r"data\Network\travel_time\Voronoi_statusquo.gpkg")
-    print(voronoi_OD.head(5).to_string())
+    logger.verbose(voronoi_OD.head(5).to_string())
 
     # Import gpkg file with the network points
     points = gpd.read_file(r"data\Network\processed\points_with_attribute.gpkg")
@@ -117,11 +123,11 @@ def get_nw_data():
 
     # Filter points to only keep those within the corridor or on border
     points_in = points[(points["within_corridor"] == True) | (points["on_corridor_border"] == True)]
-    print(f"Points in corridor or border: {points_in.shape}")
+    logger.verbose(f"Points in corridor or border: {points_in.shape}")
 
     # Get common ID_point and voronoi_ID as list
     common_ID = list(set(points_in["ID_point"]).intersection(voronoi_OD["ID_point"]))
-    print(f"Point in polygon and with voronoi: {len(common_ID)}")
+    logger.verbose(f"Point in polygon and with voronoi: {len(common_ID)}")
 
     # new column "generate_demand" where ID_point is in common_ID
     points["generate_demand"] = points["ID_point"].isin(common_ID)
@@ -133,7 +139,7 @@ def get_nw_data():
     OD_matrix.columns = OD_matrix.columns.map(lambda x: int(float(x)))
 
     OD_matrix = OD_matrix.loc[common_ID, common_ID]
-    print(f"Shape OD matrix: {OD_matrix.shape}")
+    logger.verbose(f"Shape OD matrix: {OD_matrix.shape}")
 
     # flatten OD matrix to 1D array as D_od
     D_od = OD_matrix.to_numpy().flatten()
@@ -141,7 +147,7 @@ def get_nw_data():
 
     # Get the amount of values in the OD matrix as nOD
     nOD = len(D_od)
-    print(nOD)
+    logger.verbose(nOD)
 
     # Map the single zones of the OD to actual nodes in the network
     # nodes within perimeter and on border
@@ -150,7 +156,7 @@ def get_nw_data():
     edges = gpd.read_file(r"data\Network\processed\edges_with_attribute.gpkg")
     edges = edges.sort_values(by=["ID_edge"])
 
-    print(edges.head(5).to_string())
+    logger.verbose(edges.head(5).to_string())
     # Build network using networkx
     # Map the coordinates to the edges DataFrame
     # Set the index of the nodes DataFrame to be the 'ID_point' column
@@ -158,7 +164,7 @@ def get_nw_data():
 
     # Create an empty NetworkX graph
     G = nx.MultiGraph()
-    print(points.head(5).to_string())
+    logger.verbose(points.head(5).to_string())
     # Add nodes with IDs to the graph
     for node_id, row in points.iterrows():
         G.add_node(node_id, pos=(row['geometry'].x, row['geometry'].y), demand=row['generate_demand'])
@@ -182,14 +188,14 @@ def get_nw_data():
 
     # Step 1: Identify nodes with demand
     demand_nodes = [n for n, attr in G.nodes(data=True) if attr.get('demand') == True]
-    print(f"Number of points considered: {len(demand_nodes)} ({len(demand_nodes)*len(demand_nodes)})")
+    logger.verbose(f"Number of points considered: {len(demand_nodes)} ({len(demand_nodes)*len(demand_nodes)})")
     """
     # Find connected components
     connected_components = list(nx.connected_components(G))
     # Filter components to include only those with at least one node having 'demand' == True
     #connected_components_with_demand = [comp for comp in connected_components if any(G.nodes[node]['demand'] for node in comp)]
 
-    print(connected_components)
+    logger.verbose(connected_components)
 
     # Convert the generator to a list to get its length
     connected_components_list = list(connected_components)
@@ -234,20 +240,20 @@ def get_nw_data():
     #delta_ir = np.zero((nlinks, 10000)
     """
     for i in range(len(demand_nodes)):
-        #print(f"New origin    {i}")
+        #logger.verbose(f"New origin    {i}")
         for j in range(len(demand_nodes)):
-            #print(f"    {j}")
+            #logger.verbose(f"    {j}")
             source = demand_nodes[i]
             target = demand_nodes[j]
             paths = nx.all_simple_edge_paths(G, source, target)
-            #print(f"Number of paths: {len(paths)}")
+            #logger.verbose(f"Number of paths: {len(paths)}")
 
 
             # iterate over all paths
             for path in paths:
                 # Get cell in delta_odr based on index_OD_pair and index_routes
                 delta_odr[index_OD_pair][index_routes] = 1
-                #print("Yes")
+                #logger.verbose("Yes")
                 # get the key of the edges of each path (u,v,k)
                 routelinks_list.append([k for _, _, k in path])
                 # Add array of edge keys of path to routelinks as dict with nbr_routes (as
@@ -277,7 +283,7 @@ def get_nw_data():
                 # Check if this path is already in unique_paths
                 if edge_ids not in unique_paths_ij:
                     unique_paths_ij.append(edge_ids)
-            #print(unique_paths_ij)
+            #logger.verbose(unique_paths_ij)
             for edge_ids in unique_paths_ij:
                 routelinks_list.append(edge_ids)
                 delta_odr[index_OD_pair][index_routes] = 1
@@ -297,7 +303,7 @@ def get_nw_data():
                 index_routes += 1
             """
             index_OD_pair += 1
-            # print(f"Number of routes: {index_routes} and OD pairs: {index_OD_pair}")
+            # logger.verbose(f"Number of routes: {index_routes} and OD pairs: {index_OD_pair}")
 
 
             """
@@ -316,14 +322,14 @@ def get_nw_data():
 
             except nx.NetworkXNoPath:
                 # Handle the case where no path exists between source and target
-                print(f"No path between {source} and {target}")
+                logger.verbose(f"No path between {source} and {target}")
         index_OD_pair += 1
             """
 
 
 
-    print(f"Number of routes: {index_routes}")
-    print(f"Number of OD pairs: {index_OD_pair}")
+    logger.verbose(f"Number of routes: {index_routes}")
+    logger.verbose(f"Number of OD pairs: {index_OD_pair}")
 
     max_length = max(len(arr) for arr in routelinks_list)
     # Replace all 0s with -1
@@ -338,11 +344,11 @@ def get_nw_data():
 
     ## Assert the algorithm works well
     column_sums = np.sum(delta_odr, axis=0)
-    print(f"The number of routes {np.sum(column_sums >= 1)} and {n_routes}")
+    logger.verbose(f"The number of routes {np.sum(column_sums >= 1)} and {n_routes}")
     if np.sum(column_sums >= 1) == n_routes:
         delta_odr = delta_odr[:, :n_routes]
     else:
-        print("not same amount of routes in computation - check code for errors")
+        logger.verbose("not same amount of routes in computation - check code for errors")
 
     # Example edge keys and 2D numpy array
     edge_keys = [k for u, v, k in G.edges(keys=True)]  # Replace with your actual edge keys
@@ -359,25 +365,25 @@ def get_nw_data():
     # From a matrix with all edge IDs for each route (routelinks) route ID (x) and edge ID (y) just in a list
     # to a matrix with all routes (x) and all edges (y) as delta_ir (binary if edge in route)
     for row_idx, path in enumerate(routelinks):
-        #print(f"row_idx: {row_idx} and path: {path}")
+        #logger.verbose(f"row_idx: {row_idx} and path: {path}")
         for edge in path:
             if edge != 0:
                 delta_ir_df.at[row_idx, edge] = 1
-        # print entire row
-        #print(delta_ir_df.iloc[row_idx])
+        # logger.verbose entire row
+        #logger.verbose(delta_ir_df.iloc[row_idx])
 
     # Sort in ascending edge_id and store it as array
-    print(delta_ir_df.sort_index(axis=1).transpose().head(10).to_string())
+    logger.verbose(delta_ir_df.sort_index(axis=1).transpose().head(10).to_string())
     delta_ir = delta_ir_df.sort_index(axis=1).transpose().to_numpy()
 
-    print(f"Amount of links used: {np.sum(delta_ir > 0)} (delta_ir) and {np.sum(routelinks > 0)} (routelinks)")
+    logger.verbose(f"Amount of links used: {np.sum(delta_ir > 0)} (delta_ir) and {np.sum(routelinks > 0)} (routelinks)")
 
-    print(f"Shape delta_odr {delta_odr.shape} (OD pairs x #routes)")
-    print(f"Shape delta_ir {delta_ir.shape} (#links (edge ID sorted ascending) x #routes)")
-    print(f"Shape routelinks {routelinks.shape} (#routes x amount of links of longest route)")
-    print(f"Shape D_od {D_od.shape[0]} ({math.sqrt(D_od.shape[0])} OD zones)")
-    print(f"nOD number of OD pairs {nOD}")
-    print(f"number of routes (n_routes) {n_routes}")
+    logger.verbose(f"Shape delta_odr {delta_odr.shape} (OD pairs x #routes)")
+    logger.verbose(f"Shape delta_ir {delta_ir.shape} (#links (edge ID sorted ascending) x #routes)")
+    logger.verbose(f"Shape routelinks {routelinks.shape} (#routes x amount of links of longest route)")
+    logger.verbose(f"Shape D_od {D_od.shape[0]} ({math.sqrt(D_od.shape[0])} OD zones)")
+    logger.verbose(f"nOD number of OD pairs {nOD}")
+    logger.verbose(f"number of routes (n_routes) {n_routes}")
             #paths = list(k_shortest_paths(G, source, target, 3))
 
 
@@ -512,42 +518,42 @@ def SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta):
 
         # X contains 2150 zeros
 
-        #print(np.multiply(x,np.log(x)))
-        #print(np.sum(np.divide(np.multiply(x,np.log(x)),thetavec)))
+        #logger.verbose(np.multiply(x,np.log(x)))
+        #logger.verbose(np.sum(np.divide(np.multiply(x,np.log(x)),thetavec)))
 
         # IntLinksTimes()           Travel time on each link
 
         # np.multiply(x,cf_r)       Commonality factor on each route with optimize flow
         ############################################################################################################
         ### Wha to divide by 1?
-        #print(np.sum(IntLinksTimes(x)) + np.sum(np.divide(np.multiply(x, np.log(x)), thetavec)) + np.sum((np.multiply(x, cf_r))))
-        #print(np.multiply(x, np.log(x)))
+        #logger.verbose(np.sum(IntLinksTimes(x)) + np.sum(np.divide(np.multiply(x, np.log(x)), thetavec)) + np.sum((np.multiply(x, cf_r))))
+        #logger.verbose(np.multiply(x, np.log(x)))
         # Count the amount of nan in x
-        #print(np.sum(np.isnan(np.multiply(x, np.log(x)))))  # This creates nan (like 30)
-        #print(np.sum(np.isnan(np.multiply(x,cf_r))))
-        #print(cf_r)
-        #print(np.sum(np.isinf(cf_r)))
-        #print(np.multiply(x,cf_r))
+        #logger.verbose(np.sum(np.isnan(np.multiply(x, np.log(x)))))  # This creates nan (like 30)
+        #logger.verbose(np.sum(np.isnan(np.multiply(x,cf_r))))
+        #logger.verbose(cf_r)
+        #logger.verbose(np.sum(np.isinf(cf_r)))
+        #logger.verbose(np.multiply(x,cf_r))
 
         # Check values in np.multiply(x,cf_r), number of nan and number of inf
-        #print(f"Number of nan in np.multiply(x,cf_r): {np.sum(np.isnan(np.multiply(x,cf_r)))} and number of inf: {np.sum(np.isinf(np.multiply(x,cf_r)))}")
+        #logger.verbose(f"Number of nan in np.multiply(x,cf_r): {np.sum(np.isnan(np.multiply(x,cf_r)))} and number of inf: {np.sum(np.isinf(np.multiply(x,cf_r)))}")
         # Same for np.multiply(x,np.log(x))
-        #print(f"Number of nan in np.multiply(x,np.log(x)): {np.sum(np.isnan(np.multiply(x,np.log(x))))} and number of inf: {np.sum(np.isinf(np.multiply(x,np.log(x))))}")
+        #logger.verbose(f"Number of nan in np.multiply(x,np.log(x)): {np.sum(np.isnan(np.multiply(x,np.log(x))))} and number of inf: {np.sum(np.isinf(np.multiply(x,np.log(x))))}")
         # Same for x
-        #print(f"Number of nan in x: {np.sum(np.isnan(x))}, number of inf: {np.sum(np.isinf(x))}, number of zeros: {np.sum(x==0)}")
+        #logger.verbose(f"Number of nan in x: {np.sum(np.isnan(x))}, number of inf: {np.sum(np.isinf(x))}, number of zeros: {np.sum(x==0)}")
         # And for log(x)
-        #print(f"Number of nan in log(x): {np.sum(np.isnan(np.log(x)))}, number of inf: {np.sum(np.isinf(np.log(x)))}, number of zeros: {np.sum(np.log(x)==0)}")
+        #logger.verbose(f"Number of nan in log(x): {np.sum(np.isnan(np.log(x)))}, number of inf: {np.sum(np.isinf(np.log(x)))}, number of zeros: {np.sum(np.log(x)==0)}")
 
 
         """
-        #Check if 0 in x if so print the optimization iteration
+        #Check if 0 in x if so logger.verbose the optimization iteration
         if 0 in x:
-            #print("0 in x")
-            print(f"There are 0 in x   {np.sum(x==0)}")
+            #logger.verbose("0 in x")
+            logger.verbose(f"There are 0 in x   {np.sum(x==0)}")
         
         # Check for NaN or Inf in x
         if np.any(np.isnan(x)) or np.any(np.isinf(x)):
-            print("NaN or Inf found in x:", x)
+            logger.verbose("NaN or Inf found in x:", x)
         """
         # If x is smaller than 0 replace with 0.001
         x[x<0] = 0.001
@@ -559,9 +565,9 @@ def SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta):
         """
         # Check if inf or nan in np.log(x)
         if np.sum(np.isinf(np.log(x))) > 0:
-            print(f"inf in log(x)  {np.sum(np.isinf(np.log(x)))}")
+            logger.verbose(f"inf in log(x)  {np.sum(np.isinf(np.log(x)))}")
         if np.sum(np.isnan(np.log(x))) > 0:
-            print(f"nan in log(x)  {np.sum(np.isnan(np.log(x)))}")
+            logger.verbose(f"nan in log(x)  {np.sum(np.isnan(np.log(x)))}")
         """
 
 
@@ -570,24 +576,24 @@ def SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta):
 
         result =  np.sum(IntLinksTimes(x)) + np.sum(np.divide(np.multiply(x,temp_log),thetavec)) + np.sum((np.multiply(x,cf_r)))
         if np.sum(IntLinksTimes(x)<0) > 0:
-            print(f"Neagtive numbers in IntLinksTimes(x): {np.sum(IntLinksTimes(x)>0)}")
+            logger.verbose(f"Neagtive numbers in IntLinksTimes(x): {np.sum(IntLinksTimes(x)>0)}")
         if np.isnan(np.sum(IntLinksTimes(x))):
-            print("NaN in IntLinksTimes:", result)
+            logger.verbose("NaN in IntLinksTimes:", result)
         if np.isnan(np.sum(np.divide(np.multiply(x,temp_log),thetavec))):
-            print("NaN in np.divide(np.multiply(x,np.log(x)),thetavec):", np.sum(np.isnan(np.divide(np.multiply(x,temp_log),thetavec))))
-            print("NaN in np.multiply(x,np.log(x))):", np.sum(np.isnan(np.multiply(x,temp_log))))
-            print("NaN in x:", np.sum(np.isnan(x)))
-            # Print amount of negative values in x
-            print(f"Negative values in x: {np.sum(x<0)}")
+            logger.verbose("NaN in np.divide(np.multiply(x,np.log(x)),thetavec):", np.sum(np.isnan(np.divide(np.multiply(x,temp_log),thetavec))))
+            logger.verbose("NaN in np.multiply(x,np.log(x))):", np.sum(np.isnan(np.multiply(x,temp_log))))
+            logger.verbose("NaN in x:", np.sum(np.isnan(x)))
+            # logger.verbose amount of negative values in x
+            logger.verbose(f"Negative values in x: {np.sum(x<0)}")
         if np.isnan(np.sum((np.multiply(x,cf_r)))):
-            print("NaN in np.multiply(x,cf_r):", result)
+            logger.verbose("NaN in np.multiply(x,cf_r):", result)
         # same for inf
         if np.isinf(np.sum(IntLinksTimes(x))):
-            print("Inf in IntLinksTimes:", result)
+            logger.verbose("Inf in IntLinksTimes:", result)
         if np.isinf(np.sum(np.divide(np.multiply(x,temp_log),thetavec))):
-            print("Inf in np.divide(np.multiply(x,np.log(x)),thetavec):", result)
+            logger.verbose("Inf in np.divide(np.multiply(x,np.log(x)),thetavec):", result)
         if np.isinf(np.sum((np.multiply(x,cf_r)))):
-            print("Inf in np.multiply(x,cf_r):", result)
+            logger.verbose("Inf in np.multiply(x,cf_r):", result)
         return result
 
 
@@ -611,7 +617,7 @@ def SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta):
         iteration_count += 1
         xk = args[0]  # The first argument is the current solution vector
         objective_value = fun(xk)
-        print(f"Iteration {iteration_count}, Objective Function Value: {objective_value}")
+        logger.verbose(f"Iteration {iteration_count}, Objective Function Value: {objective_value}")
 
     ineq_cons = {'type': 'ineq',
              'fun' : lambda x: x}#,
@@ -636,8 +642,8 @@ def SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta):
     ub = (max(D_od)*np.ones(np.shape(D_r0))).flatten()
     ub = ub*5
     bounds = Bounds(lb, ub)
-    print(f"lb: {lb}")
-    print(f"ub: {ub}")
+    logger.verbose(f"lb: {lb}")
+    logger.verbose(f"ub: {ub}")
     #res=least_squares(fun, D_r0.flatten(),jac=fun_der,bounds=bounds)
 
     # D_r to be optimized -> demand on each route
@@ -657,12 +663,12 @@ def SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta):
     # Describe variables
     # D_r is the demand on each route
     D_r = res.x
-    # check if values in D_r are negative if so print the amount
+    # check if values in D_r are negative if so logger.verbose the amount
     if np.sum(D_r<0) > 0:
-        print(f"Negative values in D_r: {np.sum(D_r<0)}")
+        logger.verbose(f"Negative values in D_r: {np.sum(D_r<0)}")
     #Same for 0
     if np.sum(D_r==0) > 0:
-        print(f"0 in D_r: {np.sum(D_r==0)}")
+        logger.verbose(f"0 in D_r: {np.sum(D_r==0)}")
 
     D_r[D_r <= 0] = 0.001
 
@@ -684,7 +690,7 @@ def SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta):
 
 def Commonality(betaCom,delta_ir,delta_odr,fftt_i,fftt_r):
     [nOD,nroutes]=delta_odr.shape
-    print(f"nOD {nOD} and nroutes {nroutes}")
+    logger.verbose(f"nOD {nOD} and nroutes {nroutes}")
 
     # Initialize commonality factor (per route)
     cf_r=np.zeros((nroutes,1))
@@ -693,7 +699,7 @@ def Commonality(betaCom,delta_ir,delta_odr,fftt_i,fftt_r):
     for od in range(0,nOD):
         # Find routes for OD pair
         routes = np.argwhere(np.ravel(delta_odr[od,:])==1)
-        #print(routes)
+        #logger.verbose(routes)
 
         # Check if there is more than  route for the OD pair
         if len(routes) <= 1:
@@ -725,7 +731,7 @@ def Commonality(betaCom,delta_ir,delta_odr,fftt_i,fftt_r):
                     cf_r[r1] = cf_r[r1] + t0_1_2 / (t0_1**.5 * t0_2**.5)
                     """
                     if (t0_1**.5*t0_2**.5) == 0:
-                        print(f"t0_1 or t0_2 is 0 for OD pair {od} and routes {r1} and {r2}")
+                        logger.verbose(f"t0_1 or t0_2 is 0 for OD pair {od} and routes {r1} and {r2}")
                     """
     cf_r = betaCom * np.log(cf_r)
     cf_r[np.isnan(cf_r)] = 0 #for routes with just one link -->cf_r=0;
@@ -743,13 +749,13 @@ def Commonality(betaCom,delta_ir,delta_odr,fftt_i,fftt_r):
 #if figureoption, PlotNetwork(nodes,links,find(typeroad_i==2),[network,' Network'],1,1), end
 """
 """
-# print for all variable ist daty structure and the data itselve
-print("nodes: ", type(nodes), nodes)
-print("links: ", type(links), links)
-print("nlinks: ", type(nlinks), nlinks)
-print("linklength_i: ", type(linklength_i), linklength_i)
-print("par: ", type(par), par)
-print("typeroad_i: ", type(typeroad_i), typeroad_i)
+# logger.verbose for all variable ist daty structure and the data itselve
+logger.verbose("nodes: ", type(nodes), nodes)
+logger.verbose("links: ", type(links), links)
+logger.verbose("nlinks: ", type(nlinks), nlinks)
+logger.verbose("linklength_i: ", type(linklength_i), linklength_i)
+logger.verbose("par: ", type(par), par)
+logger.verbose("typeroad_i: ", type(typeroad_i), typeroad_i)
 """
 
 
@@ -768,8 +774,8 @@ D_od = np.delete(D_od, idx)
 # same for columns of delta_odr
 delta_odr = np.delete(delta_odr, idx, axis=0)
 
-print(f"Shape delta_odr {delta_odr.shape} (OD pairs x #routes)")
-print(f" Shape D_od {D_od.shape} (OD pairs x 1)")
+logger.verbose(f"Shape delta_odr {delta_odr.shape} (OD pairs x #routes)")
+logger.verbose(f" Shape D_od {D_od.shape} (OD pairs x 1)")
 
 
 """
@@ -782,7 +788,7 @@ n_components, labels = connected_components(csgraph=connectivity_matrix, directe
 # Extract sets of connected nodes
 connected_sets = [np.where(labels == i)[0] for i in range(n_components)]
 
-print(connected_sets)
+logger.verbose(connected_sets)
 """
 
 """
@@ -809,9 +815,9 @@ fftt_r=(np.matmul(par['fftt_i'].transpose(),delta_ir)).transpose()
 betaCom=1
 # Get the common links among routes
 cf_r = Commonality(betaCom,delta_ir,delta_odr,par['fftt_i'],fftt_r)
-# print amount of nan in cf_r
-print(f"Amount of nan in cf_r: {np.sum(np.isnan(cf_r))}")
-print(f"Amount of inf in cf_r: {np.sum(np.isinf(cf_r))}")
+# logger.verbose amount of nan in cf_r
+logger.verbose(f"Amount of nan in cf_r: {np.sum(np.isnan(cf_r))}")
+logger.verbose(f"Amount of inf in cf_r: {np.sum(np.isinf(cf_r))}")
 theta=1.2
 
 iteration_count=0
@@ -819,8 +825,8 @@ iteration_count=0
 
 var_labs=list(np.zeros((nlinks)))
 for i in range(0,nlinks):
-    var_labs[i] = print("L_{%3.0f}" % i)
-    #var_labs{i}=sprintf('L_{#-.0f}',i);
+    var_labs[i] = logger.verbose("L_{%3.0f}" % i)
+    #var_labs{i}=slogger.verbosef('L_{#-.0f}',i);
 
 done=0  #calculate iterations
 factor=0.01 #fftt and capacity will be multiplied bu this factor
@@ -858,15 +864,15 @@ if not done:
     #    par2.Xmax_i(i)=par2.Xmax_i(i)*factor;
     #    # cost evaluation
     #    [~,~,fval]=SUE_C_Logit(nroutes,D_od,par2,delta_ir,delta_odr,cf_r,theta);
-    #    fprintf('Evaluation i=#-3.0f  -> #10.2f (#10.2f ##)\n',i,fval, (fval-ref)/ref*100)
+    #    flogger.verbosef('Evaluation i=#-3.0f  -> #10.2f (#10.2f ##)\n',i,fval, (fval-ref)/ref*100)
     #    Results(i)=fval;
     #end
     #toc = time.time()
-    #print(toc-tic, ' sec elapsed')
+    #logger.verbose(toc-tic, ' sec elapsed')
     comptime=timeit.default_timer()-t;
-    print(f'CPU time (seconds): {comptime}')
+    logger.verbose(f'CPU time (seconds): {comptime}')
     #
-    print(Results)
+    logger.verbose(Results)
     scipy.io.savemat('data/traffic_flow/mat/Critical_v01.mat',Results)
 else: #thus, it is done
     Results = scipy.io.loadmat('data/traffic_flow/mat/Critical_v01',Results)

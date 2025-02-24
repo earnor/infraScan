@@ -24,6 +24,10 @@ import rasterio
 from rasterio.transform import from_origin
 from rasterio.transform import from_bounds
 
+# Get the parent directory
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 
 # 1.) Define Access Points (Train Stations):
@@ -66,7 +70,7 @@ def create_bus_buffers(closest_trainstations_df, stops, output_path):
 
     bus_buffers = gpd.GeoDataFrame(grouped_buffers, geometry='buffer', crs='EPSG:2056')
     bus_buffers.to_file(output_path, driver="GPKG")
-    print(f"Bus buffers saved to {output_path}")
+    logger.verbose(f"Bus buffers saved to {output_path}")
     return bus_buffers
 
 
@@ -95,7 +99,7 @@ def create_train_buffers(stops, output_path):
 
     # Save the train buffers to a GeoPackage
     train_buffers.to_file(output_path, driver="GPKG")
-    print(f"Train buffers saved to {output_path}")
+    logger.verbose(f"Train buffers saved to {output_path}")
 
     return train_buffers
 
@@ -112,16 +116,16 @@ def resolve_overlaps(bus_buffers, train_buffers, output_path):
     Returns:
         None
     '''
-    # Debug: Print initial DataFrames
-    print("Initial Train Buffers:")
-    print(train_buffers.head())
-    print(train_buffers.columns)
-    print("Train Buffers CRS:", train_buffers.crs)
+    # Debug: logger.verbose initial DataFrames
+    logger.verbose("Initial Train Buffers:")
+    logger.verbose(train_buffers.head())
+    logger.verbose(train_buffers.columns)
+    logger.verbose("Train Buffers CRS:", train_buffers.crs)
     
-    print("Initial Bus Buffers:")
-    print(bus_buffers.head())
-    print(bus_buffers.columns)
-    print("Bus Buffers CRS:", bus_buffers.crs)
+    logger.verbose("Initial Bus Buffers:")
+    logger.verbose(bus_buffers.head())
+    logger.verbose(bus_buffers.columns)
+    logger.verbose("Bus Buffers CRS:", bus_buffers.crs)
 
     # Resolve overlaps: subtract train buffers from bus buffers
     for train_idx, train_row in train_buffers.iterrows():
@@ -136,19 +140,19 @@ def resolve_overlaps(bus_buffers, train_buffers, output_path):
     train_buffers['type'] = 'train'
     bus_buffers['type'] = 'bus'
 
-    # Debug: Print buffers before concatenation
-    print("Train Buffers Before Concatenation:")
-    print(train_buffers.head())
-    print("Bus Buffers Before Concatenation:")
-    print(bus_buffers.head())
+    # Debug: logger.verbose buffers before concatenation
+    logger.verbose("Train Buffers Before Concatenation:")
+    logger.verbose(train_buffers.head())
+    logger.verbose("Bus Buffers Before Concatenation:")
+    logger.verbose(bus_buffers.head())
 
     # Combine buffers
     combined_buffers = pd.concat([train_buffers, bus_buffers], ignore_index=True)
 
-    # Debug: Print combined DataFrame
-    print("Combined Buffers DataFrame:")
-    print(combined_buffers.head())
-    print(combined_buffers.columns)
+    # Debug: logger.verbose combined DataFrame
+    logger.verbose("Combined Buffers DataFrame:")
+    logger.verbose(combined_buffers.head())
+    logger.verbose(combined_buffers.columns)
 
     # Create GeoDataFrame and set geometry
     final_buffers = gpd.GeoDataFrame(combined_buffers, geometry='buffer', crs='EPSG:2056')
@@ -160,16 +164,16 @@ def resolve_overlaps(bus_buffers, train_buffers, output_path):
         .reset_index()
     )
 
-    # Debug: Print final grouped buffers
-    print("Grouped Buffers DataFrame:")
-    print(grouped_buffers.head())
+    # Debug: logger.verbose final grouped buffers
+    logger.verbose("Grouped Buffers DataFrame:")
+    logger.verbose(grouped_buffers.head())
 
     # Create the final GeoDataFrame
     final_buffers = gpd.GeoDataFrame(grouped_buffers, geometry='buffer', crs='EPSG:2056')
 
     # Save the final combined polygons
     final_buffers.to_file(output_path, driver="GPKG")
-    print(f"Final merged polygons saved to {output_path}")
+    logger.verbose(f"Final merged polygons saved to {output_path}")
 
 import geopandas as gpd
 from shapely.geometry import Polygon
@@ -197,7 +201,7 @@ def clip_and_fill_polygons(merged_buffers_path, innerboundary_path, output_path)
 
     # Fix invalid geometries in merged buffers
     if not merged_buffers.geometry.is_valid.all():
-        print("Fixing invalid geometries in merged buffers...")
+        logger.verbose("Fixing invalid geometries in merged buffers...")
         merged_buffers['geometry'] = merged_buffers.geometry.buffer(0)
 
     # Step 2: Clip polygons to the inner boundary
@@ -230,7 +234,7 @@ def clip_and_fill_polygons(merged_buffers_path, innerboundary_path, output_path)
 
     # Step 6: Save the finalized polygons
     final_buffers.to_file(output_path, driver='GPKG')
-    print(f"Final processed polygons saved to {output_path}")
+    logger.verbose(f"Final processed polygons saved to {output_path}")
 
 def add_diva_nr_to_points_with_buffer(points_path, stops_path, output_path, buffer_distance=100):
     """
@@ -267,7 +271,7 @@ def add_diva_nr_to_points_with_buffer(points_path, stops_path, output_path, buff
 
     # Save the updated points GeoDataFrame
     points_gdf.to_file(output_path, driver="GPKG")
-    print(f"Updated points with DIVA_NR saved to {output_path}")
+    logger.verbose(f"Updated points with DIVA_NR saved to {output_path}")
 
 def process_polygons_with_mapping(polygons_file_path, points_file_path, output_path):
     """
@@ -317,7 +321,7 @@ def process_polygons_with_mapping(polygons_file_path, points_file_path, output_p
     # Save the result to a new file
     polygons_gdf.to_file(output_path, driver="GPKG")
 
-    print(f"Processed data saved to {output_path}")
+    logger.verbose(f"Processed data saved to {output_path}")
 
 def create_raster_from_gpkg(input_gpkg, output_tif, raster_size=(100, 100)):
     """
@@ -373,7 +377,7 @@ def create_raster_from_gpkg(input_gpkg, output_tif, raster_size=(100, 100)):
     with rasterio.open(output_tif, 'w', **meta) as dst:
         dst.write(raster, 1)
 
-    print(f"Raster saved to {output_tif}")
+    logger.verbose(f"Raster saved to {output_tif}")
 
 
 def calculate_fastest_connections_to_trains(G_bus):
@@ -517,8 +521,8 @@ def create_merged_trainstation_buffers(closest_trainstations_df, stops, output_p
     # Check and remove invalid or missing geometries
     invalid_geometries = connected_df[connected_df['geometry'].is_empty | connected_df['geometry'].isna()]
     if not invalid_geometries.empty:
-        print("Warning: Invalid geometries found. These rows will be excluded:")
-        print(invalid_geometries)
+        logger.verbose("Warning: Invalid geometries found. These rows will be excluded:")
+        logger.verbose(invalid_geometries)
         connected_df = connected_df[~(connected_df['geometry'].is_empty | connected_df['geometry'].isna())]
 
     # Apply buffer operation
@@ -537,8 +541,8 @@ def create_merged_trainstation_buffers(closest_trainstations_df, stops, output_p
     # Step 7: Save the merged polygons to a GeoPackage
     merged_polygons.to_file(output_path, driver="GPKG")
 
-    # Print completion message
-    print(f"Merged polygons have been saved to {output_path}")
+    # logger.verbose completion message
+    logger.verbose(f"Merged polygons have been saved to {output_path}")
 
 
 
@@ -618,7 +622,7 @@ def save_points_as_raster(df, output_path=r'data/catchment_pt/catchement.tif', r
 
     # Drop rows with NaN values in x or y
     if df[['x', 'y']].isna().any().any():
-        print("Warning: Dropping rows with invalid 'grid_point' coordinates.")
+        logger.verbose("Warning: Dropping rows with invalid 'grid_point' coordinates.")
         df = df.dropna(subset=['x', 'y'])
 
     # Define grid extent
@@ -662,7 +666,7 @@ def save_points_as_raster(df, output_path=r'data/catchment_pt/catchement.tif', r
         dst.write(total_time_raster, 1)  # First band: total_time
         dst.write(station_raster, 2)    # Second band: closest_train_station
     
-    print(f"Raster saved to {output_path}")
+    logger.verbose(f"Raster saved to {output_path}")
 
 ###############################################################################################################################################################################################
 # 1.) Define Access Points (Train Stations):
@@ -887,8 +891,8 @@ def get_catchement(limits_corridor, outerboundary):
     #save_points_as_raster(total_times_within_buffer, resolution=100 ,crs='EPSG:4326')
     save_points_as_raster(total_times_within_buffer, resolution=100 ,crs='EPSG:2056')
     
-    # Print results
-    #print(total_times_within_buffer)
+    # logger.verbose results
+    #logger.verbose(total_times_within_buffer)
 
     ##Save the catchement as an gpkg:
 
@@ -977,15 +981,15 @@ if source_station in G_bus.nodes and target_station in G_bus.nodes:
         # Calculate the total travel time for the fastest path
         total_travel_time = nx.path_weight(G_bus, fastest_path, weight='weight')
         
-        # Print the results
-        print(f"Fastest path from station {source_station} to station {target_station}:")
-        print(" -> ".join(map(str, fastest_path)))
-        print(f"Total travel time: {total_travel_time:.2f} seconds")
+        # logger.verbose the results
+        logger.verbose(f"Fastest path from station {source_station} to station {target_station}:")
+        logger.verbose(" -> ".join(map(str, fastest_path)))
+        logger.verbose(f"Total travel time: {total_travel_time:.2f} seconds")
         
     except nx.NetworkXNoPath:
-        print(f"No path exists between station {source_station} and station {target_station}.")
+        logger.verbose(f"No path exists between station {source_station} and station {target_station}.")
 else:
-    print("One or both of the specified stations do not exist in the graph.")
+    logger.verbose("One or both of the specified stations do not exist in the graph.")
 
 
 # Open the GeoTIFF file

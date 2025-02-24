@@ -6,6 +6,7 @@ import numpy as np
 from scipy.optimize import minimize, Bounds, least_squares
 import timeit
 import os
+import sys
 os.environ['USE_PYGEOS'] = '0'
 import geopandas as gpd
 from shapely.geometry import Point
@@ -14,6 +15,11 @@ from itertools import islice
 import matplotlib.pyplot as plt
 from scipy.sparse.csgraph import connected_components
 import data_import
+
+# Get the parent directory of GUI (i.e., InfraScan)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
 
 #os.chdir(r"C:\Users\Fabrice\Desktop\HS23\Thesis\Code")
 os.chdir(r"C:\Users\spadmin\PycharmProjects\infraScan")

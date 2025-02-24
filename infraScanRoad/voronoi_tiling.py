@@ -7,6 +7,11 @@ import sys
 from data_import import *
 from plots import *
 
+# Get the parent directory of GUI (i.e., InfraScan)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
+from logging_config import logger  # Import central logger
+
 
 def voronoi_finite_polygons_2d(vor, radius=None):
     """
