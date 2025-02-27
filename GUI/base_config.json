@@ -5,7 +5,7 @@
         "time_created": "21:00:00"
     },
     "General": {
-        "working_directory": "d:/OneDrive/ETH/FS25/01_Master_Project/20_Code/infraScan",
+        "working_directory": "",
         "config_file_name": "base_config.json",
         "Logging": {
             "log_file": "log.txt",
@@ -18,12 +18,36 @@
             "n_max": 1254000
         }
     },
+    "Process":{
+        "Import": 1,
+        "Network": 1,
+        "Scenario": 1,
+        "Scoring": 1,
+        "Visualization": 1
+    },
+    "Infrastructure":{
+        "Road":{
+            "New Access Points": 1,
+            "Connecting Roads": 1
+        },
+        "Rail":{
+            "Extending Rail Lines": 1,
+            "Connecting Lines": 1
+        }
+    },
     "Road": {
         "Construction Costs": {
             "c_openhighway": { "value": 15200, "unit": "CHF/m" },
             "c_tunnel": { "value": 416000, "unit": "CHF/m" },
             "c_bridge": { "value": 63900, "unit": "CHF/m" },
             "ramp": { "value": 102000000, "unit": "CHF" }
+        },
+        "Maintenance Costs": {
+            "c_structural_maint": { "value": 0.012, "unit": "% Const cost" },
+            "c_om_openhighway": { "value": 89.7, "unit": "CHF/m/yr" },
+            "c_om_tunnel": { "value": 89.7, "unit": "CHF/m/yr" },
+            "c_om_bridge": { "value": 368.8, "unit": "CHF/m/yr" },
+            "maintenance_duration": { "value": 50, "unit": "years" }
         },
         "Value of Travel Time Savings": {
             "VTTS": { "value": 32.2, "unit": "CHF/h" },
@@ -45,7 +69,7 @@
             "co2_tunnel": { "value": 3750, "unit": "kg/km" }
         },
         "Nature and Landscape": {
-            "fragmentation": { "value": 165.6, "unit": "km²" },
+            "fragmentation": { "value": 165.6, "unit": "km^2" },
             "fragmentation_duration": { "value": 50, "unit": "years" },
             "habitat_loss": { "value": 33.6, "unit": "ha" },
             "habitat_loss_duration": { "value": 30, "unit": "years" }

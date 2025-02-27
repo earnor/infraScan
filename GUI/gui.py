@@ -77,39 +77,125 @@ class InfraGUI:
 
         # Create tabs
         self.general_tab = ttk.Frame(self.notebook)
+        self.data_tab = ttk.Frame(self.notebook)
         self.road_tab = ttk.Frame(self.notebook)
         self.rail_tab = ttk.Frame(self.notebook)
         self.spatial_limits_tab = ttk.Frame(self.notebook)
 
         # Add tabs to the notebook
         self.notebook.add(self.general_tab, text="General")
+        self.notebook.add(self.data_tab, text="Data")
         self.notebook.add(self.road_tab, text="Road")
         self.notebook.add(self.rail_tab, text="Rail")
         self.notebook.add(self.spatial_limits_tab, text="Spatial Limits")
 
         # Initialize the UI components for each tab
         self.create_general_tab()
+        self.create_data_tab()
         self.create_settings_tab(self.road_tab, "Road")
         self.create_settings_tab(self.rail_tab, "Rail")
         self.create_spatial_limit_tab()
 
     def create_general_tab(self):
         """
-        Creates the UI components for the General tab, including directory selection,
+        Creates the UI components for the General tab for
         configuration control buttons, and run script buttons.
 
         Parameters:
         self (object): The instance of the class containing this method.
         """
         # General tab UI components
+        
+        # Control buttons
+        control_frame = ttk.LabelFrame(self.general_tab, text="Configuration")
+        # Label that shows the current name of the configuration file
+        ttk.Label(control_frame, text="Config File Name:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.config_file_var = tk.StringVar()
+        self.config_file_var.set(self.data["General"].get("config_file_name", ""))
+        ttk.Label(control_frame, textvariable=self.config_file_var).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ttk.Button(control_frame, text="Import JSON", command=self.import_json).grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+        ttk.Button(control_frame, text="Export JSON", command=self.export_json).grid(row=0, column=3, padx=5, pady=5, sticky="ew")
+        ttk.Button(control_frame, text="Reset to Default", command=self.reset_to_default).grid(row=1, column=2, columnspan=2, padx=5, pady=5, sticky="ew")
+        control_frame.pack(fill="x", padx=10, pady=5)
+
+        # Process Selection (Radio Buttons)
+        process_frame = ttk.LabelFrame(self.general_tab, text="Process Selection")
+        process_frame.pack(fill="x", padx=10, pady=5)
+
+        self.process_vars = {}
+        row_frame = ttk.Frame(process_frame)
+        row_frame.pack(fill="x", padx=5, pady=5)
+
+        for idx, (process, value) in enumerate(self.data["Process"].items()):
+            var = tk.IntVar(value=value)
+            self.process_vars[process] = var
+
+            col_frame = ttk.Frame(row_frame)
+            col_frame.grid(row=0, column=idx, padx=20, pady=5)
+
+            ttk.Label(col_frame, text=process).pack(anchor="center")
+            ttk.Radiobutton(col_frame, text="True", variable=var, value=1, command=lambda p=process: self.update_process(p, 1)).pack(side="left", anchor="center")
+            ttk.Radiobutton(col_frame, text="False", variable=var, value=0, command=lambda p=process: self.update_process(p, 0)).pack(side="right", anchor="center")
+
+        # Infrastructure Selection (Radio Buttons)
+        infra_frame = ttk.LabelFrame(self.general_tab, text="Infrastructure Selection")
+        infra_frame.pack(fill="x", padx=10, pady=5)
+
+        self.infrastructure_vars = {}
+        for infra_category, items in self.data["Infrastructure"].items():
+            category_frame = ttk.LabelFrame(infra_frame, text=infra_category)
+            category_frame.pack(fill="x", padx=5, pady=5)
+            row_frame = ttk.Frame(category_frame)
+            row_frame.pack(fill="x", padx=5, pady=5)
+            for idx, (infra, value) in enumerate(items.items()):
+                var = tk.IntVar(value=value)
+                self.infrastructure_vars[infra] = var
+
+                col_frame = ttk.Frame(row_frame)
+                col_frame.grid(row=0, column=idx, padx=20, pady=5)
+
+                ttk.Label(col_frame, text=infra).pack(anchor="center")
+                ttk.Radiobutton(col_frame, text="True", variable=var, value=1,
+                        command=lambda i=infra_category, 
+                        k=infra: self.update_infrastructure(i, k, 1)).pack(side="left", anchor="center")
+                ttk.Radiobutton(col_frame, text="False", variable=var, value=0,
+                        command=lambda i=infra_category,
+                        k=infra: self.update_infrastructure(i, k, 0)).pack(side="right", anchor="center")
+            ttk.Button(category_frame, text=f"Run {infra_category}", command=lambda: self.run_script(f"{infra_category.lower()}")).pack(side="right", padx=5, pady=5)
+        
+        # Run Both Button
+        run_frame = ttk.Frame(self.general_tab)
+        run_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Button(run_frame, text="Run Both", command=self.run_both).pack(pady=5)
+
+
+    def update_process(self, key, value):
+        """Updates the Process dictionary when a radio button is selected."""
+        self.data["Process"][key] = value
+
+    def update_infrastructure(self, category, key, value):
+        """Updates the Infrastructure dictionary when a radio button is selected."""
+        self.data["Infrastructure"][category][key] = value
+
+    def create_data_tab(self):
+        """
+        Creates the UI components for the Data tab, allowing users to change the directory paths
+        """
         # Working directory label
-        directory_frame = ttk.LabelFrame(self.general_tab, text="Directories")
+        directory_frame = ttk.LabelFrame(self.data_tab, text="Directories")
         directory_frame.pack(fill="x", padx=10, pady=5)
+
         ttk.Label(directory_frame, text="Working Directory:").pack(pady=5)
+        
         # Entry to display the working directory and fill with the stated working directory
         self.working_dir_entry = ttk.Entry(directory_frame, width=75)
         self.working_dir_entry.insert(0, self.data["General"].get("working_directory", ""))
         self.working_dir_entry.pack(pady=5)
+
+        # Bind events to detect manual input and trigger directory update
+        self.working_dir_entry.bind("<FocusOut>", self.manual_directory_update)
+        self.working_dir_entry.bind("<Return>", self.manual_directory_update)
+
         ttk.Button(directory_frame, text="Browse", command=self.set_working_directory).pack(pady=5)
 
         def create_directory_entry(parent, label_text: str, subdirs: list):
@@ -129,36 +215,61 @@ class InfraGUI:
             return entry
 
         # Create directory entries
-        create_directory_entry(directory_frame, "Rail Data Directory:", ["InfraScanRail", "data"])
-        create_directory_entry(directory_frame, "Road Data Directory:", ["InfraScanRoad", "data"])
+        self.rail_data_entry = create_directory_entry(directory_frame, "Rail Data Directory:", ["InfraScanRail", "data"])
+        self.road_data_entry = create_directory_entry(directory_frame, "Road Data Directory:", ["InfraScanRoad", "data"])
         
-        # Control buttons
-        control_frame = ttk.LabelFrame(self.general_tab, text="Configuration")
-        ttk.Button(control_frame, text="Import JSON", command=self.import_json).pack(pady=5)
-        ttk.Button(control_frame, text="Export JSON", command=self.export_json).pack(pady=5)
-        ttk.Button(control_frame, text="Reset to Default", command=self.reset_to_default).pack(pady=5)  # RESET BUTTON
-        control_frame.pack(fill="x", padx=10, pady=5)
-        # Run labelframe
-        run_frame = ttk.LabelFrame(self.general_tab, text="Run")
-        ttk.Button(run_frame, text="Run Road", command=lambda: self.run_script("road")).pack(pady=5)
-        ttk.Button(run_frame, text="Run Rail", command=lambda: self.run_script("rail")).pack(pady=5)
-        ttk.Button(run_frame, text="Run Both", command=self.run_both).pack(pady=5)
-        run_frame.pack(fill="x", padx=10, pady=5)
 
     def set_working_directory(self):
         """
-        Opens a directory dialog to select a working directory and updates the 
-        working directory entry field and the data dictionary with the selected path.
-
-        Parameters:
-        self (object): The instance of the class containing this method.
+        Opens a directory dialog to select a working directory and updates
+        the working directory entry field and the data dictionary with the selected path.
         """
-        # Open a directory dialog and set the working directory
         directory = filedialog.askdirectory()
         if directory:
+            # Update UI
             self.working_dir_entry.delete(0, tk.END)
             self.working_dir_entry.insert(0, directory)
+
+            # Update data dictionary
             self.data["General"]["working_directory"] = directory
+
+            # Update derived data directories
+            self.refresh_data_paths()
+
+    def refresh_data_paths(self):
+        """ Refreshes the automatically generated data directories. """
+        if not hasattr(self, "rail_data_entry") or not hasattr(self, "road_data_entry"):
+            return  # Ensure entries exist before updating
+
+        rail_path = os.path.join(self.data["General"].get("working_directory", ""), "InfraScanRail", "data")
+        road_path = os.path.join(self.data["General"].get("working_directory", ""), "InfraScanRoad", "data")
+
+        self.rail_data_entry.configure(state="normal")
+        self.road_data_entry.configure(state="normal")
+
+        self.rail_data_entry.delete(0, tk.END)
+        self.road_data_entry.delete(0, tk.END)
+
+        self.rail_data_entry.insert(0, rail_path)
+        self.road_data_entry.insert(0, road_path)
+
+        self.rail_data_entry.configure(state="readonly")
+        self.road_data_entry.configure(state="readonly")
+
+        # Update JSON data
+        self.data["General"]["Rail Data Directory"] = rail_path
+        self.data["General"]["Road Data Directory"] = road_path
+
+    def manual_directory_update(self, event=None):
+        """Updates the working directory when the user manually types it in and refreshes data paths."""
+        new_directory = self.working_dir_entry.get().strip()  # Get user input
+
+        if os.path.isdir(new_directory):  # Ensure it's a valid directory
+            self.data["General"]["working_directory"] = new_directory
+            self.refresh_data_paths()  # Update the data directory paths
+        else:
+            messagebox.showerror("Invalid Directory", "The directory you entered does not exist.")
+
 
     def create_settings_tab(self, tab: tk.Widget, category: str):
         """
@@ -334,7 +445,10 @@ class InfraGUI:
             n_max_plot = n_center + (max_dim / 2) + buffer_size
             
             # Add basemap from Contextily
-            ctx.add_basemap(self.ax, source=ctx.providers.SwissFederalGeoportal.NationalMapColor)
+            try:
+                ctx.add_basemap(self.ax, source=ctx.providers.SwissFederalGeoportal.NationalMapColor)
+            except:
+                logger.notice("Basemap can not be downloaded")
 
             # Set limits to enforce square plot
             self.ax.set_xlim(e_min_plot, e_max_plot)
@@ -475,12 +589,29 @@ class InfraGUI:
 
 
     def refresh_ui(self):
-        """ Refreshes the UI with the current data """
-        # Refresh working directory
+        """ Refreshes the UI with the current data after an import or reset. """
+
+        # Refresh config file name
+        self.config_file_var.set(self.data["General"].get("config_file_name", ""))
+        
+        # Refresh process selection radio buttons
+        for process, var in self.process_vars.items():
+            var.set(self.data["Process"].get(process, 0))
+
+        # Refresh infrastructure selection radio buttons
+        for infra_category, items in self.data["Infrastructure"].items():
+            for infra, var in self.infrastructure_vars.items():
+                if infra in items:
+                    var.set(items[infra])  # Update radio button value
+
+        # Refresh working directory entry
         self.working_dir_entry.delete(0, tk.END)
         self.working_dir_entry.insert(0, self.data["General"].get("working_directory", ""))
 
-        # Refresh all entries
+        # Refresh automatically generated data directories
+        self.refresh_data_paths()
+
+        # Refresh all numerical entry fields
         for category, subcategories in self.entries.items():
             for subcategory, fields in subcategories.items():
                 for key, entry in fields.items():
@@ -491,7 +622,7 @@ class InfraGUI:
                         display_value = value["value"]
                     else:
                         display_value = value  # Fallback for old format
-                    
+
                     entry.delete(0, tk.END)
                     entry.insert(0, str(display_value))
 
@@ -499,7 +630,7 @@ class InfraGUI:
         self.refresh_spatial_tab()
 
     def refresh_spatial_tab(self):
-        """ Refreshes the spatial limits tab and updates the plot """
+        """ Refreshes the spatial limits tab and updates the plot. """
         if hasattr(self, "spatial_entries"):
             for key, entry in self.spatial_entries.items():
                 value = self.data["General"]["Spatial Limits"].get(key, "")
@@ -508,6 +639,8 @@ class InfraGUI:
 
         # Redraw the spatial plot
         self.update_spatial_plot()
+
+
 
 
 

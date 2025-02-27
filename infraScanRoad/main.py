@@ -103,7 +103,6 @@ def print_hi(name):
 
 
     # Define area that is protected for constructing highway links
-
     get_protected_area(limits=limits_corridor)
     get_unproductive_area(limits=limits_corridor)
     landuse(limits=limits_corridor)
@@ -472,7 +471,6 @@ def print_hi(name):
 
     runtimes["Reallocate OD matrices to Voronoi polygons"] = time.time() - st
     st = time.time()
-
 
     tt_optimization_status_quo()
 

@@ -44,8 +44,9 @@ class Rail:
     def __init__(self, config: dict):
         # Instance Variable
         self.config = config # Configuration JSON
-        self.wd = os.path.join(self.config["General"].get("working_directory", ""), "InfraScanRail") # Working Directory
+        self.wd = os.path.join(self.config["General"].get("working_directory", ""), "infraScanRail") # Working Directory
         os.chdir(self.wd) # Change working directory
+        logger.rail(f"Working Directory: {self.wd}")
 
         # runtime
         self.runtimes = {} # For saving runtime of each step
@@ -94,35 +95,46 @@ class Rail:
     def run(self):
         # Run the process based on the configuration
 
+        # Initialize
         self.progress_bar_update("Initialize Variables", 1)
         self.initialize_variables()
 
-        self.progress_bar_update("Import Raw Data", 2)
-        self.import_raw_data()
+        # Import Data
+        if self.config["Process"]["Import"]:
+            self.progress_bar_update("Import Raw Data", 2)
+            self.import_raw_data()
 
-        self.progress_bar_update("Infrastructure Network Import", 20)
-        self.infrastructure_network_import()
+        # Network
+        if self.config["Process"]["Network"]:
+            self.progress_bar_update("Infrastructure Network Import", 20)
+            self.infrastructure_network_import()
 
-        self.progress_bar_update("Infrastructure Network Process", 30)
-        self.infrastructure_network_process()
+            self.progress_bar_update("Infrastructure Network Process", 30)
+            self.infrastructure_network_process()
 
-        self.progress_bar_update("Infrastructure Network Generate Development", 40)
-        self.infrastructure_network_generate_development()
+            self.progress_bar_update("Infrastructure Network Generate Development", 40)
+            self.infrastructure_network_generate_development()
 
-        self.progress_bar_update("Infrastructure Network Catchment", 50)
-        self.infrastructure_network_catchment()
+            self.progress_bar_update("Infrastructure Network Catchment", 50)
+            self.infrastructure_network_catchment()
 
-        self.progress_bar_update("Scenarios Cantonal Predictions", 60)
-        self.scenarios_cantonal_predictions()
+        # Scenario
+        if self.config["Process"]["Scenario"]:
+            self.progress_bar_update("Generate Scenarios", 60)
+            self.generate_scenarios()
 
-        self.progress_bar_update("Scoring Travel Time Savings", 70)
-        self.scoring_traveltime_savings()
+        # Scoring
+        if self.config["Process"]["Scoring"]:
+            self.progress_bar_update("Scoring Travel Time Savings", 70)
+            self.scoring_traveltime_savings()
 
-        self.progress_bar_update("Scoring Construction Cost", 80)
-        self.scoring_construction_cost()
-
-        self.progress_bar_update("Display Results", 90)
-        self.plots_and_results()
+            self.progress_bar_update("Scoring Construction Cost", 80)
+            self.scoring_construction_cost()
+        
+        # Visualize Results
+        if self.config["Process"]["Visualize"]:
+            self.progress_bar_update("Display Results", 90)
+            self.plots_and_results()
 
         self.progress_bar_update("Finish", 100)
    
@@ -223,7 +235,7 @@ class Rail:
         self.df_access = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
         self.df_construction_cost = pd.read_csv(r"data/Network/Rail-Service_Link_construction_cost.csv", sep=";",decimal=",", encoding = "utf-8-sig")
         
-        #data_import.map_access_points_on_network(current_points=self.df_access, network=self.network)
+        data_import.map_access_points_on_network(current_points=self.df_access, network=self.network)
         #self.current_access_points = self.df_acces
 
         # Save runtime
@@ -352,9 +364,9 @@ class Rail:
         self.runtimes["Generate The Catchement based on the Bus network"] = time.time() - st
         logger.rail(f"Runtime: {self.runtimes['Generate The Catchement based on the Bus network']} seconds")
 
-    def scenarios_cantonal_predictions(self):
+    def generate_scenarios(self):
         # Define scenario based on cantonal predictions
-        logger.rail("SCORING CANTONAL PREDICTIONS")
+        logger.rail("Generate Scenarios")
         st = time.time()
 
         # Import the predicted scenario defined by the canton of Zürich
@@ -504,10 +516,10 @@ class Rail:
         ##here a check for capacity could be added
 
         file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
-        developments = TT_Delay.read_development_files('data/Network/processed/developments')
+        developments = scoring.read_development_files('data/Network/processed/developments')
 
 
-        construction_and_maintenance_costs = TT_Delay.construction_costs(file_path,
+        construction_and_maintenance_costs = scoring.construction_costs(file_path,
                                                                 developments,
                                                                 self.cost_per_meter,
                                                                 self.tunnel_cost_per_meter,

@@ -99,9 +99,10 @@ def print_hi(name):
 
 
     # Define area that is protected for constructing railway links
-    get_protected_area(limits=limits_corridor)
-    get_unproductive_area(limits=limits_corridor)
-    landuse(limits=limits_corridor)
+    # !!!!! Testing
+    #get_protected_area(limits=limits_corridor)
+    #get_unproductive_area(limits=limits_corridor)
+    #landuse(limits=limits_corridor)
 
     # Tif file of all unsuitable land cover and protected areas
     # File is stored to 'data\landuse_landcover\processed\zone_no_infra\protected_area_{suffix}.tif'
@@ -291,9 +292,8 @@ def print_hi(name):
     # For each scenario, adjusts total growth and distributes it among municipalities with urban, equal, and rural biases.
     # Merges growth results with spatial boundaries to form a GeoDataFrame of growth projections for mapping.
     # Saves the resulting GeoDataFrame to a shapefile.
-    # !!!!!!!!!!!!!!!!!!! data missing:
-    #future_scenario_pop(n=3)
-    #future_scenario_empl(n=3)
+    future_scenario_pop(n=3)
+    future_scenario_empl(n=3)
 
 
     # Compute the predicted amount of population and employment in each raster cell (hectar) for each scenario

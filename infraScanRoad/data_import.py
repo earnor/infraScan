@@ -243,7 +243,7 @@ def map_access_points_on_network(current_points, network):
     current_points = gpd.GeoDataFrame(current_points, geometry=gpd.points_from_xy(current_points["x"], current_points["y"]),
                                   crs="epsg:2056")
     adjusted_points_gdf = gpd.GeoDataFrame(columns=current_points.columns)
-
+    
     # Iterate over each point
     for index, point in current_points.iterrows():
         # Find the nearest line to the point
