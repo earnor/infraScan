@@ -74,26 +74,26 @@ class CustomBasemap:
 
     def new_development(self, new_links=None, new_nodes=None):
         if isinstance(new_links, gpd.GeoDataFrame):
-            print("ploting links")
+            logger.verbose("ploting links")
             new_links.plot(ax=self.ax, color="darkgray", lw=2)
 
         if isinstance(new_nodes, gpd.GeoDataFrame):
-            print("ploting nodes")
+            logger.verbose("ploting nodes")
             new_nodes.plot(ax=self.ax, color="blue", markersize=50)
 
 
     def single_development(self, id ,new_links=None, new_nodes=None):
         if isinstance(new_links, gpd.GeoDataFrame):
-            #print("ploting links")
+            #logger.verbose("ploting links")
             new_links[new_links["ID_new"] == id].plot(ax=self.ax, color="darkgray", lw=2)
 
         if isinstance(new_nodes, gpd.GeoDataFrame):
-            #print("ploting nodes")
+            #logger.verbose("ploting nodes")
             new_nodes[new_nodes["ID"] == id].plot(ax=self.ax, color="blue", markersize=50)
 
     def voronoi(self, id, gdf_voronoi):
         gdf_voronoi["ID"] = gdf_voronoi["ID"].astype(int)
-        #print(gdf_voronoi[gdf_voronoi["ID"] == id].head(9).to_string())
+        #logger.verbose(gdf_voronoi[gdf_voronoi["ID"] == id].head(9).to_string())
         gdf_voronoi[gdf_voronoi["ID"] == id].plot(ax=self.ax, edgecolor='red', facecolor='none' , lw=2)
         plt.savefig(r"plot/Voronoi/developments/dev_" + str(id) + ".png", dpi=400)
 
@@ -243,7 +243,7 @@ def plot_single_cost_result(df_costs, banned_area , title_bar, boundary=None, ne
     min_val = df_costs[col].min()
     max_val = df_costs[col].max()
 
-    print(f"min: {min_val}, max: {max_val}")
+    logger.verbose(f"min: {min_val}, max: {max_val}")
 
     # Number of color intervals
     n_intervals = 256
@@ -635,11 +635,11 @@ def plot_benefit_distribution_line_multi(df_costs, columns, labels, plot_name, l
         column_counts = df_costs.groupby(f'bin_{column}')[column].count()
         bin_counts[f'bin_{column}'] = column_counts
 
-    print(bin_counts.head(10).to_string())
+    logger.verbose(bin_counts.head(10).to_string())
     # Define labels
     # Check if labels len is same as columns len
     if len(labels) != len(columns):
-        print("Labels and columns length are not the same")
+        logger.verbose("Labels and columns length are not the same")
     else:
         # Create a dict with column names as keys and labels as values
         legend_labels = dict(zip(columns, labels))
@@ -704,7 +704,7 @@ def plot_best_worse(df):
     df_bottom5 = df.nsmallest(5, 'total_medium')
 
     # Specify the columns to plot
-    print(df.columns)
+    logger.verbose(df.columns)
     columns_to_plot = ['building_costs', 'local_s1', 'externalities', 'tt_medium', 'noise_s1']
 
     # Create a figure with two subplots

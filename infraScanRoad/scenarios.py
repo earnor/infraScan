@@ -59,7 +59,7 @@ def future_scenario_zuerich_2022(df_input):
     # group per location and time
     empl_dev = empl_dev.groupby(["bezirk", "jahr"]).sum("anzahl")
     empl_dev = empl_dev.reset_index()
-    #print(empl_dev.head(10).to_string())
+    #logger.verbose(empl_dev.head(10).to_string())
 
     empl_dev = empl_dev[(empl_dev["jahr"] == 2011) | (empl_dev["jahr"] == 2021)]
     empl_dev = empl_dev.pivot(index='bezirk', columns='jahr', values='anzahl').reset_index()
@@ -72,11 +72,11 @@ def future_scenario_zuerich_2022(df_input):
     empl_dev["s1_empl"] = (1 + empl_dev["rel_10y"] * 2.9)
     empl_dev = empl_dev[["bezirk", "s1_empl"]]
 
-    print(empl_dev.head(10).to_string())
+    logger.verbose(empl_dev.head(10).to_string())
 
     # plot development per region in one
     df_scenario = df_scenario.merge(empl_dev, left_on="BEZIRK", right_on="bezirk", how="right")
-    #print(df_scenraio.head(10).to_string())
+    #logger.verbose(df_scenraio.head(10).to_string())
 
     # df_scenraio = boundaries[["BEZIRK", "geometry", 2050]]
 
@@ -86,7 +86,7 @@ def future_scenario_zuerich_2022(df_input):
     df_scenario["s2_empl"] = df_scenario["s1_empl"] - (df_scenario["s1_empl"] -1) / 3
     df_scenario["s3_empl"] = df_scenario["s1_empl"] + (df_scenario["s1_empl"] - 1) / 3
 
-    print(df_scenario.columns)
+    logger.verbose(df_scenario.columns)
 
     """
     scen_2_pop  = [1.199, 1.261, 1.192, 1.215, 1.32, 1.32, 1.215]
@@ -102,7 +102,7 @@ def future_scenario_zuerich_2022(df_input):
     df_scenraio["scen_3_empl"] = scen_3_empl
     df_scenraio["scen_3_pop"] = scen_3_pop
 
-    print(df_scenraio.columns)
+    logger.verbose(df_scenraio.columns)
     plot_2x3_subplots(df_scenraio, lim, network, location)
     """
     df_scenario.to_file(r"data\temp\data_scenario_n.shp")
@@ -118,7 +118,7 @@ def scenario_to_raster(frame=False):
         bounding_poly = box(frame[0], frame[1], frame[2], frame[3])
         len = (frame[2]-frame[0])/100
         width = (frame[3]-frame[1])/100
-        print(f"frame: {len, width} it should be 377, 437")
+        logger.verbose(f"frame: {len, width} it should be 377, 437")
 
         # Calculate the difference polygon
         # This will be the area in the bounding box not covered by existing polygons
@@ -136,7 +136,7 @@ def scenario_to_raster(frame=False):
                    's2_pop': scenario_polygon['s2_pop'].mean(), 's3_pop': scenario_polygon['s3_pop'].mean(),
                    's1_empl': scenario_polygon['s1_empl'].mean(), 's2_empl': scenario_polygon['s2_empl'].mean(),
                    's3_empl': scenario_polygon['s3_empl'].mean()}
-        print("New row added")
+        logger.verbose("New row added")
         #scenario_polygon = scenario_polygon.append(new_row, ignore_index=True)
         scenario_polygon = gpd.GeoDataFrame(pd.concat([pd.DataFrame(scenario_polygon), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
 
@@ -204,7 +204,7 @@ def scenario_to_voronoi(polygons_gdf, euclidean=False):
 
     # Now polygons_gdf has new columns with the sum of raster values for each polygon
     # You can save this geodataframe to a new file if desired
-    #print(polygons_gdf.head(10).to_string())
+    #logger.verbose(polygons_gdf.head(10).to_string())
     if euclidean:
         polygons_gdf.to_file(r"data\Voronoi\voronoi_developments_euclidian_values.shp")
     else:

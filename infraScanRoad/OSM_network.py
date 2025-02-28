@@ -22,7 +22,7 @@ def travel_cost_polygon(frame):
     # Need the node id as ID_point
     points_all = points_all[points_all["intersection"] == 0]
     points_all_frame = points_all.cx[frame[0]:frame[2], frame[1]:frame[3]]
-    # print(points_all_frame.head(10).to_string())
+    # logger.verbose(points_all_frame.head(10).to_string())
 
     # travel speed
     raster_file = r"data\Network\OSM_tif\speed_limit_raster.tif"
@@ -40,7 +40,7 @@ def travel_cost_polygon(frame):
         start = time.time()
         path_lengths, source_index = nx.multi_source_dijkstra_path_length(graph, sources_indices, weight='weight')
         end = time.time()
-        print(f"Time dijkstra: {end-start} sec.")
+        logger.verbose(f"Time dijkstra: {end-start} sec.")
 
         # Initialize an empty raster for path lengths
         path_length_raster = np.full(raster_data.shape, np.nan)
@@ -61,13 +61,13 @@ def travel_cost_polygon(frame):
         # Convert raster to graph
         graph = raster_to_graph(raster_data)
         end = time.time()
-        print(f"Time to initialize graph: {end-start} sec.")
+        logger.verbose(f"Time to initialize graph: {end-start} sec.")
 
         start = time.time()
         # Get both path lengths and paths
         distances, paths = nx.multi_source_dijkstra(G=graph, sources=sources_indices, weight='weight')
         end = time.time()
-        print(f"Time dijkstra: {end - start} sec.")
+        logger.verbose(f"Time dijkstra: {end - start} sec.")
 
         # Initialize empty rasters for path lengths and source coordinates
         path_length_raster = np.full(raster_data.shape, np.nan)
@@ -142,7 +142,7 @@ def travel_cost_polygon(frame):
 
     # get Voronoi polygons in vector data as gpd df
     gdf_polygon = raster_to_polygons(path_id_raster)
-    #print(gdf_polygon.head(10).to_string())
+    #logger.verbose(gdf_polygon.head(10).to_string())
     gdf_polygon.to_file(r"data\Network\travel_time\Voronoi_statusquo.gpkg")
 
         # how to get the inputs? nodes in which reference system, weights automatically?
@@ -405,7 +405,7 @@ def match_access_point_on_highway(idx, raster):
                                 match_found = True
                                 break
                     if match_found:
-                        print("No point found to match on network")
+                        logger.verbose("No point found to match on network")
                         break
 
         updated_idx.append(i)
@@ -439,7 +439,7 @@ def travel_cost_developments(frame):
         for index, row in generated_points.iterrows():
             geometry = row.geometry  # Access geometry
             id_new = row['ID_new']  # Access value in ID_new column
-            print(f"Development {id_new}")
+            logger.verbose(f"Development {id_new}")
 
             # Create a new row to add to the target GeoDataFrame
             new_row = {'geometry': geometry, 'intersection': 0, 'ID_point': 9999} # , 'ID_new': id_new
@@ -465,7 +465,7 @@ def travel_cost_developments(frame):
             # Get both path lengths and paths
             distances, paths = nx.multi_source_dijkstra(G=graph, sources=sources_indices, weight='weight')
             end = time.time()
-            print(f"Initialize graph and running dijkstra: {end - start} sec.")
+            logger.verbose(f"Initialize graph and running dijkstra: {end - start} sec.")
 
             # Initialize empty rasters for path lengths and source coordinates
             path_length_raster = np.full(raster_data.shape, np.nan)
@@ -524,7 +524,7 @@ def travel_cost_developments(frame):
                 if isinstance(value, (tuple, list, np.ndarray)):
                     # Keep only the first value of the tuple/array
                     source_coord_raster[y, x] = value[0]
-                    print(f"Index ({value}) replace by {value[0]}")
+                    logger.verbose(f"Index ({value}) replace by {value[0]}")
                 elif np.isnan(value):
                     source_coord_raster[y, x] = -1
                     pass
@@ -549,7 +549,7 @@ def travel_cost_developments(frame):
 
             # get Voronoi polygons in vector data as gpd df
             gdf_polygon = raster_to_polygons(path_id_raster)
-            # print(gdf_polygon.head(10).to_string())
+            # logger.verbose(gdf_polygon.head(10).to_string())
             gdf_polygon.to_file(fr"data\Network\travel_time\developments\dev{id_new}_Voronoi.gpkg")
                 # how to get the inputs? nodes in which reference system, weights automatically?
                 # how to get the coordinates of the closest point?

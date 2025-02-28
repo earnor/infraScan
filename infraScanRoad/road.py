@@ -193,7 +193,12 @@ class Road:
         self.reallocation_duration = self.config["Road"]["Land Reallocation"]["reallocation_duration"]["value"]
 
         # For infrastructure development generation
-        self.num_rand = 1000
+        # Access points
+        self.n_new_access_points = self.config["Road"]["Access Points"]["n_new_access_points"]["value"]
+        # Connecting roads (cr)
+        self.max_length_connecting_roads = self.config["Road"]["Connecting Roads"]["max_length"]["value"]
+        self.shorter_by_connecting_roads = self.config["Road"]["Connecting Roads"]["shorter_by"]["value"]
+        self.alongside_buffer_connecting_roads = self.config["Road"]["Connecting Roads"]["alongside_buffer"]["value"]
         
         # Define spatial limits of the research corridor
         # The coordinates must end with 000 in order to match the coordinates of the input raster data
@@ -238,10 +243,10 @@ class Road:
         st = time.time()
 
         # Import shapes of lake for plots
-        #get_lake_data()
+        #road_data_import.get_lake_data()
 
         # Import the file containing the locations to be ploted
-        #import_locations()
+        #road_data_import.import_locations()
 
 
         # Define area that is protected for constructing highway links
@@ -264,7 +269,7 @@ class Road:
 
         # Import the highway network and preprocess it
         # Data are stored as "data/temp/network_highway.gpkg"
-        #load_nw()
+        #road_data_import.load_nw()
 
         # Read the network dataset to avoid running the function above
         self.network = gpd.read_file(r"data/temp/network_highway.gpkg")
@@ -313,42 +318,83 @@ class Road:
         logger.road("INFRASTRUCTURE NETWORK GENERATE DEVELOPMENT")
         st = time.time()
 
-        # Make random points within the perimeter (extent) and filter them, so they do not fall within protected or
-        # unsuitable area
-        # The resulting dataframe of generated nodes is stored in "data\Network\processed\generated_nodes.gpkg"
         
-        random_gdf = road_generate_infrastructure.generated_access_points(extent=self.innerboundary, number=self.num_rand)
+        bool_new_access = self.config["Infrastructure"]["Road"]["New Access Points"]
+        bool_connecting_roads = self.config["Infrastructure"]["Road"]["Connecting Roads"]
 
-        road_generate_infrastructure.filter_access_points(random_gdf)
+        if bool_new_access:
+            """
+            Generate new access points within the perimeter and filter them to exclude protected or unsuitable areas.
+            The resulting dataframe of generated nodes is stored in "data/Network/processed/generated_nodes_new_access.gpkg".
+            """
+            logger.debug("Infrastructure Measure: Generating new access points")
+            # Make random points within the perimeter (extent) and filter them, so they do not fall within protected or
+            # unsuitable area
+            # The resulting dataframe of generated nodes is stored in "data\Network\processed\generated_nodes.gpkg"
+            
+            random_gdf = road_generate_infrastructure.generated_access_points(extent=self.innerboundary, number=self.n_new_access_points)
 
-        #filtered_gdf.to_file(r"data/Network/processed/generated_nodes.gpkg")
+            road_generate_infrastructure.filter_access_points(random_gdf)
 
-        # Import the generated points as dataframe
-        self.generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
+            #filtered_gdf.to_file(r"data\Network\processed\generated_nodes_new_access.gpkg")
 
-        # Import current points as dataframe and filter only access points (no intersection points)
-        self.current_points = gpd.read_file(r"data/Network/processed/points_corridor_attribute.gpkg")
-        self.current_access_points = self.current_points.loc[self.current_points["intersection"] == 0]
+            # Import the generated points as dataframe
+            self.generated_points = gpd.read_file(r"data\Network\processed\generated_nodes_new_access.gpkg")
 
-        # Connect the generated points to the existing access points
-        # New lines are stored in "data/Network/processed/new_links.gpkg"
-        self.filtered_rand_temp = road_generate_infrastructure.connect_points_to_network(self.generated_points, self.current_access_points)
-        self.nearest_gdf = road_generate_infrastructure.create_nearest_gdf(self.filtered_rand_temp)
-        road_generate_infrastructure.create_lines(self.generated_points, self.nearest_gdf)
+            # Import current points as dataframe and filter only access points (no intersection points)
+            self.current_points = gpd.read_file(r"data/Network/processed/points_corridor_attribute.gpkg")
+            self.current_access_points = self.current_points.loc[self.current_points["intersection"] == 0]
 
-        # Filter the generated links that connect to one of the access point within the considered corridor
-        # These access points are defined in the manually defined list of access points
-        # The links to corridor are stored in "data/Network/processed/developments_to_corridor_attribute.gpkg"
-        # The generated points with link to access point in the corridor are stored in "data/Network/processed/generated_nodes_connecting_corridor.gpkg"
-        # The end point [ID_new] of developments_to_corridor_attribute are equivlent to the points in generated_nodes_connecting_corridor
-        road_data_import.only_links_to_corridor()
+            # Connect the generated points to the existing access points
+            # New lines are stored in "data/Network/processed/new_links.gpkg"
+            self.filtered_rand_temp = road_generate_infrastructure.connect_points_to_network(self.generated_points, self.current_access_points)
+            self.nearest_gdf = road_generate_infrastructure.create_nearest_gdf(self.filtered_rand_temp)
+            road_generate_infrastructure.create_lines(self.generated_points, self.nearest_gdf)
 
-        # Find a routing for the generated links that considers protected areas
-        # The new links are stored in "data/Network/processed/new_links_realistic.gpkg"
-        # If a point is not accessible due to the banned zoned it is stored in "data/Network/processed/points_inaccessible.csv"
-        raster = r'data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif'
+            # Filter the generated links that connect to one of the access point within the considered corridor
+            # These access points are defined in the manually defined list of access points
+            # The links to corridor are stored in "data/Network/processed/developments_to_corridor_attribute.gpkg"
+            # The generated points with link to access point in the corridor are stored in "data/Network/processed/generated_nodes_connecting_corridor.gpkg"
+            # The end point [ID_new] of developments_to_corridor_attribute are equivlent to the points in generated_nodes_connecting_corridor
+            road_data_import.only_links_to_corridor()
 
-        road_generate_infrastructure.routing_raster(raster_path=raster)
+            # Find a routing for the generated links that considers protected areas
+            # The new links are stored in "data/Network/processed/new_links_realistic_new_access.gpkg"
+            # If a point is not accessible due to the banned zoned it is stored in "data/Network/processed/points_inaccessible.csv"
+            raster = r'data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif'
+            new_links_new_access = r"data\Network\processed\new_links_new_access.gpkg"
+            realistic_links_new_access = r"data\Network\processed\new_links_realistic_new_access.gpkg"
+
+            road_generate_infrastructure.routing_raster(raster_path=raster,
+                                                        generated_links_path=new_links_new_access,
+                                                        realistic_links_path=realistic_links_new_access)
+
+        if bool_connecting_roads:
+            """
+            Generate connecting roads between the existing highway network.
+            The resulting dataframe of generated links is stored in "data/Network/processed/new_links_connecting_roads.gpkg".
+            """
+            
+            logger.debug("Infrastructure Measure: Connecting Roads")
+
+            # Generate connecting roads between the existing highway network
+            road_generate_infrastructure.generate_new_connections_between_hwy(self.limits_corridor, 
+                                                                              self.max_length_connecting_roads, 
+                                                                              self.shorter_by_connecting_roads, 
+                                                                              self.alongside_buffer_connecting_roads)
+            
+            # Use the protected Areas to generate a realistic road network
+            raster = r'data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif'
+            new_links_new_connections = r"data\Network/processed/new_links_new_connections.gpkg"
+            realistic_links_new_connections = r"data\Network/processed/new_links_realistic_new_connections.gpkg"
+
+            road_generate_infrastructure.routing_raster(raster_path=raster, 
+                                                        generated_links_path=new_links_new_connections, 
+                                                        realistic_links_path=realistic_links_new_connections)
+            
+        # Combine all generated links and nodes to one dataframe
+        # The resulting dataframe is stored in "data/Network/processed/new_links_realistic.gpkg"
+        road_generate_infrastructure.combine_links(bool_new_access, bool_connecting_roads)
 
         """
         #plot_corridor(network, limits=limits_corridor, location=location, new_nodes=filtered_rand_gdf, access_link=True)
@@ -449,8 +495,8 @@ class Road:
         st = time.time()
 
         # Import the road network from OSM and rasterize it
-        road_voronoi_tiling.nw_from_osm(self.limits_variables) #todo this requires data under data/Network/OSM_road that is not available.
-        road_voronoi_tiling.osm_nw_to_raster(self.limits_variables)
+        #road_voronoi_tiling.nw_from_osm(self.limits_variables) #todo this requires data under data/Network/OSM_road that is not available.
+        #road_voronoi_tiling.osm_nw_to_raster(self.limits_variables)
         self.runtimes["Import and rasterize local road network from OSM"] = time.time() - st
         st = time.time()
 
@@ -645,7 +691,7 @@ class Road:
 
         links_beeline = gpd.read_file(r"data/Network/processed/new_links.gpkg")
         links_realistic = gpd.read_file(r"data/Network/processed/new_links_realistic.gpkg")
-        print(links_realistic.head(5).to_string())
+        logger.verbose(links_realistic.head(5).to_string())
         # Plot the net benefits for each generated point and interpolate the area in between
         generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
         # Get a gpd df with points have an ID_new that is not in links_realistic ID_new

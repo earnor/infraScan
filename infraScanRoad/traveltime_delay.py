@@ -129,7 +129,7 @@ def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path)
     commune_raster, commune_df = GetCommuneShapes(raster_path=voronoi_tif_path)
 
     if jobvec.shape[0] != odmat.shape[0]:
-        print("Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
+        logger.verbose("Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
     #com_idx = np.unique(od['quelle_code']) # previously od_mat
 
     #todo the following line setting up rasterdf. We could probably pick a better GDF to start with. Most important is to have the raster, location of raster cells
@@ -234,10 +234,10 @@ def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path)
             else:
                 continue
 
-    # Print array shapes to compare
-    print(f"cout_r: {cout_r.shape}")
-    print(f"pairs: {pairs.shape}")
-    print(f"pop_empl: {pop_empl.shape}")
+    # logger.verbose array shapes to compare
+    logger.verbose(f"cout_r: {cout_r.shape}")
+    logger.verbose(f"pairs: {pairs.shape}")
+    logger.verbose(f"pop_empl: {pop_empl.shape}")
 
     # Step 3 complete exploded matrix
     # Initialize the OD matrix DataFrame with zeros or NaNs
@@ -303,7 +303,7 @@ def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path)
     """
     # Allocate values to the OD matrix
     for idx, value in tqdm(cout_r.iterrows(), desc='Allocating unit_values to OD matrix'):
-        print(value, idx)
+        logger.verbose(value, idx)
         commune_id = idx
         # Update the OD matrix using the commune_id
         od_matrix.loc[pd.IndexSlice[:, commune_id], pd.IndexSlice[:, commune_id]] += value
@@ -337,20 +337,20 @@ def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path)
     np.fill_diagonal(od_grouped.values, 0)
     # Compute the sum after changing the diagonal
     temp_sum2 = od_grouped.sum().sum()
-    # Print difference
-    print(f"Sum of OD matrix before {temp_sum} and after {temp_sum2}")
+    # logger.verbose difference
+    logger.verbose(f"Sum of OD matrix before {temp_sum} and after {temp_sum2}")
 
     # Save pd df to csv
     od_grouped.to_csv(r"data\traffic_flow\od\od_matrix_2020.csv")
     #odmat.to_csv(r"data\traffic_flow\od\od_matrix_raw.csv")
 
-    # Print sum of all values in od df
+    # logger.verbose sum of all values in od df
     # Sum over all values in pd df
     sum_com = odmat.sum().sum()
     sum_poly = od_grouped.sum().sum()
     sum_com_frame = odmat_frame.sum().sum()
-    print(f"Total trips before {sum_com_frame} ({odmat_frame.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
-    print(f"Total trips before {sum_com} ({odmat.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
+    logger.verbose(f"Total trips before {sum_com_frame} ({odmat_frame.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
+    logger.verbose(f"Total trips before {sum_com} ({odmat.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
 
     # Sum all columns of od_grouped
     origin = od_grouped.sum(axis=1).reset_index()
@@ -463,7 +463,7 @@ def GetVoronoiOD_multi_old(scen_empl_path, scen_pop_path, voronoi_tif_path):
     commune_raster, commune_df = GetCommuneShapes(raster_path=voronoi_tif_path)
 
     if jobvec.shape[0] != odmat.shape[0]:
-        print("Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
+        logger.verbose("Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
 
     # Open scenario (medium) raster data    (low = band 2, high = band 3)
     with rasterio.open(scen_pop_path) as src:
@@ -498,7 +498,7 @@ def GetVoronoiOD_multi_old(scen_empl_path, scen_pop_path, voronoi_tif_path):
 
     # Convert values to integers if needed
     xx_values = [int(xx) for xx in xx_values]
-    # print(xx_values)
+    # logger.verbose(xx_values)
 
     for xx in tqdm(xx_values, desc='Processing Voronoi IDs'):
         # Construct the file path

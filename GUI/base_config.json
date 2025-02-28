@@ -36,6 +36,14 @@
         }
     },
     "Road": {
+        "Access Points": {
+            "n_new_access_points": { "value": 1000, "unit": "number" }
+        },
+        "Connecting Roads": {
+            "max_length": { "value": 20000, "unit": "m" },
+            "shorter_by": { "value": 2, "unit": "factor" },
+            "alongside_buffer": { "value": 2000, "unit": "m" }
+        },
         "Construction Costs": {
             "c_openhighway": { "value": 15200, "unit": "CHF/m" },
             "c_tunnel": { "value": 416000, "unit": "CHF/m" },

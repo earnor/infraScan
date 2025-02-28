@@ -99,10 +99,9 @@ def print_hi(name):
 
 
     # Define area that is protected for constructing railway links
-    # !!!!! Testing
-    #get_protected_area(limits=limits_corridor)
-    #get_unproductive_area(limits=limits_corridor)
-    #landuse(limits=limits_corridor)
+    get_protected_area(limits=limits_corridor)
+    get_unproductive_area(limits=limits_corridor)
+    landuse(limits=limits_corridor)
 
     # Tif file of all unsuitable land cover and protected areas
     # File is stored to 'data\landuse_landcover\processed\zone_no_infra\protected_area_{suffix}.tif'

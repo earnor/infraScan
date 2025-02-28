@@ -6,6 +6,7 @@ import subprocess # For running sub moduls (e.g. road.py, rail.py)
 import os
 os.environ['USE_PYGEOS'] = '0'  # Force GeoPandas to use Shapely
 import sys
+import traceback
 import multiprocessing # For running sub moduls (e.g. road, rail)
 from icecream import ic # For debugging
 import logging
@@ -52,7 +53,8 @@ def start_process(process_class, config):
         process.run()  # Start execution
         logger.notice(f"{process_class.__name__} process completed.")
     except Exception as e:
-        logger.error(f"Error running {process_class.__name__}: {e}")
+        error_message = f"An error occurred in {process_class.__name__}:\n{traceback.format_exc()}"
+        logger.error(error_message)  # Ensure error prints to the terminal
 
 class InfraGUI:
     def __init__(self, root):
@@ -161,7 +163,7 @@ class InfraGUI:
                 ttk.Radiobutton(col_frame, text="False", variable=var, value=0,
                         command=lambda i=infra_category,
                         k=infra: self.update_infrastructure(i, k, 0)).pack(side="right", anchor="center")
-            ttk.Button(category_frame, text=f"Run {infra_category}", command=lambda: self.run_script(f"{infra_category.lower()}")).pack(side="right", padx=5, pady=5)
+            ttk.Button(category_frame, text=f"Run {infra_category}", command=lambda infra_category=infra_category: self.run_script(f"{infra_category.lower()}")).pack(side="right", padx=5, pady=5)
         
         # Run Both Button
         run_frame = ttk.Frame(self.general_tab)

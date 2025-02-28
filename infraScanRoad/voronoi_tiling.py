@@ -116,7 +116,7 @@ def get_voronoi_status_quo():
     df_voronoi = gpd.GeoDataFrame(geometry=gpd.GeoSeries([Polygon(vertices[region]) for region in regions]),
                                   crs="epsg:2056")
     # df_voronoi["ID"] = 1
-    print(df_voronoi.head(10).to_string())
+    logger.verbose(df_voronoi.head(10).to_string())
 
     df_voronoi.to_file(r"data\Voronoi\voronoi_status_quo_euclidian.gpkg")
 
@@ -223,7 +223,7 @@ def nw_from_osm(limits):
 
         try:
             # Attempt to process the OSM data for the sub-polygon
-            print(f"Processing sub-polygon {i + 1}/{len(sub_polygons)}", end='\r')
+            logger.verbose(f"Processing sub-polygon {i + 1}/{len(sub_polygons)}", end='\r')
             #G = ox.graph_from_polygon(lat_lon_frame, network_type="drive", simplify=True, truncate_by_edge=True)
             # Define a custom filter to exclude highways
             # This example excludes motorways, motorway_links, trunks, and trunk_links
@@ -245,8 +245,8 @@ def nw_from_osm(limits):
             gdf_edges.to_file(output_filename, driver="GPKG")
 
         except ValueError as e:
-            # Handle areas with no nodes by logging or printing an error message
-            print(f"Skipping graph in sub-polygon {i + 1} due to error: {e}")
+            # Handle areas with no nodes by logging or logger.verboseing an error message
+            logger.verbose(f"Skipping graph in sub-polygon {i + 1} due to error: {e}")
             # Optionally, continue with the next sub-polygon or perform other error handling
             continue
 
@@ -298,10 +298,10 @@ def osm_nw_to_raster(limits):
     # Drop NaN values or replace them with 0, depending on how you want to handle them
     #gdf_combined.dropna(subset=['speed_kph'], inplace=True)
     gdf_combined['speed_kph'].fillna(30, inplace=True)
-    # print(gdf_combined.crs)
-    # print(gdf_combined.head(10).to_string())
+    # logger.verbose(gdf_combined.crs)
+    # logger.verbose(gdf_combined.head(10).to_string())
     gdf_combined.to_file('data/Network/OSM_tif/nw_speed_limit.gpkg')
-    print("file stored")
+    logger.verbose("file stored")
 
 
     gdf_combined = gpd.read_file('data/Network/OSM_tif/nw_speed_limit.gpkg')
@@ -311,7 +311,7 @@ def osm_nw_to_raster(limits):
 
     # Define the bounds of the raster (aligned with your initial limits)
     minx, miny, maxx, maxy = limits
-    print(limits)
+    logger.verbose(limits)
 
     # Compute the number of rows and columns
     num_cols = int((maxx - minx) / resolution)
@@ -328,7 +328,7 @@ def osm_nw_to_raster(limits):
     #lake = gpd.read_file(r"data\landuse_landcover\landcover\water_ch\Typisierung_LV95\typisierung.gpkg")
     ###############################################################################################################
 
-    print("ready to fill")
+    logger.verbose("ready to fill")
 
     tot_num = num_cols * num_cols
     count=0
@@ -336,7 +336,7 @@ def osm_nw_to_raster(limits):
     for row in range(num_rows):
         for col in range(num_cols):
 
-            #print(row, " - ", col)
+            #logger.verbose(row, " - ", col)
             # Find the bounds of the cell
             cell_bounds = box(minx + col * resolution,
                               maxy - row * resolution,
@@ -344,18 +344,18 @@ def osm_nw_to_raster(limits):
                               maxy - (row + 1) * resolution)
 
             # Find the roads that intersect with this cell
-            #print(gdf_combined.head(10).to_string())
+            #logger.verbose(gdf_combined.head(10).to_string())
             intersecting_roads = gdf_combined[gdf_combined.intersects(cell_bounds)]
 
-            # Debugging print
-            #print(f"Cell {row},{col} intersects with {len(intersecting_roads)} roads")
+            # Debugging logger.verbose
+            #logger.verbose(f"Cell {row},{col} intersects with {len(intersecting_roads)} roads")
 
             # If there are any intersecting roads, find the maximum speed limit
             if not intersecting_roads.empty:
                 max_speed = intersecting_roads['speed_kph'].max()
                 raster[row, col] = max_speed
 
-            # Print the progress
+            # logger.verbose the progress
             count += 1
             progress_percentage = (count / tot_num) * 100
             sys.stdout.write(f"\rProgress: {progress_percentage:.2f}%")
@@ -365,11 +365,11 @@ def osm_nw_to_raster(limits):
     with rasterio.open(r"data\landuse_landcover\processed\unproductive_area.tif") as src2:
         unproductive_area = src2.read(1)
         if raster.shape == unproductive_area.shape:
-            print("Network raster and unproductive area are overalpping")
+            logger.verbose("Network raster and unproductive area are overalpping")
             mask = np.logical_and(unproductive_area > 0, unproductive_area < 100)
             raster[mask] = 0
         else:
-            print("Network raster and unproductive area are not overalpping!!!!!")
+            logger.verbose("Network raster and unproductive area are not overalpping!!!!!")
 
 
     with rasterio.open(

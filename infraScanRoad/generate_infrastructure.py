@@ -16,15 +16,23 @@ from scipy.optimize import minimize
 from tqdm import tqdm
 import pulp
 import sys
+import os
 import requests
 import zipfile
 
-from data_import import *
+# Additions sehitz
+from typing import Tuple
+from itertools import combinations
+from scipy.spatial.distance import cdist
 
-# Get the parent directory of GUI (i.e., InfraScan)
+
+
+# Get the parent directory(i.e., InfraScan)
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
 from logging_config import logger  # Import central logger
+
+from infraScanRoad.data_import import *
 
 def generated_access_points(extent,number):
     e_min, n_min, e_max, n_max = extent.bounds
@@ -51,11 +59,11 @@ def generated_access_points(extent,number):
 
 def filter_access_points(gdf):
     newgdf = gdf.copy()
-    print("All")
-    print(len(newgdf))
+    logger.verbose("All")
+    logger.verbose(len(newgdf))
     # idx = list(np.zeros(N))
     """
-    print("Lake")
+    logger.verbose("Lake")
     idx = get_idx_todrop(newgdf, r"data\landuse_landcover\landcover\lake\WB_GEWAESSERRAUM_F.shp")
     newgdf.loc[:, "index"] = idx
     keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
@@ -65,34 +73,34 @@ def filter_access_points(gdf):
     newgdf.loc[:, "index"] = idx
     keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
     newgdf = newgdf.loc[keepidx,:]
-    print(len(newgdf))
+    logger.verbose(len(newgdf))
     """
 
 
     """
     # Perform a spatial join
     FFF_gdf = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Fruchtfolgeflachen_-OGD\FFF_F.shp")
-    print(FFF_gdf.head().to_string())
+    logger.verbose(FFF_gdf.head().to_string())
     joined = gpd.sjoin(newgdf, FFF_gdf, how="left", predicate="within")
-    print(joined.head().to_string())
+    logger.verbose(joined.head().to_string())
     # Filter points that are within polygons
     newgdf = newgdf[~joined["index_right"].isna()]
-    print(newgdf.head().to_string())
+    logger.verbose(newgdf.head().to_string())
 
     #newgdf.loc[:, "index"] = idx
-    #print(newgdf.head().to_string())
+    #logger.verbose(newgdf.head().to_string())
     #newgdf.drop(newgdf.loc[newgdf['index'] == 1],inplace=True)
-    print(len(newgdf))
+    logger.verbose(len(newgdf))
     """
 
-    print("Schutzanordnung Natur und Landschaft")
+    logger.verbose("Schutzanordnung Natur und Landschaft")
     idx = get_idx_todrop(newgdf,r"data\landuse_landcover\Schutzzonen\Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD\FNS_SCHUTZZONE_F.shp")
     newgdf.loc[:, "index"] = idx
     keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
     newgdf = newgdf.loc[keepidx, :]
-    print(len(newgdf))
+    logger.verbose(len(newgdf))
     """
-    print("Naturschutzobjekte")
+    logger.verbose("Naturschutzobjekte")
     idx = get_idx_todrop(newgdf, r"data\landuse_landcover\Schutzzonen\Inventar_der_Natur-_und_Landsch...uberkommunaler_Bedeutung_-OGD\INV80_NATURSCHUTZOBJEKTE_F.shp")
     newgdf.loc[:, "index"] = idx
     keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
@@ -102,27 +110,27 @@ def filter_access_points(gdf):
     newgdf.loc[:, "index"] = idx
     keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
     newgdf = newgdf.loc[keepidx, :]
-    print(len(newgdf))
+    logger.verbose(len(newgdf))
     """
 
-    print("Forest")
+    logger.verbose("Forest")
     idx = get_idx_todrop(newgdf,r"data\landuse_landcover\Schutzzonen\Waldareal_-OGD\WALD_WALDAREAL_F.shp")
     newgdf.loc[:, "index"] = idx
     keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
     newgdf = newgdf.loc[keepidx,:]
-    print(len(newgdf))
+    logger.verbose(len(newgdf))
 
     ###########################################################################3
     """
-    print("Wetlands")
+    logger.verbose("Wetlands")
     idx = get_idx_todrop(newgdf,r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
     newgdf.loc[:, "index"] = idx
     keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
     newgdf = newgdf.loc[keepidx,:]
-    print(len(newgdf))
+    logger.verbose(len(newgdf))
     """
 
-    print("Network buffer")
+    logger.verbose("Network buffer")
     network_gdf = gpd.read_file(r"data\Network\processed\edges.gpkg")
     network_gdf['geometry'] = network_gdf['geometry'].buffer(1000)
     network_gdf.to_file(r"data\temp\buffered_network.gpkg")
@@ -131,17 +139,17 @@ def filter_access_points(gdf):
     newgdf.loc[:, "index"] = idx
     keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
     newgdf = newgdf.loc[keepidx,:]
-    print(len(newgdf))
+    logger.verbose(len(newgdf))
     """
-    print("Residential area")
+    logger.verbose("Residential area")
     idx = get_idx_todrop(newgdf,r"data\landuse_landcover\landcover\Quartieranalyse_-OGD\QUARTIERE_F.shp")
     newgdf.loc[:, "index"] = idx
     keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
     newgdf = newgdf.loc[keepidx,:]
-    print(len(newgdf))
+    logger.verbose(len(newgdf))
     """
 
-    print("Protected zones")
+    logger.verbose("Protected zones")
     # List to store indices to drop
     indices_to_drop = []
 
@@ -164,24 +172,24 @@ def filter_access_points(gdf):
                     indices_to_drop.append(index)
 
             else:
-                print(f"Point outside the polygon {row_x, row_y}")
+                logger.verbose(f"Point outside the polygon {row_x, row_y}")
                 indices_to_drop.append(index)
 
         # Drop the points
     newgdf = newgdf.drop(indices_to_drop)
-    print(len(newgdf))
+    logger.verbose(len(newgdf))
 
-    print("FFF")
+    logger.verbose("FFF")
     idx = get_idx_todrop(newgdf, r"data\landuse_landcover\Schutzzonen\Fruchtfolgeflachen_-OGD\FFF_F.shp")
     newgdf.loc[:, "index"] = idx
     keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
     newgdf = newgdf.loc[keepidx, :]
-    print(len(newgdf))
+    logger.verbose(len(newgdf))
 
     newgdf = newgdf.rename(columns={"ID": "ID_new"})
     newgdf = newgdf.to_crs("epsg:2056")
 
-    newgdf.to_file(r"data\Network\processed\generated_nodes.gpkg")
+    newgdf.to_file(r"data\Network\processed\generated_nodes_new_access.gpkg")
 
     return
 
@@ -200,7 +208,7 @@ def get_idx_todrop(pt, filename):
             idx = np.multiply(idx, tempidx)
         intidx = [int(i) for i in idx]
         newidx = [i ^ 1 for i in intidx]
-        #print(newidx)
+        #logger.verbose(newidx)
     return newidx
 
 
@@ -258,7 +266,7 @@ def create_lines(rand_pts_gdf, nearest_highway_pt_gdf):
     line_gdf["ID_current"] = nearest_highway_pt_gdf["ID_point"]
 
     line_gdf = line_gdf.set_crs("epsg:2056")
-    line_gdf.to_file(r"data\Network\processed\new_links.gpkg")
+    line_gdf.to_file(r"data\Network\processed\new_links_new_access.gpkg")
     return
 
 
@@ -291,12 +299,13 @@ def line_scoring(lines_gdf,raster_location):
     return lines_gdf
 
 
-def routing_raster(raster_path):
+def routing_raster(raster_path, generated_links_path, realistic_links_path):
     # Process LineStrings
-    generated_links = gpd.read_file(r"data\Network\processed\new_links.gpkg")
-    print(generated_links["ID_new"].unique())
+    generated_links = gpd.read_file(generated_links_path)
+    
+    logger.verbose(generated_links["ID_new"].unique())
 
-    #print(generated_links.head(10))
+    #logger.verbose(generated_links.head(10))
     new_lines = []
     generated_points_unaccessible = []
 
@@ -313,6 +322,7 @@ def routing_raster(raster_path):
             # Convert real-world coordinates to raster indices
             start_index = rasterio.transform.rowcol(transform, xs=start_point[0], ys=start_point[1])
             end_index = rasterio.transform.rowcol(transform, xs=end_point[0], ys=end_point[1])
+            #logger.verbose("Start ", start_index, "End ", end_index)
 
             # Convert raster to graph
             graph = raster_to_graph(raster_data)
@@ -322,16 +332,16 @@ def routing_raster(raster_path):
                 path, generated_points_unaccessible = find_path(graph, start_index, end_index, generated_points_unaccessible, end_point)
             except Exception as e:
                 path=None
-                print(e)
-                #print(generated_links.iloc[i])
+                logger.verbose(e)
+                #logger.verbose(generated_links.iloc[i])
 
 
             if path:
                 # If you need to convert back the path to real-world coordinates, you would use the raster's transform
                 # Here's a stub for that process
                 real_world_path = [rasterio.transform.xy(transform, cols=point[1], rows=point[0], offset='center') for point in path]
-                #print("Start ", real_world_path[0], " ersetzt durch ", line.coords[0])
-                #print("Ende ", real_world_path[-1], " ersetzt durch ", line.coords[-1])
+                #logger.verbose("Start ", real_world_path[0], " ersetzt durch ", line.coords[0])
+                #logger.verbose("Ende ", real_world_path[-1], " ersetzt durch ", line.coords[-1])
                 real_world_path[0] = line.coords[0]
                 real_world_path[-1] = line.coords[-1]
                 new_lines.append(real_world_path)
@@ -356,7 +366,7 @@ def routing_raster(raster_path):
             tempgeom = df_links['new_geometry'].apply(lambda x: LineString(x))
         except Exception as e:
             df_links.drop(index, inplace=True)
-            #print(e)
+            #logger.verbose(e)
     df_links['geometry'] = tempgeom
     df_links = df_links.drop(columns="new_geometry")
     df_links = df_links.set_geometry("geometry")
@@ -368,14 +378,14 @@ def routing_raster(raster_path):
     #tolerance = 0.01  # Adjust tolerance to your needs
     #df_links['geometry'] = df_links['geometry'].apply(lambda x: x.simplify(tolerance))
 
-    df_links.to_file(r"data\Network\processed\new_links_realistic.gpkg")
+    df_links.to_file(realistic_links_path)
 
     # Also store the point which are not joinable due to banned land cover
     # Writing to the CSV file with a header
     #df_inaccessible_points = pd.DataFrame(generated_points_unaccessible, columns=["point_id"])
     #df_inaccessible_points.to_csv(r"data\Network\processed\points_inaccessible.csv", index=False)
 
-    return
+    return df_links
 
 
 def raster_to_graph(raster_data):
@@ -409,7 +419,7 @@ def find_path(graph, start, end, list_no_path, point_end):
         return path, list_no_path
     except nx.NetworkXNoPath:
         list_no_path.append(point_end)
-        print("No path found ", point_end)
+        logger.verbose("No path found ", point_end)
         return None, list_no_path
 
 
@@ -477,7 +487,7 @@ def single_tt_voronoi_ton_one(folder_path):
         if id_development:
             id_development = int(id_development.group(1))
         else:
-            print("Error in predict >> 394")
+            logger.verbose("Error in predict >> 394")
             continue  # Skip file if no match is found
 
         # Add the ID_development as a new column
@@ -522,12 +532,12 @@ def import_elevation_model(new_resolution):
     for i, file in enumerate(xyz_files, start=1):
         downsampled_data = downsample_elevation_xyz_file(file, min_x, min_y, resolution=new_resolution)
         concatenated_data = pd.concat([concatenated_data, downsampled_data])
-        # Print progress
-        print(f"Processed file {i}/{len(xyz_files)}: {file}")
+        # logger.verbose progress
+        logger.verbose(f"Processed file {i}/{len(xyz_files)}: {file}")
 
     # Reset index
     concatenated_data.reset_index(drop=True, inplace=True)
-    print(concatenated_data.shape)
+    logger.verbose(concatenated_data.shape)
 
     # Convert the DataFrame to a 2D grid
     min_x, max_x = concatenated_data['X'].min(), concatenated_data['X'].max()
@@ -594,8 +604,8 @@ def get_road_elevation_profile():
     sampling_interval = 50
 
     with rasterio.open(elevation_raster) as raster:
-        print(raster.crs)
-        print(links.crs)
+        logger.verbose(raster.crs)
+        logger.verbose(links.crs)
 
         # Interpolate points and extract raster values for each linestring
         links['elevation_profile'] = links['geometry'].apply(
@@ -630,7 +640,7 @@ def get_road_elevation_profile():
 
 
 def get_tunnel_candidates(df):
-    print("You will have to define the needed tunnels and bridges for ", df["check_needed"].sum() , " section.")
+    logger.verbose("You will have to define the needed tunnels and bridges for ", df["check_needed"].sum() , " section.")
 
     df["elevation_profile"] = df["elevation_profile"].astype("object")
     # Custom dialog class for pop-up
@@ -682,14 +692,14 @@ def get_tunnel_candidates(df):
             dlg = CustomDialog(root, row)
             #dlg.wait_window()
     df["elevation_profile"]=df["elevation_profile"].astype('string')
-    print(df)
+    logger.verbose(df)
     #df.to_file(r"data\Network\processed\new_links_realistic_tunnel.gpkg")
     df.to_file(r"data\Network\processed\new_links_realistic_tunnel-terminal.gpkg")
 
 
 def tunnel_bridges(df):
     # The aim is to estimate the need of tunnels and bridge based on the elevation profile of each link
-    print(df.head().to_string())
+    logger.verbose(df.head().to_string())
 
     # Define max slope allowed on a highway
     max_slope = 7  # in percent
@@ -704,8 +714,8 @@ def tunnel_bridges(df):
     df["total_slope"] = df.apply(lambda row: row["total_dif"] / row["total_length"], axis=1)
     # Check if total slope is bigger than 5%
     df["too_steep"] = df.apply(lambda row: row["total_slope"] > max_slope, axis=1)
-    # Print the amount of too_steep = True
-    print("There are ", df["too_steep"].sum(), " links that are too steep.")
+    # logger.verbose the amount of too_steep = True
+    logger.verbose("There are ", df["too_steep"].sum(), " links that are too steep.")
 
     # Check how big the elevation difference is between each consecutive point and store that as new list
     # Thus for each row check elevation_i with elevation_i+1 knowing distance is 50m
@@ -715,10 +725,10 @@ def tunnel_bridges(df):
     # Check if there there are slopes with more slope than 5%, return True, False
     df["too_steep_single"] = df['single_slope'].apply(lambda x: any(np.array(x) > max_slope))
 
-    # Print the amount of too_steep_single = True, and print the entire amount of links
-    print("There are ", df["too_steep_single"].sum(), " (",len(df),") links that are too steep.")
+    # logger.verbose the amount of too_steep_single = True, and logger.verbose the entire amount of links
+    logger.verbose("There are ", df["too_steep_single"].sum(), " (",len(df),") links that are too steep.")
 
-    #print("There are ", df["too_steep_single"].sum(), " links that are too steep.")
+    #logger.verbose("There are ", df["too_steep_single"].sum(), " links that are too steep.")
     """
     """
     def adjust_elevation(elevation, max_slope=0.05):
@@ -767,7 +777,7 @@ def tunnel_bridges(df):
         result = minimize(objective, elevation, method='SLSQP', bounds=bounds, constraints=cons, options={'disp': True})
 
         if not result.success:
-            print(f"Optimization failed: {result.message}")
+            logger.verbose(f"Optimization failed: {result.message}")
 
         new_elevation = result.x
         changes = new_elevation != elevation
@@ -776,7 +786,7 @@ def tunnel_bridges(df):
 
     new_profiles = []
     change_flags = []
-    # iterate over all rows of the dataframe and print process bar
+    # iterate over all rows of the dataframe and logger.verbose process bar
 
     for index, row in tqdm(df.iterrows(), total=df.shape[0]):
         elevation = np.array(row['elevation_profile'])
@@ -789,7 +799,7 @@ def tunnel_bridges(df):
         single_slope = np.diff(np.array(new_elevation)) / 50
         too_steep_single = any(np.abs(single_slope) > max_slope)
         if too_steep_single:
-            print("There are links that are too steep.", np.where(single_slope > max_slope), changes)
+            logger.verbose("There are links that are too steep.", np.where(single_slope > max_slope), changes)
 
     df['new_elevation'] = new_profiles
     df['changes'] = change_flags
@@ -825,13 +835,13 @@ def tunnel_bridges(df):
         prob += lp_vars[len(values) - 1] == values[len(values) - 1]
         prob += change_vars[len(values) - 1] == 0  # No change for the last element
 
-        # Solve the problem without printing messages
+        # Solve the problem without logger.verboseing messages
         #prob.solve(pulp.PULP_CBC_CMD(msg=False))
         prob.solve(pulp.PULP_CBC_CMD(msg=True))
 
         # Check if the problem is infeasible
         if prob.status != pulp.LpStatusOptimal:
-            print("Infeasible Problem")
+            logger.verbose("Infeasible Problem")
             return None
 
         # Get the optimized values
@@ -852,7 +862,7 @@ def tunnel_bridges(df):
     # Add new column showing the difference between the old and new elevation profile, 0 if not - 1 if yes
     df['changes'] = df.apply(lambda row: np.array(row['elevation_profile']) != np.array(row['new_elevation']), axis=1)
 
-    print(df.head(20).to_string())
+    logger.verbose(df.head(20).to_string())
 
     def check_for_bridge_tunnel(elevation, new_elevation, changes):
         elevation = np.array(elevation)
@@ -1141,8 +1151,8 @@ def tunnel_bridges(df):
     #tunnel_gdf = tunnel_gdf.drop(columns=["tunnel_linestring"])
     #bridge_gdf = bridge_gdf.drop(columns=["bridge_linestring"])
 
-    #print(bridge_gdf.head(10).to_string())
-    #print(df.head().to_string())
+    #logger.verbose(bridge_gdf.head(10).to_string())
+    #logger.verbose(df.head().to_string())
     # safe file as geopackage
     df.to_file(r"data\Network\processed\new_links_realistic_tunnel_adjusted.gpkg")
     tunnel_gdf.to_file(r"data\Network\processed\edges_tunnels.gpkg")
@@ -1190,3 +1200,209 @@ def tunnel_bridges(df):
         plt.show()
     """
     return
+
+
+############################### Additions of new Infrastructure Generation Functions (sehitz) ###############################
+
+def generate_new_connections_between_hwy(limits_corridor: Tuple[float, float, float, float],
+                                          max_length: float, shortest_path_factor: float, along_side_buffer: float):
+    """
+    Generate new connections between highways within a specified corridor.
+    This function identifies missing direct connections between nodes in a highway network,
+    filters them based on distance and shortest path criteria, and removes connections that
+    run through or near existing links. The resulting new connections are saved to a GeoPackage file.
+    Parameters:
+    -----------
+    limits_corridor : Tuple[float, float, float, float]
+        The bounding box limits of the corridor (e_min, n_min, e_max, n_max).
+    max_length : float
+        The maximum allowable length for new connections.
+    shortest_path_factor : float
+        The factor by which the direct distance must be shorter than the shortest path distance
+        to consider a new connection.
+    along_side_buffer : float
+        The buffer distance to use when checking for proximity to existing nodes and links.
+    Returns:
+    --------
+    None
+    """
+
+    # Load the highway network
+    network = gpd.read_file(r"data/temp/network_highway.gpkg")
+
+    # Clip at corridor limits
+    e_min, n_min, e_max, n_max = limits_corridor
+    network = network.cx[e_min:e_max, n_min:n_max]
+
+    # Extract start and end nodes as Point geometries from LineStrings
+    start_points = gpd.GeoDataFrame(geometry=network.geometry.apply(lambda geom: Point(geom.coords[0])), crs=network.crs)
+    end_points = gpd.GeoDataFrame(geometry=network.geometry.apply(lambda geom: Point(geom.coords[-1])), crs=network.crs)
+
+    # Merge start and end points, dropping duplicates
+    nodes_gdf = pd.concat([start_points, end_points]).drop_duplicates(subset="geometry").reset_index(drop=True)
+
+    # Ensure CRS is in LV95 (EPSG:2056)
+    if nodes_gdf.crs != "epsg:2056":
+        nodes_gdf = nodes_gdf.to_crs("epsg:2056")
+
+    # Assign node IDs
+    nodes_gdf["Node"] = range(len(nodes_gdf))
+
+    # Create a dictionary mapping coordinates to node IDs
+    coord_to_node = {tuple(pt.coords[0]): node_id for pt, node_id in zip(nodes_gdf.geometry, nodes_gdf["Node"])}
+
+    # Create a set of existing direct connections
+    existing_links = set()
+    for _, row in network.iterrows():
+        from_coord = tuple(row.geometry.coords[0])
+        to_coord = tuple(row.geometry.coords[-1])
+        if from_coord in coord_to_node and to_coord in coord_to_node:
+            existing_links.add((coord_to_node[from_coord], coord_to_node[to_coord]))
+
+    # Generate all possible node combinations
+    potential_new_links = set(combinations(nodes_gdf["Node"], 2))
+
+    # Find missing direct connections
+    missing_connections = potential_new_links - existing_links
+    logger.verbose(f"Missing connections before filtering: {len(missing_connections)}")
+
+    # Compute pairwise distances
+    node_coords = nodes_gdf.geometry.apply(lambda p: (p.x, p.y)).to_list()
+    distance_matrix = cdist(node_coords, node_coords)
+
+    # Create a dictionary for quick lookup
+    node_index = {node: idx for idx, node in enumerate(nodes_gdf["Node"])}
+
+    # Filter connections based on distance threshold
+    filtered_connections = {
+        (n1, n2) for n1, n2 in missing_connections
+        if node_index.get(n1) is not None and node_index.get(n2) is not None
+        and distance_matrix[node_index[n1], node_index[n2]] <= max_length
+    }
+    logger.verbose(f"Filtered connections: {len(filtered_connections)}")
+
+    # Create a graph representation of the network
+    G = nx.Graph()
+    for _, row in network.iterrows():
+        from_coord = tuple(row.geometry.coords[0])
+        to_coord = tuple(row.geometry.coords[-1])
+        if from_coord in coord_to_node and to_coord in coord_to_node:
+            from_node = coord_to_node[from_coord]
+            to_node = coord_to_node[to_coord]
+            G.add_edge(from_node, to_node, weight=row["Length (meter)"])
+
+    # Ensure only nodes present in G are used
+    filtered_connections = {(n1, n2) for n1, n2 in filtered_connections if n1 in G and n2 in G}
+    logger.verbose(f"Connections after graph validation: {len(filtered_connections)}")
+
+    # Filter out redundant connections
+    final_new_links = []
+    for n1, n2 in filtered_connections:
+        try:
+            shortest_path_length = nx.shortest_path_length(G, source=n1, target=n2, weight="weight")
+            direct_distance = distance_matrix[node_index[n1], node_index[n2]]
+
+            if direct_distance * shortest_path_factor < shortest_path_length:
+                final_new_links.append((n1, n2, direct_distance))
+
+        except nx.NetworkXNoPath:
+            final_new_links.append((n1, n2, direct_distance))  # Keep if no existing path exists
+
+    logger.verbose(f"Final new links: {len(final_new_links)}")
+
+    # Create new link geometries
+    new_links_data = []
+    for n1, n2, length in final_new_links:
+        p1 = nodes_gdf.loc[nodes_gdf["Node"] == n1, "geometry"].values[0]
+        p2 = nodes_gdf.loc[nodes_gdf["Node"] == n2, "geometry"].values[0]
+        new_links_data.append({"From Node": n1, "To Node": n2, "Length (meter)": length, "geometry": LineString([p1, p2])})
+
+    # Convert to GeoDataFrame
+    new_links_gdf = gpd.GeoDataFrame(new_links_data, crs=nodes_gdf.crs)
+
+
+    ##### Remove Links that run through, near or along side existing links #####
+
+    # Remove links that run *through* existing ones
+    logger.verbose(f"New links before edge crossing removal: {len(new_links_gdf)}")
+    new_links_gdf = new_links_gdf[~new_links_gdf.crosses(network.unary_union)]
+    logger.verbose(f"New links after edge crossing removal: {len(new_links_gdf)}")
+
+
+    # Compute buffers once for all nodes (avoid re-buffering)
+    nodes_gdf["buffer_geom"] = nodes_gdf.geometry.buffer(along_side_buffer)
+
+    # Function to find neighboring nodes within buffer distance
+    def find_nearby_nodes(point, nodes, buffer_distance):
+        """Returns a set of node indices that are within the buffer distance from the given point."""
+        return set(nodes[nodes.geometry.distance(point) < buffer_distance].index)
+
+    # Function to check if a line starts, ends, or is near a given node
+    def starts_ends_or_near(line, node_idx, nodes):
+        start_point = Point(line.coords[0])
+        end_point = Point(line.coords[-1])
+
+        # Get nearby nodes for start and end points
+        start_neighbors = find_nearby_nodes(start_point, nodes, along_side_buffer)
+        end_neighbors = find_nearby_nodes(end_point, nodes, along_side_buffer)
+
+        # Allow if the node is in the start or end node's neighborhood
+        return node_idx in start_neighbors or node_idx in end_neighbors
+
+    # Initialize a set to store edges to remove
+    edges_to_remove = set()
+
+    # Iterate over each node (using its index)
+    for node_idx, node_geom in nodes_gdf.geometry.items():
+        node_buffer = nodes_gdf.loc[node_idx, "buffer_geom"]  # Use precomputed buffer
+
+        # Filter out lines that start, end, or are near this node
+        candidate_lines = new_links_gdf[~new_links_gdf.geometry.apply(lambda line: starts_ends_or_near(line, node_idx, nodes_gdf))]
+
+        # Find lines that intersect this buffer
+        intersecting_lines = candidate_lines[candidate_lines.intersects(node_buffer)]
+
+        # Add these to the set of edges to remove
+        edges_to_remove.update(intersecting_lines.index)
+
+    # Remove the identified edges
+    new_links_gdf = new_links_gdf.drop(index=edges_to_remove)
+
+    logger.verbose(f"New links after intersection removal: {len(new_links_gdf)}")
+
+    # Add a unique ID_NEW column that starts from 10000
+    new_links_gdf["ID_new"] = range(10000, 10000 + len(new_links_gdf))
+
+    # Save the new links to a GeoPackage file
+    new_links_gdf.to_file(r"data/Network/processed/new_links_new_connections.gpkg", driver="GPKG")
+
+    return
+
+def combine_links(bool_new_access: bool, bool_new_connections: bool):
+    """
+    Combines new access and connection links into an existing network and saves the result to a GeoPackage file.
+    Parameters:
+    bool_new_access (bool): If True, new access links will be loaded and combined with the existing network.
+    bool_new_connections (bool): If True, new connection links will be loaded and combined with the existing network.
+    Returns:
+    None
+    """
+
+    # Initialize an empty GeoDataFrame for the network
+    network = gpd.GeoDataFrame(columns=["From Node", "To Node", "Length (meter)", "geometry"], crs="epsg:2056")
+
+    # Links
+    # Load new links
+    if bool_new_access:
+        new_access = gpd.read_file(r"data/Network/processed/new_links_realistic_new_access.gpkg")
+        network = pd.concat([network, new_access], ignore_index=True)
+
+    if bool_new_connections:
+        new_connections = gpd.read_file(r"data/Network/processed/new_links_realistic_new_connections.gpkg")
+        network = pd.concat([network, new_connections], ignore_index=True)
+
+    # Save the combined network to a GeoPackage file
+    network.to_file(r"data/Network/processed/new_links_realistic.gpkg", driver="GPKG")
+
+    return
+
