@@ -23,7 +23,7 @@
         "Network": 1,
         "Scenario": 1,
         "Scoring": 1,
-        "Visualization": 1
+        "Visualize": 1
     },
     "Infrastructure":{
         "Road":{
