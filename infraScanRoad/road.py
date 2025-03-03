@@ -54,29 +54,19 @@ class Road:
         self.root = tk.Tk()
         self.root.title(title)
 
-        self.progress = ttk.Progressbar(
-            self.root, orient="horizontal", length=300, mode="determinate"
-        )
+        self.progress = ttk.Progressbar(self.root, orient="horizontal", length=300, mode="determinate")
         self.progress.pack(pady=10)
 
-        self.label_config = tk.Label(
-            self.root, text=f"Config: {self.config['General']['config_file_name']}"
-        )
+        self.label_config = tk.Label(self.root, text=f"Config: {self.config['General']['config_file_name']}")
         self.label_config.pack(pady=5)
 
-        self.label_start_time = tk.Label(
-            self.root, text=f"Start Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
+        self.label_start_time = tk.Label(self.root, text=f"Start Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         self.label_start_time.pack(pady=5)
 
-        self.label_estimated_completion_time = tk.Label(
-            self.root, text="Estimated Completion Time: Calculating..."
-        )
+        self.label_estimated_completion_time = tk.Label(self.root, text="Estimated Completion Time: Calculating...")
         self.label_estimated_completion_time.pack(pady=5)
 
-        self.label_current_process = tk.Label(
-            self.root, text="Current Process: Initializing..."
-        )
+        self.label_current_process = tk.Label(self.root, text="Current Process: Initializing...")
         self.label_current_process.pack(pady=5)
 
         self.total_steps = total
@@ -169,91 +159,49 @@ class Road:
         # Define variables for monetisation
 
         # Construction costs
-        self.c_openhighway = self.config["Road"]["Construction Costs"]["c_openhighway"][
-            "value"
-        ]
+        self.c_openhighway = self.config["Road"]["Construction Costs"]["c_openhighway"]["value"]
         self.c_tunnel = self.config["Road"]["Construction Costs"]["c_tunnel"]["value"]
         self.c_bridge = self.config["Road"]["Construction Costs"]["c_bridge"]["value"]
         self.ramp = self.config["Road"]["Construction Costs"]["ramp"]["value"]
 
         # Maintenance costs
-        self.c_structural_maint = self.config["Road"]["Maintenance Costs"][
-            "c_structural_maint"
-        ]["value"]
-        self.c_om_openhighway = self.config["Road"]["Maintenance Costs"][
-            "c_om_openhighway"
-        ]["value"]
-        self.c_om_tunnel = self.config["Road"]["Maintenance Costs"]["c_om_tunnel"][
-            "value"
-        ]
-        self.c_om_bridge = self.config["Road"]["Maintenance Costs"]["c_om_bridge"][
-            "value"
-        ]
-        self.maintenance_duration = self.config["Road"]["Maintenance Costs"][
-            "maintenance_duration"
-        ]["value"]
+        self.c_structural_maint = self.config["Road"]["Maintenance Costs"]["c_structural_maint"]["value"]
+        self.c_om_openhighway = self.config["Road"]["Maintenance Costs"]["c_om_openhighway"]["value"]
+        self.c_om_tunnel = self.config["Road"]["Maintenance Costs"]["c_om_tunnel"]["value"]
+        self.c_om_bridge = self.config["Road"]["Maintenance Costs"]["c_om_bridge"]["value"]
+        self.maintenance_duration = self.config["Road"]["Maintenance Costs"]["maintenance_duration"]["value"]
 
         # Value of travel time savings (VTTS)
         self.VTTS = self.config["Road"]["Value of Travel Time Savings"]["VTTS"]["value"]
-        self.travel_time_duration = self.config["Road"]["Value of Travel Time Savings"][
-            "travel_time_duration"
-        ]["value"]
+        self.travel_time_duration = self.config["Road"]["Value of Travel Time Savings"]["travel_time_duration"]["value"]
 
         # Noise costs
-        self.noise_distance = self.config["Road"]["Noise Costs"]["noise_distance"][
-            "value"
-        ]
+        self.noise_distance = self.config["Road"]["Noise Costs"]["noise_distance"]["value"]
         self.noise_values = self.config["Road"]["Noise Costs"]["noise_values"]["value"]
-        self.noise_duration = self.config["Road"]["Noise Costs"]["noise_duration"][
-            "value"
-        ]
+        self.noise_duration = self.config["Road"]["Noise Costs"]["noise_duration"]["value"]
 
         # Climate effects
-        self.co2_highway = self.config["Road"]["Climate Effects"]["co2_highway"][
-            "value"
-        ]
+        self.co2_highway = self.config["Road"]["Climate Effects"]["co2_highway"]["value"]
         self.co2_tunnel = self.config["Road"]["Climate Effects"]["co2_tunnel"]["value"]
 
         # Nature and Landscape
-        self.fragmentation = self.config["Road"]["Nature and Landscape"][
-            "fragmentation"
-        ]["value"]
-        self.fragmentation_duration = self.config["Road"]["Nature and Landscape"][
-            "fragmentation_duration"
-        ]["value"]
-        self.habitat_loss = self.config["Road"]["Nature and Landscape"]["habitat_loss"][
-            "value"
-        ]
-        self.habitat_loss_duration = self.config["Road"]["Nature and Landscape"][
-            "habitat_loss_duration"
-        ]["value"]
+        self.fragmentation = self.config["Road"]["Nature and Landscape"]["fragmentation"]["value"]
+        self.fragmentation_duration = self.config["Road"]["Nature and Landscape"]["fragmentation_duration"]["value"]
+        self.habitat_loss = self.config["Road"]["Nature and Landscape"]["habitat_loss"]["value"]
+        self.habitat_loss_duration = self.config["Road"]["Nature and Landscape"]["habitat_loss_duration"]["value"]
 
         # Land reallocation
-        self.forest_reallocation = self.config["Road"]["Land Reallocation"][
-            "forest_reallocation"
-        ]["value"]
-        self.meadow_reallocation = self.config["Road"]["Land Reallocation"][
-            "meadow_reallocation"
-        ]["value"]
-        self.reallocation_duration = self.config["Road"]["Land Reallocation"][
-            "reallocation_duration"
-        ]["value"]
+        self.forest_reallocation = self.config["Road"]["Land Reallocation"]["forest_reallocation"]["value"]
+        self.meadow_reallocation = self.config["Road"]["Land Reallocation"]["meadow_reallocation"]["value"]
+        self.reallocation_duration = self.config["Road"]["Land Reallocation"]["reallocation_duration"]["value"]
 
         # For infrastructure development generation
         # Access points
-        self.n_new_access_points = self.config["Road"]["Access Points"][
-            "n_new_access_points"
-        ]["value"]
+        self.n_new_access_points = self.config["Road"]["Access Points"]["n_new_access_points"]["value"]
         # Connecting roads (cr)
-        self.max_length_connecting_roads = self.config["Road"]["Connecting Roads"][
-            "max_length"
-        ]["value"]
-        self.shorter_by_connecting_roads = self.config["Road"]["Connecting Roads"][
-            "shorter_by"
-        ]["value"]
-        self.alongside_buffer_connecting_roads = self.config["Road"][
-            "Connecting Roads"
-        ]["alongside_buffer"]["value"]
+        self.max_length_connecting_roads = self.config["Road"]["Connecting Roads"]["max_length"]["value"]
+        self.shorter_by_connecting_roads = self.config["Road"]["Connecting Roads"]["shorter_by"]["value"]
+        self.alongside_buffer_connecting_roads = self.config["Road"]["Connecting Roads"]["alongside_buffer"]["value"]
 
         # Define spatial limits of the research corridor
         # The coordinates must end with 000 in order to match the coordinates of the input raster data
@@ -312,7 +260,7 @@ class Road:
         # Tif file of all unsuitable land cover and protected areas
         # File is stored to 'data\landuse_landcover\processed\zone_no_infra\protected_area_{suffix}.tif'
 
-        # all_protected_area_to_raster(suffix="corridor")
+        road_data_import.all_protected_area_to_raster(suffix="corridor")
 
         self.runtimes["Import land use and land cover data"] = time.time() - st
 
@@ -323,16 +271,14 @@ class Road:
 
         # Import the highway network and preprocess it
         # Data are stored as "data/temp/network_highway.gpkg"
-        # road_data_import.load_nw()
+        road_data_import.load_nw()
 
         # Read the network dataset to avoid running the function above
         self.network = gpd.read_file(r"data/temp/network_highway.gpkg")
 
         # Import manually gathered access points and map them on the highway infrastructure
         # The same point but with adjusted coordinate are saved to "data\access_highway_matched.gpkg"
-        self.df_access = pd.read_csv(
-            r"data/manually_gathered_data/highway_access.csv", sep=";"
-        )
+        self.df_access = pd.read_csv(r"data/manually_gathered_data/highway_access.csv", sep=";")
         road_data_import.map_access_points_on_network(
             current_points=self.df_access,
             network=self.network,
@@ -375,9 +321,7 @@ class Road:
         st = time.time()
 
         bool_new_access = self.config["Infrastructure"]["Road"]["New Access Points"]
-        bool_connecting_roads = self.config["Infrastructure"]["Road"][
-            "Connecting Roads"
-        ]
+        bool_connecting_roads = self.config["Infrastructure"]["Road"]["Connecting Roads"]
 
         if bool_new_access:
             """
@@ -398,31 +342,19 @@ class Road:
             # filtered_gdf.to_file(r"data\Network\processed\generated_nodes_new_access.gpkg")
 
             # Import the generated points as dataframe
-            self.generated_points = gpd.read_file(
-                r"data\Network\processed\generated_nodes_new_access.gpkg"
-            )
+            self.generated_points = gpd.read_file(r"data\Network\processed\generated_nodes_new_access.gpkg")
 
             # Import current points as dataframe and filter only access points (no intersection points)
-            self.current_points = gpd.read_file(
-                r"data/Network/processed/points_corridor_attribute.gpkg"
-            )
-            self.current_access_points = self.current_points.loc[
-                self.current_points["intersection"] == 0
-            ]
+            self.current_points = gpd.read_file(r"data/Network/processed/points_corridor_attribute.gpkg")
+            self.current_access_points = self.current_points.loc[self.current_points["intersection"] == 0]
 
             # Connect the generated points to the existing access points
             # New lines are stored in "data/Network/processed/new_links.gpkg"
-            self.filtered_rand_temp = (
-                road_generate_infrastructure.connect_points_to_network(
-                    self.generated_points, self.current_access_points
-                )
+            self.filtered_rand_temp = road_generate_infrastructure.connect_points_to_network(
+                self.generated_points, self.current_access_points
             )
-            self.nearest_gdf = road_generate_infrastructure.create_nearest_gdf(
-                self.filtered_rand_temp
-            )
-            road_generate_infrastructure.create_lines(
-                self.generated_points, self.nearest_gdf
-            )
+            self.nearest_gdf = road_generate_infrastructure.create_nearest_gdf(self.filtered_rand_temp)
+            road_generate_infrastructure.create_lines(self.generated_points, self.nearest_gdf)
 
             # Filter the generated links that connect to one of the access point within the considered corridor
             # These access points are defined in the manually defined list of access points
@@ -436,9 +368,7 @@ class Road:
             # If a point is not accessible due to the banned zoned it is stored in "data/Network/processed/points_inaccessible.csv"
             raster = r"data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif"
             new_links_new_access = r"data\Network\processed\new_links_new_access.gpkg"
-            realistic_links_new_access = (
-                r"data\Network\processed\new_links_realistic_new_access.gpkg"
-            )
+            realistic_links_new_access = r"data\Network\processed\new_links_realistic_new_access.gpkg"
 
             road_generate_infrastructure.routing_raster(
                 raster_path=raster,
@@ -464,12 +394,8 @@ class Road:
 
             # Use the protected Areas to generate a realistic road network
             raster = r"data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif"
-            new_links_new_connections = (
-                r"data\Network/processed/new_links_new_connections.gpkg"
-            )
-            realistic_links_new_connections = (
-                r"data\Network/processed/new_links_realistic_new_connections.gpkg"
-            )
+            new_links_new_connections = r"data\Network/processed/new_links_new_connections.gpkg"
+            realistic_links_new_connections = r"data\Network/processed/new_links_realistic_new_connections.gpkg"
 
             road_generate_infrastructure.routing_raster(
                 raster_path=raster,
@@ -479,9 +405,7 @@ class Road:
 
         # Combine all generated links and nodes to one dataframe
         # The resulting dataframe is stored in "data/Network/processed/new_links_realistic.gpkg"
-        road_generate_infrastructure.combine_links(
-            bool_new_access, bool_connecting_roads
-        )
+        road_generate_infrastructure.combine_links(bool_new_access, bool_connecting_roads)
 
         """
         #plot_corridor(network, limits=limits_corridor, location=location, new_nodes=filtered_rand_gdf, access_link=True)
@@ -527,9 +451,7 @@ class Road:
 
         road_data_import.import_data(self.limits_variables)
 
-        self.runtimes["Import variable for scenario (population and employment)"] = (
-            time.time() - st
-        )
+        self.runtimes["Import variable for scenario (population and employment)"] = time.time() - st
 
     def generate_scenarios(self):
         # Define scenario
@@ -553,9 +475,7 @@ class Road:
 
         # Aggregate the the scenario data to over the voronoi polygons, here euclidian polygons
         # Store the resulting file to "data/Voronoi/voronoi_developments_euclidian_values.shp"
-        polygons_gdf = gpd.read_file(
-            r"data/Voronoi/voronoi_developments_euclidian.gpkg"
-        )
+        polygons_gdf = gpd.read_file(r"data/Voronoi/voronoi_developments_euclidian.gpkg")
         road_scenarios.scenario_to_voronoi(polygons_gdf, euclidean=True)
 
         # Convert multiple tif files to one same tif with multiple bands
@@ -584,13 +504,11 @@ class Road:
         st = time.time()
 
         # Import the road network from OSM and rasterize it
-        road_voronoi_tiling.nw_from_osm(
+        """road_voronoi_tiling.nw_from_osm(
             self.limits_variables
         )  # todo this requires data under data/Network/OSM_road that is not available.
-        # road_voronoi_tiling.osm_nw_to_raster(self.limits_variables)
-        self.runtimes["Import and rasterize local road network from OSM"] = (
-            time.time() - st
-        )
+        road_voronoi_tiling.osm_nw_to_raster(self.limits_variables)"""
+        self.runtimes["Import and rasterize local road network from OSM"] = time.time() - st
         st = time.time()
 
         # Write runtimes to a file
@@ -609,9 +527,7 @@ class Road:
         # First import the elevation model downscale the resolution and store it as raster data to 'data/elevation_model/elevation.tif'
         # resolution = 50 # meter
         # import_elevation_model(new_resolution=resolution)
-        self.runtimes["Import elevation model in 50 meter resolution"] = (
-            time.time() - st
-        )
+        self.runtimes["Import elevation model in 50 meter resolution"] = time.time() - st
         st = time.time()
 
         # Compute the elevation profile for each generated highway routing based on the elevation model
@@ -623,9 +539,7 @@ class Road:
         # get_tunnel_candidates(links_temp)
         road_generate_infrastructure.tunnel_bridges(links_temp)
 
-        self.runtimes[
-            "Optimize eleavtion profile of links to find need for tunnel and bridges"
-        ] = time.time() - st
+        self.runtimes["Optimize eleavtion profile of links to find need for tunnel and bridges"] = time.time() - st
         st = time.time()
 
         # Compute the construction costs for each development (generated points with according link to existing access point)
@@ -707,12 +621,8 @@ class Road:
         # stored as vector file in "data/Network/travel_time/Voronoi_statusquo.gpkg"
         road_OSM_network.travel_cost_polygon(self.limits_variables)
 
-        self.voronoi_status_quo = gpd.read_file(
-            r"data/Voronoi/voronoi_status_quo_euclidian.gpkg"
-        )
-        self.voronoi_tt = gpd.read_file(
-            r"data/Network/travel_time/Voronoi_statusquo.gpkg"
-        )
+        self.voronoi_status_quo = gpd.read_file(r"data/Voronoi/voronoi_status_quo_euclidian.gpkg")
+        self.voronoi_tt = gpd.read_file(r"data/Network/travel_time/Voronoi_statusquo.gpkg")
 
         # Same operation is made for all developments
         # These are store similarily than above, with id_new beeing the id of the development (ID of generated point)
@@ -722,9 +632,9 @@ class Road:
         # stored as vector file in "data/Network/travel_time/developments/dev{id_new}_Voronoi.gpkg"
         road_OSM_network.travel_cost_developments(self.limits_variables)
 
-        self.runtimes[
-            "Voronoi tiling: Compute travel time from each raster cell to the closest access point"
-        ] = time.time() - st
+        self.runtimes["Voronoi tiling: Compute travel time from each raster cell to the closest access point"] = (
+            time.time() - st
+        )
         st = time.time()
 
         # Generate one dataframe containing the Voronoi polygons for all developments and all access points within the
@@ -747,9 +657,7 @@ class Road:
         st = time.time()
 
         # Compute the accessibility for status quo for scenarios
-        accessib_status_quo = road_scoring.accessibility_status_quo(
-            VTT_h=self.VTTS, duration=self.travel_time_duration
-        )
+        accessib_status_quo = road_scoring.accessibility_status_quo(VTT_h=self.VTTS, duration=self.travel_time_duration)
 
         # Compute the benefit in accessibility for each development compared to the status quo
         # The accessibility for each polygon for every development is store in "data/Voronoi/voronoi_developments_local_accessibility.gpkg"
@@ -800,15 +708,9 @@ class Road:
         # Import to the overall cost dataframe
         self.gdf_costs = gpd.read_file(r"data/costs/total_costs.gpkg")
         # Convert all costs in million CHF
-        self.gdf_costs["total_low"] = (self.gdf_costs["total_low"] / 1000000).astype(
-            int
-        )
-        self.gdf_costs["total_medium"] = (
-            self.gdf_costs["total_medium"] / 1000000
-        ).astype(int)
-        self.gdf_costs["total_high"] = (self.gdf_costs["total_high"] / 1000000).astype(
-            int
-        )
+        self.gdf_costs["total_low"] = (self.gdf_costs["total_low"] / 1000000).astype(int)
+        self.gdf_costs["total_medium"] = (self.gdf_costs["total_medium"] / 1000000).astype(int)
+        self.gdf_costs["total_high"] = (self.gdf_costs["total_high"] / 1000000).astype(int)
 
         self.runtimes["Aggregate costs"] = time.time() - st
 
@@ -821,22 +723,16 @@ class Road:
         tif_path_plot = r"data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif"
 
         links_beeline = gpd.read_file(r"data/Network/processed/new_links.gpkg")
-        links_realistic = gpd.read_file(
-            r"data/Network/processed/new_links_realistic.gpkg"
-        )
+        links_realistic = gpd.read_file(r"data/Network/processed/new_links_realistic.gpkg")
         logger.verbose(links_realistic.head(5).to_string())
         # Plot the net benefits for each generated point and interpolate the area in between
         generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
         # Get a gpd df with points have an ID_new that is not in links_realistic ID_new
-        filtered_rand_gdf = generated_points[
-            ~generated_points["ID_new"].isin(links_realistic["ID_new"])
-        ]
+        filtered_rand_gdf = generated_points[~generated_points["ID_new"].isin(links_realistic["ID_new"])]
         # plot_points_gen(points=generated_points, edges=links_beeline, banned_area=tif_path_plot, boundary=boundary_plot, network=network, all_zones=True, plot_name="gen_nodes_beeline")
         # plot_points_gen(points=generated_points, points_2=filtered_rand_gdf, edges=links_realistic, banned_area=tif_path_plot, boundary=boundary_plot, network=network, all_zones=False, plot_name="gen_links_realistic")
 
-        voronoi_dev_2 = gpd.read_file(
-            r"data/Network/travel_time/developments/dev779_Voronoi.gpkg"
-        )
+        voronoi_dev_2 = gpd.read_file(r"data/Network/travel_time/developments/dev779_Voronoi.gpkg")
         road_plots.plot_voronoi_development(
             self.voronoi_tt,
             voronoi_dev_2,
@@ -928,15 +824,11 @@ class Road:
         )
 
         # Plot uncertainty
-        self.gdf_costs["mean_costs"] = self.gdf_costs[
-            ["total_low", "total_medium", "total_high"]
-        ].mean(axis=1)
-        self.gdf_costs["std"] = self.gdf_costs[
-            ["total_low", "total_medium", "total_high"]
-        ].std(axis=1)
-        self.gdf_costs["cv"] = self.gdf_costs[
-            ["total_low", "total_medium", "total_high"]
-        ].std(axis=1) / abs(self.gdf_costs["mean_costs"])
+        self.gdf_costs["mean_costs"] = self.gdf_costs[["total_low", "total_medium", "total_high"]].mean(axis=1)
+        self.gdf_costs["std"] = self.gdf_costs[["total_low", "total_medium", "total_high"]].std(axis=1)
+        self.gdf_costs["cv"] = self.gdf_costs[["total_low", "total_medium", "total_high"]].std(axis=1) / abs(
+            self.gdf_costs["mean_costs"]
+        )
         self.gdf_costs["cv"] = self.gdf_costs["cv"] * 10000000
 
         road_plots.plot_cost_uncertainty(
@@ -964,9 +856,7 @@ class Road:
         # Plot the uncertainty of the nbr highest ranked developments as boxplot
         road_plots.boxplot(self.gdf_costs, 15)
 
-        road_plots.plot_benefit_distribution_bar_single(
-            df_costs=self.gdf_costs, column="total_medium"
-        )
+        road_plots.plot_benefit_distribution_bar_single(df_costs=self.gdf_costs, column="total_medium")
 
         road_plots.plot_benefit_distribution_line_multi(
             df_costs=self.gdf_costs,

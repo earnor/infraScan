@@ -1,17 +1,18 @@
 # Import Package
-import tkinter as tk # For GUI
-from tkinter import ttk, filedialog, messagebox # For GUI
-import json # For data operation
-import subprocess # For running sub moduls (e.g. road.py, rail.py)
+import tkinter as tk  # For GUI
+from tkinter import ttk, filedialog, messagebox  # For GUI
+import json  # For data operation
+import subprocess  # For running sub moduls (e.g. road.py, rail.py)
 import os
-os.environ['USE_PYGEOS'] = '0'  # Force GeoPandas to use Shapely
+
+os.environ["USE_PYGEOS"] = "0"  # Force GeoPandas to use Shapely
 import sys
 import traceback
-import multiprocessing # For running sub moduls (e.g. road, rail)
-from icecream import ic # For debugging
+import multiprocessing  # For running sub moduls (e.g. road, rail)
+from icecream import ic  # For debugging
 import logging
 
-from datetime import datetime # For time operation
+from datetime import datetime  # For time operation
 import geopandas as gpd
 import matplotlib.pyplot as plt
 from shapely.geometry import box
@@ -26,6 +27,7 @@ sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
 # For that reason, we need to add the parent directory to the Python path
 # And go back in the directory structure to import the classes
 from logging_config import logger  # Import central logger
+
 try:
     from infraScanRail.rail import Rail
     from infraScanRoad.road import Road
@@ -56,6 +58,7 @@ def start_process(process_class, config):
         error_message = f"An error occurred in {process_class.__name__}:\n{traceback.format_exc()}"
         logger.error(error_message)  # Ensure error prints to the terminal
 
+
 class InfraGUI:
     def __init__(self, root):
         """
@@ -67,7 +70,9 @@ class InfraGUI:
         self.root = root
         self.root.title("Infrastructure Evaluation GUI")
         self.size = (800, 800)
-        self.root.geometry(f"{self.size[0]}x{self.size[1]}+{int((root.winfo_screenwidth() - self.size[0]) / 2)}+{int((root.winfo_screenheight() - self.size[1]) / 2)}")
+        self.root.geometry(
+            f"{self.size[0]}x{self.size[1]}+{int((root.winfo_screenwidth() - self.size[0]) / 2)}+{int((root.winfo_screenheight() - self.size[1]) / 2)}"
+        )
 
         self.data = config.copy()  # Copy the base configuration to self.data
         self.original_data = json.loads(json.dumps(config))  # Deep copy to store original values
@@ -107,7 +112,7 @@ class InfraGUI:
         self (object): The instance of the class containing this method.
         """
         # General tab UI components
-        
+
         # Control buttons
         control_frame = ttk.LabelFrame(self.general_tab, text="Configuration")
         # Label that shows the current name of the configuration file
@@ -115,9 +120,15 @@ class InfraGUI:
         self.config_file_var = tk.StringVar()
         self.config_file_var.set(self.data["General"].get("config_file_name", ""))
         ttk.Label(control_frame, textvariable=self.config_file_var).grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        ttk.Button(control_frame, text="Import JSON", command=self.import_json).grid(row=0, column=2, padx=5, pady=5, sticky="ew")
-        ttk.Button(control_frame, text="Export JSON", command=self.export_json).grid(row=0, column=3, padx=5, pady=5, sticky="ew")
-        ttk.Button(control_frame, text="Reset to Default", command=self.reset_to_default).grid(row=1, column=2, columnspan=2, padx=5, pady=5, sticky="ew")
+        ttk.Button(control_frame, text="Import JSON", command=self.import_json).grid(
+            row=0, column=2, padx=5, pady=5, sticky="ew"
+        )
+        ttk.Button(control_frame, text="Export JSON", command=self.export_json).grid(
+            row=0, column=3, padx=5, pady=5, sticky="ew"
+        )
+        ttk.Button(control_frame, text="Reset to Default", command=self.reset_to_default).grid(
+            row=1, column=2, columnspan=2, padx=5, pady=5, sticky="ew"
+        )
         control_frame.pack(fill="x", padx=10, pady=5)
 
         # Process Selection (Radio Buttons)
@@ -136,8 +147,12 @@ class InfraGUI:
             col_frame.grid(row=0, column=idx, padx=20, pady=5)
 
             ttk.Label(col_frame, text=process).pack(anchor="center")
-            ttk.Radiobutton(col_frame, text="True", variable=var, value=1, command=lambda p=process: self.update_process(p, 1)).pack(side="left", anchor="center")
-            ttk.Radiobutton(col_frame, text="False", variable=var, value=0, command=lambda p=process: self.update_process(p, 0)).pack(side="right", anchor="center")
+            ttk.Radiobutton(
+                col_frame, text="True", variable=var, value=1, command=lambda p=process: self.update_process(p, 1)
+            ).pack(side="left", anchor="center")
+            ttk.Radiobutton(
+                col_frame, text="False", variable=var, value=0, command=lambda p=process: self.update_process(p, 0)
+            ).pack(side="right", anchor="center")
 
         # Infrastructure Selection (Radio Buttons)
         infra_frame = ttk.LabelFrame(self.general_tab, text="Infrastructure Selection")
@@ -157,19 +172,30 @@ class InfraGUI:
                 col_frame.grid(row=0, column=idx, padx=20, pady=5)
 
                 ttk.Label(col_frame, text=infra).pack(anchor="center")
-                ttk.Radiobutton(col_frame, text="True", variable=var, value=1,
-                        command=lambda i=infra_category, 
-                        k=infra: self.update_infrastructure(i, k, 1)).pack(side="left", anchor="center")
-                ttk.Radiobutton(col_frame, text="False", variable=var, value=0,
-                        command=lambda i=infra_category,
-                        k=infra: self.update_infrastructure(i, k, 0)).pack(side="right", anchor="center")
-            ttk.Button(category_frame, text=f"Run {infra_category}", command=lambda infra_category=infra_category: self.run_script(f"{infra_category.lower()}")).pack(side="right", padx=5, pady=5)
-        
+                ttk.Radiobutton(
+                    col_frame,
+                    text="True",
+                    variable=var,
+                    value=1,
+                    command=lambda i=infra_category, k=infra: self.update_infrastructure(i, k, 1),
+                ).pack(side="left", anchor="center")
+                ttk.Radiobutton(
+                    col_frame,
+                    text="False",
+                    variable=var,
+                    value=0,
+                    command=lambda i=infra_category, k=infra: self.update_infrastructure(i, k, 0),
+                ).pack(side="right", anchor="center")
+            ttk.Button(
+                category_frame,
+                text=f"Run {infra_category}",
+                command=lambda infra_category=infra_category: self.run_script(f"{infra_category.lower()}"),
+            ).pack(side="right", padx=5, pady=5)
+
         # Run Both Button
         run_frame = ttk.Frame(self.general_tab)
         run_frame.pack(fill="x", padx=10, pady=5)
         ttk.Button(run_frame, text="Run Both", command=self.run_both).pack(pady=5)
-
 
     def update_process(self, key, value):
         """Updates the Process dictionary when a radio button is selected."""
@@ -188,7 +214,7 @@ class InfraGUI:
         directory_frame.pack(fill="x", padx=10, pady=5)
 
         ttk.Label(directory_frame, text="Working Directory:").pack(pady=5)
-        
+
         # Entry to display the working directory and fill with the stated working directory
         self.working_dir_entry = ttk.Entry(directory_frame, width=75)
         self.working_dir_entry.insert(0, self.data["General"].get("working_directory", ""))
@@ -202,7 +228,7 @@ class InfraGUI:
 
         def create_directory_entry(parent, label_text: str, subdirs: list):
             """Creates a read-only directory entry with a label.
-            
+
             Args:
             parent: Parent widget
             label_text (str): Text for the label
@@ -217,9 +243,12 @@ class InfraGUI:
             return entry
 
         # Create directory entries
-        self.rail_data_entry = create_directory_entry(directory_frame, "Rail Data Directory:", ["InfraScanRail", "data"])
-        self.road_data_entry = create_directory_entry(directory_frame, "Road Data Directory:", ["InfraScanRoad", "data"])
-        
+        self.rail_data_entry = create_directory_entry(
+            directory_frame, "Rail Data Directory:", ["InfraScanRail", "data"]
+        )
+        self.road_data_entry = create_directory_entry(
+            directory_frame, "Road Data Directory:", ["InfraScanRoad", "data"]
+        )
 
     def set_working_directory(self):
         """
@@ -239,7 +268,7 @@ class InfraGUI:
             self.refresh_data_paths()
 
     def refresh_data_paths(self):
-        """ Refreshes the automatically generated data directories. """
+        """Refreshes the automatically generated data directories."""
         if not hasattr(self, "rail_data_entry") or not hasattr(self, "road_data_entry"):
             return  # Ensure entries exist before updating
 
@@ -271,7 +300,6 @@ class InfraGUI:
             self.refresh_data_paths()  # Update the data directory paths
         else:
             messagebox.showerror("Invalid Directory", "The directory you entered does not exist.")
-
 
     def create_settings_tab(self, tab: tk.Widget, category: str):
         """
@@ -317,7 +345,9 @@ class InfraGUI:
                 entry = ttk.Entry(row, width=40)
                 entry.insert(0, str(display_value))
                 entry.pack(side="right", expand=True)
-                entry.bind("<FocusOut>", lambda e, k=key, s=subcategory, c=category, en=entry: self.update_data(k, s, c, en))
+                entry.bind(
+                    "<FocusOut>", lambda e, k=key, s=subcategory, c=category, en=entry: self.update_data(k, s, c, en)
+                )
                 self.entries[category][subcategory][key] = entry
 
     def update_data(self, key: str, subcategory: str, category: str, entry: ttk.Entry):
@@ -334,7 +364,10 @@ class InfraGUI:
             value = json.loads(entry.get())
 
             # Check if the original value is a dictionary with "value" and "unit"
-            if isinstance(self.data[category][subcategory][key], dict) and "unit" in self.data[category][subcategory][key]:
+            if (
+                isinstance(self.data[category][subcategory][key], dict)
+                and "unit" in self.data[category][subcategory][key]
+            ):
                 self.data[category][subcategory][key]["value"] = value  # Preserve the unit
             else:
                 self.data[category][subcategory][key] = {"value": value, "unit": ""}  # Fallback
@@ -344,7 +377,7 @@ class InfraGUI:
 
     def create_spatial_limit_tab(self):
         """
-        Creates the UI components for the Spatial Limits tab, allowing users to change 
+        Creates the UI components for the Spatial Limits tab, allowing users to change
         the limits set in the JSON configuration and visualize the spatial extent with GeoPandas.
         """
         # Ensure "General" and "Spatial Limits" exist in self.entries
@@ -401,8 +434,6 @@ class InfraGUI:
         except ValueError:
             messagebox.showerror("Input Error", f"Invalid input for {key}. Please enter a valid number.")
 
-
-
     def update_spatial_plot(self):
         """
         Updates the spatial extent plot based on the values in the Spatial Limits tab.
@@ -424,7 +455,7 @@ class InfraGUI:
 
             # Clear the previous plot
             self.ax.clear()
-            
+
             # Plot bounding box
             bbox_gdf.plot(ax=self.ax, color="none", edgecolor="blue", linewidth=2, label="Bounding Box")
 
@@ -445,7 +476,7 @@ class InfraGUI:
             e_max_plot = e_center + (max_dim / 2) + buffer_size
             n_min_plot = n_center - (max_dim / 2) - buffer_size
             n_max_plot = n_center + (max_dim / 2) + buffer_size
-            
+
             # Add basemap from Contextily
             try:
                 ctx.add_basemap(self.ax, source=ctx.providers.SwissFederalGeoportal.NationalMapColor)
@@ -455,13 +486,13 @@ class InfraGUI:
             # Set limits to enforce square plot
             self.ax.set_xlim(e_min_plot, e_max_plot)
             self.ax.set_ylim(n_min_plot, n_max_plot)
-            self.ax.set_aspect('equal', adjustable='box')  # Ensure square aspect ratio
-            self.ax.grid(True, which='both', linestyle='--', linewidth=0.5) # Add grid
+            self.ax.set_aspect("equal", adjustable="box")  # Ensure square aspect ratio
+            self.ax.grid(True, which="both", linestyle="--", linewidth=0.5)  # Add grid
             # Turn of all edges
-            self.ax.spines['top'].set_visible(False)
-            self.ax.spines['right'].set_visible(False)
-            self.ax.spines['bottom'].set_visible(False)
-            self.ax.spines['left'].set_visible(False)
+            self.ax.spines["top"].set_visible(False)
+            self.ax.spines["right"].set_visible(False)
+            self.ax.spines["bottom"].set_visible(False)
+            self.ax.spines["left"].set_visible(False)
 
             # Set labels and title
             self.ax.set_xlabel("Easting (m)")
@@ -479,8 +510,6 @@ class InfraGUI:
 
         except ValueError:
             messagebox.showerror("Input Error", "Invalid spatial extent values. Please enter valid numbers.")
-
-
 
     def reset_to_default(self):
         """
@@ -503,7 +532,9 @@ class InfraGUI:
 
         # Save configuration before running
         working_dir = self.data["General"].get("working_directory", "")
-        save_path = os.path.join(working_dir, "GUI", "past_runs", f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        save_path = os.path.join(
+            working_dir, "GUI", "past_runs", f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
         # Set Config File Name in json itself (if name is base_config.json, it will be overwritten)
         if self.data["General"]["config_file_name"] == "base_config.json":
             self.data["General"]["config_file_name"] = os.path.basename(save_path)
@@ -554,14 +585,13 @@ class InfraGUI:
             json.dump(self.data, file, indent=4)
 
     def import_json(self):
-        """ Imports configuration data from a JSON file and updates the UI """
+        """Imports configuration data from a JSON file and updates the UI"""
         file_path = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
         if file_path:
             with open(file_path, "r") as file:
                 self.data = json.load(file)
             self.refresh_ui()
             messagebox.showinfo("Success", "Configuration loaded successfully.")
-
 
     def export_json(self):
         """Export the current configuration to a JSON file, ensuring unit preservation."""
@@ -580,22 +610,24 @@ class InfraGUI:
                         value = entry.get()
 
                         # Ensure the existing unit is not lost
-                        if isinstance(self.data[category][subcategory][key], dict) and "unit" in self.data[category][subcategory][key]:
+                        if (
+                            isinstance(self.data[category][subcategory][key], dict)
+                            and "unit" in self.data[category][subcategory][key]
+                        ):
                             self.data[category][subcategory][key]["value"] = json.loads(value)
 
             # Save to file
             with open(file_path, "w") as file:
                 json.dump(self.data, file, indent=4)
-            
+
             messagebox.showinfo("Success", "Configuration saved successfully.")
 
-
     def refresh_ui(self):
-        """ Refreshes the UI with the current data after an import or reset. """
+        """Refreshes the UI with the current data after an import or reset."""
 
         # Refresh config file name
         self.config_file_var.set(self.data["General"].get("config_file_name", ""))
-        
+
         # Refresh process selection radio buttons
         for process, var in self.process_vars.items():
             var.set(self.data["Process"].get(process, 0))
@@ -632,7 +664,7 @@ class InfraGUI:
         self.refresh_spatial_tab()
 
     def refresh_spatial_tab(self):
-        """ Refreshes the spatial limits tab and updates the plot. """
+        """Refreshes the spatial limits tab and updates the plot."""
         if hasattr(self, "spatial_entries"):
             for key, entry in self.spatial_entries.items():
                 value = self.data["General"]["Spatial Limits"].get(key, "")
@@ -641,10 +673,6 @@ class InfraGUI:
 
         # Redraw the spatial plot
         self.update_spatial_plot()
-
-
-
-
 
 
 if __name__ == "__main__":

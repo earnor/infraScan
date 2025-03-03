@@ -4,7 +4,7 @@ import os
 import zipfile
 import timeit
 
-os.environ['USE_PYGEOS'] = '0'
+os.environ["USE_PYGEOS"] = "0"
 import geopandas as gpd
 import pandas as pd
 import numpy as np
@@ -33,7 +33,7 @@ from logging_config import logger  # Import central logger
 
 def import_elevation_model_old():
     # Replace with your actual file path list
-    file_paths = ['path/to/zip1', 'path/to/zip2', ...]
+    file_paths = ["path/to/zip1", "path/to/zip2", ...]
     # "data/elevation_model/ch.swisstopo.swissalti3d-pivq0Jb7.csv"
 
     # Temporary directory for extracted files
@@ -45,22 +45,23 @@ def import_elevation_model_old():
         # Here you would download the file if 'file_path' is a URL
         # For example, using requests.get if it's an HTTP link
         # Extract the ZIP file
-        with zipfile.ZipFile(file_path, 'r') as zip_ref:
+        with zipfile.ZipFile(file_path, "r") as zip_ref:
             zip_ref.extractall(temp_dir)
 
         # Now read the extracted XYZ file (assuming there's only one file in the ZIP)
         xyz_file = os.listdir(temp_dir)[0]  # This is not robust - only works if there's one file in the ZIP
         xyz_path = os.path.join(temp_dir, xyz_file)
-        data = pd.read_csv(xyz_path, delim_whitespace=True, names=['X', 'Y', 'Z'])
+        data = pd.read_csv(xyz_path, delim_whitespace=True, names=["X", "Y", "Z"])
 
         # Perform your data processing here
         # For example, creating a grid to interpolate onto
         # Define your grid spacing for the raster (this is where you coarsen the resolution)
-        grid_x, grid_y = np.mgrid[data['X'].min():data['X'].max():100,
-                         data['Y'].min():data['Y'].max():100]  # 100 can be replaced with the desired spacing
+        grid_x, grid_y = np.mgrid[
+            data["X"].min() : data["X"].max() : 100, data["Y"].min() : data["Y"].max() : 100
+        ]  # 100 can be replaced with the desired spacing
 
         # Interpolate using griddata - this creates the raster from the point data
-        grid_z = griddata((data['X'], data['Y']), data['Z'], (grid_x, grid_y), method='nearest')
+        grid_z = griddata((data["X"], data["Y"]), data["Z"], (grid_x, grid_y), method="nearest")
 
         # The rest of the code goes here to create and resample the raster using rasterio...
 
@@ -90,11 +91,12 @@ def construction_costs(highway, tunnel, bridge, ramp):
     # Aggreagte by development over all tunnels and bridges
     generated_links_gdf = generated_links_gdf.fillna(0)
     generated_links_gdf = generated_links_gdf.groupby(by="ID_new").agg(
-        {"ID_current": "first", "total_tunnel_length": "sum", "total_bridge_length": "sum", "geometry": "first"})
+        {"ID_current": "first", "total_tunnel_length": "sum", "total_bridge_length": "sum", "geometry": "first"}
+    )
     # Convert the index into a column
     generated_links_gdf = generated_links_gdf.reset_index()
     # Convert the DataFrame back to a GeoDataFrame
-    generated_links_gdf = gpd.GeoDataFrame(generated_links_gdf, geometry='geometry', crs="epsg:2056")
+    generated_links_gdf = gpd.GeoDataFrame(generated_links_gdf, geometry="geometry", crs="epsg:2056")
 
     # Costs due to bridges to cross water
     generated_links_gdf = bridges_crossing_water(generated_links_gdf)
@@ -105,30 +107,40 @@ def construction_costs(highway, tunnel, bridge, ramp):
     # Replace nan values by 0
     generated_links_gdf = generated_links_gdf.fillna(0)
 
-    generated_links_gdf["bridge"] = generated_links_gdf["count_rail"] * bridge_rail + generated_links_gdf[
-        "klein"] * bridge_small_river + generated_links_gdf["mittel"] * bridge_medium_river + generated_links_gdf[
-                                        "gross"] * bridge_big_river
+    generated_links_gdf["bridge"] = (
+        generated_links_gdf["count_rail"] * bridge_rail
+        + generated_links_gdf["klein"] * bridge_small_river
+        + generated_links_gdf["mittel"] * bridge_medium_river
+        + generated_links_gdf["gross"] * bridge_big_river
+    )
 
     # Sum amount of tunnel and bridges
     generated_links_gdf["bridge_len"] = generated_links_gdf["total_bridge_length"] + generated_links_gdf["bridge"]
     generated_links_gdf["tunnel_len"] = generated_links_gdf["total_tunnel_length"]
-    generated_links_gdf["hw_len"] = generated_links_gdf.geometry.length - generated_links_gdf["bridge_len"] - \
-                                    generated_links_gdf["tunnel_len"]
+    generated_links_gdf["hw_len"] = (
+        generated_links_gdf.geometry.length - generated_links_gdf["bridge_len"] - generated_links_gdf["tunnel_len"]
+    )
 
     # Drop unseless columns
     generated_links_gdf = generated_links_gdf.drop(
-        columns=["gross", "klein", "mittel", "count_rail", "bridge", "total_bridge_length", "total_bridge_length"])
+        columns=["gross", "klein", "mittel", "count_rail", "bridge", "total_bridge_length", "total_bridge_length"]
+    )
     generated_links_gdf.to_file(r"data/Network/processed/links_with_geometry_attributes.gpkg")
 
     generated_links_gdf["cost_path"] = generated_links_gdf["hw_len"] * highway
     generated_links_gdf["cost_bridge"] = generated_links_gdf["bridge_len"] * bridge
     generated_links_gdf["cost_tunnel"] = generated_links_gdf["tunnel_len"] * tunnel
-    generated_links_gdf["building_costs"] = generated_links_gdf["cost_path"] + generated_links_gdf["cost_bridge"] + \
-                                            generated_links_gdf["cost_tunnel"] + ramp
+    generated_links_gdf["building_costs"] = (
+        generated_links_gdf["cost_path"]
+        + generated_links_gdf["cost_bridge"]
+        + generated_links_gdf["cost_tunnel"]
+        + ramp
+    )
 
     # Only keep relevant columns
     generated_links_gdf = generated_links_gdf[
-        ["ID_current", "ID_new", "geometry", "cost_path", "cost_bridge", "cost_tunnel", "building_costs"]]
+        ["ID_current", "ID_new", "geometry", "cost_path", "cost_bridge", "cost_tunnel", "building_costs"]
+    ]
     generated_links_gdf.to_file(r"data/costs/construction.gpkg")
 
     return
@@ -139,8 +151,10 @@ def maintenance_costs(duration, highway, tunnel, bridge, structural):
     # logger.verbose(generated_links_gdf.head(10).to_string())
 
     generated_links_gdf["operational_maint"] = duration * (
-                generated_links_gdf["hw_len"] * highway + generated_links_gdf["tunnel_len"] * tunnel +
-                generated_links_gdf["bridge_len"] * bridge)
+        generated_links_gdf["hw_len"] * highway
+        + generated_links_gdf["tunnel_len"] * tunnel
+        + generated_links_gdf["bridge_len"] * bridge
+    )
 
     costs_links = gpd.read_file(r"data/costs/construction.gpkg")
     costs_links["structural_maint"] = costs_links["building_costs"] * structural * duration
@@ -148,16 +162,18 @@ def maintenance_costs(duration, highway, tunnel, bridge, structural):
     # generated_links_gdf["structural_maint"] = duration * generated_links_gdf["bridge_len"] * structural
 
     # Merge column "structural_maint" to generated links using ID_new
-    generated_links_gdf = generated_links_gdf.merge(costs_links[["ID_new", "structural_maint"]], on="ID_new",
-                                                    how="left")
-    generated_links_gdf["maintenance"] = generated_links_gdf["operational_maint"] + generated_links_gdf[
-        "structural_maint"]
+    generated_links_gdf = generated_links_gdf.merge(
+        costs_links[["ID_new", "structural_maint"]], on="ID_new", how="left"
+    )
+    generated_links_gdf["maintenance"] = (
+        generated_links_gdf["operational_maint"] + generated_links_gdf["structural_maint"]
+    )
 
     # Only keep df with ID_new and maintenance costs
     generated_links_gdf = generated_links_gdf[["ID_new", "geometry", "maintenance"]]
 
     # Store the modified GeoDataFrame
-    generated_links_gdf.to_file(r"data/costs/maintenance.gpkg", driver='GPKG')
+    generated_links_gdf.to_file(r"data/costs/maintenance.gpkg", driver="GPKG")
     logger.verbose(generated_links_gdf.head(10).to_string())
     return
 
@@ -168,19 +184,19 @@ def bridges_crossing_water(links):
     rivers = rivers[["ABFLUSS", "geometry"]]
 
     # Use spatial join to find crossings - this will add an index to each street where it intersects a river
-    intersections = gpd.sjoin(links, rivers, how="left", predicate='intersects')
+    intersections = gpd.sjoin(links, rivers, how="left", predicate="intersects")
 
     # Now, count the number of intersections for each street
     # Assuming the 'streets_gdf' has a unique identifier for each street in the 'street_id' column
-    crossing_counts = intersections.groupby(['ID_new', "ABFLUSS"]).count()
+    crossing_counts = intersections.groupby(["ID_new", "ABFLUSS"]).count()
     crossing_counts = crossing_counts[["ID_current"]].rename(columns={"ID_current": "count"})
     crossing_counts = crossing_counts.reset_index()
     # Now pivot 'Abfluss' to become columns and 'count' as values
-    pivot_df = crossing_counts.pivot(index='ID_new', columns='ABFLUSS', values='count')
+    pivot_df = crossing_counts.pivot(index="ID_new", columns="ABFLUSS", values="count")
     # Replace NaN with 0 since you want counts to default to 0 where there's no data
     pivot_df = pivot_df.fillna(0)
 
-    links = links.merge(pivot_df, on='ID_new', how='left')
+    links = links.merge(pivot_df, on="ID_new", how="left")
 
     return links
 
@@ -189,17 +205,17 @@ def rail_crossing(links):
     # Get all the layers from the .gdb file
     # layers = fiona.listlayers(r"data/landuse_landcover/landcover/railway/schienennetz_2056_de.gdb")
     # logger.verbose(layers)
-    rail = gpd.read_file(r"data/landuse_landcover/landcover/railway/schienennetz_2056_de.gdb", layer='Netzsegment')
+    rail = gpd.read_file(r"data/landuse_landcover/landcover/railway/schienennetz_2056_de.gdb", layer="Netzsegment")
 
     # Use spatial join to find crossings - this will add an index to each street where it intersects a river
-    intersections = gpd.sjoin(links, rail, how="left", predicate='intersects')
+    intersections = gpd.sjoin(links, rail, how="left", predicate="intersects")
 
     # Now, count the number of intersections for each street
     # Assuming the 'streets_gdf' has a unique identifier for each street in the 'street_id' column
-    crossing_counts = intersections.groupby(['ID_new']).count()
+    crossing_counts = intersections.groupby(["ID_new"]).count()
     crossing_counts = crossing_counts[["ID_current"]].rename(columns={"ID_current": "count_rail"})
 
-    links = links.merge(crossing_counts, on='ID_new', how='left')
+    links = links.merge(crossing_counts, on="ID_new", how="left")
     links["count_rail"] = links["count_rail"].fillna(0)
 
     return links
@@ -211,32 +227,42 @@ def land_tb_reallocated(links, buffer_distance):
 
     buffer = links.copy()
     # Create a buffer around each line
-    links['buffer'] = buffer.geometry.buffer(buffer_distance)
+    links["buffer"] = buffer.geometry.buffer(buffer_distance)
     # links = links.set_geometry(col="buffer")
 
     # Initialize the columns for the areas of overlap
-    for mp_id in zones['name'].unique():
-        links[f'{mp_id}_area'] = 0.0
+    for mp_id in zones["name"].unique():
+        links[f"{mp_id}_area"] = 0.0
 
     # Calculate the overlapping area for each polygon with each multipolygon
     for idx, multipolygon in zones.iterrows():
         # Get the current multipolygon_id
-        mp_id = multipolygon['name']
+        mp_id = multipolygon["name"]
 
         # Calculate the intersection with each polygon in A
         # This returns a GeoSeries of the intersecting geometries
-        intersections = links['buffer'].intersection(multipolygon['geometry'])
+        intersections = links["buffer"].intersection(multipolygon["geometry"])
 
         # Calculate the area of each intersection
-        links[f'{mp_id}_area'] = intersections.area
+        links[f"{mp_id}_area"] = intersections.area
 
     links = links.drop(columns="buffer")
 
     return links
 
 
-def externalities_costs(ce_highway, ce_tunnel, realloc_forest, realloc_FFF, realloc_dry_meadow, realloc_period,
-                        nat_fragmentation, fragm_period, nat_loss_habitat, habitat_period):
+def externalities_costs(
+    ce_highway,
+    ce_tunnel,
+    realloc_forest,
+    realloc_FFF,
+    realloc_dry_meadow,
+    realloc_period,
+    nat_fragmentation,
+    fragm_period,
+    nat_loss_habitat,
+    habitat_period,
+):
     # Import dataframe with links geometries
     generated_links_gdf = gpd.read_file(r"data/Network/processed/links_with_geometry_attributes.gpkg")
     # Replace nan values by 0
@@ -249,8 +275,11 @@ def externalities_costs(ce_highway, ce_tunnel, realloc_forest, realloc_FFF, real
     """
     ce_bridge = ce_tunnel
 
-    generated_links_gdf["climate_cost"] = generated_links_gdf["hw_len"] * ce_highway + generated_links_gdf[
-        "tunnel_len"] * ce_tunnel + generated_links_gdf["bridge_len"] * ce_bridge
+    generated_links_gdf["climate_cost"] = (
+        generated_links_gdf["hw_len"] * ce_highway
+        + generated_links_gdf["tunnel_len"] * ce_tunnel
+        + generated_links_gdf["bridge_len"] * ce_bridge
+    )
 
     ############################
     # Land reallocation
@@ -270,7 +299,7 @@ def externalities_costs(ce_highway, ce_tunnel, realloc_forest, realloc_FFF, real
     # Iterate over the links
     for idx, link in generated_links_gdf.iterrows():
         # Find the corresponding tunnel
-        corresponding_tunnels = tunnels_gdf[tunnels_gdf['link_id'] == link['ID_new']]
+        corresponding_tunnels = tunnels_gdf[tunnels_gdf["link_id"] == link["ID_new"]]
 
         if not corresponding_tunnels.empty:
             # Create a buffer around each tunnel geometry and then combine them
@@ -280,17 +309,20 @@ def externalities_costs(ce_highway, ce_tunnel, realloc_forest, realloc_FFF, real
             new_link_geometry = link.geometry.difference(all_tunnel_buffers)
 
             # Update the link geometry
-            generated_links_gdf.at[idx, 'geometry'] = new_link_geometry
+            generated_links_gdf.at[idx, "geometry"] = new_link_geometry
 
     # Reallocation of land
     buffer_distance = 25
     generated_links_gdf = land_tb_reallocated(generated_links_gdf, buffer_distance)
 
     generated_links_gdf["land_realloc"] = realloc_period * (
-            generated_links_gdf["wald_area"] * realloc_forest + generated_links_gdf[
-        "fruchtfolgeflaeche_area"] * realloc_FFF + (
-                    generated_links_gdf["trockenweiden_area"] + generated_links_gdf[
-                "trockenlandschaften_area"] * realloc_dry_meadow))
+        generated_links_gdf["wald_area"] * realloc_forest
+        + generated_links_gdf["fruchtfolgeflaeche_area"] * realloc_FFF
+        + (
+            generated_links_gdf["trockenweiden_area"]
+            + generated_links_gdf["trockenlandschaften_area"] * realloc_dry_meadow
+        )
+    )
 
     ###########################################
     # Nature and landscape
@@ -299,13 +331,15 @@ def externalities_costs(ce_highway, ce_tunnel, realloc_forest, realloc_FFF, real
     nat_loss_habitat = 31.6  # CHF/m/a
     """
     generated_links_gdf["nature"] = generated_links_gdf["hw_len"] * (
-                nat_fragmentation * fragm_period + nat_loss_habitat * habitat_period)
+        nat_fragmentation * fragm_period + nat_loss_habitat * habitat_period
+    )
 
     # df_temp["externality_costs"] = df_temp["climate_cost"] + df_temp["nature"]
     # df_temp["building_costs"] = df_temp["building_costs"] + df_temp["land_realloc"]
 
     generated_links_gdf = generated_links_gdf[
-        ["ID_new", "ID_current", "geometry", "climate_cost", "land_realloc", "nature"]]
+        ["ID_new", "ID_current", "geometry", "climate_cost", "land_realloc", "nature"]
+    ]
     # logger.verbose(generated_links_gdf.head(10).to_string())
     generated_links_gdf.to_file(r"data/costs/externalities.gpkg")
 
@@ -326,9 +360,9 @@ def noise_costs(years, unit_costs, boundaries):
     # Calculate the amount of inhabitants in each buffer zone
     # Iterate over all scenarios
     # Input data of scenarios import directly tif files
-    scenario_path = ['s1_pop.tif', 's2_pop.tif', 's3_pop.tif']
+    scenario_path = ["s1_pop.tif", "s2_pop.tif", "s3_pop.tif"]
     for path in scenario_path:
-        with rasterio.open(fr"data/independent_variable/processed/scenario/{path}") as scenario_tif:
+        with rasterio.open(rf"data/independent_variable/processed/scenario/{path}") as scenario_tif:
             trip_tif = scenario_tif.read(1)
 
             edges_temp = gpd.GeoDataFrame()
@@ -336,7 +370,7 @@ def noise_costs(years, unit_costs, boundaries):
             for i in range(len(boundaries) - 1):
                 outer_buffer = edges.geometry.buffer(boundaries[i + 1])
                 inner_buffer = edges.geometry.buffer(boundaries[i])
-                edges_temp[f'noise_{i}'] = outer_buffer.difference(inner_buffer)
+                edges_temp[f"noise_{i}"] = outer_buffer.difference(inner_buffer)
 
             total_costs = []
 
@@ -344,8 +378,8 @@ def noise_costs(years, unit_costs, boundaries):
                 cost_per_edge = 0
 
                 for i, unit_cost in zip(range(len(boundaries) - 1), unit_costs):
-                    if not row[f'noise_{i}'].is_empty:
-                        geom = [mapping(row[f'noise_{i}'])]
+                    if not row[f"noise_{i}"].is_empty:
+                        geom = [mapping(row[f"noise_{i}"])]
                         out_image, out_transform = mask(scenario_tif, geom, crop=True)
                         # Replace nan by 0
                         out_image = np.nan_to_num(out_image)
@@ -358,7 +392,7 @@ def noise_costs(years, unit_costs, boundaries):
 
     edges = edges[["ID_current", "ID_new", "geometry", "noise_s1", "noise_s2", "noise_s3"]]
     # Store the modified GeoDataFrame
-    edges.to_file(r"data/costs/noise.gpkg", driver='GPKG')
+    edges.to_file(r"data/costs/noise.gpkg", driver="GPKG")
     return
 
 
@@ -388,7 +422,7 @@ def accessibility_developments(costs, VTT_h, duration):
 
     # File paths and trip_generation
     # travel_time_path = r"data/Network/travel_time/travel_time_raster.tif"
-    scenario_path = ['s1_pop.tif', 's2_pop.tif', 's3_pop.tif']
+    scenario_path = ["s1_pop.tif", "s2_pop.tif", "s3_pop.tif"]
     voronoi_path = r"data/Voronoi/voronoi_developments_tt_values.shp"
 
     trip_generation_day_cell = 1.14  # trip/p/d
@@ -405,7 +439,7 @@ def accessibility_developments(costs, VTT_h, duration):
 
     # Process each TIF A
     for path in scenario_path:
-        with rasterio.open(fr"data/independent_variable/processed/scenario/{path}") as scenario_tif:
+        with rasterio.open(rf"data/independent_variable/processed/scenario/{path}") as scenario_tif:
             logger.verbose(path)
             # Multiply TIF A by trip_generation
             trip_tif = scenario_tif.read(1) * trip_generation
@@ -415,14 +449,18 @@ def accessibility_developments(costs, VTT_h, duration):
                 id_development = row["ID_develop"]
 
                 # If the geometry is a MultiPolygon, convert it to a list of Polygons
-                if isinstance(row['geometry'], MultiPolygon):
-                    polygons = [poly for poly in row['geometry'].geoms]
+                if isinstance(row["geometry"], MultiPolygon):
+                    polygons = [poly for poly in row["geometry"].geoms]
                 else:
-                    polygons = [row['geometry']]
+                    polygons = [row["geometry"]]
 
                 # Extract data for the polygon area from TIF A
-                trip_mask = geometry_mask(polygons, transform=scenario_tif.transform, invert=True,
-                                          out_shape=(scenario_tif.height, scenario_tif.width))
+                trip_mask = geometry_mask(
+                    polygons,
+                    transform=scenario_tif.transform,
+                    invert=True,
+                    out_shape=(scenario_tif.height, scenario_tif.width),
+                )
                 # Apply the mask to the raster data
 
                 # trip_filled = np.full(trip_mask.shape, 1.3)
@@ -433,13 +471,18 @@ def accessibility_developments(costs, VTT_h, duration):
                 trip_masked = trip_tif * trip_mask
 
                 with rasterio.open(
-                        fr"data/Network/travel_time/developments/dev{id_development}_travel_time_raster.tif") as travel_time:
+                    rf"data/Network/travel_time/developments/dev{id_development}_travel_time_raster.tif"
+                ) as travel_time:
                     # data/Network/travel_time/developments/dev2_travel_time_raster.tif"
                     ###################################################################################
                     # travel_time = rasterio.open(travel_time_path)
                     tt_tif = travel_time.read(1)
-                    tt_mask = geometry_mask(polygons, transform=travel_time.transform, invert=True,
-                                            out_shape=(travel_time.height, travel_time.width))
+                    tt_mask = geometry_mask(
+                        polygons,
+                        transform=travel_time.transform,
+                        invert=True,
+                        out_shape=(travel_time.height, travel_time.width),
+                    )
 
                     tt_masked = tt_tif * tt_mask
 
@@ -453,14 +496,14 @@ def accessibility_developments(costs, VTT_h, duration):
                     sum_value = np.nansum(total_tt)
 
                     # Store the sum in the GeoDataFrame
-                    column_name = path.split('.')[0]  # Adjust as needed
+                    column_name = path.split(".")[0]  # Adjust as needed
                     voronoi_gdf.at[index, column_name] = sum_value * VTT
 
     # Save the modified GeoDataFrame
-    voronoi_gdf.to_file(r"data/Voronoi/voronoi_developments_local_accessibility.gpkg", driver='GPKG')
+    voronoi_gdf.to_file(r"data/Voronoi/voronoi_developments_local_accessibility.gpkg", driver="GPKG")
     # logger.verbose(voronoi_gdf.head(50).to_string())
-    voronoi_gdf = voronoi_gdf.drop(columns=['geometry'])
-    grouped_sum = voronoi_gdf.groupby('ID_develop').sum()
+    voronoi_gdf = voronoi_gdf.drop(columns=["geometry"])
+    grouped_sum = voronoi_gdf.groupby("ID_develop").sum()
     grouped_sum = grouped_sum[["s1_pop", "s2_pop", "s3_pop"]]
     costs = costs[["s1_pop", "s2_pop", "s3_pop"]]
     logger.verbose(grouped_sum.head().to_string())
@@ -470,13 +513,13 @@ def accessibility_developments(costs, VTT_h, duration):
     grouped_sum["local_s3"] = costs["s3_pop"] - grouped_sum["s3_pop"]
     logger.verbose(grouped_sum.head().to_string())
     # logger.verbose(costs.head().to_string())
-    grouped_sum = grouped_sum.reset_index().rename(columns={'index': 'ID_development'})
+    grouped_sum = grouped_sum.reset_index().rename(columns={"index": "ID_development"})
 
     # Optionally, you can rename the new column (which will be named 'index' by default)
     # gr = df.reset_index()
 
     # Save the DataFrame as a CSV file
-    grouped_sum.to_csv('data/costs/local_accessibility.csv', index=False)
+    grouped_sum.to_csv("data/costs/local_accessibility.csv", index=False)
     # grouped_sum.to(r"data/costs/local_accessibility.gpkg", driver='GPKG')
 
     return
@@ -485,7 +528,7 @@ def accessibility_developments(costs, VTT_h, duration):
 def accessibility_status_quo(VTT_h, duration):
     # File paths and trip_generation
     travel_time_path = r"data/Network/travel_time/travel_time_raster.tif"
-    scenario_path = ['s1_pop.tif', 's2_pop.tif', 's3_pop.tif']
+    scenario_path = ["s1_pop.tif", "s2_pop.tif", "s3_pop.tif"]
     voronoi_path = r"data/Network/travel_time/Voronoi_statusquo.gpkg"
 
     trip_generation_day_cell = 1.14  # trip/p/d
@@ -500,22 +543,25 @@ def accessibility_status_quo(VTT_h, duration):
 
     # Process each TIF A
     for path in scenario_path:
-        with rasterio.open(fr"data/independent_variable/processed/scenario/{path}") as scenario_tif:
+        with rasterio.open(rf"data/independent_variable/processed/scenario/{path}") as scenario_tif:
             # Multiply TIF A by trip_generation
             trip_tif = scenario_tif.read(1) * trip_generation
             logger.verbose(trip_tif.shape)
 
             for index, row in voronoi_gdf.iterrows():
-
                 # If the geometry is a MultiPolygon, convert it to a list of Polygons
-                if isinstance(row['geometry'], MultiPolygon):
-                    polygons = [poly for poly in row['geometry'].geoms]
+                if isinstance(row["geometry"], MultiPolygon):
+                    polygons = [poly for poly in row["geometry"].geoms]
                 else:
-                    polygons = [row['geometry']]
+                    polygons = [row["geometry"]]
 
                 # Extract data for the polygon area from TIF A
-                trip_mask = geometry_mask(polygons, transform=scenario_tif.transform, invert=True,
-                                          out_shape=(scenario_tif.height, scenario_tif.width))
+                trip_mask = geometry_mask(
+                    polygons,
+                    transform=scenario_tif.transform,
+                    invert=True,
+                    out_shape=(scenario_tif.height, scenario_tif.width),
+                )
                 # Apply the mask to the raster data
 
                 # trip_filled = np.full(trip_mask.shape, 1.3)
@@ -528,8 +574,12 @@ def accessibility_status_quo(VTT_h, duration):
                 with rasterio.open(travel_time_path) as travel_time:
                     # travel_time = rasterio.open(travel_time_path)
                     tt_tif = travel_time.read(1)
-                    tt_mask = geometry_mask(polygons, transform=travel_time.transform, invert=True,
-                                            out_shape=(travel_time.height, travel_time.width))
+                    tt_mask = geometry_mask(
+                        polygons,
+                        transform=travel_time.transform,
+                        invert=True,
+                        out_shape=(travel_time.height, travel_time.width),
+                    )
 
                     tt_masked = tt_tif * tt_mask
 
@@ -543,14 +593,14 @@ def accessibility_status_quo(VTT_h, duration):
                     sum_value = np.nansum(total_tt)
 
                     # Store the sum in the GeoDataFrame
-                    column_name = path.split('.')[0]  # Adjust as needed
+                    column_name = path.split(".")[0]  # Adjust as needed
                     voronoi_gdf.at[index, column_name] = sum_value * VTT
 
     # Save the modified GeoDataFrame
-    voronoi_gdf.to_file(r"data/Voronoi/voronoi_developments_local_accessibility.gpkg", driver='GPKG')
+    voronoi_gdf.to_file(r"data/Voronoi/voronoi_developments_local_accessibility.gpkg", driver="GPKG")
     # logger.verbose(voronoi_gdf.head(50).to_string())
     # logger.verbose(voronoi_gdf.sum()["s1_pop"])
-    voronoi_gdf = voronoi_gdf.drop(columns=['geometry'])
+    voronoi_gdf = voronoi_gdf.drop(columns=["geometry"])
     return voronoi_gdf.sum()
 
 
@@ -562,7 +612,6 @@ def nw_from_osm(limits):
     # Initialize the transformer between LV95 and WGS 84
     transformer = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
     for i, lv95_sub_polygon in enumerate(sub_polygons):
-
         # Convert the coordinates of the sub-polygon to lat/lon
         lat_lon_frame = Polygon([transformer.transform(*point) for point in lv95_sub_polygon.exterior.coords])
 
@@ -574,8 +623,9 @@ def nw_from_osm(limits):
             # This example excludes motorways, motorway_links, trunks, and trunk_links
             # custom_filter = '["highway"!~"motorway|motorway_link|trunk|trunk_link"]'
             # Create the graph using the custom filter
-            G = ox.graph_from_polygon(lat_lon_frame, network_type="drive", simplify=True,
-                                      truncate_by_edge=True)  # custom_filter=custom_filter,
+            G = ox.graph_from_polygon(
+                lat_lon_frame, network_type="drive", simplify=True, truncate_by_edge=True
+            )  # custom_filter=custom_filter,
             G = ox.add_edge_speeds(G)
 
             # Convert the graph to a GeoDataFrame
@@ -633,23 +683,23 @@ def osm_nw_to_raster(limits):
     gpkg_folder = "data/Network/OSM_road"
 
     # List all geopackage files in the folder
-    gpkg_files = [os.path.join(gpkg_folder, f) for f in os.listdir(gpkg_folder) if f.endswith('.gpkg')]
+    gpkg_files = [os.path.join(gpkg_folder, f) for f in os.listdir(gpkg_folder) if f.endswith(".gpkg")]
 
     # Combine all geopackages into one GeoDataFrame
     gdf_combined = gpd.GeoDataFrame(pd.concat([gpd.read_file(f) for f in gpkg_files], ignore_index=True))
     # Assuming 'speed' is the column with speed limits
     # Convert speeds to numeric, handling non-numeric values
-    gdf_combined['speed'] = pd.to_numeric(gdf_combined['speed_kph'], errors='coerce')
+    gdf_combined["speed"] = pd.to_numeric(gdf_combined["speed_kph"], errors="coerce")
 
     # Drop NaN values or replace them with 0, depending on how you want to handle them
     # gdf_combined.dropna(subset=['speed_kph'], inplace=True)
-    gdf_combined['speed_kph'].fillna(30, inplace=True)
+    gdf_combined["speed_kph"].fillna(30, inplace=True)
     # logger.verbose(gdf_combined.crs)
     # logger.verbose(gdf_combined.head(10).to_string())
-    gdf_combined.to_file('data/Network/OSM_tif/nw_speed_limit.gpkg')
+    gdf_combined.to_file("data/Network/OSM_tif/nw_speed_limit.gpkg")
     logger.verbose("file stored")
 
-    gdf_combined = gpd.read_file('data/Network/OSM_tif/nw_speed_limit.gpkg')
+    gdf_combined = gpd.read_file("data/Network/OSM_tif/nw_speed_limit.gpkg")
 
     # Define the resolution
     resolution = 100
@@ -679,13 +729,14 @@ def osm_nw_to_raster(limits):
 
     for row in range(num_rows):
         for col in range(num_cols):
-
             # logger.verbose(row, " - ", col)
             # Find the bounds of the cell
-            cell_bounds = box(minx + col * resolution,
-                              maxy - row * resolution,
-                              minx + (col + 1) * resolution,
-                              maxy - (row + 1) * resolution)
+            cell_bounds = box(
+                minx + col * resolution,
+                maxy - row * resolution,
+                minx + (col + 1) * resolution,
+                maxy - (row + 1) * resolution,
+            )
 
             # Find the roads that intersect with this cell
             # logger.verbose(gdf_combined.head(10).to_string())
@@ -696,7 +747,7 @@ def osm_nw_to_raster(limits):
 
             # If there are any intersecting roads, find the maximum speed limit
             if not intersecting_roads.empty:
-                max_speed = intersecting_roads['speed_kph'].max()
+                max_speed = intersecting_roads["speed_kph"].max()
                 raster[row, col] = max_speed
 
             # logger.verbose the progress
@@ -716,15 +767,15 @@ def osm_nw_to_raster(limits):
             logger.verbose("Network raster and unproductive area are not overalpping!!!!!")
 
     with rasterio.open(
-            'data/Network/OSM_tif/speed_limit_raster.tif',
-            'w',
-            driver='GTiff',
-            height=raster.shape[0],
-            width=raster.shape[1],
-            count=1,
-            dtype=str(raster.dtype),
-            crs="EPSG:2056",
-            transform=transform,
+        "data/Network/OSM_tif/speed_limit_raster.tif",
+        "w",
+        driver="GTiff",
+        height=raster.shape[0],
+        width=raster.shape[1],
+        count=1,
+        dtype=str(raster.dtype),
+        crs="EPSG:2056",
+        transform=transform,
     ) as dst:
         dst.write(raster, 1)
 
@@ -740,16 +791,15 @@ def tif_to_vector(raster_path, vector_path):
 
     # Step 3: Convert the masked raster to vector shapes
     results = (
-        {'properties': {'raster_val': v}, 'geometry': s}
-        for i, (s, v) in enumerate(
-        shapes(image, mask=mask, transform=src.transform)))
+        {"properties": {"raster_val": v}, "geometry": s}
+        for i, (s, v) in enumerate(shapes(image, mask=mask, transform=src.transform))
+    )
 
     # Step 4: Create Shapely polygons and generate a GeoDataFrame
-    geometries = [shape(result['geometry']) for result in results]
-    gdf = gpd.GeoDataFrame.from_features([
-        {"geometry": geom, "properties": {"value": val}}
-        for geom, val in zip(geometries, mask)
-    ])
+    geometries = [shape(result["geometry"]) for result in results]
+    gdf = gpd.GeoDataFrame.from_features(
+        [{"geometry": geom, "properties": {"value": val}} for geom, val in zip(geometries, mask)]
+    )
 
     # Save to a new Shapefile, if desired
     # gdf.to_file(vector_path)
@@ -763,12 +813,12 @@ def map_coordinates_to_developments():
     # logger.verbose(points.head(10).to_string())
     # logger.verbose(points["ID_new"].unique())
 
-    df_temp = df_temp.merge(points, how='left', left_on='ID_new', right_on='ID_new')
+    df_temp = df_temp.merge(points, how="left", left_on="ID_new", right_on="ID_new")
     # logger.verbose(df_temp["ID_new"].unique())
     # logger.verbose(df_temp.head(10).to_string())
-    df_temp['geometry'] = df_temp['geometry_y']
+    df_temp["geometry"] = df_temp["geometry_y"]
     # todo buildin and externality not in index
-    df_temp = df_temp[['ID_current', 'ID_new', 'building_costs', 'externality_costs', 'geometry']]
+    df_temp = df_temp[["ID_current", "ID_new", "building_costs", "externality_costs", "geometry"]]
     df_temp["total_cost"] = df_temp["building_costs"] + df_temp["externality_costs"]
     # df_temp['geometry'] = df_temp['geometry_y'].replace('geometry_y', 'geometry')
 
@@ -795,12 +845,17 @@ def aggregate_costs():
     c_noise = gpd.read_file(r"data/costs/noise.gpkg")
 
     # Rename columns to simplify further steps
-    c_acces_time = c_acces_time.rename(columns={'ID_develop': 'ID_new'})
-    c_tt = c_tt.rename(columns={'development': 'ID_new'}).drop(columns=["Unnamed: 0"])
+    c_acces_time = c_acces_time.rename(columns={"ID_develop": "ID_new"})
+    c_tt = c_tt.rename(columns={"development": "ID_new"}).drop(columns=["Unnamed: 0"])
 
     # Find common values
-    common_values = set(c_construction["ID_new"]).intersection(c_acces_time["ID_new"]).intersection(
-        c_tt["ID_new"]).intersection(c_externalities["ID_new"]).intersection(c_noise["ID_new"])
+    common_values = (
+        set(c_construction["ID_new"])
+        .intersection(c_acces_time["ID_new"])
+        .intersection(c_tt["ID_new"])
+        .intersection(c_externalities["ID_new"])
+        .intersection(c_noise["ID_new"])
+    )
     logger.verbose(f"Number of developments: {len(common_values)}")
 
     # Merge construction costs and maintenance costs
@@ -815,34 +870,68 @@ def aggregate_costs():
     # total_costs = total_costs.merge(c_noise, how='inner', on='ID_new')
 
     # geom_id_map = c_maintenance.drop("maintenance",axis=1)
-    total_costs = c_construction.drop("geometry", axis=1).merge(c_maintenance.drop(["geometry"], axis=1), how='inner',
-                                                                on='ID_new')
+    total_costs = c_construction.drop("geometry", axis=1).merge(
+        c_maintenance.drop(["geometry"], axis=1), how="inner", on="ID_new"
+    )
     # Add acccess time costs
-    total_costs = total_costs.merge(c_acces_time, how='inner', on='ID_new')
+    total_costs = total_costs.merge(c_acces_time, how="inner", on="ID_new")
     # Add travel time
-    total_costs = total_costs.merge(c_tt, how='inner', on='ID_new')
+    total_costs = total_costs.merge(c_tt, how="inner", on="ID_new")
     # Add externalities costs
-    total_costs = total_costs.merge(c_externalities.drop("geometry", axis=1), how='inner', on='ID_new')
+    total_costs = total_costs.merge(c_externalities.drop("geometry", axis=1), how="inner", on="ID_new")
     # Add noise costs
-    total_costs = total_costs.merge(c_noise.drop("geometry", axis=1), how='inner', on='ID_new')
+    total_costs = total_costs.merge(c_noise.drop("geometry", axis=1), how="inner", on="ID_new")
 
-    total_costs = total_costs[['ID_new', 'cost_path', 'cost_bridge', 'cost_tunnel', 'building_costs',
-                               'local_s1', 'local_s2', 'local_s3', 'tt_low', 'tt_medium', 'tt_high', 'climate_cost',
-                               'land_realloc', 'nature', 'noise_s1', 'noise_s2', 'noise_s3', "maintenance"]]
-    cost_columns = ['cost_path', 'cost_bridge', 'cost_tunnel', 'building_costs', 'climate_cost', 'land_realloc',
-                    'nature', 'noise_s1', 'noise_s2', 'noise_s3', "maintenance"]
+    total_costs = total_costs[
+        [
+            "ID_new",
+            "cost_path",
+            "cost_bridge",
+            "cost_tunnel",
+            "building_costs",
+            "local_s1",
+            "local_s2",
+            "local_s3",
+            "tt_low",
+            "tt_medium",
+            "tt_high",
+            "climate_cost",
+            "land_realloc",
+            "nature",
+            "noise_s1",
+            "noise_s2",
+            "noise_s3",
+            "maintenance",
+        ]
+    ]
+    cost_columns = [
+        "cost_path",
+        "cost_bridge",
+        "cost_tunnel",
+        "building_costs",
+        "climate_cost",
+        "land_realloc",
+        "nature",
+        "noise_s1",
+        "noise_s2",
+        "noise_s3",
+        "maintenance",
+    ]
 
     # Multiply the values in these columns by -1
     for column in cost_columns:
         total_costs[column] = total_costs[column] * -1
 
     # Compute costs of externalities
-    total_costs["externalities_s1"] = total_costs["climate_cost"] + total_costs["land_realloc"] + total_costs[
-        "nature"] + total_costs["noise_s1"]
-    total_costs["externalities_s2"] = total_costs["climate_cost"] + total_costs["land_realloc"] + total_costs[
-        "nature"] + total_costs["noise_s2"]
-    total_costs["externalities_s3"] = total_costs["climate_cost"] + total_costs["land_realloc"] + total_costs[
-        "nature"] + total_costs["noise_s3"]
+    total_costs["externalities_s1"] = (
+        total_costs["climate_cost"] + total_costs["land_realloc"] + total_costs["nature"] + total_costs["noise_s1"]
+    )
+    total_costs["externalities_s2"] = (
+        total_costs["climate_cost"] + total_costs["land_realloc"] + total_costs["nature"] + total_costs["noise_s2"]
+    )
+    total_costs["externalities_s3"] = (
+        total_costs["climate_cost"] + total_costs["land_realloc"] + total_costs["nature"] + total_costs["noise_s3"]
+    )
     total_costs["construction_maintenance"] = total_costs["building_costs"] + total_costs["maintenance"]
 
     # Sum externality costs
@@ -850,13 +939,14 @@ def aggregate_costs():
     logger.verbose(total_costs.head(10).to_string())
     # Compute net benefit for each development
     total_costs["total_low"] = total_costs[["construction_maintenance", "local_s2", "tt_low", "externalities_s2"]].sum(
-        axis=1)
+        axis=1
+    )
     total_costs["total_medium"] = total_costs[
-        ["construction_maintenance", "local_s1", "tt_medium", "externalities_s1"]].sum(
-        axis=1)
+        ["construction_maintenance", "local_s1", "tt_medium", "externalities_s1"]
+    ].sum(axis=1)
     total_costs["total_high"] = total_costs[
-        ["construction_maintenance", "local_s3", "tt_high", "externalities_s3"]].sum(
-        axis=1)
+        ["construction_maintenance", "local_s3", "tt_high", "externalities_s3"]
+    ].sum(axis=1)
 
     # logger.verbose(total_costs.sort_values(by="total_medium", ascending=False).head(7).to_string())
 
@@ -876,6 +966,7 @@ def aggregate_costs():
 #######################################################################################################################
 # From here on the code is destinated to compute the travel time on the highway network
 
+
 def stack_tif_files(var):
     # List of your TIFF file paths
     tiff_files = [f"/s1_{var}.tif", f"/s2_{var}.tif", f"/s3_{var}.tif"]
@@ -887,9 +978,9 @@ def stack_tif_files(var):
     # Update metadata to reflect the number of layers
     meta.update(count=len(tiff_files))
 
-    out_fp = fr"data/independent_variable/processed/scenario/scen_{var}.tif"
+    out_fp = rf"data/independent_variable/processed/scenario/scen_{var}.tif"
     # Read each layer and write it to stack
-    with rasterio.open(out_fp, 'w', **meta) as dst:
+    with rasterio.open(out_fp, "w", **meta) as dst:
         for id, layer in enumerate(tiff_files, start=1):
             with rasterio.open(r"data/independent_variable/processed/scenario" + layer) as src1:
                 dst.write_band(id, src1.read(1))
@@ -898,21 +989,21 @@ def stack_tif_files(var):
 # # 0 Who will drive by car
 # We assume peak hour demand is generated by population residence at origin and employment opportunites at destination.
 def GetCommunePopulation(y0):  # We find population of each commune.
-    rawpop = pd.read_excel('data/_basic_data/KTZH_00000127_00001245.xlsx', sheet_name='Gemeinden', header=None)
+    rawpop = pd.read_excel("data/_basic_data/KTZH_00000127_00001245.xlsx", sheet_name="Gemeinden", header=None)
     rawpop.columns = rawpop.iloc[5]
     rawpop = rawpop.drop([0, 1, 2, 3, 4, 5, 6])
-    pop = pd.DataFrame(data=rawpop, columns=['BFS-NR  ', 'TOTAL_' + str(y0) + '  ']).sort_values(by='BFS-NR  ')
-    popvec = np.array(pop['TOTAL_' + str(y0) + '  '])
+    pop = pd.DataFrame(data=rawpop, columns=["BFS-NR  ", "TOTAL_" + str(y0) + "  "]).sort_values(by="BFS-NR  ")
+    popvec = np.array(pop["TOTAL_" + str(y0) + "  "])
     return popvec
 
 
 def GetCommuneEmployment(y0):  # we find employment in each commune.
-    rawjob = pd.read_excel('data/_basic_data/KANTON_ZUERICH_596.xlsx')
-    rawjob = rawjob.loc[(rawjob['INDIKATOR_JAHR'] == y0) & (rawjob['BFS_NR'] > 0) & (rawjob['BFS_NR'] != 291)]
+    rawjob = pd.read_excel("data/_basic_data/KANTON_ZUERICH_596.xlsx")
+    rawjob = rawjob.loc[(rawjob["INDIKATOR_JAHR"] == y0) & (rawjob["BFS_NR"] > 0) & (rawjob["BFS_NR"] != 291)]
 
     # rawjob=rawjob.loc[(rawjob['INDIKATOR_JAHR']==y0)&(rawjob['BFS_NR']>0)&(rawjob['BFS_NR']!=291)]
-    job = pd.DataFrame(data=rawjob, columns=['BFS_NR', 'INDIKATOR_VALUE']).sort_values(by='BFS_NR')
-    jobvec = np.array(job['INDIKATOR_VALUE'])
+    job = pd.DataFrame(data=rawjob, columns=["BFS_NR", "INDIKATOR_VALUE"]).sort_values(by="BFS_NR")
+    jobvec = np.array(job["INDIKATOR_VALUE"])
     return jobvec
 
 
@@ -920,38 +1011,41 @@ def GetHighwayPHDemandPerCommune():
     # now we extract an od matrix for private motrised vehicle traffic from year 2019
     # we then modify the OD matrix to fit our needs of expressing peak hour highway travel demand
     y0 = 2019
-    rawod = pd.read_excel('data/_basic_data/KTZH_00001982_00003903.xlsx')
+    rawod = pd.read_excel("data/_basic_data/KTZH_00001982_00003903.xlsx")
     communalOD = rawod.loc[
-        (rawod['jahr'] == 2018) & (rawod['kategorie'] == 'Verkehrsaufkommen') & (rawod['verkehrsmittel'] == 'miv')]
+        (rawod["jahr"] == 2018) & (rawod["kategorie"] == "Verkehrsaufkommen") & (rawod["verkehrsmittel"] == "miv")
+    ]
     # communalOD = data.drop(['jahr','quelle_name','quelle_gebietart','ziel_name','ziel_gebietart',"kategorie","verkehrsmittel","einheit","gebietsstand_jahr","zeit_dimension"],axis=1)
     # sum(communalOD['wert'])
     # 1 Who will go on highway?
     # # # Not binnenverkehr ... removes about 50% of trips
-    communalOD['wert'].loc[(communalOD['quelle_code'] == communalOD['ziel_code'])] = 0
+    communalOD["wert"].loc[(communalOD["quelle_code"] == communalOD["ziel_code"])] = 0
     # sum(communalOD['wert'])
     # # Take share of OD
     # todo adapt this value
     tau = 0.013  # Data is in trips per OD combination per day. Now we assume the number of trips gone in peak hour
     # This ratio explains the interzonal trips made in peak hour as a ratio of total interzonal trips made per day.
     # communalOD['wert'] = (communalOD['wert']*tau)
-    communalOD.loc[:, 'wert'] = communalOD['wert'] * tau
+    communalOD.loc[:, "wert"] = communalOD["wert"] * tau
     # # # Not those who travel < 15 min ?  Not yet implemented.
     return communalOD
 
 
 def GetODMatrix(od):
-    od_ext = od.loc[(od['quelle_code'] > 9999) | (od[
-                                                      'ziel_code'] > 9999)]  # here we separate the parts of the od matrix that are outside the canton. We can add them later.
-    od_int = od.loc[(od['quelle_code'] < 9999) & (od['ziel_code'] < 9999)]
-    odmat = od_int.pivot(index='quelle_code', columns='ziel_code', values='wert')
+    od_ext = od.loc[
+        (od["quelle_code"] > 9999) | (od["ziel_code"] > 9999)
+    ]  # here we separate the parts of the od matrix that are outside the canton. We can add them later.
+    od_int = od.loc[(od["quelle_code"] < 9999) & (od["ziel_code"] < 9999)]
+    odmat = od_int.pivot(index="quelle_code", columns="ziel_code", values="wert")
     return odmat
 
 
 def GetCommuneShapes(raster_path):  # todo this might be unnecessary if you already have these shapes.
     communalraw = gpd.read_file(r"data/_basic_data/Gemeindegrenzen/UP_GEMEINDEN_F.shp")
-    communalraw = communalraw.loc[(communalraw['ART_TEXT'] == 'Gemeinde')]
-    communedf = gpd.GeoDataFrame(data=communalraw, geometry=communalraw['geometry'], columns=['BFS', 'GEMEINDENA'],
-                                 crs="epsg:2056").sort_values(by='BFS')
+    communalraw = communalraw.loc[(communalraw["ART_TEXT"] == "Gemeinde")]
+    communedf = gpd.GeoDataFrame(
+        data=communalraw, geometry=communalraw["geometry"], columns=["BFS", "GEMEINDENA"], crs="epsg:2056"
+    ).sort_values(by="BFS")
 
     # Read the reference TIFF file
     with rasterio.open(raster_path) as src:
@@ -960,14 +1054,14 @@ def GetCommuneShapes(raster_path):  # todo this might be unnecessary if you alre
         crs = src.crs
 
     # Rasterize
-    with rasterio.open('data/_basic_data/Gemeindegrenzen/gemeinde_zh.tif', 'w', **profile) as dst:
+    with rasterio.open("data/_basic_data/Gemeindegrenzen/gemeinde_zh.tif", "w", **profile) as dst:
         rasterized_image = rasterize(
-            [(shape, value) for shape, value in zip(communedf.geometry, communedf['BFS'])],
+            [(shape, value) for shape, value in zip(communedf.geometry, communedf["BFS"])],
             out_shape=(src.height, src.width),
             transform=src.transform,
             fill=0,
             all_touched=False,
-            dtype=rasterio.int32
+            dtype=rasterio.int32,
         )
         dst.write(rasterized_image, 1)
 
@@ -1001,8 +1095,9 @@ def GetVoronoiOD():
     commune_raster, commune_df = GetCommuneShapes(raster_path=voronoi_tif_path)
 
     if jobvec.shape[0] != odmat.shape[0]:
-        logger.verbose(
-            "Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
+        logger.error(
+            "Error: The number of communes in the OD matrix and the number of communes in the employment data do not match."
+        )
     # com_idx = np.unique(od['quelle_code']) # previously od_mat
     # 1. Define a new raster file that stores the Commune's BFS ID as cell value
     # Think if new band or new tif makes more sense
@@ -1045,7 +1140,7 @@ def GetVoronoiOD():
     # Get the bounds of the voronoi tif
     bounds = src.bounds
     # Get the commune_df that are within the bounds
-    commune_df_filtered = commune_df.cx[bounds.left:bounds.right, bounds.bottom:bounds.top]
+    commune_df_filtered = commune_df.cx[bounds.left : bounds.right, bounds.bottom : bounds.top]
     # Get "BFS" value of the commune_df_filtered that are within the bounds
     commune_df_filtered = commune_df_filtered["BFS"].to_numpy()
 
@@ -1078,10 +1173,10 @@ def GetVoronoiOD():
 
     # Step 2: Get all pairs of combinations from communes to polygons
     unique_commune_id = np.sort(np.unique(commune_raster))
-    pairs = pd.DataFrame(columns=['commune_id', 'voronoi_id'])
-    pop_empl = pd.DataFrame(columns=['commune_id', 'voronoi_id', "empl", "pop"])
+    pairs = pd.DataFrame(columns=["commune_id", "voronoi_id"])
+    pop_empl = pd.DataFrame(columns=["commune_id", "voronoi_id", "empl", "pop"])
 
-    for i in tqdm(unique_voronoi_id, desc='Processing Voronoi IDs'):
+    for i in tqdm(unique_voronoi_id, desc="Processing Voronoi IDs"):
         # Get the voronoi raster
         mask_voronoi = voronoi_tif == i
         for j in unique_commune_id:
@@ -1093,9 +1188,8 @@ def GetVoronoiOD():
                 # Check if there are overlaying values
                 if np.nansum(mask) > 0:
                     # pairs = pairs.append({'commune_id': j, 'voronoi_id': i}, ignore_index=True)
-                    temp = pd.Series({'commune_id': j, 'voronoi_id': i})
-                    pairs = gpd.GeoDataFrame(
-                        pd.concat([pairs, pd.DataFrame(temp).T], ignore_index=True))
+                    temp = pd.Series({"commune_id": j, "voronoi_id": i})
+                    pairs = gpd.GeoDataFrame(pd.concat([pairs, pd.DataFrame(temp).T], ignore_index=True))
 
                     # Get the population and employment values for multiple scenarios
                     pop20 = scen_pop_20_tif[mask]
@@ -1107,13 +1201,21 @@ def GetVoronoiOD():
                     pop_high = scen_pop_high_tif[mask]
                     empl_high = scen_empl_high_tif[mask]
 
-                    temp = pd.Series({'commune_id': j, 'voronoi_id': i,
-                                      'pop_20': np.nansum(pop20), 'empl_20': np.nansum(empl20),
-                                      'pop_low': np.nansum(pop_low), 'empl_low': np.nansum(empl_low),
-                                      'pop_medium': np.nansum(pop_medium), 'empl_medium': np.nansum(empl_medium),
-                                      'pop_high': np.nansum(pop_high), 'empl_high': np.nansum(empl_high)})
-                    pop_empl = gpd.GeoDataFrame(
-                        pd.concat([pop_empl, pd.DataFrame(temp).T], ignore_index=True))
+                    temp = pd.Series(
+                        {
+                            "commune_id": j,
+                            "voronoi_id": i,
+                            "pop_20": np.nansum(pop20),
+                            "empl_20": np.nansum(empl20),
+                            "pop_low": np.nansum(pop_low),
+                            "empl_low": np.nansum(empl_low),
+                            "pop_medium": np.nansum(pop_medium),
+                            "empl_medium": np.nansum(empl_medium),
+                            "pop_high": np.nansum(pop_high),
+                            "empl_high": np.nansum(empl_high),
+                        }
+                    )
+                    pop_empl = gpd.GeoDataFrame(pd.concat([pop_empl, pd.DataFrame(temp).T], ignore_index=True))
                     # pop_empl = pop_empl.append({'commune_id': j, 'voronoi_id': i,
                     #                            'pop_20': np.nansum(pop20), 'empl_20': np.nansum(empl20),
                     #                            'pop_low': np.nansum(pop_low), 'empl_low': np.nansum(empl_low),
@@ -1131,9 +1233,9 @@ def GetVoronoiOD():
 
     # Step 3 complete exploded matrix
     # Initialize the OD matrix DataFrame with zeros or NaNs
-    tuples = list(zip(pairs['voronoi_id'], pairs['commune_id']))
-    multi_index = pd.MultiIndex.from_tuples(tuples, names=['voronoi_id', 'commune_id'])
-    temp_df = pd.DataFrame(index=multi_index, columns=multi_index).fillna(0).to_numpy('float')
+    tuples = list(zip(pairs["voronoi_id"], pairs["commune_id"]))
+    multi_index = pd.MultiIndex.from_tuples(tuples, names=["voronoi_id", "commune_id"])
+    temp_df = pd.DataFrame(index=multi_index, columns=multi_index).fillna(0).to_numpy("float")
     od_matrix = pd.DataFrame(data=temp_df, index=multi_index, columns=multi_index)
 
     # Handle raster without values
@@ -1152,7 +1254,7 @@ def GetVoronoiOD():
         row_values = cout_r.loc[commune_id_origin]
 
         # Use the valid columns to extract values
-        extracted_values = row_values[set_id_destination].to_numpy('float')
+        extracted_values = row_values[set_id_destination].to_numpy("float")
 
         # Create a boolean mask for rows where the second element of the index matches commune_id_o
         mask = od_matrix.index.get_level_values(1) == commune_id_origin
@@ -1172,34 +1274,34 @@ def GetVoronoiOD():
     logger.verbose(pop_empl_scenarios)
 
     # SEt index of df to access its single components
-    pop_empl = pop_empl.set_index(['voronoi_id', 'commune_id'])
+    pop_empl = pop_empl.set_index(["voronoi_id", "commune_id"])
 
     # for each of these scenarios make an own copy of od_matrix named od_matrix+scen
     for scen in pop_empl_scenarios:
         logger.verbose(f"Processing scenario {scen}")
         od_matrix_temp = od_matrix.copy()
 
-        for polygon_id, row in tqdm(pop_empl.iterrows(), desc='Allocating pop and empl to OD matrix'):
+        for polygon_id, row in tqdm(pop_empl.iterrows(), desc="Allocating pop and empl to OD matrix"):
             # Multiply all values in the row/column
-            od_matrix_temp.loc[polygon_id] *= row[f'pop_{scen}']
-            od_matrix_temp.loc[:, polygon_id] *= row[f'empl_{scen}']
+            od_matrix_temp.loc[polygon_id] *= row[f"pop_{scen}"]
+            od_matrix_temp.loc[:, polygon_id] *= row[f"empl_{scen}"]
 
         # Step 4: Group the OD matrix by polygon_id
         # Reset the index to turn the MultiIndex into columns
         od_matrix_reset = od_matrix_temp.reset_index()
 
         # Sum the values by 'polygon_id' for both the rows and columns
-        od_grouped = od_matrix_reset.groupby('voronoi_id').sum()
+        od_grouped = od_matrix_reset.groupby("voronoi_id").sum()
 
         # Now od_grouped has 'polygon_id' as the index, but we still need to group the columns
         # First, transpose the DataFrame to apply the same operation on the columns
         od_grouped = od_grouped.T
 
         # Again group by 'polygon_id' and sum, then transpose back
-        od_grouped = od_grouped.groupby('voronoi_id').sum().T
+        od_grouped = od_grouped.groupby("voronoi_id").sum().T
 
         # Drop column commune_id
-        od_grouped = od_grouped.drop(columns='commune_id')
+        od_grouped = od_grouped.drop(columns="commune_id")
 
         # Set diagonal values to 0
         temp_sum = od_grouped.sum().sum()
@@ -1210,7 +1312,7 @@ def GetVoronoiOD():
         logger.verbose(f"Sum of OD matrix before {temp_sum} and after {temp_sum2} removing diagonal values")
 
         # Save pd df to csv
-        od_grouped.to_csv(fr"data/traffic_flow/od/od_matrix_{scen}.csv")
+        od_grouped.to_csv(rf"data/traffic_flow/od/od_matrix_{scen}.csv")
         # odmat.to_csv(r"data/traffic_flow/od/od_matrix_raw.csv")
 
         # logger.verbose sum of all values in od df
@@ -1219,9 +1321,11 @@ def GetVoronoiOD():
         sum_poly = od_grouped.sum().sum()
         sum_com_frame = odmat_frame.sum().sum()
         logger.verbose(
-            f"Total trips before {sum_com_frame} ({odmat_frame.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
+            f"Total trips before {sum_com_frame} ({odmat_frame.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)"
+        )
         logger.verbose(
-            f"Total trips before {sum_com} ({odmat.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)")
+            f"Total trips before {sum_com} ({odmat.shape} communes) and after {sum_poly} ({od_grouped.shape} polygons)"
+        )
 
         # Sum all columns of od_grouped
         origin = od_grouped.sum(axis=1).reset_index()
@@ -1233,10 +1337,10 @@ def GetVoronoiOD():
         # merge origin and destination to voronoidf based on voronoi_id
         # Make a copy of voronoidf
         voronoidf_temp = voronoidf.copy()
-        voronoidf_temp = voronoidf_temp.merge(origin, how='left', left_on='ID_point', right_on='voronoi_id')
-        voronoidf_temp = voronoidf_temp.merge(destination, how='left', left_on='ID_point', right_on='voronoi_id')
-        voronoidf_temp = voronoidf_temp.rename(columns={'0_x': 'origin', '0_y': 'destination'})
-        voronoidf_temp.to_file(fr"data/traffic_flow/od/OD_voronoidf_{scen}.gpkg", driver="GPKG")
+        voronoidf_temp = voronoidf_temp.merge(origin, how="left", left_on="ID_point", right_on="voronoi_id")
+        voronoidf_temp = voronoidf_temp.merge(destination, how="left", left_on="ID_point", right_on="voronoi_id")
+        voronoidf_temp = voronoidf_temp.rename(columns={"0_x": "origin", "0_y": "destination"})
+        voronoidf_temp.to_file(rf"data/traffic_flow/od/OD_voronoidf_{scen}.gpkg", driver="GPKG")
 
         # Same for odmat and commune_df
         if scen == "20":
@@ -1244,9 +1348,9 @@ def GetVoronoiOD():
             origin_commune.colum = ["commune_id", "origin"]
             destination_commune = odmat_frame.sum(axis=0).reset_index()
             destination_commune.colum = ["commune_id", "destination"]
-            commune_df = commune_df.merge(origin_commune, how='left', left_on='BFS', right_on='quelle_code')
-            commune_df = commune_df.merge(destination_commune, how='left', left_on='BFS', right_on='ziel_code')
-            commune_df = commune_df.rename(columns={'0_x': 'origin', '0_y': 'destination'})
+            commune_df = commune_df.merge(origin_commune, how="left", left_on="BFS", right_on="quelle_code")
+            commune_df = commune_df.merge(destination_commune, how="left", left_on="BFS", right_on="ziel_code")
+            commune_df = commune_df.rename(columns={"0_x": "origin", "0_y": "destination"})
             commune_df.to_file(r"data/traffic_flow/od/OD_commune_filtered.gpkg", driver="GPKG")
 
     return
@@ -1267,7 +1371,8 @@ def GetVoronoiOD_multi():
 
     if jobvec.shape[0] != odmat.shape[0]:
         logger.verbose(
-            "Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
+            "Error: The number of communes in the OD matrix and the number of communes in the employment data do not match."
+        )
 
     # Open scenario (medium) raster data    (low = band 2, high = band 3)
     with rasterio.open(scen_pop_path) as src:
@@ -1294,7 +1399,7 @@ def GetVoronoiOD_multi():
     # Iterate through files in the directory
     for filename in os.listdir(directory_path):
         # Check if the filename matches the pattern 'devXX_source_id_raster.tif'
-        match = re.match(r'dev(\d+)_source_id_raster\.tif', filename)
+        match = re.match(r"dev(\d+)_source_id_raster\.tif", filename)
         if match:
             # Extract XX value and add to the list
             xx = match.group(1)
@@ -1304,7 +1409,7 @@ def GetVoronoiOD_multi():
     xx_values = [int(xx) for xx in xx_values]
     logger.verbose(len(xx_values))
 
-    for xx in tqdm(xx_values, desc='Processing Voronoi IDs'):
+    for xx in tqdm(xx_values, desc="Processing Voronoi IDs"):
         # Construct the file path
         file_path = f"{directory_path}dev{xx}_source_id_raster.tif"
 
@@ -1317,8 +1422,8 @@ def GetVoronoiOD_multi():
 
         # Step 2: Get all pairs of combinations from communes to polygons
         unique_commune_id = np.sort(np.unique(commune_raster))
-        pairs = pd.DataFrame(columns=['commune_id', 'voronoi_id'])
-        pop_empl = pd.DataFrame(columns=['commune_id', 'voronoi_id', "empl", "pop"])
+        pairs = pd.DataFrame(columns=["commune_id", "voronoi_id"])
+        pop_empl = pd.DataFrame(columns=["commune_id", "voronoi_id", "empl", "pop"])
 
         for i in unique_voronoi_id:
             # Get the voronoi raster
@@ -1332,9 +1437,8 @@ def GetVoronoiOD_multi():
                     # Check if there are overlaying values
                     if np.nansum(mask) > 0:
                         # pairs = pairs.append({'commune_id': j, 'voronoi_id': i}, ignore_index=True)
-                        temp = pd.Series({'commune_id': j, 'voronoi_id': i})
-                        pairs = gpd.GeoDataFrame(
-                            pd.concat([pairs, pd.DataFrame(temp).T], ignore_index=True))
+                        temp = pd.Series({"commune_id": j, "voronoi_id": i})
+                        pairs = gpd.GeoDataFrame(pd.concat([pairs, pd.DataFrame(temp).T], ignore_index=True))
 
                         # Get the population and employment values for multiple scenarios
                         pop_low = scen_pop_low_tif[mask]
@@ -1344,13 +1448,19 @@ def GetVoronoiOD_multi():
                         pop_high = scen_pop_high_tif[mask]
                         empl_high = scen_empl_high_tif[mask]
 
-                        temp = pd.Series({'commune_id': j, 'voronoi_id': i,
-                                          'pop_low': np.nansum(pop_low), 'empl_low': np.nansum(empl_low),
-                                          'pop_medium': np.nansum(pop_medium),
-                                          'empl_medium': np.nansum(empl_medium),
-                                          'pop_high': np.nansum(pop_high), 'empl_high': np.nansum(empl_high)})
-                        pop_empl = gpd.GeoDataFrame(
-                            pd.concat([pop_empl, pd.DataFrame(temp).T], ignore_index=True))
+                        temp = pd.Series(
+                            {
+                                "commune_id": j,
+                                "voronoi_id": i,
+                                "pop_low": np.nansum(pop_low),
+                                "empl_low": np.nansum(empl_low),
+                                "pop_medium": np.nansum(pop_medium),
+                                "empl_medium": np.nansum(empl_medium),
+                                "pop_high": np.nansum(pop_high),
+                                "empl_high": np.nansum(empl_high),
+                            }
+                        )
+                        pop_empl = gpd.GeoDataFrame(pd.concat([pop_empl, pd.DataFrame(temp).T], ignore_index=True))
                         # pop_empl = pop_empl.append({'commune_id': j, 'voronoi_id': i,
                         #                            'pop_low': np.nansum(pop_low), 'empl_low': np.nansum(empl_low),
                         #                            'pop_medium': np.nansum(pop_medium),
@@ -1362,9 +1472,9 @@ def GetVoronoiOD_multi():
 
         # Step 3 complete exploded matrix
         # Initialize the OD matrix DataFrame with zeros or NaNs
-        tuples = list(zip(pairs['voronoi_id'], pairs['commune_id']))
-        multi_index = pd.MultiIndex.from_tuples(tuples, names=['voronoi_id', 'commune_id'])
-        temp_df = pd.DataFrame(index=multi_index, columns=multi_index).fillna(0).to_numpy('float')
+        tuples = list(zip(pairs["voronoi_id"], pairs["commune_id"]))
+        multi_index = pd.MultiIndex.from_tuples(tuples, names=["voronoi_id", "commune_id"])
+        temp_df = pd.DataFrame(index=multi_index, columns=multi_index).fillna(0).to_numpy("float")
         od_matrix = pd.DataFrame(data=temp_df, index=multi_index, columns=multi_index)
 
         # Handle raster without values
@@ -1384,7 +1494,7 @@ def GetVoronoiOD_multi():
             row_values = cout_r.loc[commune_id_origin]
 
             # Use the valid columns to extract values
-            extracted_values = row_values[set_id_destination].to_numpy('float')
+            extracted_values = row_values[set_id_destination].to_numpy("float")
 
             # Create a boolean mask for rows where the second element of the index matches commune_id_o
             mask = od_matrix.index.get_level_values(1) == commune_id_origin
@@ -1402,7 +1512,7 @@ def GetVoronoiOD_multi():
         pop_empl_scenarios = [col.split("_")[1] for col in pop_empl_columns if col.startswith("pop_")]
 
         # SEt index of df to access its single components
-        pop_empl = pop_empl.set_index(['voronoi_id', 'commune_id'])
+        pop_empl = pop_empl.set_index(["voronoi_id", "commune_id"])
 
         # for each of these scenarios make an own copy of od_matrix named od_matrix+scen
         for scen in pop_empl_scenarios:
@@ -1411,31 +1521,31 @@ def GetVoronoiOD_multi():
 
             for polygon_id, row in pop_empl.iterrows():
                 # Multiply all values in the row/column
-                od_matrix_temp.loc[polygon_id] *= row[f'pop_{scen}']
-                od_matrix_temp.loc[:, polygon_id] *= row[f'empl_{scen}']
+                od_matrix_temp.loc[polygon_id] *= row[f"pop_{scen}"]
+                od_matrix_temp.loc[:, polygon_id] *= row[f"empl_{scen}"]
 
             # Step 4: Group the OD matrix by polygon_id
             # Reset the index to turn the MultiIndex into columns
             od_matrix_reset = od_matrix_temp.reset_index()
 
             # Sum the values by 'polygon_id' for both the rows and columns
-            od_grouped = od_matrix_reset.groupby('voronoi_id').sum()
+            od_grouped = od_matrix_reset.groupby("voronoi_id").sum()
 
             # Now od_grouped has 'polygon_id' as the index, but we still need to group the columns
             # First, transpose the DataFrame to apply the same operation on the columns
             od_grouped = od_grouped.T
 
             # Again group by 'polygon_id' and sum, then transpose back
-            od_grouped = od_grouped.groupby('voronoi_id').sum().T
+            od_grouped = od_grouped.groupby("voronoi_id").sum().T
 
             # Drop column commune_id
-            od_grouped = od_grouped.drop(columns='commune_id')
+            od_grouped = od_grouped.drop(columns="commune_id")
 
             # Set diagonal values to 0
             np.fill_diagonal(od_grouped.values, 0)
 
             # Save pd df to csv
-            od_grouped.to_csv(fr"data/traffic_flow/od/developments/od_matrix_dev{xx}_{scen}.csv")
+            od_grouped.to_csv(rf"data/traffic_flow/od/developments/od_matrix_dev{xx}_{scen}.csv")
             # odmat.to_csv(r"data/traffic_flow/od/od_matrix_raw.csv")
 
     return
@@ -1445,7 +1555,7 @@ def link_traffic_to_map():
     # Import travel flows from matrix to df, no index, set column name to flow
     # flow = pd.read_csv(r"data/traffic_flow/Xi_sum.csv", header=None, index_col=False)
     flow = pd.read_csv(r"data/traffic_flow/developments/D_i/Xi_sum_status_quo_20.csv", header=None, index_col=False)
-    flow.columns = ['flow']
+    flow.columns = ["flow"]
     logger.verbose(flow.head(10).to_string())
 
     # Import data with links
@@ -1458,15 +1568,15 @@ def link_traffic_to_map():
 
     # Sort edges by edge_ID
     edges["ID_edge"] = edges["ID_edge"].astype(int)
-    edges = edges.sort_values(by=['ID_edge'])
+    edges = edges.sort_values(by=["ID_edge"])
 
     # Add flow column to edges df
-    edges['flow'] = flow['flow']
+    edges["flow"] = flow["flow"]
 
     logger.verbose(edges.head(10).to_string())
 
     # Only keep column capacity, flow and geometry
-    edges = edges[['ID_edge', 'geometry', 'flow']]
+    edges = edges[["ID_edge", "geometry", "flow"]]
     # Safe file
     edges.to_file(r"data/Network/processed/edges_only_flow.gpkg")
 
@@ -1505,8 +1615,9 @@ def convert_data_to_input(points, edges):
     # When point is in corridor or on border, it generates traffic
     # points["generate_traffic"] = points["within_corridor"] | points["on_corridor_border"]
     # points["generate_traffic"] = np.logical_or(points['within_corridor'], points['on_corridor_border'])
-    points["generate_traffic"] = np.logical_or(np.array(points['within_corridor']) == '1',
-                                               np.array(points['on_corridor_border']) == '1')
+    points["generate_traffic"] = np.logical_or(
+        np.array(points["within_corridor"]) == "1", np.array(points["on_corridor_border"]) == "1"
+    )
 
     #######################################################################################################################
     # Store values as needed for the model
@@ -1566,10 +1677,11 @@ def get_nw_data(OD_matrix, points, voronoi_gdf, edges):
     # Filter points to only keep those within the corridor or on border
     # points_in = points[(points["within_corridor"] == True) | (points["on_corridor_border"] == True)]
     points_in = points[
-        np.logical_or(np.array(points['within_corridor']) == '1', np.array(points['on_corridor_border']) == '1')]
+        np.logical_or(np.array(points["within_corridor"]) == "1", np.array(points["on_corridor_border"]) == "1")
+    ]
     # logger.verbose(f"Points in corridor or border: {points_in.shape}")
     # logger.verbose(points_in.head(5).to_string())
-    # logger.verbose(voronoi_gdf.head(5).to_string())
+    # logger.verbose(voronoi_gdf.head(5)p.to_string())
     # Get common ID_point and voronoi_ID as list
     # common_ID = list(set(points_in["ID_point"]).intersection(set(voronoi_gdf["ID_point"])))
     common_ID = list(set(pd.to_numeric(points_in["ID_point"])) & set(voronoi_gdf["ID_point"]))
@@ -1603,19 +1715,19 @@ def get_nw_data(OD_matrix, points, voronoi_gdf, edges):
     # Build network using networkx
     # Map the coordinates to the edges DataFrame
     # Set the index of the nodes DataFrame to be the 'ID_point' column
-    points.set_index('ID_point', inplace=True)
+    points.set_index("ID_point", inplace=True)
 
     # Create an empty NetworkX graph
     G = nx.MultiGraph()
     # logger.verbose(points.head(5).to_string())
     # Add nodes with IDs to the graph
     for node_id, row in points.iterrows():
-        G.add_node(node_id, pos=(row['geometry'].x, row['geometry'].y), demand=row['generate_demand'])
+        G.add_node(node_id, pos=(row["geometry"].x, row["geometry"].y), demand=row["generate_demand"])
 
     # Add edges to the graph
     # Make sure 'start' and 'end' in edges_gdf refer to the node IDs, add attribute
     for idx, row in edges.iterrows():
-        G.add_edge(row['start'], row['end'], key=row['ID_edge'], fftt=pd.to_numeric(row['ffs']) / row.geometry.length)
+        G.add_edge(row["start"], row["end"], key=row["ID_edge"], fftt=pd.to_numeric(row["ffs"]) / row.geometry.length)
     """
     # Plot graph small points with coordinates as position and color based on demand attribute
     nx.draw(G, pos=nx.get_node_attributes(G, 'pos'), node_size=3, node_color=list(nx.get_node_attributes(G, 'demand').values()), edge_color='black', width=0.5)
@@ -1629,7 +1741,7 @@ def get_nw_data(OD_matrix, points, voronoi_gdf, edges):
     # nx.all_simple_edge_paths() # (u,v,k) -> u,v are nodes, k is the key of the edge
 
     # Step 1: Identify nodes with demand
-    demand_nodes = [n for n, attr in G.nodes(data=True) if attr.get('demand') == True]
+    demand_nodes = [n for n, attr in G.nodes(data=True) if attr.get("demand") == True]
     if len(demand_nodes) < 29:
         logger.verbose(f"Number of points considered: {len(demand_nodes)} ({len(demand_nodes) * len(demand_nodes)})")
     """
@@ -1694,7 +1806,7 @@ def get_nw_data(OD_matrix, points, voronoi_gdf, edges):
             target = demand_nodes[j]
             unique_paths_ij = []
 
-            paths = k_shortest_paths_edge_ids(G_simple, source, target, 2, weight='fftt')
+            paths = k_shortest_paths_edge_ids(G_simple, source, target, 2, weight="fftt")
 
             for path in paths:
                 edge_ids = [list(G[u][v])[0] for u, v in zip(path[:-1], path[1:])]  # Assuming G is a DiGraph or Graph
@@ -1782,9 +1894,9 @@ def CostFun(Xi, par):
     # Computes the cost function for the flow Xi, with the parameters 'par', Xi has the adequate size
 
     # BPR
-    s1 = np.power(np.divide(Xi, par['Xmax_i']), par['gamma_i'])
-    s2 = np.multiply(par['alpha_i'], s1)
-    Ci = np.multiply(par['fftt_i'], np.add(1, s2))
+    s1 = np.power(np.divide(Xi, par["Xmax_i"]), par["gamma_i"])
+    s2 = np.multiply(par["alpha_i"], s1)
+    Ci = np.multiply(par["fftt_i"], np.add(1, s2))
     # Ci=par.fftt_i.*(1+par.alpha_i.*(Xi./par.Xmax_i).^par.gamma_i);
     return Ci
 
@@ -1798,11 +1910,13 @@ def IntCostFun(Xi, par):
     # s2 = Xi*par.alpha_i.*par.fftt_i.*s1           Flow*alpha*fftt*s1
     # Ci = Xi.*par.fftt_i + s2./(par.gamma_i + 1)   Flow*fftt + s2/(gamma+1)
 
-    s1 = np.power(np.divide(Xi, par['Xmax_i']), par['gamma_i'])  # (Xi./par.Xmax_i).^par.gamma_i
-    s2 = np.multiply(Xi,
-                     np.multiply(par['alpha_i'], np.multiply(par['fftt_i'], s1)))  # (Xi.*par.alpha_i.*par.fftt_i.*s1)
-    Ci = np.multiply(Xi, par['fftt_i']) + np.divide(s2, (
-        np.add(par['gamma_i'], 1)))  # Xi.*par.fftt_i + s2./(par.gamma_i + 1);
+    s1 = np.power(np.divide(Xi, par["Xmax_i"]), par["gamma_i"])  # (Xi./par.Xmax_i).^par.gamma_i
+    s2 = np.multiply(
+        Xi, np.multiply(par["alpha_i"], np.multiply(par["fftt_i"], s1))
+    )  # (Xi.*par.alpha_i.*par.fftt_i.*s1)
+    Ci = np.multiply(Xi, par["fftt_i"]) + np.divide(
+        s2, (np.add(par["gamma_i"], 1))
+    )  # Xi.*par.fftt_i + s2./(par.gamma_i + 1);
     # Ci=Xi.*par.fftt_i + (Xi.*par.alpha_i.*par.fftt_i.*(Xi./par.Xmax_i).^par.gamma_i)./(par.gamma_i + 1);
 
     # returns travel cost for each link
@@ -1895,15 +2009,20 @@ def SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta):
         # Replace all nan values in x with 0
         # x[np.isnan(x)] = 0
 
-        result = np.sum(IntLinksTimes(x)) + np.sum(np.divide(np.multiply(x, temp_log), thetavec)) + np.sum(
-            (np.multiply(x, cf_r)))
+        result = (
+            np.sum(IntLinksTimes(x))
+            + np.sum(np.divide(np.multiply(x, temp_log), thetavec))
+            + np.sum((np.multiply(x, cf_r)))
+        )
         if np.sum(IntLinksTimes(x) < 0) > 0:
             logger.verbose(f"Neagtive numbers in IntLinksTimes(x): {np.sum(IntLinksTimes(x) > 0)}")
         if np.isnan(np.sum(IntLinksTimes(x))):
             logger.verbose("NaN in IntLinksTimes:", result)
         if np.isnan(np.sum(np.divide(np.multiply(x, temp_log), thetavec))):
-            logger.verbose("NaN in np.divide(np.multiply(x,np.log(x)),thetavec):",
-                  np.sum(np.isnan(np.divide(np.multiply(x, temp_log), thetavec))))
+            logger.verbose(
+                "NaN in np.divide(np.multiply(x,np.log(x)),thetavec):",
+                np.sum(np.isnan(np.divide(np.multiply(x, temp_log), thetavec))),
+            )
             logger.verbose("NaN in np.multiply(x,np.log(x))):", np.sum(np.isnan(np.multiply(x, temp_log))))
             logger.verbose("NaN in x:", np.sum(np.isnan(x)))
             # logger.verbose amount of negative values in x
@@ -1940,11 +2059,9 @@ def SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta):
         objective_value = fun(xk)
         logger.verbose(f"Iteration, Objective Function Value: {objective_value}")
 
-    ineq_cons = {'type': 'ineq',
-                 'fun': lambda x: x}  # ,
+    ineq_cons = {"type": "ineq", "fun": lambda x: x}  # ,
     # 'jac' : lambda x: np.array([])}
-    eq_cons = {'type': 'eq',
-               'fun': lambda x: (np.matmul(delta_odr, x) - (D_od)).flatten()}  # ,
+    eq_cons = {"type": "eq", "fun": lambda x: (np.matmul(delta_odr, x) - (D_od)).flatten()}  # ,
     # 'jac' : lambda x: -delta_odr.flatten()}
 
     ###################################################################################################################
@@ -1967,17 +2084,20 @@ def SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta):
     # res=least_squares(fun, D_r0.flatten(),jac=fun_der,bounds=bounds)
 
     # D_r to be optimized -> demand on each route
-    res = minimize(fun, D_r0.flatten(),
-                   method='trust-constr',
-                   # method='SLSQP',
-                   # jac=fun_der,
-                   constraints=[eq_cons, ineq_cons],
-                   options={  # 'ftol': 1e5,
-                       'maxiter': 2,
-                       'verbose': 0,
-                       'disp': True},
-                   bounds=bounds
-                   )
+    res = minimize(
+        fun,
+        D_r0.flatten(),
+        method="trust-constr",
+        # method='SLSQP',
+        # jac=fun_der,
+        constraints=[eq_cons, ineq_cons],
+        options={  # 'ftol': 1e5,
+            "maxiter": 2,
+            "verbose": 0,
+            "disp": True,
+        },
+        bounds=bounds,
+    )
     # callback=callback_function
     # )
     # Describe variables
@@ -1999,8 +2119,11 @@ def SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta):
     thetavec = np.ones_like(D_r)
 
     # fval is the objective function value
-    fval = np.sum(IntLinksTimes(D_r)) + np.sum(np.divide(np.multiply(D_r, np.log(D_r)), thetavec)) + np.sum(
-        (np.multiply(D_r, cf_r)))
+    fval = (
+        np.sum(IntLinksTimes(D_r))
+        + np.sum(np.divide(np.multiply(D_r, np.log(D_r)), thetavec))
+        + np.sum((np.multiply(D_r, cf_r)))
+    )
     # fval = sum(IntLinksTimes(D_r)) + 1/theta*sum(np.multiply(D_r,np.log(D_r))) + sum(np.multiply(D_r,cf_r))
     # --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
 
@@ -2047,7 +2170,7 @@ def Commonality(betaCom, delta_ir, delta_odr, fftt_i, fftt_r):
                         t0_1_2 = sum(fftt_i[common])
 
                     # Update commonality factor
-                    cf_r[r1] = cf_r[r1] + t0_1_2 / (t0_1 ** .5 * t0_2 ** .5)
+                    cf_r[r1] = cf_r[r1] + t0_1_2 / (t0_1**0.5 * t0_2**0.5)
                     """
                     if (t0_1**.5*t0_2**.5) == 0:
                         logger.verbose(f"t0_1 or t0_2 is 0 for OD pair {od} and routes {r1} and {r2}")
@@ -2074,8 +2197,9 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
 
     # Same with own data
     nodes_lv95, nodes_wgs84, links, link_length_i, nlinks, par = convert_data_to_input(points=points, edges=edges)
-    delta_ir, delta_odr, routelinks, D_od, nOD, nroutes = get_nw_data(OD_matrix=OD_matrix, points=points,
-                                                                      voronoi_gdf=voronoi, edges=edges)
+    delta_ir, delta_odr, routelinks, D_od, nOD, nroutes = get_nw_data(
+        OD_matrix=OD_matrix, points=points, voronoi_gdf=voronoi, edges=edges
+    )
 
     # Remove all trip from origin to same destination
     # Delete all diagonals in OD matrix
@@ -2094,14 +2218,14 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
     # --- Definition of parameters for SUE
 
     # Freeflow traval time per route
-    fftt_r = (np.matmul(par['fftt_i'].transpose(), delta_ir)).transpose()
+    fftt_r = (np.matmul(par["fftt_i"].transpose(), delta_ir)).transpose()
     #######################################################################################################################
     # No travel time when OD same point (intra cellular move)
     # fftt_r[fftt_r == 0] = 0.0001
 
     betaCom = 1
     # Get the common links among routes
-    cf_r = Commonality(betaCom, delta_ir, delta_odr, par['fftt_i'], fftt_r)
+    cf_r = Commonality(betaCom, delta_ir, delta_odr, par["fftt_i"], fftt_r)
     # logger.verbose amount of nan in cf_r
     # logger.verbose(f"Amount of nan in cf_r: {np.sum(np.isnan(cf_r))}")
     # logger.verbose(f"Amount of inf in cf_r: {np.sum(np.isinf(cf_r))}")
@@ -2128,22 +2252,25 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
         # --- Reference value: network with no damage
 
         [Xi, D_r1, intTrec_i, ref] = SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta)
-        Results = {'Xi': Xi, "D_r1": D_r1, 'ref': ref}
+        Results = {"Xi": Xi, "D_r1": D_r1, "ref": ref}
 
         # Sum values of Xi for each row
         Xi_sum = np.sum(Xi, axis=1)
 
         # Store Xi_sum as csv but using number through pd df (demand link)
-        pd.DataFrame(Xi_sum).to_csv(f"data/traffic_flow/developments/D_i/Xi_sum_{dev}_{scen}.csv", header=False,
-                                    index=False)
+        pd.DataFrame(Xi_sum).to_csv(
+            f"data/traffic_flow/developments/D_i/Xi_sum_{dev}_{scen}.csv", header=False, index=False
+        )
 
         # Store D_r1 as csv but using number through pd df (demand route)
-        pd.DataFrame(D_r1).to_csv(f"data/traffic_flow/developments/D_r/D_r1_{dev}_{scen}.csv", header=False,
-                                  index=False)
+        pd.DataFrame(D_r1).to_csv(
+            f"data/traffic_flow/developments/D_r/D_r1_{dev}_{scen}.csv", header=False, index=False
+        )
 
         # Store intTrec_i as csv using pd df (travel time link)
-        pd.DataFrame(intTrec_i).to_csv(f"data/traffic_flow/developments/tt_i/intTrec_i_{dev}_{scen}.csv", header=False,
-                                       index=False)
+        pd.DataFrame(intTrec_i).to_csv(
+            f"data/traffic_flow/developments/tt_i/intTrec_i_{dev}_{scen}.csv", header=False, index=False
+        )
 
         # Compute total travel time
         # Multiplying travel time on each link with demand on each link
@@ -2164,7 +2291,7 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
         # end
         # toc = time.time()
         # logger.verbose(toc-tic, ' sec elapsed')
-        comptime = timeit.default_timer() - t;
+        comptime = timeit.default_timer() - t
         # logger.verbose(f'CPU time (seconds): {comptime}')
 
         return travel_time  # .item(0)
@@ -2181,7 +2308,7 @@ def tt_optimization_all_developments():
     developments = []
     for filename in os.listdir(directory_path):
         # Check if the filename matches the pattern 'devXX_source_id_raster.tif'
-        match = re.match(r'od_matrix_dev(\d+)_medium\.csv', filename)
+        match = re.match(r"od_matrix_dev(\d+)_medium\.csv", filename)
         if match:
             # Extract XX value and add to the list
             xx = match.group(1)
@@ -2197,9 +2324,9 @@ def tt_optimization_all_developments():
     for dev in tqdm(developments):
         # Import generated links
         # links_developments = gpd.read_file(fr"data/Network/processed/new_links_realistic_costs.gpkg")
-        links_developments = gpd.read_file(fr"data/costs/construction.gpkg")
+        links_developments = gpd.read_file(rf"data/costs/construction.gpkg")
         # Check "dev" is in links_developments['ID_new']
-        if dev not in links_developments['ID_new'].values:
+        if dev not in links_developments["ID_new"].values:
             logger.verbose(f"Development {dev} not in links_developments['ID_new'] - skipping")
             # continue with next for loop
             continue
@@ -2217,11 +2344,11 @@ def tt_optimization_all_developments():
             logger.verbose(f"Development: {dev} in scenario: {scen}")
 
             # Import generated points
-            points_developments = gpd.read_file(fr"data/Network/processed/generated_nodes.gpkg")
+            points_developments = gpd.read_file(rf"data/Network/processed/generated_nodes.gpkg")
             # logger.verbose(points_developments.head(5).to_string())
 
             # Import points of current network
-            points_current = gpd.read_file(fr"data/Network/processed/points_with_attribute.gpkg")
+            points_current = gpd.read_file(rf"data/Network/processed/points_with_attribute.gpkg")
 
             # Filter generated point of development using ID_new
             point_temp = points_developments[points_developments["ID_new"] == dev]
@@ -2232,26 +2359,26 @@ def tt_optimization_all_developments():
             # try geometry[0] otherwise geometry
             points = points_current.copy()
             # Add point of development to network
-            new_point_row = {"intersection": 0,
-                             "ID_point": 9999,
-                             "geometry": point_temp.geometry.iloc[0],
-                             "open_ends": None,
-                             "within_corridor": True,
-                             "on_corridor_border": False,
-                             "generate_traffic": 0
-                             }
+            new_point_row = {
+                "intersection": 0,
+                "ID_point": 9999,
+                "geometry": point_temp.geometry.iloc[0],
+                "open_ends": None,
+                "within_corridor": True,
+                "on_corridor_border": False,
+                "generate_traffic": 0,
+            }
             # points = points.append(new_point_row, ignore_index=True)
             temp = pd.Series(new_point_row)
-            points = gpd.GeoDataFrame(
-                pd.concat([points, pd.DataFrame(temp).T], ignore_index=True))
+            points = gpd.GeoDataFrame(pd.concat([points, pd.DataFrame(temp).T], ignore_index=True))
             # sort points in ascending point ID
             points.index = points.index.astype(int)
             points = points.sort_index()
             # points = points.sort_values(by=["ID_point"])
-            points['id_dummy'] = points.index.values
+            points["id_dummy"] = points.index.values
 
             # Import current links
-            links_current = gpd.read_file(fr"data/Network/processed/edges_with_attribute.gpkg")
+            links_current = gpd.read_file(rf"data/Network/processed/edges_with_attribute.gpkg")
             # logger.verbose(links_current.head(5).to_string())
 
             # Filter edge of development
@@ -2265,20 +2392,20 @@ def tt_optimization_all_developments():
             index_point_start = points[points["id_dummy"] == edge_temp["ID_current"].values[0]].index[0]
 
             # Add edge of development to network
-            new_edge_row = {"start": index_point_start,
-                            "end": 9999,
-                            "geometry": edge_temp["geometry"].iloc[0],
-                            "ffs": 120,
-                            "capacity": 2200,
-                            "start_access": False,
-                            "end_access": True,
-                            "polygon_border": False,
-                            "ID_edge": edge_ID_max + 1
-                            }
+            new_edge_row = {
+                "start": index_point_start,
+                "end": 9999,
+                "geometry": edge_temp["geometry"].iloc[0],
+                "ffs": 120,
+                "capacity": 2200,
+                "start_access": False,
+                "end_access": True,
+                "polygon_border": False,
+                "ID_edge": edge_ID_max + 1,
+            }
             # edges = edges.append(new_edge_row, ignore_index=True)
             temp = pd.Series(new_edge_row)
-            edges = gpd.GeoDataFrame(
-                pd.concat([edges, pd.DataFrame(temp).T], ignore_index=True))
+            edges = gpd.GeoDataFrame(pd.concat([edges, pd.DataFrame(temp).T], ignore_index=True))
 
             # sort edges in ascending edge ID
             edges["ID_edge"] = edges["ID_edge"].astype(int)
@@ -2302,14 +2429,16 @@ def tt_optimization_all_developments():
             # logger.verbose(f"Amount of overlapping points in links_development['new_ID'] and developments: {len(set(links_developments['ID_new']).intersection(developments))}")
 
             # Get path like data/traffic_flow/od/od_matrix_i.csv
-            OD_matrix = pd.read_csv(fr"data/traffic_flow/od/developments/od_matrix_dev{dev}_{scen}.csv", sep=",",
-                                    index_col=0)
+            OD_matrix = pd.read_csv(
+                rf"data/traffic_flow/od/developments/od_matrix_dev{dev}_{scen}.csv", sep=",", index_col=0
+            )
 
             # Import voronoi_df based on development
-            voronoi_df = gpd.read_file(fr"data/Network/travel_time/developments/dev{dev}_Voronoi.gpkg")
+            voronoi_df = gpd.read_file(rf"data/Network/travel_time/developments/dev{dev}_Voronoi.gpkg")
 
-            tt = travel_flow_optimization(OD_matrix=OD_matrix, points=points, edges=edges, voronoi=voronoi_df, dev=dev,
-                                          scen=scen)
+            tt = travel_flow_optimization(
+                OD_matrix=OD_matrix, points=points, edges=edges, voronoi=voronoi_df, dev=dev, scen=scen
+            )
             # add tt to dict with key dev
             results[scen] = tt
         # logger.verbose(results)
@@ -2317,13 +2446,14 @@ def tt_optimization_all_developments():
         # Append the result dict and add dev as values for thats row development column
         # costs_travel_time = costs_travel_time.append({"development":dev, "low":results["low"], "medium":results["medium"], "high":results["high"]}, ignore_index=True)
         temp = pd.Series(
-            {"development": dev, "low": results["low"], "medium": results["medium"], "high": results["high"]})
+            {"development": dev, "low": results["low"], "medium": results["medium"], "high": results["high"]}
+        )
         costs_travel_time = pd.concat([costs_travel_time, pd.DataFrame(temp).T], ignore_index=True)
         # logger.verbose(costs_travel_time.head(5).to_string())
-        costs_travel_time.to_csv(fr"data/traffic_flow/travel_time.csv", index=False)
+        costs_travel_time.to_csv(rf"data/traffic_flow/travel_time.csv", index=False)
 
     # Save results as csv
-    costs_travel_time.to_csv(fr"data/traffic_flow/travel_time_2.csv", index=False)
+    costs_travel_time.to_csv(rf"data/traffic_flow/travel_time_2.csv", index=False)
 
 
 def tt_optimization_status_quo():
@@ -2351,8 +2481,9 @@ def tt_optimization_status_quo():
         edges["ID_edge"] = edges["ID_edge"].astype(int)
         edges = edges.sort_values(by=["ID_edge"])
 
-        tt = travel_flow_optimization(OD_matrix=OD_matrix, points=points, edges=edges, voronoi=voronoi_df, dev=dev,
-                                      scen=scen)
+        tt = travel_flow_optimization(
+            OD_matrix=OD_matrix, points=points, edges=edges, voronoi=voronoi_df, dev=dev, scen=scen
+        )
         # Append tt to dict with key scen
         results_status_quo[scen] = tt
     pd.DataFrame(results_status_quo).to_csv(r"data/traffic_flow/travel_time_status_quo.csv", index=False)
@@ -2367,9 +2498,9 @@ def monetize_tts(VTTS, duration):
 
     # convert columns object to float
     # for i in [1,len(tt_total["low"])]:
-    #	tt_total["low"][i-1]=tt_total["low"][i-1].strip('][')
-    #	tt_total["medium"][i-1]=tt_total["medium"][i-1].strip('][')
-    #	tt_total["high"][i-1]=tt_total["high"][i-1].strip('][')
+    # tt_total["low"][i-1]=tt_total["low"][i-1].strip('][')
+    # tt_total["medium"][i-1]=tt_total["medium"][i-1].strip('][')
+    # tt_total["high"][i-1]=tt_total["high"][i-1].strip('][')
     # tt_total["low"] = tt_total["low"].astype(float)
     # tt_total["medium"] = tt_total["medium"].astype(float)
     # tt_total["high"] = tt_total["high"].astype(float)
@@ -2378,10 +2509,10 @@ def monetize_tts(VTTS, duration):
     tt_total["high"] = tt_total["high"].apply(lambda x: float(x[1:-1]))
 
     # Import reference travel time for each scenario and current infrastructure
-    tt_status_quo = pd.read_csv(fr"data/traffic_flow/travel_time_status_quo.csv")
+    tt_status_quo = pd.read_csv(rf"data/traffic_flow/travel_time_status_quo.csv")
 
     # monetization factor of travel time (peak hour * CHF/h * 365 d/a * 30 a)
-    #mon_factor = VTTS * 365 * duration
+    # mon_factor = VTTS * 365 * duration
     mon_factor = VTTS * 2.5 * 250 * duration
     # Compute difference in travel time for each scenario and each development
 
@@ -2390,14 +2521,10 @@ def monetize_tts(VTTS, duration):
     tt_total["tt_high"] = (tt_status_quo["high"].iloc[0] - tt_total["high"]) * mon_factor
 
     # Change presign of all psitive values to negative
-    columns_to_negate = ['tt_low', 'tt_medium', 'tt_high']
+    columns_to_negate = ["tt_low", "tt_medium", "tt_high"]
     for col in columns_to_negate:
         tt_total[col] = tt_total[col].apply(lambda x: -abs(x))
 
     # drop useless columns
     tt_total = tt_total.drop(columns=["low", "medium", "high"])
     tt_total.to_csv(r"data/costs/traveltime_savings.csv")
-
-
-
-

@@ -26,7 +26,6 @@ from itertools import combinations
 from scipy.spatial.distance import cdist
 
 
-
 # Get the parent directory(i.e., InfraScan)
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, BASE_DIR)  # Add InfraScan to Python's module search path
@@ -34,10 +33,11 @@ from logging_config import logger  # Import central logger
 
 from infraScanRoad.data_import import *
 
-def generated_access_points(extent,number):
+
+def generated_access_points(extent, number):
     e_min, n_min, e_max, n_max = extent.bounds
     e = int(e_max - e_min)
-    n = int(n_max+100 - n_min+100)
+    n = int(n_max + 100 - n_min + 100)
 
     N = number
 
@@ -50,9 +50,9 @@ def generated_access_points(extent,number):
     n_gen = np.add(np.multiply(n_sample, n), int(n_min))
     e_gen = np.add(np.multiply(e_sample, e), int(e_min))
 
-    idlist = list(range(0,N))
-    gen_df = pd.DataFrame({"ID": idlist, "XKOORD": e_gen,"YKOORD":n_gen})
-    gen_gdf = gpd.GeoDataFrame(gen_df,geometry=gpd.points_from_xy(gen_df.XKOORD,gen_df.YKOORD),crs="epsg:2056")
+    idlist = list(range(0, N))
+    gen_df = pd.DataFrame({"ID": idlist, "XKOORD": e_gen, "YKOORD": n_gen})
+    gen_gdf = gpd.GeoDataFrame(gen_df, geometry=gpd.points_from_xy(gen_df.XKOORD, gen_df.YKOORD), crs="epsg:2056")
 
     return gen_gdf
 
@@ -76,7 +76,6 @@ def filter_access_points(gdf):
     logger.verbose(len(newgdf))
     """
 
-
     """
     # Perform a spatial join
     FFF_gdf = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Fruchtfolgeflachen_-OGD\FFF_F.shp")
@@ -94,9 +93,12 @@ def filter_access_points(gdf):
     """
 
     logger.verbose("Schutzanordnung Natur und Landschaft")
-    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\Schutzzonen\Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD\FNS_SCHUTZZONE_F.shp")
+    idx = get_idx_todrop(
+        newgdf,
+        r"data\landuse_landcover\Schutzzonen\Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD\FNS_SCHUTZZONE_F.shp",
+    )
     newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
+    keepidx = newgdf["index"] == 0  # 1 is the value of the columns that should be dropped
     newgdf = newgdf.loc[keepidx, :]
     logger.verbose(len(newgdf))
     """
@@ -114,10 +116,10 @@ def filter_access_points(gdf):
     """
 
     logger.verbose("Forest")
-    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\Schutzzonen\Waldareal_-OGD\WALD_WALDAREAL_F.shp")
+    idx = get_idx_todrop(newgdf, r"data\landuse_landcover\Schutzzonen\Waldareal_-OGD\WALD_WALDAREAL_F.shp")
     newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx,:]
+    keepidx = newgdf["index"] == 0  # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx, :]
     logger.verbose(len(newgdf))
 
     ###########################################################################3
@@ -132,13 +134,13 @@ def filter_access_points(gdf):
 
     logger.verbose("Network buffer")
     network_gdf = gpd.read_file(r"data\Network\processed\edges.gpkg")
-    network_gdf['geometry'] = network_gdf['geometry'].buffer(1000)
+    network_gdf["geometry"] = network_gdf["geometry"].buffer(1000)
     network_gdf.to_file(r"data\temp\buffered_network.gpkg")
 
     idx = get_idx_todrop(newgdf, r"data\temp\buffered_network.gpkg")
     newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx,:]
+    keepidx = newgdf["index"] == 0  # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx, :]
     logger.verbose(len(newgdf))
     """
     logger.verbose("Residential area")
@@ -160,7 +162,7 @@ def filter_access_points(gdf):
         # Loop through each point in the GeoDataFrame
         for index, row in newgdf.iterrows():
             # Convert the point geometry to raster space
-            row_x, row_y = row['geometry'].x, row['geometry'].y
+            row_x, row_y = row["geometry"].x, row["geometry"].y
             row_col, row_row = src.index(row_x, row_y)
 
             if 0 <= row_col < raster_data.shape[0] and 0 <= row_row < raster_data.shape[1]:
@@ -182,7 +184,7 @@ def filter_access_points(gdf):
     logger.verbose("FFF")
     idx = get_idx_todrop(newgdf, r"data\landuse_landcover\Schutzzonen\Fruchtfolgeflachen_-OGD\FFF_F.shp")
     newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
+    keepidx = newgdf["index"] == 0  # 1 is the value of the columns that should be dropped
     newgdf = newgdf.loc[keepidx, :]
     logger.verbose(len(newgdf))
 
@@ -195,29 +197,29 @@ def filter_access_points(gdf):
 
 
 def get_idx_todrop(pt, filename):
-    #with fiona.open(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp") as input:
+    # with fiona.open(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp") as input:
     with fiona.open(filename, crs="epsg:2056") as input:
-        #pt = newgdf.copy() #for testing
+        # pt = newgdf.copy() #for testing
         idx = np.ones(len(pt))
         for feat in input:
-            geom = shape(feat['geometry'])
+            geom = shape(feat["geometry"])
             temptempidx = pt.within(geom)
             temptempidx = np.multiply(np.array(temptempidx), 1)
             tempidx = [i ^ 1 for i in temptempidx]
-            #tempidx = np.multiply(np.array(tempidx),1)
+            # tempidx = np.multiply(np.array(tempidx),1)
             idx = np.multiply(idx, tempidx)
         intidx = [int(i) for i in idx]
         newidx = [i ^ 1 for i in intidx]
-        #logger.verbose(newidx)
+        # logger.verbose(newidx)
     return newidx
 
 
-def nearest(row, geom_union, df1, df2, geom1_col='geometry', geom2_col='geometry', src_column=None):
+def nearest(row, geom_union, df1, df2, geom1_col="geometry", geom2_col="geometry", src_column=None):
     """Find the nearest point and return the corresponding value from specified column."""
 
     # Find the geometry that is closest
-    #nearest = df2[geom2_col] == nearest_points(row[geom1_col], geom_union)[1]
-    nearest = df2[geom2_col] == nearest_points(geom_union,row[geom1_col])[1]
+    # nearest = df2[geom2_col] == nearest_points(row[geom1_col], geom_union)[1]
+    nearest = df2[geom2_col] == nearest_points(geom_union, row[geom1_col])[1]
 
     # Get the corresponding value from df2 (matching is based on the geometry)
     value = df2[nearest][src_column].values()[0]
@@ -225,32 +227,33 @@ def nearest(row, geom_union, df1, df2, geom1_col='geometry', geom2_col='geometry
     return value
 
 
-def near(point, network_gdf,pts):
+def near(point, network_gdf, pts):
     # find the nearest point and return the corresponding Place value
     nearest = network_gdf.geometry == nearest_points(point, pts)[1]
     return network_gdf[nearest].geometry.values()[0]
 
 
 def connect_points_to_network(new_point_gdf, network_gdf):
-    #unary_union = network_gdf.unary_union
-    #new_gdf=point_gdf.copy()
+    # unary_union = network_gdf.unary_union
+    # new_gdf=point_gdf.copy()
     ###
-    #network_gdf = network_gdf.rename(columns={'geometry': 'geometry_current'})
-    #network_gdf = network_gdf.set_geometry("geometry_current")
+    # network_gdf = network_gdf.rename(columns={'geometry': 'geometry_current'})
+    # network_gdf = network_gdf.set_geometry("geometry_current")
     network_gdf["geometry_current"] = network_gdf["geometry"]
-    network_gdf = network_gdf[['intersection', 'ID_point', 'name', 'end', 'cor_1',
-       'geometry', 'geometry_current']]
-    new_gdf = gpd.sjoin_nearest(new_point_gdf,network_gdf,distance_col="distances")[["ID_new","XKOORD","YKOORD","geometry","distances","geometry_current", "ID_point"]] # "geometry",
+    network_gdf = network_gdf[["intersection", "ID_point", "name", "end", "cor_1", "geometry", "geometry_current"]]
+    new_gdf = gpd.sjoin_nearest(new_point_gdf, network_gdf, distance_col="distances")[
+        ["ID_new", "XKOORD", "YKOORD", "geometry", "distances", "geometry_current", "ID_point"]
+    ]  # "geometry",
     ###
-    #new_gdf['straight_line'] = new_gdf.apply(lambda row: LineString([row['geometry'], row['nearest_node']]), axis=1) #Create a linestring column
+    # new_gdf['straight_line'] = new_gdf.apply(lambda row: LineString([row['geometry'], row['nearest_node']]), axis=1) #Create a linestring column
     return new_gdf
 
 
 def create_nearest_gdf(filtered_rand_gdf):
     nearest_gdf = filtered_rand_gdf[["ID_new", "ID_point", "geometry_current"]].set_geometry("geometry_current")
-    #nearest_gdf = nearest_gdf.rename({"ID":"PointID", "index_right":"NearestAccID"})
-    #nearest_df = filtered_rand_gdf.assign(PointID=filtered_rand_gdf["ID"],NearestAccID=filtered_rand_gdf["index_right"],x=filtered_rand_gdf["x"],y=filtered_rand_gdf["y"])
-    #nearest_gdf = gpd.GeoDataFrame(nearest_df,geometry=gpd.points_from_xy(nearest_df.x,nearest_df.y),crs="epsg:2056")
+    # nearest_gdf = nearest_gdf.rename({"ID":"PointID", "index_right":"NearestAccID"})
+    # nearest_df = filtered_rand_gdf.assign(PointID=filtered_rand_gdf["ID"],NearestAccID=filtered_rand_gdf["index_right"],x=filtered_rand_gdf["x"],y=filtered_rand_gdf["y"])
+    # nearest_gdf = gpd.GeoDataFrame(nearest_df,geometry=gpd.points_from_xy(nearest_df.x,nearest_df.y),crs="epsg:2056")
     return nearest_gdf
 
 
@@ -270,15 +273,15 @@ def create_lines(rand_pts_gdf, nearest_highway_pt_gdf):
     return
 
 
-def plot_lines_to_network(points_gdf,lines_gdf):
-    points_gdf.plot(marker='*', color='green', markersize=5)
-    base = lines_gdf.plot(edgecolor='black')
-    points_gdf.plot(ax=base, marker='o', color='red', markersize=5)
+def plot_lines_to_network(points_gdf, lines_gdf):
+    points_gdf.plot(marker="*", color="green", markersize=5)
+    base = lines_gdf.plot(edgecolor="black")
+    points_gdf.plot(ax=base, marker="o", color="red", markersize=5)
     plt.savefig(r"plot\predict\230822_network-generation.png", dpi=300)
     return None
 
 
-def line_scoring(lines_gdf,raster_location):
+def line_scoring(lines_gdf, raster_location):
     # Load your raster file using rasterio
     raster_path = raster_location
     with rasterio.open(raster_path) as src:
@@ -289,12 +292,12 @@ def line_scoring(lines_gdf,raster_location):
 
     # Iterate over each line geometry in the GeoDataFrame
     for idx, line in lines_gdf.iterrows():
-        mask = geometry_mask([line['geometry']], out_shape=raster.shape, transform=src.transform, invert=False)
+        mask = geometry_mask([line["geometry"]], out_shape=raster.shape, transform=src.transform, invert=False)
         line_sum = raster[mask].sum()
         sums.append(line_sum)
 
     # Add the sums as a new column to the GeoDataFrame
-    lines_gdf['raster_sum'] = sums
+    lines_gdf["raster_sum"] = sums
 
     return lines_gdf
 
@@ -302,10 +305,10 @@ def line_scoring(lines_gdf,raster_location):
 def routing_raster(raster_path, generated_links_path, realistic_links_path):
     # Process LineStrings
     generated_links = gpd.read_file(generated_links_path)
-    
+
     logger.verbose(generated_links["ID_new"].unique())
 
-    #logger.verbose(generated_links.head(10))
+    # logger.verbose(generated_links.head(10))
     new_lines = []
     generated_points_unaccessible = []
 
@@ -322,26 +325,29 @@ def routing_raster(raster_path, generated_links_path, realistic_links_path):
             # Convert real-world coordinates to raster indices
             start_index = rasterio.transform.rowcol(transform, xs=start_point[0], ys=start_point[1])
             end_index = rasterio.transform.rowcol(transform, xs=end_point[0], ys=end_point[1])
-            #logger.verbose("Start ", start_index, "End ", end_index)
+            # logger.verbose("Start ", start_index, "End ", end_index)
 
             # Convert raster to graph
             graph = raster_to_graph(raster_data)
 
             # Calculate the shortest path avoiding forbidden cells
             try:
-                path, generated_points_unaccessible = find_path(graph, start_index, end_index, generated_points_unaccessible, end_point)
+                path, generated_points_unaccessible = find_path(
+                    graph, start_index, end_index, generated_points_unaccessible, end_point
+                )
             except Exception as e:
-                path=None
+                path = None
                 logger.verbose(e)
-                #logger.verbose(generated_links.iloc[i])
-
+                # logger.verbose(generated_links.iloc[i])
 
             if path:
                 # If you need to convert back the path to real-world coordinates, you would use the raster's transform
                 # Here's a stub for that process
-                real_world_path = [rasterio.transform.xy(transform, cols=point[1], rows=point[0], offset='center') for point in path]
-                #logger.verbose("Start ", real_world_path[0], " ersetzt durch ", line.coords[0])
-                #logger.verbose("Ende ", real_world_path[-1], " ersetzt durch ", line.coords[-1])
+                real_world_path = [
+                    rasterio.transform.xy(transform, cols=point[1], rows=point[0], offset="center") for point in path
+                ]
+                # logger.verbose("Start ", real_world_path[0], " ersetzt durch ", line.coords[0])
+                # logger.verbose("Ende ", real_world_path[-1], " ersetzt durch ", line.coords[-1])
                 real_world_path[0] = line.coords[0]
                 real_world_path[-1] = line.coords[-1]
                 new_lines.append(real_world_path)
@@ -349,25 +355,25 @@ def routing_raster(raster_path, generated_links_path, realistic_links_path):
                 new_lines.append(None)
 
     # Update GeoDataFrame
-    generated_links['new_geometry'] = new_lines
+    generated_links["new_geometry"] = new_lines
 
     # Save the updated GeoDataFrame
-    #generated_links.to_csv(r'data\Network\processed\generated_links_updated.csv', index=False)
+    # generated_links.to_csv(r'data\Network\processed\generated_links_updated.csv', index=False)
 
-    df_links = generated_links.dropna(subset=['new_geometry'])
+    df_links = generated_links.dropna(subset=["new_geometry"])
 
     df_links = gpd.GeoDataFrame(df_links)
     # Assuming 'df' is your DataFrame and it has a column 'coords' with coordinate arrays
     # Step 1: Convert to LineStrings
-    #df_links['geometry'] = df_links['new_geometry'].apply(lambda x: LineString(x))
-    #df_links2 = df_links
+    # df_links['geometry'] = df_links['new_geometry'].apply(lambda x: LineString(x))
+    # df_links2 = df_links
     for index, row in df_links.iterrows():
         try:
-            tempgeom = df_links['new_geometry'].apply(lambda x: LineString(x))
+            tempgeom = df_links["new_geometry"].apply(lambda x: LineString(x))
         except Exception as e:
             df_links.drop(index, inplace=True)
-            #logger.verbose(e)
-    df_links['geometry'] = tempgeom
+            # logger.verbose(e)
+    df_links["geometry"] = tempgeom
     df_links = df_links.drop(columns="new_geometry")
     df_links = df_links.set_geometry("geometry")
     df_links = df_links.set_crs(epsg=2056)
@@ -375,15 +381,15 @@ def routing_raster(raster_path, generated_links_path, realistic_links_path):
     # df_links.to_file(r"data\Network\processed\01_linestring_links.gpkg")
 
     # Step 2: Simplify LineStrings (Retaining corners)
-    #tolerance = 0.01  # Adjust tolerance to your needs
-    #df_links['geometry'] = df_links['geometry'].apply(lambda x: x.simplify(tolerance))
+    # tolerance = 0.01  # Adjust tolerance to your needs
+    # df_links['geometry'] = df_links['geometry'].apply(lambda x: x.simplify(tolerance))
 
     df_links.to_file(realistic_links_path)
 
     # Also store the point which are not joinable due to banned land cover
     # Writing to the CSV file with a header
-    #df_inaccessible_points = pd.DataFrame(generated_points_unaccessible, columns=["point_id"])
-    #df_inaccessible_points.to_csv(r"data\Network\processed\points_inaccessible.csv", index=False)
+    # df_inaccessible_points = pd.DataFrame(generated_points_unaccessible, columns=["point_id"])
+    # df_inaccessible_points.to_csv(r"data\Network\processed\points_inaccessible.csv", index=False)
 
     return df_links
 
@@ -391,15 +397,11 @@ def routing_raster(raster_path, generated_links_path, realistic_links_path):
 def raster_to_graph(raster_data):
     rows, cols = raster_data.shape
     graph = nx.grid_2d_graph(rows, cols)
-    graph.add_edges_from([
-                         ((x, y), (x + 1, y + 1))
-                         for x in range(cols)
-                         for y in range(rows)
-                     ] + [
-                         ((x + 1, y), (x, y + 1))
-                         for x in range(cols)
-                         for y in range(rows)
-                     ], weight=1.4)
+    graph.add_edges_from(
+        [((x, y), (x + 1, y + 1)) for x in range(cols) for y in range(rows)]
+        + [((x + 1, y), (x, y + 1)) for x in range(cols) for y in range(rows)],
+        weight=1.4,
+    )
 
     # Remove edges to forbidden cells (assuming forbidden cells are marked with value 1)
     for y in range(rows):
@@ -414,7 +416,7 @@ def find_path(graph, start, end, list_no_path, point_end):
     # Find the shortest path using A* algorithm or dijkstra
     # You might want to include a heuristic function for A*
     try:
-        #path = nx.astar_path(graph, start, end)
+        # path = nx.astar_path(graph, start, end)
         path = nx.dijkstra_path(graph, start, end)
         return path, list_no_path
     except nx.NetworkXNoPath:
@@ -424,19 +426,22 @@ def find_path(graph, start, end, list_no_path, point_end):
 
 
 def plot_corridor(network, limits, location, current_nodes=False, new_nodes=False, new_links=False, access_link=False):
-
     fig, ax = plt.subplots(figsize=(10, 10))
 
-    network = network[(network["Rank"] == 1) & (network["Opening Ye"] < 2023) & (network["NAME"] != 'Freeway Tunnel planned') & (
-                network["NAME"] != 'Freeway planned')]
+    network = network[
+        (network["Rank"] == 1)
+        & (network["Opening Ye"] < 2023)
+        & (network["NAME"] != "Freeway Tunnel planned")
+        & (network["NAME"] != "Freeway planned")
+    ]
 
     # Define square to show perimeter of investigation
     square = Polygon([(limits[0], limits[2]), (limits[1], limits[2]), (limits[1], limits[3]), (limits[0], limits[3])])
     frame = gpd.GeoDataFrame(geometry=[square], crs=network.crs)
 
-    #df_voronoi.plot(ax=ax, facecolor='none', alpha=0.2, edgecolor='k')
+    # df_voronoi.plot(ax=ax, facecolor='none', alpha=0.2, edgecolor='k')
 
-    if access_link==True:
+    if access_link == True:
         access = network[network["NAME"] == "Freeway access"]
         access["point"] = access.representative_point()
         access.plot(ax=ax, color="red", markersize=50)
@@ -456,14 +461,14 @@ def plot_corridor(network, limits, location, current_nodes=False, new_nodes=Fals
     location.plot(ax=ax, color="black", markersize=75)
     # Add city names to the plot
     for idx, row in location.iterrows():
-        plt.annotate(row['location'], xy=row["geometry"].coords[0], ha='left', va="bottom", fontsize=15)
+        plt.annotate(row["location"], xy=row["geometry"].coords[0], ha="left", va="bottom", fontsize=15)
 
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_xlim(limits[0], limits[1])
     ax.set_ylim(limits[2], limits[3])
 
-    #plt.title("Voronoi polygons to each highway access point")
+    # plt.title("Voronoi polygons to each highway access point")
     plt.savefig(r"plot\network_base_generated.png", dpi=300)
     plt.show()
 
@@ -471,9 +476,8 @@ def plot_corridor(network, limits, location, current_nodes=False, new_nodes=Fals
 
 
 def single_tt_voronoi_ton_one(folder_path):
-
     # List all gpkg files in the folder
-    gpkg_files = [f for f in os.listdir(folder_path) if f.endswith('Voronoi.gpkg')]
+    gpkg_files = [f for f in os.listdir(folder_path) if f.endswith("Voronoi.gpkg")]
 
     # Initialize an empty list to store dataframes
     dataframes = []
@@ -483,7 +487,7 @@ def single_tt_voronoi_ton_one(folder_path):
         gdf = gpd.read_file(os.path.join(folder_path, file))
 
         # Use regular expression to extract the XXX number from the filename
-        id_development = re.search(r'dev(\d+)_Voronoi', file)
+        id_development = re.search(r"dev(\d+)_Voronoi", file)
         if id_development:
             id_development = int(id_development.group(1))
         else:
@@ -491,7 +495,7 @@ def single_tt_voronoi_ton_one(folder_path):
             continue  # Skip file if no match is found
 
         # Add the ID_development as a new column
-        gdf['ID_development'] = id_development
+        gdf["ID_development"] = id_development
 
         # Append the dataframe to the list
         dataframes.append(gdf)
@@ -504,7 +508,6 @@ def single_tt_voronoi_ton_one(folder_path):
 
 
 def import_elevation_model(new_resolution):
-
     # Read CSV file containing the ZIP file links
     csv_file = r"data\elevation_model\ch.swisstopo.swissalti3d-pivq0Jb7.csv"
     df = pd.read_csv(csv_file, names=["url"], header=None)
@@ -513,9 +516,9 @@ def import_elevation_model(new_resolution):
     for url in df["url"]:
         r = requests.get(url)
         zip_path = r"data\elevation_model\zip_files\temp.zip"
-        with open(zip_path, 'wb') as f:
+        with open(zip_path, "wb") as f:
             f.write(r.content)
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(r"data\elevation_model\extracted_xyz_files")
 
     # Find all XYZ files
@@ -526,7 +529,7 @@ def import_elevation_model(new_resolution):
 
     # Calculate the minimum coordinates based on the first file
     sample_data = pd.read_csv(xyz_files[0], sep=" ")
-    min_x, min_y = sample_data['X'].min(), sample_data['Y'].min()
+    min_x, min_y = sample_data["X"].min(), sample_data["Y"].min()
 
     # Process each file
     for i, file in enumerate(xyz_files, start=1):
@@ -540,8 +543,8 @@ def import_elevation_model(new_resolution):
     logger.verbose(concatenated_data.shape)
 
     # Convert the DataFrame to a 2D grid
-    min_x, max_x = concatenated_data['X'].min(), concatenated_data['X'].max()
-    min_y, max_y = concatenated_data['Y'].min(), concatenated_data['Y'].max()
+    min_x, max_x = concatenated_data["X"].min(), concatenated_data["X"].max()
+    min_y, max_y = concatenated_data["Y"].min(), concatenated_data["Y"].max()
 
     # Calculate the number of rows and columns
     cols = int((max_x - min_x) / new_resolution) + 1
@@ -552,18 +555,25 @@ def import_elevation_model(new_resolution):
 
     # Populate the grid with Z values
     for _, row in concatenated_data.iterrows():
-        col_idx = int((row['X'] - min_x) / new_resolution)
-        row_idx = int((max_y - row['Y']) / new_resolution)
-        raster[row_idx, col_idx] = row['Z']
+        col_idx = int((row["X"] - min_x) / new_resolution)
+        row_idx = int((max_y - row["Y"]) / new_resolution)
+        raster[row_idx, col_idx] = row["Z"]
 
     # Define the georeferencing transform
     transform = from_origin(min_x, max_y, new_resolution, new_resolution)
 
     # Write the data to a GeoTIFF file
-    with rasterio.open(r'data\elevation_model\elevation.tif', 'w', driver='GTiff',
-                       height=raster.shape[0], width=raster.shape[1],
-                       count=1, dtype=str(raster.dtype),
-                       crs='EPSG:2056', transform=transform) as dst:
+    with rasterio.open(
+        r"data\elevation_model\elevation.tif",
+        "w",
+        driver="GTiff",
+        height=raster.shape[0],
+        width=raster.shape[1],
+        count=1,
+        dtype=str(raster.dtype),
+        crs="EPSG:2056",
+        transform=transform,
+    ) as dst:
         dst.write(raster, 1)
 
     return
@@ -574,7 +584,7 @@ def downsample_elevation_xyz_file(file_path, min_x, min_y, resolution):
     data = pd.read_csv(file_path, sep=" ")
 
     # Filter the data
-    filtered_data = data[((data['X'] - min_x) % resolution == 0) & ((data['Y'] - min_y) % resolution == 0)]
+    filtered_data = data[((data["X"] - min_x) % resolution == 0) & ((data["Y"] - min_y) % resolution == 0)]
 
     return filtered_data
 
@@ -608,41 +618,40 @@ def get_road_elevation_profile():
         logger.verbose(links.crs)
 
         # Interpolate points and extract raster values for each linestring
-        links['elevation_profile'] = links['geometry'].apply(
-            lambda x: sample_raster_at_points(
-                interpolate_linestring(x, sampling_interval), raster))
-
+        links["elevation_profile"] = links["geometry"].apply(
+            lambda x: sample_raster_at_points(interpolate_linestring(x, sampling_interval), raster)
+        )
 
     # Somehow find how to investigate the need for tunnels based on the elevation profile
     # Assuming you have a DataFrame named 'df' with a column 'altitude'
     # Calculate the elevation difference between successive values
 
     # Iterate through the DataFrame using iterrows and calculate the elevation difference
-    links['elevation_difference'] = links.apply(lambda row: np.diff(np.array(row['elevation_profile'])), axis=1)
+    links["elevation_difference"] = links.apply(lambda row: np.diff(np.array(row["elevation_profile"])), axis=1)
 
     # Compute absolute elevation
     links["elevation_absolute"] = links.apply(lambda row: np.absolute(row["elevation_difference"]), axis=1)
 
-
     links["slope"] = links.apply(lambda row: row["elevation_absolute"] / 50 * 100, axis=1)
 
     # Compute mean elevation
-    links['slope_mean'] = links.apply(lambda row: np.mean(row['slope']), axis=1)
+    links["slope_mean"] = links.apply(lambda row: np.mean(row["slope"]), axis=1)
 
     # Compute number of values bigger than thresshold
-    links["steep_section"] = links.apply(lambda  row: (row["slope"] < 5).sum(), axis=1)
+    links["steep_section"] = links.apply(lambda row: (row["slope"] < 5).sum(), axis=1)
 
-    links["check_needed"] = (links['slope_mean'] > 5) | (links["steep_section"] > 40)
+    links["check_needed"] = (links["slope_mean"] > 5) | (links["steep_section"] > 40)
     links = links.drop(columns=["elevation_difference", "elevation_absolute", "slope", "slope_mean", "steep_section"])
-    #links["elevation_profile"] = links["elevation_profile"].astype("string")
-    #links.to_file(r"data\Network\processed\new_links_realistic_elevation.gpkg")
+    # links["elevation_profile"] = links["elevation_profile"].astype("string")
+    # links.to_file(r"data\Network\processed\new_links_realistic_elevation.gpkg")
     return links
 
 
 def get_tunnel_candidates(df):
-    logger.verbose("You will have to define the needed tunnels and bridges for ", df["check_needed"].sum() , " section.")
+    logger.verbose("You will have to define the needed tunnels and bridges for ", df["check_needed"].sum(), " section.")
 
     df["elevation_profile"] = df["elevation_profile"].astype("object")
+
     # Custom dialog class for pop-up
     class CustomDialog(Dialog):
         def __init__(self, parent, row):
@@ -652,11 +661,11 @@ def get_tunnel_candidates(df):
         def body(self, master):
             # Create a figure for the plot
             self.fig, self.ax = plt.subplots()
-            x_values = np.arange(0, len(self.row['elevation_profile'])) * 50
-            self.ax.plot(x_values, self.row['elevation_profile'])
-            self.ax.set_title('Elevation profile')
-            self.ax.set_xlabel('Distance (m)')
-            self.ax.set_ylabel('Elevation (m. asl.)')
+            x_values = np.arange(0, len(self.row["elevation_profile"])) * 50
+            self.ax.plot(x_values, self.row["elevation_profile"])
+            self.ax.set_title("Elevation profile")
+            self.ax.set_xlabel("Distance (m)")
+            self.ax.set_ylabel("Elevation (m. asl.)")
 
             # Create labels and input fields for questions
             tk.Label(master, text="How much tunnel is required in meters:").pack()
@@ -677,23 +686,23 @@ def get_tunnel_candidates(df):
             bridge_len = int(self.bridge_len_entry.get())
 
             # Update DataFrame with user's input
-            df.at[self.row.name, 'tunnel_len'] = tunnel_len
-            df.at[self.row.name, 'bridge_len'] = bridge_len
-    # Create new columns for user input
-    df['tunnel_len'] = None
-    df['bridge_len'] = None
+            df.at[self.row.name, "tunnel_len"] = tunnel_len
+            df.at[self.row.name, "bridge_len"] = bridge_len
 
+    # Create new columns for user input
+    df["tunnel_len"] = None
+    df["bridge_len"] = None
 
     # Iterate through the DataFrame and show the custom pop-up for rows with 'check_needed' set to True
     for index, row in df.iterrows():
-        if row['check_needed']:
+        if row["check_needed"]:
             root = tk.Tk()
             root.withdraw()
             dlg = CustomDialog(root, row)
-            #dlg.wait_window()
-    df["elevation_profile"]=df["elevation_profile"].astype('string')
+            # dlg.wait_window()
+    df["elevation_profile"] = df["elevation_profile"].astype("string")
     logger.verbose(df)
-    #df.to_file(r"data\Network\processed\new_links_realistic_tunnel.gpkg")
+    # df.to_file(r"data\Network\processed\new_links_realistic_tunnel.gpkg")
     df.to_file(r"data\Network\processed\new_links_realistic_tunnel-terminal.gpkg")
 
 
@@ -813,7 +822,7 @@ def tunnel_bridges(df):
 
         # Decision variables
         lp_vars = {i: pulp.LpVariable(f"v_{i}") for i in range(len(values))}
-        change_vars = {i: pulp.LpVariable(f"c_{i}", 0, 1, cat='Binary') for i in range(len(values))}
+        change_vars = {i: pulp.LpVariable(f"c_{i}", 0, 1, cat="Binary") for i in range(len(values))}
 
         # Objective function: minimize the number of points that are changed
         prob += pulp.lpSum(change_vars[i] for i in range(len(values)))
@@ -836,7 +845,7 @@ def tunnel_bridges(df):
         prob += change_vars[len(values) - 1] == 0  # No change for the last element
 
         # Solve the problem without logger.verboseing messages
-        #prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        # prob.solve(pulp.PULP_CBC_CMD(msg=False))
         prob.solve(pulp.PULP_CBC_CMD(msg=True))
 
         # Check if the problem is infeasible
@@ -850,17 +859,18 @@ def tunnel_bridges(df):
 
     # Add new column with optimized elevation profile
     tqdm.pandas(desc="Optimizing elevation profiles")
-    df['new_elevation'] = df.progress_apply(
-        lambda row: optimize_values_min_changes(row["elevation_profile"], max_slope) if row['check_needed'] else row[
-            'elevation_profile'],
-        axis=1
+    df["new_elevation"] = df.progress_apply(
+        lambda row: optimize_values_min_changes(row["elevation_profile"], max_slope)
+        if row["check_needed"]
+        else row["elevation_profile"],
+        axis=1,
     )
 
     # Drop with "new_elevation" == None
-    df = df.dropna(subset=['new_elevation'])
+    df = df.dropna(subset=["new_elevation"])
 
     # Add new column showing the difference between the old and new elevation profile, 0 if not - 1 if yes
-    df['changes'] = df.apply(lambda row: np.array(row['elevation_profile']) != np.array(row['new_elevation']), axis=1)
+    df["changes"] = df.apply(lambda row: np.array(row["elevation_profile"]) != np.array(row["new_elevation"]), axis=1)
 
     logger.verbose(df.head(20).to_string())
 
@@ -883,8 +893,9 @@ def tunnel_bridges(df):
 
         return list(flags)  # Convert back to list for DataFrame storage
 
-    df['bridge_tunnel_flags'] = df.apply(
-        lambda row: check_for_bridge_tunnel(row['elevation_profile'], row['new_elevation'], row['changes']), axis=1)
+    df["bridge_tunnel_flags"] = df.apply(
+        lambda row: check_for_bridge_tunnel(row["elevation_profile"], row["new_elevation"], row["changes"]), axis=1
+    )
     """
     def create_linestrings(elevation_profile, flags, original_linestring):
         tunnel_linestrings = []
@@ -976,7 +987,6 @@ def tunnel_bridges(df):
             bridge_data.append({'link_id': index, 'bridge_linestring': bridge})
     """
 
-
     # Make a lineplot of both lists in elevation profile and new elevation profile on the same plot
     # Plot the elevation profile
 
@@ -989,34 +999,38 @@ def tunnel_bridges(df):
         # Plot the new elevation profile
         plt.plot(row["new_elevation"], label="Optimized", color="black", zorder=3)
         # Multiply x ticks by 50 to get distance in meters
-        plt.xticks(np.arange(0, len(row["elevation_profile"]), step=10), np.arange(0, len(row["elevation_profile"]) * 50, step=500))
+        plt.xticks(
+            np.arange(0, len(row["elevation_profile"]), step=10),
+            np.arange(0, len(row["elevation_profile"]) * 50, step=500),
+        )
         # Add labels
         plt.xlabel("Link distance (m)")
         plt.ylabel("Elevation (m. asl.)")
         # Mark where tunnel and where bridge based on flags
-        for i, flag in enumerate(row['bridge_tunnel_flags']):
+        for i, flag in enumerate(row["bridge_tunnel_flags"]):
             if flag == -1:
-                plt.axvline(x=i+0.5, color='lightgray', linestyle='solid', linewidth=12, zorder=1, alpha=0.7)
+                plt.axvline(x=i + 0.5, color="lightgray", linestyle="solid", linewidth=12, zorder=1, alpha=0.7)
             elif flag == 1:
-                plt.axvline(x=i+0.5, color='lightblue', linestyle='solid', linewidth=12, zorder=1, alpha=0.7)
+                plt.axvline(x=i + 0.5, color="lightblue", linestyle="solid", linewidth=12, zorder=1, alpha=0.7)
 
         # Create custom patches for legend
-        original_line = mlines.Line2D([], [], color='gray', linewidth=3, label='Original')
-        optimized_line = mlines.Line2D([], [], color='black', label='Optimized')
-        tunnel_patch = mpatches.Patch(color='lightgray', alpha=0.7, label='Required tunnel')
-        bridge_patch = mpatches.Patch(color='lightblue', alpha=0.7, label='Required bridge')
+        original_line = mlines.Line2D([], [], color="gray", linewidth=3, label="Original")
+        optimized_line = mlines.Line2D([], [], color="black", label="Optimized")
+        tunnel_patch = mpatches.Patch(color="lightgray", alpha=0.7, label="Required tunnel")
+        bridge_patch = mpatches.Patch(color="lightblue", alpha=0.7, label="Required bridge")
 
         # Modify the legend to include custom patches
-        legend = plt.legend(handles=[original_line, optimized_line, tunnel_patch, bridge_patch],
-                   title="Elevation profile", loc="lower left", bbox_to_anchor=(1.04, 0), frameon=False)
-        legend.get_title().set_horizontalalignment('left')
+        legend = plt.legend(
+            handles=[original_line, optimized_line, tunnel_patch, bridge_patch],
+            title="Elevation profile",
+            loc="lower left",
+            bbox_to_anchor=(1.04, 0),
+            frameon=False,
+        )
+        legend.get_title().set_horizontalalignment("left")
         plt.tight_layout()
-        plt.savefig(fr"plot\network\elevation\new_profile{row['ID_new']}.png", dpi=300)
+        plt.savefig(rf"plot\network\elevation\new_profile{row['ID_new']}.png", dpi=300)
         plt.show()
-
-
-
-
 
     def split_linestring_at_distance(linestring, distance):
         """Split a LineString at a specified distance."""
@@ -1082,24 +1096,24 @@ def tunnel_bridges(df):
     road_data = []
 
     for index, row in df.iterrows():
-        road_linestrings, tunnel_linestrings, bridge_linestrings = process_flags(row["geometry"], row['bridge_tunnel_flags'])
+        road_linestrings, tunnel_linestrings, bridge_linestrings = process_flags(
+            row["geometry"], row["bridge_tunnel_flags"]
+        )
         for tunnel in tunnel_linestrings:
-            tunnel_data.append({'link_id': index, 'tunnel_linestring': tunnel})
+            tunnel_data.append({"link_id": index, "tunnel_linestring": tunnel})
         for bridge in bridge_linestrings:
-            bridge_data.append({'link_id': index, 'bridge_linestring': bridge})
+            bridge_data.append({"link_id": index, "bridge_linestring": bridge})
         for road in road_linestrings:
-            road_data.append({'link_id': index, 'road_linestring': road})
-
+            road_data.append({"link_id": index, "road_linestring": road})
 
     # Creating DataFrames
     tunnel_df = pd.DataFrame(tunnel_data)
     bridge_df = pd.DataFrame(bridge_data)
     road_df = pd.DataFrame(road_data)
 
-
     # Calculate Lengths for Each Linestring
-    #tunnel_df['length'] = tunnel_df['tunnel_linestring'].apply(lambda x: sum([line.length for line in x]))
-    #bridge_df['length'] = bridge_df['bridge_linestring'].apply(lambda x: sum([line.length for line in x]))
+    # tunnel_df['length'] = tunnel_df['tunnel_linestring'].apply(lambda x: sum([line.length for line in x]))
+    # bridge_df['length'] = bridge_df['bridge_linestring'].apply(lambda x: sum([line.length for line in x]))
 
     """
     def convert_to_multilinestring(linestrings):
@@ -1112,47 +1126,50 @@ def tunnel_bridges(df):
 
     # Convert tunnel DataFrame to GeoDataFrame
 
-    tunnel_gdf = gpd.GeoDataFrame(tunnel_df, geometry='tunnel_linestring')
-    bridge_gdf = gpd.GeoDataFrame(bridge_df, geometry='bridge_linestring')
-    road_gdf = gpd.GeoDataFrame(road_df, geometry='road_linestring')
+    tunnel_gdf = gpd.GeoDataFrame(tunnel_df, geometry="tunnel_linestring")
+    bridge_gdf = gpd.GeoDataFrame(bridge_df, geometry="bridge_linestring")
+    road_gdf = gpd.GeoDataFrame(road_df, geometry="road_linestring")
 
-
-    #tunnel_gdf['geometry'] = tunnel_gdf['tunnel_linestring'].apply(convert_to_multilinestring)
+    # tunnel_gdf['geometry'] = tunnel_gdf['tunnel_linestring'].apply(convert_to_multilinestring)
 
     # Convert bridge DataFrame to GeoDataFrame
 
-    #bridge_gdf['geometry'] = bridge_gdf['bridge_linestring'].apply(convert_to_multilinestring)
+    # bridge_gdf['geometry'] = bridge_gdf['bridge_linestring'].apply(convert_to_multilinestring)
 
     tunnel_gdf.set_crs(epsg=2056, inplace=True)
     bridge_gdf.set_crs(epsg=2056, inplace=True)
     road_gdf.set_crs(epsg=2056, inplace=True)
 
     # Calculate total length of tunnels for each link
-    tunnel_gdf['total_tunnel_length'] = tunnel_gdf['tunnel_linestring'].apply(lambda x: x.length if x is not None else 0)
+    tunnel_gdf["total_tunnel_length"] = tunnel_gdf["tunnel_linestring"].apply(
+        lambda x: x.length if x is not None else 0
+    )
     # Calculate total length of bridges for each link
-    bridge_gdf['total_bridge_length'] = bridge_gdf['bridge_linestring'].apply(lambda x: x.length if x is not None else 0)
+    bridge_gdf["total_bridge_length"] = bridge_gdf["bridge_linestring"].apply(
+        lambda x: x.length if x is not None else 0
+    )
     # Calculate total length of road for each link
-    road_gdf['total_road_length'] = road_gdf['road_linestring'].apply(lambda x: x.length if x is not None else 0)
+    road_gdf["total_road_length"] = road_gdf["road_linestring"].apply(lambda x: x.length if x is not None else 0)
 
     # Join tunnel lengths
-    df = df.join(tunnel_gdf.set_index('link_id')['total_tunnel_length'])
+    df = df.join(tunnel_gdf.set_index("link_id")["total_tunnel_length"])
     # Join bridge lengths
-    df = df.join(bridge_gdf.set_index('link_id')['total_bridge_length'])
+    df = df.join(bridge_gdf.set_index("link_id")["total_bridge_length"])
     # Aggregate Lengths for Each Link
-    #total_tunnel_lengths = tunnel_df.groupby('link_id')['length'].sum()
-    #total_bridge_lengths = bridge_df.groupby('link_id')['length'].sum()
+    # total_tunnel_lengths = tunnel_df.groupby('link_id')['length'].sum()
+    # total_bridge_lengths = bridge_df.groupby('link_id')['length'].sum()
 
     # Join these lengths back to the original DataFrame
-    #df = df.join(total_tunnel_lengths, rsuffix='_tunnel')
-    #df = df.join(total_bridge_lengths, rsuffix='_bridge')
+    # df = df.join(total_tunnel_lengths, rsuffix='_tunnel')
+    # df = df.join(total_bridge_lengths, rsuffix='_bridge')
 
     # Drop column with list from df DataFrame
     df = df.drop(columns=["bridge_tunnel_flags", "new_elevation", "changes", "elevation_profile"])
-    #tunnel_gdf = tunnel_gdf.drop(columns=["tunnel_linestring"])
-    #bridge_gdf = bridge_gdf.drop(columns=["bridge_linestring"])
+    # tunnel_gdf = tunnel_gdf.drop(columns=["tunnel_linestring"])
+    # bridge_gdf = bridge_gdf.drop(columns=["bridge_linestring"])
 
-    #logger.verbose(bridge_gdf.head(10).to_string())
-    #logger.verbose(df.head().to_string())
+    # logger.verbose(bridge_gdf.head(10).to_string())
+    # logger.verbose(df.head().to_string())
     # safe file as geopackage
     df.to_file(r"data\Network\processed\new_links_realistic_tunnel_adjusted.gpkg")
     tunnel_gdf.to_file(r"data\Network\processed\edges_tunnels.gpkg")
@@ -1204,8 +1221,13 @@ def tunnel_bridges(df):
 
 ############################### Additions of new Infrastructure Generation Functions (sehitz) ###############################
 
-def generate_new_connections_between_hwy(limits_corridor: Tuple[float, float, float, float],
-                                          max_length: float, shortest_path_factor: float, along_side_buffer: float):
+
+def generate_new_connections_between_hwy(
+    limits_corridor: Tuple[float, float, float, float],
+    max_length: float,
+    shortest_path_factor: float,
+    along_side_buffer: float,
+):
     """
     Generate new connections between highways within a specified corridor.
     This function identifies missing direct connections between nodes in a highway network,
@@ -1235,7 +1257,9 @@ def generate_new_connections_between_hwy(limits_corridor: Tuple[float, float, fl
     network = network.cx[e_min:e_max, n_min:n_max]
 
     # Extract start and end nodes as Point geometries from LineStrings
-    start_points = gpd.GeoDataFrame(geometry=network.geometry.apply(lambda geom: Point(geom.coords[0])), crs=network.crs)
+    start_points = gpd.GeoDataFrame(
+        geometry=network.geometry.apply(lambda geom: Point(geom.coords[0])), crs=network.crs
+    )
     end_points = gpd.GeoDataFrame(geometry=network.geometry.apply(lambda geom: Point(geom.coords[-1])), crs=network.crs)
 
     # Merge start and end points, dropping duplicates
@@ -1275,8 +1299,10 @@ def generate_new_connections_between_hwy(limits_corridor: Tuple[float, float, fl
 
     # Filter connections based on distance threshold
     filtered_connections = {
-        (n1, n2) for n1, n2 in missing_connections
-        if node_index.get(n1) is not None and node_index.get(n2) is not None
+        (n1, n2)
+        for n1, n2 in missing_connections
+        if node_index.get(n1) is not None
+        and node_index.get(n2) is not None
         and distance_matrix[node_index[n1], node_index[n2]] <= max_length
     }
     logger.verbose(f"Filtered connections: {len(filtered_connections)}")
@@ -1315,11 +1341,12 @@ def generate_new_connections_between_hwy(limits_corridor: Tuple[float, float, fl
     for n1, n2, length in final_new_links:
         p1 = nodes_gdf.loc[nodes_gdf["Node"] == n1, "geometry"].values[0]
         p2 = nodes_gdf.loc[nodes_gdf["Node"] == n2, "geometry"].values[0]
-        new_links_data.append({"From Node": n1, "To Node": n2, "Length (meter)": length, "geometry": LineString([p1, p2])})
+        new_links_data.append(
+            {"From Node": n1, "To Node": n2, "Length (meter)": length, "geometry": LineString([p1, p2])}
+        )
 
     # Convert to GeoDataFrame
     new_links_gdf = gpd.GeoDataFrame(new_links_data, crs=nodes_gdf.crs)
-
 
     ##### Remove Links that run through, near or along side existing links #####
 
@@ -1327,7 +1354,6 @@ def generate_new_connections_between_hwy(limits_corridor: Tuple[float, float, fl
     logger.verbose(f"New links before edge crossing removal: {len(new_links_gdf)}")
     new_links_gdf = new_links_gdf[~new_links_gdf.crosses(network.unary_union)]
     logger.verbose(f"New links after edge crossing removal: {len(new_links_gdf)}")
-
 
     # Compute buffers once for all nodes (avoid re-buffering)
     nodes_gdf["buffer_geom"] = nodes_gdf.geometry.buffer(along_side_buffer)
@@ -1357,7 +1383,9 @@ def generate_new_connections_between_hwy(limits_corridor: Tuple[float, float, fl
         node_buffer = nodes_gdf.loc[node_idx, "buffer_geom"]  # Use precomputed buffer
 
         # Filter out lines that start, end, or are near this node
-        candidate_lines = new_links_gdf[~new_links_gdf.geometry.apply(lambda line: starts_ends_or_near(line, node_idx, nodes_gdf))]
+        candidate_lines = new_links_gdf[
+            ~new_links_gdf.geometry.apply(lambda line: starts_ends_or_near(line, node_idx, nodes_gdf))
+        ]
 
         # Find lines that intersect this buffer
         intersecting_lines = candidate_lines[candidate_lines.intersects(node_buffer)]
@@ -1377,6 +1405,7 @@ def generate_new_connections_between_hwy(limits_corridor: Tuple[float, float, fl
     new_links_gdf.to_file(r"data/Network/processed/new_links_new_connections.gpkg", driver="GPKG")
 
     return
+
 
 def combine_links(bool_new_access: bool, bool_new_connections: bool):
     """
@@ -1405,4 +1434,3 @@ def combine_links(bool_new_access: bool, bool_new_connections: bool):
     network.to_file(r"data/Network/processed/new_links_realistic.gpkg", driver="GPKG")
 
     return
-
