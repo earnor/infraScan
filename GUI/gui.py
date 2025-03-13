@@ -42,7 +42,9 @@ if os.path.exists(BASE_CONFIG_PATH):
         config = json.load(file)
         # If the config working directory is not found, set it to the current directory
         if not os.path.exists(config["General"].get("working_directory", "")):
-            config["General"]["working_directory"] = os.path.dirname(os.path.dirname(__file__))
+            config["General"]["working_directory"] = os.path.dirname(
+                os.path.dirname(__file__)
+            )
 else:
     messagebox.showerror("Error", "Base configuration file not found!")
     config = {}
@@ -55,7 +57,9 @@ def start_process(process_class, config):
         process.run()  # Start execution
         logger.notice(f"{process_class.__name__} process completed.")
     except Exception as e:
-        error_message = f"An error occurred in {process_class.__name__}:\n{traceback.format_exc()}"
+        error_message = (
+            f"An error occurred in {process_class.__name__}:\n{traceback.format_exc()}"
+        )
         logger.error(error_message)  # Ensure error prints to the terminal
 
 
@@ -75,7 +79,9 @@ class InfraGUI:
         )
 
         self.data = config.copy()  # Copy the base configuration to self.data
-        self.original_data = json.loads(json.dumps(config))  # Deep copy to store original values
+        self.original_data = json.loads(
+            json.dumps(config)
+        )  # Deep copy to store original values
         self.entries = {}  # Dictionary to hold entry widgets
 
         # Create a notebook (tabbed interface)
@@ -116,19 +122,23 @@ class InfraGUI:
         # Control buttons
         control_frame = ttk.LabelFrame(self.general_tab, text="Configuration")
         # Label that shows the current name of the configuration file
-        ttk.Label(control_frame, text="Config File Name:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(control_frame, text="Config File Name:").grid(
+            row=0, column=0, padx=5, pady=5, sticky="w"
+        )
         self.config_file_var = tk.StringVar()
         self.config_file_var.set(self.data["General"].get("config_file_name", ""))
-        ttk.Label(control_frame, textvariable=self.config_file_var).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ttk.Label(control_frame, textvariable=self.config_file_var).grid(
+            row=0, column=1, padx=5, pady=5, sticky="w"
+        )
         ttk.Button(control_frame, text="Import JSON", command=self.import_json).grid(
             row=0, column=2, padx=5, pady=5, sticky="ew"
         )
         ttk.Button(control_frame, text="Export JSON", command=self.export_json).grid(
             row=0, column=3, padx=5, pady=5, sticky="ew"
         )
-        ttk.Button(control_frame, text="Reset to Default", command=self.reset_to_default).grid(
-            row=1, column=2, columnspan=2, padx=5, pady=5, sticky="ew"
-        )
+        ttk.Button(
+            control_frame, text="Reset to Default", command=self.reset_to_default
+        ).grid(row=1, column=2, columnspan=2, padx=5, pady=5, sticky="ew")
         control_frame.pack(fill="x", padx=10, pady=5)
 
         # Process Selection (Radio Buttons)
@@ -148,10 +158,18 @@ class InfraGUI:
 
             ttk.Label(col_frame, text=process).pack(anchor="center")
             ttk.Radiobutton(
-                col_frame, text="True", variable=var, value=1, command=lambda p=process: self.update_process(p, 1)
+                col_frame,
+                text="True",
+                variable=var,
+                value=1,
+                command=lambda p=process: self.update_process(p, 1),
             ).pack(side="left", anchor="center")
             ttk.Radiobutton(
-                col_frame, text="False", variable=var, value=0, command=lambda p=process: self.update_process(p, 0)
+                col_frame,
+                text="False",
+                variable=var,
+                value=0,
+                command=lambda p=process: self.update_process(p, 0),
             ).pack(side="right", anchor="center")
 
         # Infrastructure Selection (Radio Buttons)
@@ -177,19 +195,23 @@ class InfraGUI:
                     text="True",
                     variable=var,
                     value=1,
-                    command=lambda i=infra_category, k=infra: self.update_infrastructure(i, k, 1),
+                    command=lambda i=infra_category,
+                    k=infra: self.update_infrastructure(i, k, 1),
                 ).pack(side="left", anchor="center")
                 ttk.Radiobutton(
                     col_frame,
                     text="False",
                     variable=var,
                     value=0,
-                    command=lambda i=infra_category, k=infra: self.update_infrastructure(i, k, 0),
+                    command=lambda i=infra_category,
+                    k=infra: self.update_infrastructure(i, k, 0),
                 ).pack(side="right", anchor="center")
             ttk.Button(
                 category_frame,
                 text=f"Run {infra_category}",
-                command=lambda infra_category=infra_category: self.run_script(f"{infra_category.lower()}"),
+                command=lambda infra_category=infra_category: self.run_script(
+                    f"{infra_category.lower()}"
+                ),
             ).pack(side="right", padx=5, pady=5)
 
         # Run Both Button
@@ -217,14 +239,18 @@ class InfraGUI:
 
         # Entry to display the working directory and fill with the stated working directory
         self.working_dir_entry = ttk.Entry(directory_frame, width=75)
-        self.working_dir_entry.insert(0, self.data["General"].get("working_directory", ""))
+        self.working_dir_entry.insert(
+            0, self.data["General"].get("working_directory", "")
+        )
         self.working_dir_entry.pack(pady=5)
 
         # Bind events to detect manual input and trigger directory update
         self.working_dir_entry.bind("<FocusOut>", self.manual_directory_update)
         self.working_dir_entry.bind("<Return>", self.manual_directory_update)
 
-        ttk.Button(directory_frame, text="Browse", command=self.set_working_directory).pack(pady=5)
+        ttk.Button(
+            directory_frame, text="Browse", command=self.set_working_directory
+        ).pack(pady=5)
 
         def create_directory_entry(parent, label_text: str, subdirs: list):
             """Creates a read-only directory entry with a label.
@@ -236,7 +262,9 @@ class InfraGUI:
             """
             ttk.Label(parent, text=label_text).pack(pady=5)
             entry = ttk.Entry(parent, width=75)
-            dir_path = os.path.join(self.data["General"].get("working_directory", ""), *subdirs)
+            dir_path = os.path.join(
+                self.data["General"].get("working_directory", ""), *subdirs
+            )
             entry.insert(0, dir_path)
             entry.pack(pady=5)
             entry.configure(state="readonly")
@@ -272,8 +300,12 @@ class InfraGUI:
         if not hasattr(self, "rail_data_entry") or not hasattr(self, "road_data_entry"):
             return  # Ensure entries exist before updating
 
-        rail_path = os.path.join(self.data["General"].get("working_directory", ""), "InfraScanRail", "data")
-        road_path = os.path.join(self.data["General"].get("working_directory", ""), "InfraScanRoad", "data")
+        rail_path = os.path.join(
+            self.data["General"].get("working_directory", ""), "InfraScanRail", "data"
+        )
+        road_path = os.path.join(
+            self.data["General"].get("working_directory", ""), "InfraScanRoad", "data"
+        )
 
         self.rail_data_entry.configure(state="normal")
         self.road_data_entry.configure(state="normal")
@@ -299,7 +331,9 @@ class InfraGUI:
             self.data["General"]["working_directory"] = new_directory
             self.refresh_data_paths()  # Update the data directory paths
         else:
-            messagebox.showerror("Invalid Directory", "The directory you entered does not exist.")
+            messagebox.showerror(
+                "Invalid Directory", "The directory you entered does not exist."
+            )
 
     def create_settings_tab(self, tab: tk.Widget, category: str):
         """
@@ -318,7 +352,9 @@ class InfraGUI:
         scrollbar = ttk.Scrollbar(tab, orient="vertical", command=canvas.yview)
         scroll_frame = ttk.Frame(canvas)
 
-        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        scroll_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
         canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -346,7 +382,12 @@ class InfraGUI:
                 entry.insert(0, str(display_value))
                 entry.pack(side="right", expand=True)
                 entry.bind(
-                    "<FocusOut>", lambda e, k=key, s=subcategory, c=category, en=entry: self.update_data(k, s, c, en)
+                    "<FocusOut>",
+                    lambda e,
+                    k=key,
+                    s=subcategory,
+                    c=category,
+                    en=entry: self.update_data(k, s, c, en),
                 )
                 self.entries[category][subcategory][key] = entry
 
@@ -368,12 +409,19 @@ class InfraGUI:
                 isinstance(self.data[category][subcategory][key], dict)
                 and "unit" in self.data[category][subcategory][key]
             ):
-                self.data[category][subcategory][key]["value"] = value  # Preserve the unit
+                self.data[category][subcategory][key]["value"] = (
+                    value  # Preserve the unit
+                )
             else:
-                self.data[category][subcategory][key] = {"value": value, "unit": ""}  # Fallback
+                self.data[category][subcategory][key] = {
+                    "value": value,
+                    "unit": "",
+                }  # Fallback
 
         except json.JSONDecodeError:
-            messagebox.showerror("Input Error", f"Invalid input for {key}. Please enter a valid number.")
+            messagebox.showerror(
+                "Input Error", f"Invalid input for {key}. Please enter a valid number."
+            )
 
     def create_spatial_limit_tab(self):
         """
@@ -407,7 +455,10 @@ class InfraGUI:
             entry = ttk.Entry(row, width=40)
             entry.insert(0, str(value))
             entry.pack(side="right", expand=True)
-            entry.bind("<FocusOut>", lambda e, k=key, en=entry: self.update_spatial_limit(k, en))
+            entry.bind(
+                "<FocusOut>",
+                lambda e, k=key, en=entry: self.update_spatial_limit(k, en),
+            )
 
             self.spatial_entries[key] = entry
 
@@ -432,7 +483,9 @@ class InfraGUI:
             self.update_spatial_plot()
 
         except ValueError:
-            messagebox.showerror("Input Error", f"Invalid input for {key}. Please enter a valid number.")
+            messagebox.showerror(
+                "Input Error", f"Invalid input for {key}. Please enter a valid number."
+            )
 
     def update_spatial_plot(self):
         """
@@ -448,7 +501,9 @@ class InfraGUI:
 
             # Create a bounding box as a GeoDataFrame
             bbox_geom = box(e_min, n_min, e_max, n_max)
-            bbox_gdf = gpd.GeoDataFrame(geometry=[bbox_geom], crs="EPSG:2056")  # LV95 Projection
+            bbox_gdf = gpd.GeoDataFrame(
+                geometry=[bbox_geom], crs="EPSG:2056"
+            )  # LV95 Projection
 
             # Reproject the bounding box to EPSG:3857 for Contextily
             bbox_gdf = bbox_gdf.to_crs(epsg=3857)
@@ -457,7 +512,13 @@ class InfraGUI:
             self.ax.clear()
 
             # Plot bounding box
-            bbox_gdf.plot(ax=self.ax, color="none", edgecolor="blue", linewidth=2, label="Bounding Box")
+            bbox_gdf.plot(
+                ax=self.ax,
+                color="none",
+                edgecolor="blue",
+                linewidth=2,
+                label="Bounding Box",
+            )
 
             # Compute bounding box dimensions
             dx = bbox_gdf.total_bounds[2] - bbox_gdf.total_bounds[0]  # Width
@@ -479,8 +540,9 @@ class InfraGUI:
 
             # Add basemap from Contextily
             try:
-                ctx.add_basemap(self.ax, source=ctx.providers.SwissFederalGeoportal.NationalMapColor)
-            except:
+                pass
+                # ctx.add_basemap(self.ax, source=ctx.providers.SwissFederalGeoportal.NationalMapColor)
+            except Exception:
                 logger.notice("Basemap can not be downloaded")
 
             # Set limits to enforce square plot
@@ -500,7 +562,9 @@ class InfraGUI:
             self.ax.set_title("Spatial Extent (WGS 84)")
 
             # Manually create legend handles
-            legend_patches = [mpatches.Patch(edgecolor="blue", facecolor="none", label="Bounding Box")]
+            legend_patches = [
+                mpatches.Patch(edgecolor="blue", facecolor="none", label="Bounding Box")
+            ]
 
             # Manually set legend with patches
             self.ax.legend(handles=legend_patches, loc="upper right")
@@ -509,17 +573,26 @@ class InfraGUI:
             self.canvas.draw()
 
         except ValueError:
-            messagebox.showerror("Input Error", "Invalid spatial extent values. Please enter valid numbers.")
+            messagebox.showerror(
+                "Input Error",
+                "Invalid spatial extent values. Please enter valid numbers.",
+            )
 
     def reset_to_default(self):
         """
         Resets all values to their default (original) state.
         """
-        confirm = messagebox.askyesno("Reset", "Are you sure you want to reset all values to their defaults?")
+        confirm = messagebox.askyesno(
+            "Reset", "Are you sure you want to reset all values to their defaults?"
+        )
         if confirm:
-            self.data = json.loads(json.dumps(self.original_data))  # Restore original data
+            self.data = json.loads(
+                json.dumps(self.original_data)
+            )  # Restore original data
             self.refresh_ui()
-            messagebox.showinfo("Reset", "Configuration has been reset to default values.")
+            messagebox.showinfo(
+                "Reset", "Configuration has been reset to default values."
+            )
 
     def run_script(self, script: str):
         """
@@ -533,7 +606,10 @@ class InfraGUI:
         # Save configuration before running
         working_dir = self.data["General"].get("working_directory", "")
         save_path = os.path.join(
-            working_dir, "GUI", "past_runs", f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            working_dir,
+            "GUI",
+            "past_runs",
+            f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
         )
         # Set Config File Name in json itself (if name is base_config.json, it will be overwritten)
         if self.data["General"]["config_file_name"] == "base_config.json":
@@ -551,7 +627,9 @@ class InfraGUI:
             return
 
         # Start the process using multiprocessing
-        process = multiprocessing.Process(target=start_process, args=(process_class, self.data))
+        process = multiprocessing.Process(
+            target=start_process, args=(process_class, self.data)
+        )
         process.start()
 
     def run_both(self):
@@ -595,7 +673,9 @@ class InfraGUI:
 
     def export_json(self):
         """Export the current configuration to a JSON file, ensuring unit preservation."""
-        file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON Files", "*.json")])
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json", filetypes=[("JSON Files", "*.json")]
+        )
 
         if file_path:
             # Update metadata before exporting
@@ -614,7 +694,9 @@ class InfraGUI:
                             isinstance(self.data[category][subcategory][key], dict)
                             and "unit" in self.data[category][subcategory][key]
                         ):
-                            self.data[category][subcategory][key]["value"] = json.loads(value)
+                            self.data[category][subcategory][key]["value"] = json.loads(
+                                value
+                            )
 
             # Save to file
             with open(file_path, "w") as file:
@@ -640,7 +722,9 @@ class InfraGUI:
 
         # Refresh working directory entry
         self.working_dir_entry.delete(0, tk.END)
-        self.working_dir_entry.insert(0, self.data["General"].get("working_directory", ""))
+        self.working_dir_entry.insert(
+            0, self.data["General"].get("working_directory", "")
+        )
 
         # Refresh automatically generated data directories
         self.refresh_data_paths()
