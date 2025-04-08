@@ -31,7 +31,6 @@ def print_hi():
     # The coordinates must end with 000 in order to match the coordinates of the input raster data
     e_min, e_max = 2687000, 2708000     # 2688000, 2704000 - 2688000, 2705000
     n_min, n_max = 1237000, 1254000     # 1238000, 1252000 - 1237000, 1252000
-    limits_corridor = [e_min, n_min, e_max, n_max]
 
     # Boudary for plot
 
@@ -50,22 +49,8 @@ def print_hi():
     # Define variables for monetisation
 
     # Value of travel time savings (VTTS)
-    VTTS = 14.8 # CHF/h 
-    
 
     # Construction costs
-    cost_per_meter = 33250  # CHF per meter
-    tunnel_cost_per_meter = 104000  # CHF per meter per track (From Schweizer())
-    bridge_cost_per_meter = 70000  # CHF per meter per track
-    
-
-    track_maintenance_cost = 132 # CHF per meter per track per year
-    tunnel_maintenance_cost = 132 # CHF/m/a
-    bridge_maintenance_cost = 368.8 # CHF/m/a
-    duration = 50  # 50 years
-    travel_time_duration = 50
-    
-
 
     runtimes["Initialize variables"] = time.time() - st
     st = time.time()
@@ -195,15 +180,10 @@ def print_hi():
 
     network_railway_service_path = r"data\temp\network_railway-services.gpkg"
     new_links_updated_path = r"data\Network\processed\updated_new_links.gpkg"
-    output_path = r"data\Network\processed\combined_network_with_new_links.gpkg"
-    
 
     #combined_gdf = delete_connections_back(file_path_updated=r"data\Network\processed\new_links.gpkg",
     #                                        file_path_raw_edges=r"data/temp/network_railway-services.gpkg",
     #                                        output_path=r"data/Network/processed/updated_new_links_cleaned.gpkg")
-
-
-    combined_gdf = update_network_with_new_links(network_railway_service_path, new_links_updated_path)
 
     create_network_foreach_dev()
 
@@ -410,9 +390,6 @@ def print_hi():
     # Compute the construction costs for each development 
     print(" -> Construction costs")
 
-    file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
-    developments = read_development_files()
-
     runtimes["Compute construction and maintenance costs"] = time.time() - st
     st = time.time()
 
@@ -436,13 +413,10 @@ def print_hi():
 
 
     #TTT for status quo (trips in Peak hour * OD-Times) [in hour]
-    TTT_status_quo = calculate_total_travel_times(od_times_status_quo, od_directory_stat_quo, df_access)
 
     #TTT for developments (trips in Peak hour * OD-Times) [in hour]
-    TTT_developments = calculate_total_travel_times(od_times_dev, od_directory_dev, df_access)
 
     # Monetize travel time savings ()
-    output_path = "data/costs/traveltime_savings.csv"
 
     '''
     #tt_optimization_status_quo()

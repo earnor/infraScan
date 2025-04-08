@@ -1100,7 +1100,6 @@ def plot_corridor(network, limits, location, current_nodes=False, new_nodes=Fals
                 network["NAME"] != 'Freeway planned')]
 
     # Define square to show perimeter of investigation
-    square = Polygon([(limits[0], limits[2]), (limits[1], limits[2]), (limits[1], limits[3]), (limits[0], limits[3])])
 
     #df_voronoi.plot(ax=ax, facecolor='none', alpha=0.2, edgecolor='k')
 
@@ -1312,41 +1311,6 @@ def get_tunnel_candidates(df):
 
     df["elevation_profile"] = df["elevation_profile"].astype("object")
     # Custom dialog class for pop-up
-    class CustomDialog(Dialog):
-        def __init__(self, parent, row):
-            self.row = row
-            Dialog.__init__(self, parent)
-
-        def body(self, master):
-            # Create a figure for the plot
-            self.fig, self.ax = plt.subplots()
-            x_values = np.arange(0, len(self.row['elevation_profile'])) * 50
-            self.ax.plot(x_values, self.row['elevation_profile'])
-            self.ax.set_title('Elevation profile')
-            self.ax.set_xlabel('Distance (m)')
-            self.ax.set_ylabel('Elevation (m. asl.)')
-
-            # Create labels and input fields for questions
-            tk.Label(master, text="How much tunnel is required in meters:").pack()
-            self.tunnel_len_entry = tk.Entry(master)
-            self.tunnel_len_entry.pack()
-
-            tk.Label(master, text="How much bridge is required in meters:").pack()
-            self.bridge_len_entry = tk.Entry(master)
-            self.bridge_len_entry.pack()
-
-            # Create a canvas to display the plot
-            canvas = FigureCanvasTkAgg(self.fig, master=master)
-            canvas.get_tk_widget().pack()
-
-        def apply(self):
-            # Get the user's input values
-            tunnel_len = int(self.tunnel_len_entry.get())
-            bridge_len = int(self.bridge_len_entry.get())
-
-            # Update DataFrame with user's input
-            df.at[self.row.name, 'tunnel_len'] = tunnel_len
-            df.at[self.row.name, 'bridge_len'] = bridge_len
     # Create new columns for user input
     df['tunnel_len'] = None
     df['bridge_len'] = None

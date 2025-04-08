@@ -498,7 +498,6 @@ def SUE_C_Logit(D_od, par, delta_ir, delta_odr, cf_r):
 
     def IntLinksTimes(D_r):
         # Demand on each link from demand on routes
-        x_i=np.matmul(delta_ir,D_r)
         intTrec_i=IntCostFun(par) #integral de la funcion de coste
         return intTrec_i
 

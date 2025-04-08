@@ -208,7 +208,6 @@ def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path)
         voronoi_tif = src.read(1)
     unique_voronoi_id = np.sort(np.unique(voronoi_tif))
     #vor_idx = unique_voronoi_id.tolist()
-    vor_idx = unique_voronoi_id.size
     #vor_idx = voronoidf['ID_point'].sort_by('ID_point')
 
     # Get voronoi tif boundaries and filter the commune_df that lay in it or touch it

@@ -489,9 +489,6 @@ def plot_cost_result(df_costs, banned_area, title_bar, boundary=None, network=No
     rasterio.plot.show(raster, ax=ax, cmap=cmap_raster, zorder=3)
 
     # Create custom legend elements
-    water_body_patch = mpatches.Patch(facecolor="lightblue", label='Water bodies', edgecolor='black', linewidth=1)
-    protected_area_patch = mpatches.Patch(facecolor='white', label='Protected area or no interpolated value available',
-                                          edgecolor='black', linewidth=1)
 
     # Create the legend below the plot
 
@@ -628,9 +625,6 @@ def plot_single_cost_result(df_costs, banned_area , title_bar, boundary=None, ne
     rasterio.plot.show(raster, ax=ax, cmap=cmap_raster, zorder=3)
 
     # Create custom legend elements
-    water_body_patch = mpatches.Patch(facecolor="lightblue", label='Water bodies', edgecolor='black', linewidth=1)
-    protected_area_patch = mpatches.Patch(facecolor='white', label='Protected area or no interpolated value available',
-                                          edgecolor='black', linewidth=1)
 
     # Create the legend below the plot
 
@@ -1106,7 +1100,6 @@ def plot_2x3_subplots(gdf, network, location):
     sm.set_array([])
 
     # Add the colorbar to the figure
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
     title_ax = fig.add_axes([0.97, 0.45, 0.05, 0.1])
     # cbar.ax.set_title("Relative population increase", rotation=90)
     # cbar.ax.yaxis.set_label_position('right')

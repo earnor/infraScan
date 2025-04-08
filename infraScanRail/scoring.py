@@ -1932,7 +1932,6 @@ def GetCatchmentOD():
 
     # Identify unique catchment IDs
     unique_catchment_id = np.sort(np.unique(catchment_tif))
-    catch_idx = unique_catchment_id.size  # Total number of unique catchments
 
     # Filter commune_df based on catchment raster bounds
     commune_df_filtered = commune_df.cx[bounds.left:bounds.right, bounds.bottom:bounds.top]
@@ -2851,7 +2850,6 @@ def SUE_C_Logit(D_od, par, delta_ir, delta_odr, cf_r):
 
     def IntLinksTimes(D_r):
         # Demand on each link from demand on routes
-        x_i = np.matmul(delta_ir, D_r)
         intTrec_i = IntCostFun(par)  # integral de la funcion de coste
         return intTrec_i
 
@@ -3123,7 +3121,6 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
     # print amount of nan in cf_r
     # print(f"Amount of nan in cf_r: {np.sum(np.isnan(cf_r))}")
     # print(f"Amount of inf in cf_r: {np.sum(np.isinf(cf_r))}")
-    theta = 1.2
 
     ## INPUT DATA ANALYSIS
 
@@ -3137,7 +3134,6 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
 
     ## CALCULATION OF INCREASE OF TOTAL TRAVEL COST
     if not done:
-        t = timeit.default_timer()
         # t = time.process_time()
 
         # --- Reference value: network with no damage
