@@ -175,13 +175,12 @@ def plotting(input_file, output_file, node_file):
                 print(f"No data to save for {scenario_name}")
     
 
-def plot_developments_and_table_for_scenarios(osm_file, input_dir, output_dir):
+def plot_developments_and_table_for_scenarios(input_dir, output_dir):
     """
     Plots all developments on a map with OSM as the background and labels them.
     Creates a corresponding table with development details for each scenario.
     
     Parameters:
-        osm_file (str): File path to the OpenStreetMap data.
         input_dir (str): Directory containing GeoPackage files with processed costs.
         output_dir (str): Directory to save the map and table images.
     """
@@ -495,8 +494,6 @@ def plot_cost_result(df_costs, banned_area, title_bar, boundary=None, network=No
                                           edgecolor='black', linewidth=1)
 
     # Create the legend below the plot
-    legend = ax.legend(handles=[water_body_patch, protected_area_patch], loc='upper center',
-                       bbox_to_anchor=(0.5, -0.02), ncol=2, fontsize=16, frameon=False)
 
     # Add a north arrow
     # Add the letter "N"
@@ -636,8 +633,6 @@ def plot_single_cost_result(df_costs, banned_area , title_bar, boundary=None, ne
                                           edgecolor='black', linewidth=1)
 
     # Create the legend below the plot
-    legend = ax.legend(handles=[water_body_patch, protected_area_patch], loc='upper center',
-                       bbox_to_anchor=(0.5, -0.02), ncol=2, fontsize=16, frameon=False)
 
     ax.set_xticks([])
     ax.set_yticks([])
@@ -765,9 +760,6 @@ def plot_cost_uncertainty(df_costs, banned_area, col, legend_title, boundary=Non
     rasterio.plot.show(raster, ax=ax, cmap=cmap_raster, zorder=3)
 
     # Create custom legend elements
-    water_body_patch = mpatches.Patch(facecolor="lightblue", label='Water bodies', edgecolor='black', linewidth=1)
-    protected_area_patch = mpatches.Patch(facecolor='lightgray', label='Protected area',
-                                          edgecolor='black', linewidth=1)
 
     # Create the legend below the plot
     # legend = ax.legend(handles=[water_body_patch, protected_area_patch], loc='lower center',bbox_to_anchor=(0.5, -0.08), ncol=2, fontsize=16, frameon=False)
@@ -1072,7 +1064,7 @@ def boxplot(df, nbr):
     plt.show()
 
 
-def plot_2x3_subplots(gdf, limits, network, location):
+def plot_2x3_subplots(gdf, network, location):
     """
     This function plots the relative population and employment development for all districts considered and for all
     three scenarios defined
@@ -1116,7 +1108,6 @@ def plot_2x3_subplots(gdf, limits, network, location):
     # Add the colorbar to the figure
     cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
     title_ax = fig.add_axes([0.97, 0.45, 0.05, 0.1])
-    cbar = fig.colorbar(sm, cax=cbar_ax)
     # cbar.ax.set_title("Relative population increase", rotation=90)
     # cbar.ax.yaxis.set_label_position('right')
     title_ax.axis('off')  # Hide the frame around the title axis
@@ -1133,7 +1124,6 @@ def plot_points_gen(points, edges, banned_area, points_2=None, boundary=None, ne
     # Import other zones
     schutzzonen = gpd.read_file(r"data/landuse_landcover/Schutzzonen/Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD/FNS_SCHUTZZONE_F.shp")
     forest = gpd.read_file(r"data/landuse_landcover/Schutzzonen/Waldareal_-OGD/WALD_WALDAREAL_F.shp")
-    fff = gpd.read_file(r"data/landuse_landcover/Schutzzonen/Fruchtfolgeflachen_-OGD/FFF_F.shp")
 
     fig, ax = plt.subplots(figsize=(13,9))
     # Plot lakes
@@ -1228,7 +1218,7 @@ def plot_points_gen(points, edges, banned_area, points_2=None, boundary=None, ne
     return
 
 
-def plot_voronoi_comp(eucledian, traveltime, boundary=None, network=None, access_points=None, plot_name=False, all_zones=False):
+def plot_voronoi_comp(eucledian, traveltime, boundary=None, network=None, access_points=None, plot_name=False):
     fig, ax = plt.subplots(figsize=(13, 9))
     # Plot lakes
     lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
@@ -1306,7 +1296,7 @@ def plot_voronoi_comp(eucledian, traveltime, boundary=None, network=None, access
     return
 
 
-def plot_voronoi_development(statusquo, development_voronoi, development_point, boundary=None, network=None, access_points=None, plot_name=False, all_zones=False):
+def plot_voronoi_development(statusquo, development_voronoi, development_point, boundary=None, network=None, access_points=None, plot_name=False):
     fig, ax = plt.subplots(figsize=(13, 9))
     # Plot lakes
     lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")

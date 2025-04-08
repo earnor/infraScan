@@ -55,7 +55,6 @@ def GetCommuneEmployment(y0): # we find employment in each commune.
 def GetHighwayPHDemandPerCommune():
     # now we extract an od matrix for pt from year 2019
     # we then modify the OD matrix to fit our needs of expressing peak hour pt travel demand
-    y0 = 2019
     rawod = pd.read_excel('data\_basic_data\KTZH_00001982_00003903.xlsx')
     communalOD = rawod.loc[(rawod['jahr']==2018) & (rawod['kategorie']=='Verkehrsaufkommen') & (rawod['verkehrsmittel']=='oev')]
     #communalOD = data.drop(['jahr','quelle_name','quelle_gebietart','ziel_name','ziel_gebietart',"kategorie","verkehrsmittel","einheit","gebietsstand_jahr","zeit_dimension"],axis=1)
@@ -73,7 +72,6 @@ def GetHighwayPHDemandPerCommune():
 
 
 def GetODMatrix(od):
-    od_ext = od.loc[(od['quelle_code']>9999) | (od['ziel_code']>9999)] #here we separate the parts of the od matrix that are outside the canton. We can add them later.
     od_int = od.loc[(od['quelle_code']<9999) & (od['ziel_code']<9999)]
     odmat = od_int.pivot(index='quelle_code',columns='ziel_code',values='wert')
     return odmat
@@ -88,7 +86,6 @@ def GetCommuneShapes(raster_path): #todo this might be unnecessary if you alread
     with rasterio.open(raster_path) as src:
         profile = src.profile
         profile.update(count=1)
-        crs = src.crs
 
     # Rasterize
     with rasterio.open('data\_basic_data\Gemeindegrenzen\gemeinde_zh.tif', 'w', **profile) as dst:
@@ -107,7 +104,7 @@ def GetCommuneShapes(raster_path): #todo this might be unnecessary if you alread
 
     return commune_raster, communedf
 
-def  GetCatchmentold(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path):
+def  GetCatchmentold():
 
     return
 
@@ -161,7 +158,6 @@ def compute_TT():
 def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path):
 
     # define dev (=ID of the polygons of a development)
-    dev = 0
 
     #todo When we iterate over devs and scens, maybe we can check if the VoronoiDF already has the communal data and then skip the following five lines
     popvec = GetCommunePopulation(y0="2021")
@@ -230,25 +226,8 @@ def GetVoronoiOD_old(voronoidf, scen_empl_path, scen_pop_path, voronoi_tif_path)
     #todo By addressing this monster of five for loops, we can win a lot of computational performance.
 
     #od_mn = np.zeros([len(vor_idx),len(vor_idx)])
-    od_mn = np.zeros([vor_idx, vor_idx])
 
     # Assume vectorized functions are defined for the below operations
-    def compute_cont_r(odmat, popvec, jobvec):
-        # Convert popvec and jobvec to 2D arrays for broadcasting
-        pop_matrix = np.array(popvec)[:, np.newaxis]
-        job_matrix = np.array(jobvec)[np.newaxis, :]
-
-        # Ensure odmat is a NumPy array
-        odmat = np.array(odmat)
-
-        # Perform the vectorized operation
-        cont_r = odmat / (pop_matrix * job_matrix)
-        return cont_r
-
-    def compute_cont_v(cont_r, pop_m, job_n):
-        # Sum over the cont_r matrix, multiply by pop_m and job_n
-        cont_v = np.sum(cont_r)
-        return cont_v
 
     # Step 1: generate unit_flow matrix from each commune to each other commune
     cout_r = odmat / np.outer(popvec, jobvec)
@@ -513,14 +492,10 @@ def GetVoronoiOD_multi_old(scen_empl_path, scen_pop_path, voronoi_tif_path):
     with rasterio.open(scen_pop_path) as src:
         # Read the raster into a NumPy array (assuming you want the first band)
         scen_pop_medium_tif = src.read(1)
-        scen_pop_low_tif = src.read(2)
-        scen_pop_high_tif = src.read(3)
 
     with rasterio.open(scen_empl_path) as src:
         # Read the raster into a NumPy array (assuming you want the first band)
         scen_empl_medium_tif = src.read(1)
-        scen_empl_low_tif = src.read(2)
-        scen_empl_high_tif = src.read(3)
 
     # Step 1: generate unit_flow matrix from each commune to each other commune
     cout_r = odmat / np.outer(popvec, jobvec)

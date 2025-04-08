@@ -193,7 +193,6 @@ def load_nw():
     node_table = pd.read_csv(r"data\Network\Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
     node_table = node_table[['NR','XKOORD','YKOORD']]
     #link_attribute = pd.read_csv(r"data\Network\Road_LinkType.csv", sep=";")
-    change_table = pd.read_csv(r"data\Network\Rail-Service_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
 
     # Add coordinates of the origin node of each link by merging nodes and links through the node ID
     #edge_table = edge_table.join(node_table,on="FromNode").rename({'XKOORD': 'E_KOORD_O', 'YKOORD': 'N_KOORD_O'}, axis=1)
@@ -249,7 +248,7 @@ def load_nw_zh():
     all_roads = gpd.read_file(r"data\Network\Strassennetz\TBA_STR_ACHS_L.shp")
     print(all_roads.columns)
 
-def map_access_points_on_network(current_points, network):
+def map_access_points_on_network():
     network = gpd.read_file(r"data/temp/network_railway-services.gpkg")
     current_points = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
     # As the access points were collected manually they do not match the infrastructure perfectly all the time. 
@@ -475,7 +474,6 @@ def reformat_highway_network():
 
     ##################################################################################################
     # Add connect points (new geometries)
-    split_points = list(current_points['geometry'])
     multi_point = MultiPoint(current_points['geometry'])
 
 
@@ -709,8 +707,6 @@ def reformat_rail_network():
 
     ##################################################################################################
     # Add connect points (new geometries)
-    split_points = list(current_points['geometry'])
-    multi_point = MultiPoint(current_points['geometry'])
 
     current_points.to_file(r"data\Network\processed\points.gpkg") #replaces the commented out stuff above.
     points_gdf = current_points
@@ -998,7 +994,7 @@ def map_values_to_nodes():
     neww.to_file(r"data\Network\processed\points_attribute.gpkg")
 
 
-def only_links_to_corridor(poly):
+def only_links_to_corridor():
     # Load the new_links and all access points datasets
     new_links = gpd.read_file(r"data\Network\processed\filtered_new_links.gpkg")
     all_access_points = gpd.read_file(r"data\Network\processed\points_with_attribute.gpkg")
@@ -1341,10 +1337,8 @@ def save_focus_area_shapefile(e_min, e_max, n_min, n_max):
         ])
 
     # Spatial limits of the research corridor
-    limits_corridor = [e_min, n_min, e_max, n_max]
 
     # Create polygons
-    boundary_plot = polygon_from_points(e_min=e_min+1000, e_max=e_max-500, n_min=n_min+1000, n_max=n_max-2000)
     innerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max)
     margin = 3000  # meters
     outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)

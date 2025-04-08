@@ -808,7 +808,6 @@ def update_stations(combined_gdf, output_path):
     combined_gdf["ToNode"] = combined_gdf["ToNode"].astype(int)
 
     # Define mapping for nodes to stations
-    node_to_station = {1008: "Hinwil", 2298: "Uster"}
 
     # Update ToStation based on ToNode
     combined_gdf.loc[combined_gdf["ToNode"] == 1018, "ToStation"] = "Hinwil"
@@ -846,7 +845,7 @@ def get_idx_todrop(pt, filename):
     return newidx
 
 
-def nearest(row, geom_union, df1, df2, geom1_col='geometry', geom2_col='geometry', src_column=None):
+def nearest(row, geom_union, df2, geom1_col='geometry', geom2_col='geometry', src_column=None):
     """Find the nearest point and return the corresponding value from specified column."""
 
     # Find the geometry that is closest
@@ -1102,7 +1101,6 @@ def plot_corridor(network, limits, location, current_nodes=False, new_nodes=Fals
 
     # Define square to show perimeter of investigation
     square = Polygon([(limits[0], limits[2]), (limits[1], limits[2]), (limits[1], limits[3]), (limits[0], limits[3])])
-    frame = gpd.GeoDataFrame(geometry=[square], crs=network.crs)
 
     #df_voronoi.plot(ax=ax, facecolor='none', alpha=0.2, edgecolor='k')
 
@@ -1359,7 +1357,6 @@ def get_tunnel_candidates(df):
         if row['check_needed']:
             root = tk.Tk()
             root.withdraw()
-            dlg = CustomDialog(root, row)
             #dlg.wait_window()
     df["elevation_profile"]=df["elevation_profile"].astype('string')
     print(df)

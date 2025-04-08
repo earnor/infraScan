@@ -17,7 +17,7 @@ from display_results import *
 import paths
 
 
-def print_hi(name):
+def print_hi():
 
     os.chdir(paths.MAIN)
     runtimes = {}
@@ -34,17 +34,14 @@ def print_hi(name):
     limits_corridor = [e_min, n_min, e_max, n_max]
 
     # Boudary for plot
-    boundary_plot = polygon_from_points(e_min=e_min+1000, e_max=e_max-500, n_min=n_min+1000, n_max=n_max-2000)
 
     # Get a polygon as limits for teh corridor
-    innerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max)
 
     # For global operation a margin is added to the boundary
     margin = 3000 # meters
     outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
 
     # Define the size of the resolution of the raster to 100 meter
-    raster_size = 100 # meters
 
     #save spatial limits as shp
     save_focus_area_shapefile(e_min, e_max, n_min, n_max)
@@ -112,15 +109,12 @@ def print_hi(name):
     #load_nw()
 
     # Read the network dataset to avoid running the function above
-    network = gpd.read_file(r"data/temp/network_railway-services.gpkg")
-    
-    
+
     # Import manually gathered access points and map them on the highway infrastructure
     # The same point but with adjusted coordinate are saved to "data\access_highway_matched.gpkg"
     #df_access = pd.read_csv(r"data/manually_gathered_data/highway_access.csv", sep=";")
     df_access = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
-    df_construction_cost = pd.read_csv(r"data/Network/Rail-Service_Link_construction_cost.csv", sep=";",decimal=",", encoding = "utf-8-sig")
-    
+
     '''
     map_access_points_on_network(current_points=df_access, network=network)
     current_access_points = df_acces
@@ -195,7 +189,7 @@ def print_hi(name):
     # The links to corridor are stored in "data/Network/processed/developments_to_corridor_attribute.gpkg"
     # The generated points with link to access point in the corridor are stored in "data/Network/processed/generated_nodes_connecting_corridor.gpkg"
     # The end point [ID_new] of developments_to_corridor_attribute are equivlent to the points in generated_nodes_connecting_corridor
-    only_links_to_corridor(poly=outerboundary)
+    only_links_to_corridor()
 
     calculate_new_service_time()
 
@@ -210,9 +204,7 @@ def print_hi(name):
 
 
     combined_gdf = update_network_with_new_links(network_railway_service_path, new_links_updated_path)
-    combined_gdf = update_stations(combined_gdf, output_path)
 
-    
     create_network_foreach_dev()
 
     ##here insert other network generations and save them also as a GPGK at: data/Network/processed/developments/
@@ -243,7 +235,7 @@ def print_hi(name):
     # Dataframe with the voronoi polygons for the status quo is stored in "data/Voronoi/voronoi_status_quo_euclidian.gpkg"
     # Dataframe with the voronoi polygons for the all developments is stored in "data/Voronoi/voronoi_developments_euclidian.gpkg"
     
-    get_catchement(limits_corridor, outerboundary)
+    get_catchement()
 
     runtimes["Generate The Catchement based on the Bus network"] = time.time() - st
     st = time.time()
@@ -263,9 +255,7 @@ def print_hi(name):
     # 1) Define scenario based on cantonal predictions
 
     # Import the predicted scenario defined by the canton of Zürich
-    scenario_zh = pd.read_csv(r"data/Scenario/KTZH_00000705_00001741.csv", sep=";")
 
-    
     # Define the relative growth per scenario and district
     # The growth rates are stored in "data/temp/data_scenario_n.shp"
     #future_scenario_zuerich_2022(scenario_zh)
@@ -289,7 +279,6 @@ def print_hi(name):
 
     # Aggregate the the scenario data to over the voronoi polygons, here euclidian polygons
     # Store the resulting file to "data/Voronoi/voronoi_developments_euclidian_values.shp"
-    polygons_gdf = gpd.read_file(r"data/Voronoi/voronoi_developments_euclidian.gpkg")
     #scenario_to_voronoi(polygons_gdf, euclidean=True)
 
     # Convert multiple tif files to one same tif with multiple bands
@@ -422,19 +411,7 @@ def print_hi(name):
     print(" -> Construction costs")
 
     file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
-    developments = read_development_files('data/Network/processed/developments')
-
-
-    construction_and_maintenance_costs = construction_costs(file_path,
-                                                            developments,
-                                                            cost_per_meter,
-                                                            tunnel_cost_per_meter,
-                                                            bridge_cost_per_meter,
-                                                            track_maintenance_cost,
-                                                            tunnel_maintenance_cost,
-                                                            bridge_maintenance_cost,
-                                                            duration)
-    
+    developments = read_development_files()
 
     runtimes["Compute construction and maintenance costs"] = time.time() - st
     st = time.time()
@@ -444,8 +421,6 @@ def print_hi(name):
     # Travel time delay on rail
 
     # Compute the OD matrix for the current infrastructure under all scenarios
-    directory = "data/traffic_flow/od/rail/"
-    status_quo_directory = "data/traffic_flow/od/rail/stat_quo"
     od_directory_stat_quo = r"data/traffic_flow/od/rail/stat_quo"
     od_directory_dev = r"data/traffic_flow/od/rail"
 
@@ -468,7 +443,6 @@ def print_hi(name):
 
     # Monetize travel time savings ()
     output_path = "data/costs/traveltime_savings.csv"
-    monetized_tt = calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, travel_time_duration, output_path)
 
     '''
     #tt_optimization_status_quo()
@@ -501,10 +475,8 @@ def print_hi(name):
     with open(r'runtimes_2.txt', 'w') as file:
         for part, runtime in runtimes.items():
             file.write(f"{part}: {runtime}/n")
-    
-    #####code until here runs fine
 
-    ##################################################################################
+
     ##################################################################################
     # VISUALIZE THE RESULTS
 
@@ -561,4 +533,4 @@ def print_hi(name):
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    print_hi('You did a good job ;)')
+    print_hi()

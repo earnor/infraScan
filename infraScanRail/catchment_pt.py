@@ -669,20 +669,17 @@ def save_points_as_raster(df, output_path=r'data/catchment_pt/catchement.tif', r
 # 2.) Prepare Bus Network:
 ###############################################################################################################################################################################################
 
-def get_catchement(limits_corridor, outerboundary):
+def get_catchement():
 
 
     # Define spatial limits of the research corridor
     # The coordinates must end with 000 in order to match the coordinates of the input raster data
     e_min, e_max = 2687000, 2708000     # 2688000, 2704000 - 2688000, 2705000
     n_min, n_max = 1237000, 1254000     # 1238000, 1252000 - 1237000, 1252000
-    limits_corridor = [e_min, n_min, e_max, n_max]
 
     # Boudary for plot
-    boundary_plot = polygon_from_points(e_min=e_min+1000, e_max=e_max-500, n_min=n_min+1000, n_max=n_max-2000)
 
     # Get a polygon as limits for teh corridor
-    innerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max)
 
     # For global operation a margin is added to the boundary
     margin = 3000 # meters
@@ -712,11 +709,11 @@ def get_catchement(limits_corridor, outerboundary):
 
         # Determine the type of stop (Bus, Train, or Other)
         if pd.isna(row['VTYP']) or row['VTYP'] == '':
-            stop_type = 'Other'  # Set to 'Other' if VTYP is empty or NaN
+            pass
         elif row['VTYP'] == 'S-Bahn':
-            stop_type = 'Train'
+            pass
         else:
-            stop_type = 'Bus'
+            pass
 
         # Determine the type of stop (Bus or Train)
         stop_type = 'Bus'  # Default to Bus
@@ -765,8 +762,7 @@ def get_catchement(limits_corridor, outerboundary):
 
     
     # Extract positions of bus stops for plotting
-    pos = nx.get_node_attributes(G_bus, 'pos')
-    
+
     '''
     # Plot the bus network
     plt.figure(figsize=(12, 12))
@@ -786,7 +782,6 @@ def get_catchement(limits_corridor, outerboundary):
     # to the closest train station based on their service direction toward a train station.
     # requires assessing changes in access times.
     # Specify the output file path
-    output_path = r"data/catchment_pt/merged_trainstation_buffers.gpkg"
     #create_merge is an old function, which does not include the trainbuffers
     #create_merged_trainstation_buffers(closest_trainstations_df, stops, output_path)
     # File paths

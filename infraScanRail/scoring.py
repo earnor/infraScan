@@ -105,8 +105,7 @@ def calculate_od_matrices_with_penalties(graph_dict):
             origin_station = G.nodes[origin]['station']  # Get the station name for the origin
             # Use Dijkstra's algorithm to find shortest paths from the origin node
             paths = nx.single_source_dijkstra_path(G, origin, weight='weight')
-            travel_times = nx.single_source_dijkstra_path_length(G, origin, weight='weight')
-            
+
             for destination, path in paths.items():
                 if origin != destination:
                     destination_station = G.nodes[destination]['station']  # Get the station name for the destination
@@ -199,8 +198,6 @@ def get_google_travel_time(origin_coords, destination_coords, api_key, mode="tra
 def calculate_travel_times(od_matrix, api_key):
 
     # Initialize UTM to Lat/Lng transformer (replace with your UTM zone if needed)
-    utm_proj = pyproj.Proj(init="epsg:32632")  # For UTM zone 32N (adjust if needed)
-    latlng_proj = pyproj.Proj(init="epsg:4326")  # WGS84 Lat/Lng
     """Calculate and update travel times in the GeoDataFrame using Google Maps API."""
     od_matrix['GoogleTravelTime'] = None  # Initialize the column for travel times
 
@@ -263,7 +260,6 @@ def import_elevation_model_old():
                          data['Y'].min():data['Y'].max():100]  # 100 can be replaced with the desired spacing
 
         # Interpolate using griddata - this creates the raster from the point data
-        grid_z = griddata((data['X'], data['Y']), data['Z'], (grid_x, grid_y), method='nearest')
 
         # The rest of the code goes here to create and resample the raster using rasterio...
 
@@ -395,12 +391,9 @@ def merge_lines(df):
     return merged_df
 
 
-def read_development_files(development_dir):
+def read_development_files():
     """
     Read all development files from the specified directory and filter lines with new_dev = 'Yes'.
-
-    Parameters:
-        development_dir (str): Path to the directory containing development `.gpkg` files.
 
     Returns:
         list of pd.DataFrame: A list of DataFrames, each containing filtered data for a development.
@@ -465,7 +458,7 @@ def process_via_column(df):
 
     return df
 
-def construction_costs(file_path, developments, cost_per_meter, tunnel_cost_per_meter, bridge_cost_per_meter,
+def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_cost_per_meter,
                        track_maintenance_cost, tunnel_maintenance_cost, bridge_maintenance_cost, duration):
     """
     Process the rail network data to calculate construction and maintenance costs for each segment.
@@ -474,7 +467,6 @@ def construction_costs(file_path, developments, cost_per_meter, tunnel_cost_per_
 
     Parameters:
         file_path (str): Path to the CSV file containing the rail network data.
-        developments (list of pd.DataFrame): List of DataFrames, each representing new connections for a development.
         cost_per_meter (float): Cost of building a new track per meter.
         tunnel_cost_per_meter (float): Cost of updating tunnels per meter per track.
         bridge_cost_per_meter (float): Cost of updating bridges per meter per track.
@@ -495,7 +487,7 @@ def construction_costs(file_path, developments, cost_per_meter, tunnel_cost_per_
         raise RuntimeError(f"An error occurred while reading the file: {e}")
 
     development_costs = []  # To store costs for each development
-    developments = read_development_files('data/Network/processed/developments')
+    developments = read_development_files()
     #Process the Via column in a DataFrame.
     #Converts strings in the Via column to lists of integers
     #If no Via nodes are present, replaces it with -99.
@@ -789,7 +781,6 @@ def noise_costs(years, unit_costs, boundaries):
     scenario_path = ['s1_pop.tif', 's2_pop.tif', 's3_pop.tif']
     for path in scenario_path:
         with rasterio.open(fr"data/independent_variable/processed/scenario/{path}") as scenario_tif:
-            trip_tif = scenario_tif.read(1)
 
             edges_temp = gpd.GeoDataFrame()
 
@@ -1187,7 +1178,7 @@ def osm_nw_to_raster(limits):
         dst.write(raster, 1)
 """
 
-def tif_to_vector(raster_path, vector_path):
+def tif_to_vector(raster_path):
     # Step 1: Read the raster data
     with rasterio.open(raster_path) as src:
         image = src.read(1)  # Read the first band
@@ -1257,7 +1248,6 @@ def aggregate_costs():
     travel_time_path = "data/costs/traveltime_savings.csv"
     construction_maintenance_cost = "data/costs/construction_cost.csv"
     total_costs_csv_path = "data/costs/total_costs_raw.csv"
-    total_costs_gpkg_path = "data/costs/total_costs.gpkg"
 
     # Define scenarios for population and employment
     pop_scenarios = [
@@ -1364,7 +1354,6 @@ def transform_and_reshape_dataframe():
     reshaped_df = reshaped_df.reset_index()
 
     # Calculate total costs for each scenario
-    construction_cost_columns = [col for col in reshaped_df.columns if col.startswith("construction_cost_")]
     savings_columns = [col for col in reshaped_df.columns if col.startswith("monetized_savings_")]
     
     for savings_col in savings_columns:
@@ -1688,7 +1677,6 @@ def GetCommuneEmployment(y0):  # we find employment in each commune.
 def GetHighwayPHDemandPerCommune():
     # now we extract an od matrix for oev tripps from year 2019
     # we then modify the OD matrix to fit our needs of expressing peak hour travel demand
-    y0 = 2019
     rawod = pd.read_excel('data/_basic_data/KTZH_00001982_00003903.xlsx')
     communalOD = rawod.loc[
         (rawod['jahr'] == 2018) & (rawod['kategorie'] == 'Verkehrsaufkommen') & (rawod['verkehrsmittel'] == 'oev')]
@@ -1709,8 +1697,6 @@ def GetHighwayPHDemandPerCommune():
 
 
 def GetODMatrix(od):
-    od_ext = od.loc[(od['quelle_code'] > 9999) | (od[
-                                                      'ziel_code'] > 9999)]  # here we separate the parts of the od matrix that are outside the canton. We can add them later.
     od_int = od.loc[(od['quelle_code'] < 9999) & (od['ziel_code'] < 9999)]
     odmat = od_int.pivot(index='quelle_code', columns='ziel_code', values='wert')
     return odmat
@@ -1726,7 +1712,6 @@ def GetCommuneShapes(raster_path):  # todo this might be unnecessary if you alre
     with rasterio.open(raster_path) as src:
         profile = src.profile
         profile.update(count=1)
-        crs = src.crs
 
     # Rasterize
     with rasterio.open('data/_basic_data/Gemeindegrenzen/gemeinde_zh.tif', 'w', **profile) as dst:
@@ -1755,7 +1740,7 @@ import numpy as np
 def correct_rasters_to_extent(
     empl_path, pop_path, 
     output_empl_path, output_pop_path,
-    reference_raster_path, crs="EPSG:2056"):
+    reference_raster_path):
 
     """
     Corrects the raster files to match the given reference raster's extent, resolution, and transform.
@@ -1766,7 +1751,6 @@ def correct_rasters_to_extent(
         output_empl_path (str): Path to save the corrected employment raster.
         output_pop_path (str): Path to save the corrected population raster.
         reference_raster_path (str): Path to the reference raster file.
-        crs (str): Coordinate Reference System for the output rasters. Default is "EPSG:2056".
     """
     # Read the reference raster
     with rasterio.open(reference_raster_path) as ref_src:
@@ -1816,18 +1800,13 @@ def GetCatchmentOD():
     # The coordinates must end with 000 in order to match the coordinates of the input raster data
     e_min, e_max = 2687000, 2708000     # 2688000, 2704000 - 2688000, 2705000
     n_min, n_max = 1237000, 1254000     # 1238000, 1252000 - 1237000, 1252000
-    limits_corridor = [e_min, n_min, e_max, n_max]
     # Get a polygon as limits for teh corridor
-    innerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max)
-
 
     # Import the required data or define the path to access it
     catchement_tif_path = r'data/catchment_pt/catchement.tif'
     catchmentdf = gpd.read_file(r"data/catchment_pt/catchement.gpkg")
 
     # File paths for population and employment combined raster files
-    pop_combined_file = r"data/independent_variable/processed/scenario/pop_combined.tif"
-    empl_combined_file = r"data/independent_variable/processed/scenario/empl_combined.tif"
 
     '''
     correct_rasters_to_extent(pop_combined_file,
@@ -1852,8 +1831,7 @@ def GetCatchmentOD():
         pop_path=pop_combined_file,
         output_empl_path=output_empl_path,
         output_pop_path=output_pop_path,
-        reference_raster_path=catchment_tif_path,
-        crs="EPSG:2056")
+        reference_raster_path=catchment_tif_path)
 
 
 
@@ -1862,7 +1840,6 @@ def GetCatchmentOD():
     empl_combined_file = r"data/independent_variable/processed/scenario/pop20_corrected.tif"
 
     # define dev (=ID of the polygons of a development)
-    dev = 0
 
     # Get voronoidf crs
     print(catchmentdf.crs)
@@ -1936,8 +1913,7 @@ def GetCatchmentOD():
         pop_path=pop_raster_path,
         output_empl_path=output_empl_path,
         output_pop_path=output_pop_path,
-        reference_raster_path=catchment_tif_path,
-        crs="EPSG:2056"
+        reference_raster_path=catchment_tif_path
     )
 
     
@@ -1953,7 +1929,6 @@ def GetCatchmentOD():
         # Read the raster data
         catchment_tif = src.read(1)  # Read the first band, which holds id information
         bounds = src.bounds  # Get the spatial bounds of the raster
-        catchment_transform = src.transform  # Get the affine transform for spatial reference
 
     # Identify unique catchment IDs
     unique_catchment_id = np.sort(np.unique(catchment_tif))
@@ -1970,26 +1945,8 @@ def GetCatchmentOD():
 
     # Initialize an OD matrix for catchments
     # Shape is [number of unique catchments, number of unique catchments]
-    od_mn = np.zeros([catch_idx, catch_idx])
-
 
     # Assume vectorized functions are defined for the below operations
-    def compute_cont_r(odmat, popvec, jobvec):
-        # Convert popvec and jobvec to 2D arrays for broadcasting
-        pop_matrix = np.array(popvec)[:, np.newaxis]
-        job_matrix = np.array(jobvec)[np.newaxis, :]
-
-        # Ensure odmat is a NumPy array
-        odmat = np.array(odmat)
-
-        # Perform the vectorized operation
-        cont_r = odmat / (pop_matrix * job_matrix)
-        return cont_r
-
-    def compute_cont_v(cont_r, pop_m, job_n):
-        # Sum over the cont_r matrix, multiply by pop_m and job_n
-        cont_v = np.sum(cont_r)
-        return cont_v
 
     ###############################################################################################################################
     # Step 1: generate unit_flow matrix from each commune to each other commune
@@ -1997,8 +1954,6 @@ def GetCatchmentOD():
     ###############################################################################################################################
     # Step 2: Get all pairs of combinations from communes to polygons
     unique_commune_id = np.sort(np.unique(commune_raster))
-    pairs = pd.DataFrame(columns=['commune_id', 'catchement_id'])
-    pop_empl = pd.DataFrame(columns=['commune_id', 'catchement_id', "empl", "pop"])
 
     # Initialize the DataFrame for storing results
     pop_empl = gpd.GeoDataFrame()
@@ -2083,7 +2038,6 @@ def GetCatchmentOD():
     # Check for scenario based on column names in pop_empl
     # Sceanrio are defined like pop_XX and empl_XX get a list of all these endings (only XX)
     # Get the column names of pop_empl
-    pop_empl_columns = pop_empl.columns
     # Get the column names that end with XX
     '''
     pop_empl_scenarios = [col.split("_")[1] for col in pop_empl_columns if col.startswith("pop_")]
@@ -2858,7 +2812,7 @@ def CostFun(Xi, par):
     return Ci
 
 
-def IntCostFun(Xi, par):
+def IntCostFun(par):
     # Computes the integral of the cost function for the flow Xi, with the
     # parameters 'par'. Xi has the adequate size
     Xi = 2
@@ -2878,7 +2832,7 @@ def IntCostFun(Xi, par):
     return Ci
 
 
-def SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta):
+def SUE_C_Logit(D_od, par, delta_ir, delta_odr, cf_r):
     # De acuerdo con C logit SUE_Zhou (2010)
 
     # --- Optimizacion NO lineal
@@ -2898,7 +2852,7 @@ def SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta):
     def IntLinksTimes(D_r):
         # Demand on each link from demand on routes
         x_i = np.matmul(delta_ir, D_r)
-        intTrec_i = IntCostFun(x_i, par)  # integral de la funcion de coste
+        intTrec_i = IntCostFun(par)  # integral de la funcion de coste
         return intTrec_i
 
     # def bpr(x):
@@ -3004,11 +2958,6 @@ def SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta):
     #     der = np.divide((np.log(x)+1),theta)+cf_r+a1+s4
     #     return der.flatten()
 
-    def callback_function(*args):
-        xk = args[0]  # The first argument is the current solution vector
-        objective_value = fun(xk)
-        print(f"Iteration, Objective Function Value: {objective_value}")
-
     ineq_cons = {'type': 'ineq',
                  'fun': lambda x: x}  # ,
     # 'jac' : lambda x: np.array([])}
@@ -3063,7 +3012,7 @@ def SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta):
     # x_i is the demand on each link
     x_i = delta_ir * D_r
     # Get travel time on each route
-    intTrec_i = IntCostFun(x_i, par)
+    intTrec_i = IntCostFun(par)
 
     thetavec = np.ones_like(D_r)
 
@@ -3176,10 +3125,8 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
     # print(f"Amount of inf in cf_r: {np.sum(np.isinf(cf_r))}")
     theta = 1.2
 
-    iteration_count = 0
     ## INPUT DATA ANALYSIS
 
-    var_labs = list(np.zeros((nlinks)))
     """
     for i in range(0, nlinks):
         var_labs[i] = print("L_{%3.0f}" % i)
@@ -3187,7 +3134,6 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
     """
 
     done = 1  # calculate iterations  ## changed this to 1 for rail, because no increase in travel time due to congestion
-    factor = 0.01  # fftt and capacity will be multiplied bu this factor
 
     ## CALCULATION OF INCREASE OF TOTAL TRAVEL COST
     if not done:
@@ -3196,8 +3142,7 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
 
         # --- Reference value: network with no damage
 
-        [Xi, D_r1, intTrec_i, ref] = SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta)
-        Results = {'Xi': Xi, "D_r1": D_r1, 'ref': ref}
+        [Xi, D_r1, intTrec_i, ref] = SUE_C_Logit(D_od, par, delta_ir, delta_odr, cf_r)
 
         # Sum values of Xi for each row
         Xi_sum = np.sum(Xi, axis=1)
@@ -3233,7 +3178,6 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
         # end
         # toc = time.time()
         # print(toc-tic, ' sec elapsed')
-        comptime = timeit.default_timer() - t;
         # print(f'CPU time (seconds): {comptime}')
 
         return travel_time  # .item(0)

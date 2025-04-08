@@ -461,7 +461,7 @@ def CostFun(Xi,par):
     return Ci
 
 
-def IntCostFun(Xi,par):
+def IntCostFun(par):
     #Computes the integral of the cost function for the flow Xi, with the
     #parameters 'par'. Xi has the adequate size
     Xi=2
@@ -479,7 +479,7 @@ def IntCostFun(Xi,par):
     return Ci
 
 
-def SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta):
+def SUE_C_Logit(D_od, par, delta_ir, delta_odr, cf_r):
     #De acuerdo con C logit SUE_Zhou (2010)
 
     #--- Optimizacion NO lineal
@@ -499,7 +499,7 @@ def SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta):
     def IntLinksTimes(D_r):
         # Demand on each link from demand on routes
         x_i=np.matmul(delta_ir,D_r)
-        intTrec_i=IntCostFun(x_i,par) #integral de la funcion de coste
+        intTrec_i=IntCostFun(par) #integral de la funcion de coste
         return intTrec_i
 
     #def bpr(x):
@@ -669,7 +669,7 @@ def SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta):
     # x_i is the demand on each link
     x_i=delta_ir*D_r
     # Get travel time on each route
-    intTrec_i=IntCostFun(x_i,par)
+    intTrec_i=IntCostFun(par)
 
 
     thetavec=np.ones_like(D_r)
@@ -832,7 +832,7 @@ if not done:
 
     #--- Reference value: network with no damage
 
-    [Xi,D_r1,intTrec_i,ref]=SUE_C_Logit(nroutes,D_od,par,delta_ir,delta_odr,cf_r,theta)
+    [Xi,D_r1,intTrec_i,ref]=SUE_C_Logit(D_od, par, delta_ir, delta_odr, cf_r)
     Results = {'Xi':Xi, "D_r1":D_r1,'ref':ref}
 
     # Sum values of Xi for each row
