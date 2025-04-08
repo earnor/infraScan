@@ -6,7 +6,7 @@ import time
 import pandas as pd
 
 from data_import import *
-from catchement_pt import *
+from catchment_pt import *
 from scenarios import *
 from plots import *
 from generate_infrastructure import *
@@ -14,21 +14,13 @@ from scoring import *
 from traveltime_delay import *
 from TT_Delay import *
 from display_results import *
-
+import paths
 
 
 def print_hi(name):
-    # Welcome
-    # Use a breakpoint in the code line below to debug your script.
-    #os.chdir(r"C:\Users\Fabrice\Desktop\HS23\Thesis\Code")
-    #os.chdir(r"G:\IM\09 - Teaching\11 - Masters - Projects\2023 - FS\Marggi\04_Submission\Submission\FS2023 - MScProject - Marggi\06 - Developments\01 - Code\01 - Python")
-    #os.chdir(r"C:/Users/spadmin/PycharmProjects/infraScan/infraScanRail")
-    os.chdir(r"C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail")
-    #os.chdir(r"/local/home/earnor/infraScan/")
-    #os.chdir(r"/home/earnor/infraScan/")
 
+    os.chdir(paths.MAIN)
     runtimes = {}
-
 
     ##################################################################################
     # Initializing global variables

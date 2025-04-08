@@ -146,14 +146,14 @@ def import_locations():
     gdf_cities = gpd.GeoDataFrame(df_cities, geometry=gpd.points_from_xy(df_cities["x"], df_cities["y"]),
                                   crs="epsg:2056")
 
-    gdf_cities.to_file('data\manually_gathered_data\cities.shp', crs="epsg:2056")
+    gdf_cities.to_file('data\manually_gathered_data\cities.shp')
     return
 
 
 def get_lake_data():
     gdf = gpd.read_file(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
-    gdf = gdf[gdf["GEWAESSERN"].isin(["Zürichsee", "Greifensee", "Pfäffikersee"])]
-    gdf.to_file('data\landuse_landcover\processed\lake_data_zh.gpkg', crs="epsg:2056")
+    gdf = gdf[gdf["GEWAESSERN"].isin(["Zürichsee", "Greifensee", "Pfäffikersee"])].to_crs("epsg:2056")
+    gdf.to_file('data\landuse_landcover\processed\lake_data_zh.gpkg')
     return
 
 

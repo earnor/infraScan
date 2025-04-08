@@ -8,7 +8,7 @@ import pandas as pd
 # Geospatial Libraries
 import geopandas as gpd
 from shapely.geometry import Point, LineString, box
-
+from shapely import make_valid
 # Raster Data Libraries
 import rasterio
 from rasterio.plot import show
@@ -1661,15 +1661,19 @@ def create_catchement_plot_time():
     # Load and reproject vector layers
     cities = gpd.read_file(cities_path)
     cities = reproject_to_boundary(cities, boundary)
+    cities['geometry'] = cities['geometry'].apply(make_valid)
 
     s_bahn = gpd.read_file(s_bahn_path)
     s_bahn = reproject_to_boundary(s_bahn, boundary)
+    s_bahn['geometry'] = s_bahn['geometry'].apply(make_valid)
 
     lakes = gpd.read_file(lakes_path)
     lakes = reproject_to_boundary(lakes, boundary)
+    lakes['geometry'] = lakes['geometry'].apply(make_valid)
 
     points = gpd.read_file(points_path)
     points = reproject_to_boundary(points, boundary)
+    points['geometry'] = points['geometry'].apply(make_valid)
 
     # Clip vector layers to the boundary
     cities_clipped = gpd.clip(cities, boundary)
@@ -1802,11 +1806,23 @@ def plot_develompments_rail():
 
     # Load data
     trainstations = gpd.read_file(trainstations_path)
+    trainstations["geometry"] = trainstations["geometry"].apply(make_valid)
+
     lakes = gpd.read_file(lakes_path)
+    lakes["geometry"] = lakes["geometry"].apply(make_valid)
+
     s_bahn_lines = gpd.read_file(s_bahn_lines_path)
+    s_bahn_lines["geometry"] = s_bahn_lines["geometry"].apply(make_valid)
+
     developments = gpd.read_file(developments_path)
+    developments["geometry"] = developments["geometry"].apply(make_valid)
+
     endnodes = gpd.read_file(endnodes_path)
+    endnodes["geometry"] = endnodes["geometry"].apply(make_valid)
+
     boundary = gpd.read_file(boundary_path)
+    boundary["geometry"] = boundary["geometry"].apply(make_valid)
+
 
     # Ensure all layers use the same CRS
     layers = [trainstations, lakes, s_bahn_lines, developments, endnodes, boundary]
@@ -2028,14 +2044,19 @@ def plot_catchment_and_distributions(
     extent_path,
     output_dir="plots/"
 ):
-    # Load the extent boundary for clipping
     extent = gpd.read_file(extent_path)
+    extent["geometry"] = extent["geometry"].apply(make_valid)
     extent_bounds = extent.total_bounds  # Get the bounding box as [xmin, ymin, xmax, ymax]
 
     # Load vector data
     s_bahn_lines = gpd.read_file(s_bahn_lines_path)
+    s_bahn_lines["geometry"] = s_bahn_lines["geometry"].apply(make_valid)
+
     water_bodies = gpd.read_file(water_bodies_path)
+    water_bodies["geometry"] = water_bodies["geometry"].apply(make_valid)
+
     communal_borders = gpd.read_file(communal_borders_path)
+    communal_borders["geometry"] = communal_borders["geometry"].apply(make_valid)
 
     # Clip vector data to the extent
     s_bahn_lines = gpd.clip(s_bahn_lines, extent)

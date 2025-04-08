@@ -257,7 +257,7 @@ def add_diva_nr_to_points_with_buffer(points_path, stops_path, output_path, buff
 
     # Use the buffer geometries for spatial join
     points_with_buffer = gpd.GeoDataFrame(points_gdf, geometry='buffer', crs=points_gdf.crs)
-    joined_gdf = gpd.sjoin(points_with_buffer, s_bahn_stops[['DIVA_NR', 'geometry']], how='left', op='intersects')
+    joined_gdf = gpd.sjoin(points_with_buffer, s_bahn_stops[['DIVA_NR', 'geometry']], how='left', predicate='intersects')
 
     # Add DIVA_NR to the original points GeoDataFrame
     points_gdf['DIVA_NR'] = joined_gdf['DIVA_NR']
