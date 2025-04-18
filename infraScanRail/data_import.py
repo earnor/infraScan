@@ -134,7 +134,7 @@ def csv_to_tiff(data_table, attribute, path, rastersize = 100):
     return
 
 
-def import_locations():
+def import_cities():
     """
     This functions converts a csv files of location with coordinate to a geopandas DataFrame
     :return: GeoPandas DataFrame containing the locations as points
@@ -653,7 +653,6 @@ def reformat_highway_network():
 
 def reformat_rail_network():
     # Import points and nodes
-    #points_gdf = gpd.read_file(r"data\access_highway_correct.shp")
     current_points = pd.read_csv(r"data\Network\Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
     current_points = gpd.GeoDataFrame(current_points,
                                       geometry=gpd.points_from_xy(current_points["XKOORD"], current_points["YKOORD"]),
@@ -672,14 +671,6 @@ def reformat_rail_network():
     edges_gdf['x_dest'] = edges_gdf["last"].apply(lambda p: p.x)
     edges_gdf['y_dest'] = edges_gdf["last"].apply(lambda p: p.y)
 
-    """
-    edges_gdf['E_KOORD_O'], edges_gdf['N_KOORD_O'], edges_gdf['E_KOORD_D'], edges_gdf['N_KOORD_D'] = \
-        np.where(edges_gdf['E_KOORD_O'] < edges_gdf['E_KOORD_D'],
-                 (edges_gdf['E_KOORD_O'], edges_gdf['N_KOORD_O'], edges_gdf['E_KOORD_D'], edges_gdf['N_KOORD_D']),
-                 (edges_gdf['E_KOORD_D'], edges_gdf['N_KOORD_D'], edges_gdf['E_KOORD_O'], edges_gdf['N_KOORD_O']))
-    edges_gdf = edges_gdf.drop_duplicates(subset=['E_KOORD_O', 'E_KOORD_D', 'N_KOORD_O', 'N_KOORD_D'], keep="first")
-    """
-
     # Create a list of unique coordinates (x, y) for both source and target
     # Create an empty set to store unique coordinates
     unique_coords = set()
@@ -693,7 +684,6 @@ def reformat_rail_network():
     for index, row in edges_gdf.iterrows():
         target_coord = (row['x_dest'], row['y_dest'])
         unique_coords.add(target_coord)
-    #unique_coords = pd.concat([edges_gdf[['E_KOORD_O', 'N_KOORD_O']], edges_gdf[['E_KOORD_D', 'N_KOORD_D']]]).values
 
     # Create a dictionary to store the count of edges for each coordinate
     coord_count = {}
@@ -726,53 +716,6 @@ def required_manipulations_on_network():
     print(edges.head(10).to_string())
     print(points.head(10).to_string())
 
-
-    """
-    # Add one row ro points with ID_point max_id+1
-    max_id = points["ID_point"].max()
-    #intersection = 0, ID_point = max_id+1, within_corridor = False, on_corridor_border = False, generate_traffic = False, geometry = Point(2676958, 1243990)
-    new_row_data = {
-        #'intersection': 0,
-        'ID_point': max_id + 1,
-        'within_corridor': False,
-        'on_corridor_border': False,
-        'generate_traffic': False,
-        'geometry': Point(2676958, 1243990)
-    }
-    # Append the new row to the DataFrame
-    #points = points.append(new_row_data, ignore_index=True)
-    points = gpd.GeoDataFrame(pd.concat([pd.DataFrame(points), pd.DataFrame(pd.Series(new_row_data)).T], ignore_index=True))
-
-    # Some changes to the network are needed
-    # Point with id 131 should be deleted, while all edges to it should go to id 7
-    # Step 1: Get the coordinates of the point with ID_point = 7
-    point_coordinates = points.loc[points['ID_point'] == 7, 'geometry'].iloc[0].coords[0]
-
-    # Step 2: Update edges where "start" = 131
-    for index, edge in edges[edges['start'] == 131].iterrows():
-        # Update the "start" value
-        edges.at[index, 'start'] = 7
-
-        # Update the first point of the LineString geometry
-        new_line_coords = [point_coordinates] + list(edge['geometry'].coords[1:])
-        edges.at[index, 'geometry'] = LineString(new_line_coords)
-
-    # Step 3: Update edges where "end" = 131
-    for index, edge in edges[edges['end'] == 131].iterrows():
-        # Update the "end" value
-        edges.at[index, 'end'] = 7
-
-        # Update the last point of the LineString geometry
-        new_line_coords = list(edge['geometry'].coords[:-1]) + [point_coordinates]
-        edges.at[index, 'geometry'] = LineString(new_line_coords)
-
-    # Delete the point with ID_point = 131
-    points = points[points['ID_point'] != 131]
-
-    # Add a set of new edges connecting following nodes: 89 to 90, 172 to 70, 94 to max_id+1, 146 to max_id+1, 89 to max_id+1
-    # Define the pairs of points to connect
-    pairs_to_connect = [(152, 168), (89, 90), (172, 70), (94, max_id + 1), (146, max_id + 1), (89, max_id + 1)]
-    """
     def get_coords(point_id):
         return points.loc[points['ID_point'] == point_id, 'geometry'].iloc[0].coords[0]
 
@@ -801,29 +744,6 @@ def required_manipulations_on_network():
         #edges = edges.append(new_row, ignore_index=True)
         edges = gpd.GeoDataFrame(pd.concat([pd.DataFrame(edges), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
 
-
-    """
-    # Add one edge which is not a highway but a cantonal road point 39 to 6
-    # Create a new LineString
-    new_line = LineString([get_coords(39), get_coords(6)])
-
-    # Create a new row with the desired attributes
-    new_row = {
-        'start': 39,
-        'end': 6,
-        'start_access': False,
-        'end_access': False,
-        'polygon_border': False,
-        'capacity': 1000,
-        'ffs': 80,
-        'ID_edge': edges['ID_edge'].max() + 1,
-        'geometry': new_line
-    }
-
-    # Append the new row to edges_df
-    #edges = edges.append(new_row, ignore_index=True)
-    edges = gpd.GeoDataFrame(pd.concat([pd.DataFrame(edges), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
-    """
     # Store the updated edges DataFrame
     edges.to_file(r"data/Network/processed/edges_with_attribute.gpkg")
     points.to_file(r"data/Network/processed/points_with_attribute.gpkg")
@@ -831,36 +751,12 @@ def required_manipulations_on_network():
 
 
 def get_edge_attributes():
-    #edges_raw = gpd.read_file(r"data/temp/network_highway.gpkg")
     edges_process = gpd.read_file(r"data/Network/processed/edges_with_attribute.gpkg")
 
-    """
-    # Step 1: Create a buffer around the edges in df2
-    buffer_distance = 50
-    edges_process['buffered'] = edges_process.geometry.buffer(buffer_distance)
-
-    # Step 2 & 3: Find overlapping edges from df1 for each edge in df2 and print lengths
-    def get_min_attributes(edge, df1):
-        #overlaps = df1[df1.geometry.within(edge.buffered)]
-        overlaps = df1[df1.geometry.intersects(edge.buffered)]
-        if not overlaps.empty:
-            # Get the mean value of the attribute capacity and speed weighted by each link length
-            mean_capacity = np.average(overlaps['Capacity'], weights=overlaps.geometry.length)
-            mean_speed = np.average(overlaps['Free Flow Speed'], weights=overlaps.geometry.length)
-
-            # divide mean capacity by 24 to get hourly capacity
-            mean_capacity = mean_capacity / 24
-
-            return mean_capacity, mean_speed
-        return None, None, None, None
-    """
     # Step 4 & 5: Apply the function to each edge in df2
     edges_process=edges_process.rename(columns={'Link NR':'ID_edge','Capacity':'TrainCapacity','TotalPeakCapacity':'capacity','TravelTime':'tt'})
     edges_process=edges_process.drop(['FromStation','ToStation','FromCode','ToCode','FromGde','ToGde','E_KOORD_O','E_KOORD_D','N_KOORD_O','N_KOORD_D','Speed'],axis=1)
-    #edges_process['capacity'], edges_process['ffs'] = zip(*edges_process.apply(lambda x: get_min_attributes(x, edges_raw), axis=1))
 
-    # Drop the buffered column if not needed
-    #edges_process.drop(columns=['buffered'], inplace=True)
 
     # Store values as integer
     # Drop rows with None values
@@ -879,6 +775,123 @@ def get_edge_attributes():
     edges_process.to_file(r"data/Network/processed/edges_with_attribute.gpkg")
 
 ## processes geospatial data to identify points and edges within a specified polygonal corridor
+
+def create_network_AK2035():
+    def add_new_line(stations, frequency, service_name, travel_times, edges_file, points):
+        """
+        Add a new line to the network with bidirectional edges and travel times.
+
+        Parameters:
+            stations (list): List of station names representing the new line.
+            frequency (int): Frequency of the new line.
+            service_name (str): Name of the service for the new line.
+            travel_times (list): List of travel times between consecutive stations.
+            edges_file (str): Path to the GeoPackage file containing the edges.
+            points (str): GeoPackage file containing the station points.
+
+        Returns:
+            None
+        """
+        edges = gpd.read_file(edges_file)
+        # Iterate through consecutive station pairs
+        for i in range(len(stations) - 1):
+            # Get the IDs and geometries of the two stations
+            from_station = stations[i]
+            to_station = stations[i + 1]
+            from_id = points.loc[points['NAME'] == from_station, 'ID_point'].iloc[0]
+            to_id = points.loc[points['NAME'] == to_station, 'ID_point'].iloc[0]
+            from_geom = points.loc[points['ID_point'] == from_id, 'geometry'].iloc[0]
+            to_geom = points.loc[points['ID_point'] == to_id, 'geometry'].iloc[0]
+
+            # Create LineString geometries
+            line_geom_a = LineString([from_geom, to_geom])
+            line_geom_b = LineString([to_geom, from_geom])
+
+            # Determine FromEnd and ToEnd for direction "A"
+            from_end_a = 1 if i == 0 else 0
+            to_end_a = 1 if i == len(stations) - 2 else 0
+
+            # Create a new row for the edge in direction "A"
+            new_edge_a = {
+                'FromStation': from_station,
+                'ToStation': to_station,
+                'FromNode': from_id,
+                'ToNode': to_id,
+                'Service': service_name,
+                'Frequency': frequency,
+                'Direction': 'A',
+                'FromEnd': from_end_a,
+                'ToEnd': to_end_a,
+                'TravelTime': travel_times[i],
+                'InVehWait': 0,
+                'geometry': line_geom_a
+            }
+
+            # Determine FromEnd and ToEnd for direction "B"
+            from_end_b = 1 if i == len(stations) - 2 else 0
+            to_end_b = 1 if i == 0 else 0
+
+            # Create a new row for the edge in direction "B"
+            new_edge_b = {
+                'FromStation': from_station,
+                'ToStation': to_station,
+                'FromNode': to_id,
+                'ToNode': from_id,
+                'Service': service_name,
+                'Frequency': frequency,
+                'Direction': 'B',
+                'FromEnd': from_end_b,
+                'ToEnd': to_end_b,
+                'TravelTime': travel_times[i],
+                'InVehWait': 0,
+                'geometry': line_geom_b
+            }
+
+            # Append the new edges to the edges GeoDataFrame
+            new_line_gpd = gpd.GeoDataFrame([new_edge_a, new_edge_b])
+            edges = gpd.GeoDataFrame(pd.concat([edges, new_line_gpd], ignore_index=True))
+
+        # Save the updated edges GeoDataFrame
+        edges.to_file(edges_file)
+
+    edges_ak2035 = gpd.read_file(r"data/Network/processed/edges_with_attribute.gpkg")
+    points = gpd.read_file(r'data/Network/processed/points_with_attribute.gpkg')
+
+    # Double the frequency and capacity for rows where "Service" contains "S9"
+    edges_ak2035.loc[edges_ak2035["Service"] == "S9", "Frequency"] *= 2
+
+    #S14 no longer runs to Hinwil
+    hinwil_id = get_station_id('Hinwil', points)
+    # Filter out edges with Service "S14" starting or ending in Hinwil
+    edges_ak2035 = edges_ak2035[~((edges_ak2035['Service'] == 'S14') &
+                                  ((edges_ak2035['FromNode'] == hinwil_id) | (edges_ak2035['ToNode'] == hinwil_id)))]
+
+    wetzikon_id = get_station_id('Wetzikon', points)
+
+    # Update ToEnd for the edge where Service is "S14" and ToNode is Wetzikon
+    edges_ak2035.loc[(edges_ak2035['Service'] == 'S14') & (edges_ak2035['ToNode'] == wetzikon_id), 'ToEnd'] = True
+
+    # Update FromEnd for the edge where Service is "S14" and FromNode is Wetzikon
+    edges_ak2035.loc[(edges_ak2035['Service'] == 'S14') & (edges_ak2035['FromNode'] == wetzikon_id), 'FromEnd'] = True
+
+
+    edges_ak2035.to_file(r"data/Network/processed/edges_ak2035.gpkg")
+
+    add_new_line(
+        stations=['Zürich Oerlikon', 'Uster', 'Wetzikon', 'Hinwil'],
+        frequency=2,
+        service_name='G',
+        travel_times=[10, 6, 4], #TT Oerlikon-Uster 1 min faster
+        edges_file=r"data/Network/processed/edges_ak2035.gpkg",
+        points=points)
+
+    add_new_line(
+        stations=['Zürich Stadelhofen', 'Stettbach', 'Dietlikon', 'Effretikon', 'Illnau', 'Fehraltorf','Pfäffikon ZH'],
+        frequency=2,
+        service_name='P',
+        travel_times=[5, 3, 6, 4, 5, 4],
+        edges_file=r"data/Network/processed/edges_ak2035.gpkg",
+        points=points)
 
 def network_in_corridor(poly):
     # polygon to Geopandas dataframe
@@ -923,17 +936,6 @@ def network_in_corridor(poly):
     #edges_crossing_polygon = edges[edges.apply(lambda x: is_one_endpoint_inside(x, polygon), axis=1)]
     edges_crossing_polygon = edges[edges["polygon_border"] == True]
     edges_crossing_polygon.to_file(r"data\Network\processed\edges_on_corridor_border.gpkg")
-
-    # get nodes of edges on corridor
-
-    #points_crossing_polygon = gpd.sjoin(edges_crossing_polygon, points_temp, how="inner", predicate="intersects", lsuffix="left", rsuffix="")
-    #points_crossing_polygon = points_crossing_polygon.drop(columns=["geometry_left", "index_"])
-    #print(points_crossing_polygon.head(10).to_string())
-    #points_crossing_polygon = points_crossing_polygon.rename(columns={'geometry_':'geometry'}, inplace=True)
-
-    #points_crossing_polygon = points_crossing_polygon.set_geometry("geometry_")
-    #print(points_crossing_polygon.head(10).to_string())
-    #points_crossing_polygon.to_file(r"data\Network\processed\points_corridor_border.gpkg")
 
     points_temp = points.copy()
     points_temp['buffered_points'] = points_temp['geometry'].buffer(1e-6)
@@ -1352,3 +1354,30 @@ def save_focus_area_shapefile(e_min, e_max, n_min, n_max):
     outerboundary_gdf.to_file("data/_basic_data/outerboundary.shp")
 
     print("Shapefiles 'innerboundary.shp' and 'outerboundary.shp' saved successfully in 'data_basic_data'!")
+
+
+def get_station_id(station_name, points, name_column='NAME', id_column='ID_point'):
+    """ Get the station ID for a given station name.
+    Parameters:
+        station_name (str): The name of the station to search for.
+        points (str): GPD File containing the station data.
+        name_column (str): Column name containing station names. Default is 'NAME'.
+        id_column (str): Column name containing station IDs. Default is 'ID_point'.
+
+    Returns:
+        int: The station ID corresponding to the given station name.
+
+    Raises:
+        ValueError: If the station name is not found in the dataset.
+    """
+    # Load the GeoPackage file
+
+    # Filter the dataset for the given station name
+    station_row = points.loc[points[name_column] == station_name]
+
+    # Check if the station exists
+    if station_row.empty:
+        raise ValueError(f"Station '{station_name}' not found in the dataset.")
+
+    # Return the station ID
+    return station_row[id_column].iloc[0]

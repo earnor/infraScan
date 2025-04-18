@@ -32,10 +32,6 @@ def print_hi():
     e_min, e_max = 2687000, 2708000     # 2688000, 2704000 - 2688000, 2705000
     n_min, n_max = 1237000, 1254000     # 1238000, 1252000 - 1237000, 1252000
 
-    # Boudary for plot
-
-    # Get a polygon as limits for teh corridor
-
     # For global operation a margin is added to the boundary
     margin = 3000 # meters
     outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
@@ -45,12 +41,6 @@ def print_hi():
     #save spatial limits as shp
     save_focus_area_shapefile(e_min, e_max, n_min, n_max)
 
-    ##################################################################################
-    # Define variables for monetisation
-
-    # Value of travel time savings (VTTS)
-
-    # Construction costs
 
     runtimes["Initialize variables"] = time.time() - st
     st = time.time()
@@ -63,8 +53,7 @@ def print_hi():
     get_lake_data()
 
     # Import the file containing the locations to be ploted
-    import_locations()
-
+    import_cities()
 
     # Define area that is protected for constructing railway links
     #   get_protected_area(limits=limits_corridor)
@@ -91,28 +80,12 @@ def print_hi():
     # 1) Import network
     # Import the railway network and preprocess it
     # Data are stored as "data/temp/???.gpkg" ## To DO
-    #load_nw()
 
     # Read the network dataset to avoid running the function above
 
-    # Import manually gathered access points and map them on the highway infrastructure
-    # The same point but with adjusted coordinate are saved to "data\access_highway_matched.gpkg"
-    #df_access = pd.read_csv(r"data/manually_gathered_data/highway_access.csv", sep=";")
-    df_access = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
-
-    '''
-    map_access_points_on_network(current_points=df_access, network=network)
-    current_access_points = df_acces
-    '''
-
     runtimes["Import network data"] = time.time() - st
     st = time.time()
-    """
-    # Plot the highway network with the access points (adjusted coordinates)
-    current_points = gpd.read_file(r"data\access_highway_matched.shp")
-    map_2 = CustomBasemap(boundary=polygon_from_points(current_points.total_bounds), network=network, access_points=current_points, frame=innerboundary)
-    map_2.show()
-    """
+
 
     ##################################################################################
     # 2) Process network
@@ -122,7 +95,6 @@ def print_hi():
     # Edges are stored in "data\Network\processed\edges.gpkg"
     # Points in simplified network can be intersections ("intersection"==1) or access points ("intersection"==0)
     # Points are stored in "data\Network\processed\points.gpkg"
-    #reformat_highway_network()
     reformat_rail_network()
 
 
@@ -130,19 +102,14 @@ def print_hi():
     # Points within the corridor are stored in "data\Network\processed\points_corridor.gpkg"
     # Edges within the corridor are stored in "data\Network\processed\edges_corridor.gpkg"
     # Edges crossing the corridor border are stored in "data\Network\processed\edges_on_corridor.gpkg"
+
+    # In general, the final product of this function is edges_with_attributes.gpkg and points_with_attributes.gpkg
     network_in_corridor(poly=outerboundary)
 
+    create_network_AK2035()
 
-
-    # Add attributes to nodes within the corridor (mainly access point T/F)
-    # Points with attributes saved as "data\Network\processed\points_attribute.gpkg"
-    #map_values_to_nodes()
-
-    # Add attributes to the edges
+    # Removes unvalid values and drops unnecessary columns
     get_edge_attributes()
-
-    # Add specific elements to the network
-    #required_manipulations_on_network()
 
     runtimes["Preprocess the network"] = time.time() - st
     st = time.time()
