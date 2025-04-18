@@ -95,6 +95,8 @@ def print_hi():
     # Edges are stored in "data\Network\processed\edges.gpkg"
     # Points in simplified network can be intersections ("intersection"==1) or access points ("intersection"==0)
     # Points are stored in "data\Network\processed\points.gpkg"
+    create_network_AK2035()
+
     reformat_rail_network()
 
 
@@ -106,9 +108,9 @@ def print_hi():
     # In general, the final product of this function is edges_with_attributes.gpkg and points_with_attributes.gpkg
     network_in_corridor(poly=outerboundary)
 
-    create_network_AK2035()
 
-    # Removes unvalid values and drops unnecessary columns
+
+    # Removes invalid values and drops unnecessary columns
     get_edge_attributes()
 
     runtimes["Preprocess the network"] = time.time() - st

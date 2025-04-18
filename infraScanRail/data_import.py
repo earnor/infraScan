@@ -13,8 +13,8 @@ from geopandas.tools import sjoin
 from shapely.geometry import MultiPoint
 import alphashape
 import rasterio
+import settings
 from rasterio.features import rasterize
-import geopandas as gpd
 from shapely.geometry import Polygon
 
 from plots import *
@@ -874,9 +874,9 @@ def create_network_AK2035():
     # Update FromEnd for the edge where Service is "S14" and FromNode is Wetzikon
     edges_ak2035.loc[(edges_ak2035['Service'] == 'S14') & (edges_ak2035['FromNode'] == wetzikon_id), 'FromEnd'] = True
 
-
     edges_ak2035.to_file(r"data/Network/processed/edges_ak2035.gpkg")
 
+# Add new lines to the network which are introduced with AK2035
     add_new_line(
         stations=['Zürich Oerlikon', 'Uster', 'Wetzikon', 'Hinwil'],
         frequency=2,
