@@ -16,7 +16,7 @@ import rasterio
 import settings
 from rasterio.features import rasterize
 from shapely.geometry import Polygon
-
+import paths
 from plots import *
 
 
@@ -651,14 +651,13 @@ def reformat_highway_network():
 
     filtered_edges.to_file(r"data\Network\processed\edges.gpkg")
 
-def reformat_rail_network():
+def reformat_rail_edges():
     # Import points and nodes
-    current_points = pd.read_csv(r"data\Network\Rail_Node.csv", sep=";",decimal=",", encoding = "ISO-8859-1")
-    current_points = gpd.GeoDataFrame(current_points,
-                                      geometry=gpd.points_from_xy(current_points["XKOORD"], current_points["YKOORD"]),
-                                      crs="epsg:21781")
-    current_points = current_points.to_crs("epsg:2056")
-    edges_gdf = gpd.read_file(r"data/temp/network_railway-services.gpkg")
+    if settings.rail_network == 'current':
+        edges_gdf = gpd.read_file(r"data/temp/network_railway-services.gpkg")
+    elif settings.rail_network == 'AK_2035':
+        print("Using AK2035 network")
+        edges_gdf = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
 
     for index, row in edges_gdf.iterrows():
         coords = [(coords) for coords in list(row['geometry'].coords)]
@@ -698,55 +697,63 @@ def reformat_rail_network():
     ##################################################################################################
     # Add connect points (new geometries)
 
-    current_points.to_file(r"data\Network\processed\points.gpkg") #replaces the commented out stuff above.
-    points_gdf = current_points
-    points_gdf = points_gdf.rename(columns={"NR":"ID_point"})
 
-    points_gdf.to_file(r"data\Network\processed\points.gpkg")
 
-    #filtered_edges.to_file(r"data\Network\processed\edges.gpkg")
     edges_gdf = edges_gdf.drop(['first', 'last'],axis=1)
     edges_gdf.to_file(r"data\Network\processed\edges.gpkg")
 
-def required_manipulations_on_network():
-    # This function is introduced to add/remoce some parts of the network enable some computations
-    # Import the network
-    edges = gpd.read_file(r"data\Network\processed\edges_with_attribute.gpkg")
-    points = gpd.read_file(r"data\Network\processed\points_with_attribute.gpkg")
-    print(edges.head(10).to_string())
-    print(points.head(10).to_string())
 
-    def get_coords(point_id):
-        return points.loc[points['ID_point'] == point_id, 'geometry'].iloc[0].coords[0]
+def reformat_rail_nodes():
+    current_points = pd.read_csv(r"data\Network\Rail_Node.csv", sep=";", decimal=",", encoding="ISO-8859-1")
+    current_points = gpd.GeoDataFrame(current_points,
+                                      geometry=gpd.points_from_xy(current_points["XKOORD"], current_points["YKOORD"]),
+                                      crs="epsg:21781")
+    current_points = current_points.to_crs("epsg:2056")
+    current_points = current_points.rename(columns={"NR": "ID_point"})
+    current_points.to_file(r"data\Network\processed\points.gpkg")
 
-    # Add new links
-    for start_id, end_id in pairs_to_connect:
-        start_coords = get_coords(start_id)
-        end_coords = get_coords(end_id)
 
-        # Create a new LineString
-        new_line = LineString([start_coords, end_coords])
 
-        # Create a new row with the desired attributes
-        new_row = {
-            'start': start_id,
-            'end': end_id,
-            'start_access': False,
-            'end_access': False,
-            'polygon_border': False,
-            'capacity': 2200,
-            'ffs': 100,
-            'ID_edge': edges['ID_edge'].max() + 1,
-            'geometry': new_line
-        }
+# def required_manipulations_on_network():
+#     # This function is introduced to add/remoce some parts of the network enable some computations
+#     # Import the network
+#     edges = gpd.read_file(r"data\Network\processed\edges_with_attribute.gpkg")
+#     points = gpd.read_file(r"data\Network\processed\points_with_attribute.gpkg")
+#     print(edges.head(10).to_string())
+#     print(points.head(10).to_string())
+#
+#     def get_coords(point_id):
+#         return points.loc[points['ID_point'] == point_id, 'geometry'].iloc[0].coords[0]
+#
+#     # Add new links
+#     for start_id, end_id in pairs_to_connect:
+#         start_coords = get_coords(start_id)
+#         end_coords = get_coords(end_id)
+#
+#         # Create a new LineString
+#         new_line = LineString([start_coords, end_coords])
+#
+#         # Create a new row with the desired attributes
+#         new_row = {
+#             'start': start_id,
+#             'end': end_id,
+#             'start_access': False,
+#             'end_access': False,
+#             'polygon_border': False,
+#             'capacity': 2200,
+#             'ffs': 100,
+#             'ID_edge': edges['ID_edge'].max() + 1,
+#             'geometry': new_line
+#         }
+#
+#         # Append the new row to edges_df
+#         #edges = edges.append(new_row, ignore_index=True)
+#         edges = gpd.GeoDataFrame(pd.concat([pd.DataFrame(edges), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
+#
+#     # Store the updated edges DataFrame
+#     edges.to_file(r"data/Network/processed/edges_with_attribute.gpkg")
+#     points.to_file(r"data/Network/processed/points_with_attribute.gpkg")
 
-        # Append the new row to edges_df
-        #edges = edges.append(new_row, ignore_index=True)
-        edges = gpd.GeoDataFrame(pd.concat([pd.DataFrame(edges), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
-
-    # Store the updated edges DataFrame
-    edges.to_file(r"data/Network/processed/edges_with_attribute.gpkg")
-    points.to_file(r"data/Network/processed/points_with_attribute.gpkg")
 
 
 
@@ -776,7 +783,7 @@ def get_edge_attributes():
 
 ## processes geospatial data to identify points and edges within a specified polygonal corridor
 
-def create_network_AK2035():
+def create_railway_services_AK2035():
     def add_new_line(stations, frequency, service_name, travel_times, edges_file, points):
         """
         Add a new line to the network with bidirectional edges and travel times.
@@ -854,8 +861,10 @@ def create_network_AK2035():
         # Save the updated edges GeoDataFrame
         edges.to_file(edges_file)
 
-    edges_ak2035 = gpd.read_file(r"data/Network/processed/edges_with_attribute.gpkg")
-    points = gpd.read_file(r'data/Network/processed/points_with_attribute.gpkg')
+
+
+    edges_ak2035 = gpd.read_file(r'data/temp/network_railway-services.gpkg')
+    points = gpd.read_file(r'data\Network\processed\points.gpkg')
 
     # Double the frequency and capacity for rows where "Service" contains "S9"
     edges_ak2035.loc[edges_ak2035["Service"] == "S9", "Frequency"] *= 2
@@ -874,7 +883,7 @@ def create_network_AK2035():
     # Update FromEnd for the edge where Service is "S14" and FromNode is Wetzikon
     edges_ak2035.loc[(edges_ak2035['Service'] == 'S14') & (edges_ak2035['FromNode'] == wetzikon_id), 'FromEnd'] = True
 
-    edges_ak2035.to_file(r"data/Network/processed/edges_ak2035.gpkg")
+    edges_ak2035.to_file(paths.RAIL_SERVICES_AK2035_PATH)
 
 # Add new lines to the network which are introduced with AK2035
     add_new_line(
@@ -882,7 +891,7 @@ def create_network_AK2035():
         frequency=2,
         service_name='G',
         travel_times=[10, 6, 4], #TT Oerlikon-Uster 1 min faster
-        edges_file=r"data/Network/processed/edges_ak2035.gpkg",
+        edges_file=paths.RAIL_SERVICES_AK2035_PATH,
         points=points)
 
     add_new_line(
@@ -890,7 +899,7 @@ def create_network_AK2035():
         frequency=2,
         service_name='P',
         travel_times=[5, 3, 6, 4, 5, 4],
-        edges_file=r"data/Network/processed/edges_ak2035.gpkg",
+        edges_file=paths.RAIL_SERVICES_AK2035_PATH,
         points=points)
 
 def network_in_corridor(poly):

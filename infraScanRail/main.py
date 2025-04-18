@@ -95,9 +95,9 @@ def print_hi():
     # Edges are stored in "data\Network\processed\edges.gpkg"
     # Points in simplified network can be intersections ("intersection"==1) or access points ("intersection"==0)
     # Points are stored in "data\Network\processed\points.gpkg"
-    create_network_AK2035()
-
-    reformat_rail_network()
+    reformat_rail_nodes()
+    create_railway_services_AK2035()
+    reformat_rail_edges()
 
 
     # Filter the infrastructure elements that lie within a given polygon
