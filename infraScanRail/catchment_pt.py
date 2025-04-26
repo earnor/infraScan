@@ -669,44 +669,113 @@ def save_points_as_raster(df, output_path=r'data/catchment_pt/catchement.tif', r
 # 2.) Prepare Bus Network:
 ###############################################################################################################################################################################################
 
-def get_catchement():
+def get_catchment(use_cache):
+    """
+    Creates and analyzes catchment areas for train stations by integrating bus stop locations and their service zones.
 
+    This function generates service area polygons that represent the accessible areas around train stations,
+    taking into account both direct train station access and bus connections. The analysis combines
+    both bus and train networks to create a comprehensive public transport accessibility map.
 
+    Parameters
+    ----------
+    use_cache : bool
+        If True, uses previously calculated results from cache to improve performance.
+        If False, performs full recalculation of all catchment areas.
+
+    Key Processing Steps
+    ------------------
+    1. Spatial boundary definition:
+       - Sets corridor boundaries for analysis area
+       - Creates buffer zones around transport nodes
+
+    2. Network Analysis:
+       - Processes bus and train stop locations
+       - Creates network graph for connectivity analysis
+       - Calculates service areas based on transport connections
+
+    3. Buffer Generation:
+       - Creates buffers around bus stops (bus_buffers.gpkg)
+       - Creates buffers around train stations (train_buffers.gpkg)
+       - Resolves overlapping areas between different service zones
+
+    Output Files
+    -----------
+    Vector Files:
+    - bus_buffers.gpkg: Buffer zones around bus stops
+    - train_buffers.gpkg: Buffer zones around train stations
+    - final_buffers.gpkg: Merged and resolved buffer zones
+    - final_clipped_buffers.gpkg: Buffers clipped to study area
+    - catchement.gpkg: Final catchment areas with attributes
+
+    Raster Files:
+    - catchement.tif: Rasterized version of catchment areas (100x100m resolution)
+
+    Notes
+    -----
+    - Used for analyzing public transport accessibility in the research corridor
+    - Integrates with scenario analysis and infrastructure development assessment
+    - Essential for travel time calculations and service area analysis
+    """
+    # Define all output file paths that should exist if using cache
+    output_files = {
+        'bus_buffers': "data/catchment_pt/bus_buffers.gpkg",
+        'train_buffers': "data/catchment_pt/train_buffers.gpkg",
+        'final_buffers': "data/catchment_pt/final_buffers.gpkg",
+        'final_clipped_buffers': "data/catchment_pt/final_clipped_buffers.gpkg",
+        'catchment': "data/catchment_pt/catchement.gpkg",
+        'catchment_raster': "data/catchment_pt/catchement.tif",
+        'points_with_diva': "data/Network/processed/points_with_diva_nr_buffered.gpkg"
+    }
+    
+    # Check if cache should be used and all files exist
+    if use_cache:
+        # Check if all required output files exist
+        all_files_exist = all(os.path.exists(file_path) for file_path in output_files.values())
+        
+        if all_files_exist:
+            print("Using cached catchment files - skipping catchment generation.")
+            return
+        else:
+            print("Cache is enabled but some output files are missing. Regenerating all catchment files...")
+    else:
+        print("Cache is disabled. Generating all catchment files...")
+    
     # Define spatial limits of the research corridor
     # The coordinates must end with 000 in order to match the coordinates of the input raster data
     e_min, e_max = 2687000, 2708000     # 2688000, 2704000 - 2688000, 2705000
     n_min, n_max = 1237000, 1254000     # 1238000, 1252000 - 1237000, 1252000
-
+    
     # Boudary for plot
-
+    
     # Get a polygon as limits for teh corridor
-
+    
     # For global operation a margin is added to the boundary
     margin = 3000 # meters
     outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
     
     # Load the GeoPackage for bus lines and stops
     bus_lines_path = r"data/Network/Buslines/Linien_des_offentlichen_Verkehrs_-OGD.gpkg"
-
+    
     # Load the bus lines and bus stops layers
     layer_name_segmented = 'ZVV_LINIEN_L'
     bus_lines_segmented = gpd.read_file(bus_lines_path, layer=layer_name_segmented)
     stops = gpd.read_file(r"data/Network/Buslines/Haltestellen_des_offentlichen_Verkehrs_-OGD.gpkg")
     
-
+    
     # Filter bus stops and bus lines within the boundary
     stops_filtered = stops[stops.within(outerboundary)]
     bus_lines_segmented_filtered = bus_lines_segmented[bus_lines_segmented.within(outerboundary)]
-
+    
     # Create a directed graph for the bus network
     G_bus = nx.Graph()
-
+    
     # Add filtered bus stops as nodes with positions from the 'geometry' column
     for idx, row in stops_filtered.iterrows():
         stop_id = row['DIVA_NR']
         stop_position = row['geometry']
         
-
+    
         # Determine the type of stop (Bus, Train, or Other)
         if pd.isna(row['VTYP']) or row['VTYP'] == '':
             pass
@@ -714,7 +783,7 @@ def get_catchement():
             pass
         else:
             pass
-
+    
         # Determine the type of stop (Bus or Train)
         stop_type = 'Bus'  # Default to Bus
         if row['VTYP'] == 'S-Bahn':
@@ -722,8 +791,8 @@ def get_catchement():
         
         # Add the node with position and type
         G_bus.add_node(stop_id, pos=(stop_position.x, stop_position.y), type=stop_type)
-
-
+    
+    
     # Add edges from the filtered bus lines segment
     for idx, row in bus_lines_segmented_filtered.iterrows():
         from_stop = row['VONHALTESTELLENNR']
@@ -738,16 +807,16 @@ def get_catchement():
             
             # Add an edge to the graph with travel time as weight and stop types
             G_bus.add_edge(from_stop, to_stop, weight=travel_time, from_type=from_stop_type, to_type=to_stop_type)
-
-
+    
+    
     # Define a threshold distance (e.g., 100 meters)
     threshold_distance = 100
-
+    
     # Create edges with a fixed travel time of 83 seconds for all nodes closer than 100m
     for stop_id_1 in G_bus.nodes:
         pos_1 = G_bus.nodes[stop_id_1]['pos']
         point_1 = Point(pos_1)  # Create a Point from the position
-
+    
         for stop_id_2 in G_bus.nodes:
             if stop_id_1 != stop_id_2:  # Avoid self-comparison
                 pos_2 = G_bus.nodes[stop_id_2]['pos']
@@ -755,29 +824,29 @@ def get_catchement():
                 
                 # Calculate the distance between the two stops
                 dist = point_1.distance(point_2)
-
+    
                 # If the distance is less than the threshold, add an edge with a fixed travel time
                 if dist < threshold_distance:
                     G_bus.add_edge(stop_id_1, stop_id_2, weight=83)  # Adding an edge with 83 seconds (walking Time for 100m, At 1.2 meters/second)
-
+    
     
     # Extract positions of bus stops for plotting
-
+    
     '''
     # Plot the bus network
     plt.figure(figsize=(12, 12))
     nx.draw(G_bus, pos, node_size=10, node_color='red', with_labels=False, edge_color='blue', linewidths=1, font_size=8)
     '''
-
+    
     ###############################################################################################################################################################################################
     # 3.) Calculate Fastest Path from Each Node (Bus Stop) to All Train Stations:
     ###############################################################################################################################################################################################
-
+    
     # calculate od_matrix for the bus metwork
     od_df_busTOtrain = calculate_fastest_connections_to_trains(G_bus)
     #find the closest trainstations for each busstop
     closest_trainstations_df = find_closest_train_station(od_df_busTOtrain)
-
+    
     # These lines of code create a 650m buffer around bus stops and assign each bus stop 
     # to the closest train station based on their service direction toward a train station.
     # requires assessing changes in access times.
@@ -788,26 +857,26 @@ def get_catchement():
     bus_buffers_path = "data/catchment_pt/bus_buffers.gpkg"
     train_buffers_path = "data/catchment_pt/train_buffers.gpkg"
     final_output_path = "data/catchment_pt/final_buffers.gpkg"
-
+    
     # SubStep 1: Create Bus Buffers
     bus_buffers = create_bus_buffers(closest_trainstations_df, stops, bus_buffers_path)
-
+    
     # SubStep 2: Create Train Buffers (only VTYP='S-Bahn')
     train_buffers = create_train_buffers(stops, train_buffers_path)
-
+    
     # SubStep 3: Resolve Overlaps and Merge Polygons by Train Station
     resolve_overlaps(bus_buffers, train_buffers, final_output_path)
     clip_and_fill_polygons(
     merged_buffers_path="data/catchment_pt/final_buffers.gpkg",
     innerboundary_path="data/_basic_data/innerboundary.shp",
     output_path="data/catchment_pt/final_clipped_buffers.gpkg")
-
+    
     #prepare the nodes for matching the DIVANR and the rail node number
     # File paths
     points_file_path = "data/Network/processed/points.gpkg"
     stops_file_path = "data/Network/Buslines/Haltestellen_des_offentlichen_Verkehrs_-OGD.gpkg"
     output_file_path = "data/Network/processed/points_with_diva_nr_buffered.gpkg"
-
+    
     # Mapping
     add_diva_nr_to_points_with_buffer(points_file_path, stops_file_path, output_file_path)
     process_polygons_with_mapping(
@@ -820,5 +889,6 @@ def get_catchement():
     input_gpkg="data/catchment_pt/catchement.gpkg",
     output_tif="data/catchment_pt/catchement.tif",
     raster_size=(100, 100))  # Raster size set to 100x100
-
+    
+    print("Catchment generation completed.")
     return

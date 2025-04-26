@@ -2,6 +2,7 @@
 import os
 import math
 import time
+import shutil
 
 import pandas as pd
 
@@ -113,7 +114,7 @@ def infrascanrail():
     # Dataframe with the voronoi polygons for the status quo is stored in "data/Voronoi/voronoi_status_quo_euclidian.gpkg"
     # Dataframe with the voronoi polygons for the all developments is stored in "data/Voronoi/voronoi_developments_euclidian.gpkg"
     
-    get_catchement()
+    get_catchment(use_cache=True)
 
     runtimes["Generate The Catchement based on the Bus network"] = time.time() - st
     st = time.time()
@@ -184,8 +185,10 @@ def infrascanrail():
     # Returns the graph (nx.DiGraph) and a DataFrame with OD travel data including adjusted travel times and geometries.
 
     #network of status quo
-
-    network_status_quo = [r"data/temp/network_railway-services.gpkg"]
+    if settings.rail_network == 'current':
+        network_status_quo = [r"data/temp/network_railway-services.gpkg"]
+    elif settings.rail_network == 'AK_2035':
+        network_status_quo = [paths.RAIL_SERVICES_AK2035_PATH]
     G_status_quo = create_graphs_from_directories(network_status_quo)
     od_times_status_quo = calculate_od_pairs_with_times_by_graph(G_status_quo)
 
@@ -354,39 +357,7 @@ def infrascanrail():
 
     print("\nVISUALIZE THE RESULTS \n")
 
-
-    plotting(input_file="data/costs/total_costs_with_geometry.gpkg",
-             output_file="data/costs/processed_costs.gpkg",
-             node_file="data/Network/Rail_Node.xlsx")
-
-
-    #make a plot of the developments
-    plot_develompments_rail()
-
-    # plot the scenarios
-    plot_scenarios()
-
-    # make a plot of the catchement with id and times
-    create_plot_catchement()
-    create_catchement_plot_time()
-
-    # plot the empl and pop with the comunal boarders and the catchment
-    # to visualize the OD-Transformation 
-    plot_catchment_and_distributions(
-        s_bahn_lines_path="data/Network/processed/split_s_bahn_lines.gpkg",
-        water_bodies_path="data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp",
-        catchment_raster_path="data/catchment_pt/catchement.tif",
-        communal_borders_path="data/_basic_data/Gemeindegrenzen/UP_GEMEINDEN_F.shp",
-        population_raster_path="data/independent_variable/processed/raw/pop20.tif",
-        employment_raster_path="data/independent_variable/processed/raw/empl20.tif",
-        extent_path="data/_basic_data/innerboundary.shp"
-    )
-
-    # Load the dataset and generate plots:
-    # - Enhanced boxplot and strip plot for monetized savings by development.
-    # Plots are saved in the 'plots' directory.
-    results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
-    create_and_save_plots(results_raw)
+    visualize_results(clear_plot_directory=True)
 
     '''
     plot_developments_and_table_for_scenarios(
@@ -399,7 +370,55 @@ def infrascanrail():
     # Specify the path to your CSV file
     csv_file_path = "data/costs/total_costs_with_geometry.csv"
     # Call the function to ccreate_scenario_analysis_viewerreate and display the GUI
-    (csv_file_path)
+    create_scenario_analysis_viewer(csv_file_path)
+
+
+def visualize_results(clear_plot_directory=False):
+    # Define the plot directory
+    plot_dir = "plots"
+
+    # Clear the plot directory if requested
+    if clear_plot_directory:
+        print(f"Clearing plot directory: {plot_dir}")
+        for filename in os.listdir(plot_dir):
+            file_path = os.path.join(plot_dir, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+                print(f"Removed: {file_path}")
+            except Exception as e:
+                print(f"Error while clearing {file_path}: {e}")
+    
+    # Generate all visualizations
+    
+    plotting(input_file="data/costs/total_costs_with_geometry.gpkg",
+             output_file="data/costs/processed_costs.gpkg",
+             node_file="data/Network/Rail_Node.xlsx")
+    # make a plot of the developments
+    plot_develompments_rail()
+    # plot the scenarios
+    plot_scenarios()
+    # make a plot of the catchement with id and times
+    create_plot_catchement()
+    create_catchement_plot_time()
+    # plot the empl and pop with the comunal boarders and the catchment
+    # to visualize the OD-Transformation 
+    plot_catchment_and_distributions(
+        s_bahn_lines_path="data/Network/processed/split_s_bahn_lines.gpkg",
+        water_bodies_path="data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp",
+        catchment_raster_path="data/catchment_pt/catchement.tif",
+        communal_borders_path="data/_basic_data/Gemeindegrenzen/UP_GEMEINDEN_F.shp",
+        population_raster_path="data/independent_variable/processed/raw/pop20.tif",
+        employment_raster_path="data/independent_variable/processed/raw/empl20.tif",
+        extent_path="data/_basic_data/innerboundary.shp"
+    )
+    # Load the dataset and generate plots:
+    # - Enhanced boxplot and strip plot for monetized savings by development.
+    # Plots are saved in the 'plots' directory.
+    results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
+    create_and_save_plots(results_raw)
 
 
 def generate_infra_development():
@@ -419,11 +438,7 @@ def generate_infra_development():
     # The end point [ID_new] of developments_to_corridor_attribute are equivlent to the points in generated_nodes_connecting_corridor
     only_links_to_corridor()
     calculate_new_service_time()
-    network_railway_service_path = r"data\temp\network_railway-services.gpkg"
-    new_links_updated_path = r"data\Network\processed\updated_new_links.gpkg"
-    # combined_gdf = delete_connections_back(file_path_updated=r"data\Network\processed\new_links.gpkg",
-    #                                        file_path_raw_edges=r"data/temp/network_railway-services.gpkg",
-    #                                        output_path=r"data/Network/processed/updated_new_links_cleaned.gpkg")
+
     create_network_foreach_dev()
 
 

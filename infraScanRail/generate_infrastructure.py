@@ -232,8 +232,12 @@ def generate_rail_edges(n, radius):
     # Step 1: Load data and filter
     current_points = gpd.read_file(r"data/Network/processed/points.gpkg")
     current_points = current_points[~current_points['ID_point'].isin([112, 113, 720, 2200])]
-    raw_edges = gpd.read_file(r"data/temp/network_railway-services.gpkg")
-    
+    if settings.rail_network == 'current':
+        raw_edges = gpd.read_file(r"data/temp/network_railway-services.gpkg")
+    elif settings.rail_network == 'AK_2035':
+        raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
+    else:
+        exit("No rail network specified.")
     # Identify endpoint nodes
     endpoints = set(
         raw_edges.loc[raw_edges['FromEnd'] == True, 'FromNode']
