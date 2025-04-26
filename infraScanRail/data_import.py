@@ -652,7 +652,11 @@ def reformat_highway_network():
     filtered_edges.to_file(r"data\Network\processed\edges.gpkg")
 
 def reformat_rail_edges():
-    # Import points and nodes
+    """
+    This function reformats the railway network to add the access points to the network. The railway network is
+    imported from a geopackage and the access points are loaded from a csv file. The access points are projected to
+    the closest railway segment. The railway segments are then split at the access points.
+    """
     if settings.rail_network == 'current':
         edges_gdf = gpd.read_file(r"data/temp/network_railway-services.gpkg")
     elif settings.rail_network == 'AK_2035':
@@ -704,6 +708,12 @@ def reformat_rail_edges():
 
 
 def reformat_rail_nodes():
+    # Simplify the physical topology of the network
+    # One distinct edge between two nodes (currently multiple edges between nodes)
+    # Edges are stored in "data\Network\processed\edges.gpkg"
+    # Points in simplified network can be intersections ("intersection"==1) or access points ("intersection"==0)
+    # Points are stored in "data\Network\processed\points.gpkg"
+
     current_points = pd.read_csv(r"data\Network\Rail_Node.csv", sep=";", decimal=",", encoding="ISO-8859-1")
     current_points = gpd.GeoDataFrame(current_points,
                                       geometry=gpd.points_from_xy(current_points["XKOORD"], current_points["YKOORD"]),
@@ -757,34 +767,10 @@ def reformat_rail_nodes():
 
 
 
-def get_edge_attributes():
-    edges_process = gpd.read_file(r"data/Network/processed/edges_with_attribute.gpkg")
 
-    # Step 4 & 5: Apply the function to each edge in df2
-    edges_process=edges_process.rename(columns={'Link NR':'ID_edge','Capacity':'TrainCapacity','TotalPeakCapacity':'capacity','TravelTime':'tt'})
-    edges_process=edges_process.drop(['FromStation','ToStation','FromCode','ToCode','FromGde','ToGde','E_KOORD_O','E_KOORD_D','N_KOORD_O','N_KOORD_D','Speed'],axis=1)
-
-
-    # Store values as integer
-    # Drop rows with None values
-    edges_process.dropna(inplace=True)
-    edges_process['capacity'] = edges_process['capacity'].astype(int)
-    edges_process['tt'] = edges_process['tt'].astype(int)
-
-    # Check if there are None values in the capacity and ffs columns
-    print(edges_process[edges_process['capacity'].isnull()])
-    print(edges_process[edges_process['tt'].isnull()])
-
-    edges_process["ID_edge"] = edges_process.index
-
-    print(edges_process.head(10).to_string())
-
-    edges_process.to_file(r"data/Network/processed/edges_with_attribute.gpkg")
-
-## processes geospatial data to identify points and edges within a specified polygonal corridor
 
 def create_railway_services_AK2035():
-    def add_new_line(stations, frequency, service_name, travel_times, edges_file, points):
+    def add_new_line(stations, frequency, service_name, travel_times, edges, points):
         """
         Add a new line to the network with bidirectional edges and travel times.
 
@@ -793,13 +779,12 @@ def create_railway_services_AK2035():
             frequency (int): Frequency of the new line.
             service_name (str): Name of the service for the new line.
             travel_times (list): List of travel times between consecutive stations.
-            edges_file (str): Path to the GeoPackage file containing the edges.
+            edges (str): Path to the GeoPackage file containing the edges.
             points (str): GeoPackage file containing the station points.
 
         Returns:
             None
         """
-        edges = gpd.read_file(edges_file)
         # Iterate through consecutive station pairs
         for i in range(len(stations) - 1):
             # Get the IDs and geometries of the two stations
@@ -857,9 +842,8 @@ def create_railway_services_AK2035():
             # Append the new edges to the edges GeoDataFrame
             new_line_gpd = gpd.GeoDataFrame([new_edge_a, new_edge_b])
             edges = gpd.GeoDataFrame(pd.concat([edges, new_line_gpd], ignore_index=True))
-
         # Save the updated edges GeoDataFrame
-        edges.to_file(edges_file)
+        return edges
 
 
 
@@ -883,43 +867,55 @@ def create_railway_services_AK2035():
     # Update FromEnd for the edge where Service is "S14" and FromNode is Wetzikon
     edges_ak2035.loc[(edges_ak2035['Service'] == 'S14') & (edges_ak2035['FromNode'] == wetzikon_id), 'FromEnd'] = True
 
-    edges_ak2035.to_file(paths.RAIL_SERVICES_AK2035_PATH)
-
-# Add new lines to the network which are introduced with AK2035
-    add_new_line(
+    # Add new lines to the network which are introduced with AK2035
+    edges_ak2035=add_new_line(
         stations=['Zürich Oerlikon', 'Uster', 'Wetzikon', 'Hinwil'],
         frequency=2,
         service_name='G',
-        travel_times=[10, 6, 4], #TT Oerlikon-Uster 1 min faster
-        edges_file=paths.RAIL_SERVICES_AK2035_PATH,
+        travel_times=[10, 6, 4],  # TT Oerlikon-Uster 1 min faster
+        edges=edges_ak2035,
         points=points)
 
-    add_new_line(
-        stations=['Zürich Stadelhofen', 'Stettbach', 'Dietlikon', 'Effretikon', 'Illnau', 'Fehraltorf','Pfäffikon ZH'],
+    edges_ak2035=add_new_line(
+        stations=['Zürich Stadelhofen', 'Stettbach', 'Dietlikon', 'Effretikon', 'Illnau', 'Fehraltorf', 'Pfäffikon ZH'],
         frequency=2,
         service_name='P',
         travel_times=[5, 3, 6, 4, 5, 4],
-        edges_file=paths.RAIL_SERVICES_AK2035_PATH,
+        edges=edges_ak2035,
         points=points)
+    edges_ak2035 = edges_ak2035.fillna(0)
+    edges_ak2035.to_file(paths.RAIL_SERVICES_AK2035_PATH)
+
+
 
 def network_in_corridor(poly):
-    # polygon to Geopandas dataframe
+    """
+    This function takes a polygon and a network and selects the parts of the network within the polygon.
+    # Filter the infrastructure elements that lie within a given polygon
+    # Points within the corridor are stored in "data/Network/processed/points_corridor.gpkg"
+    # Edges within the corridor are stored in "data/Network/processed/edges_corridor.gpkg"
+    # Edges crossing the corridor border are stored in "data/Network/processed/edges_on_corridor.gpkg"
+
+    # In general, the final product of this function is edges_with_attributes.gpkg and points_with_attributes.gpkg
+
+    :param poly: Polygon in which to search for network elements.
+    :return: None
+    """
+
+    # Create a GeoDataFrame from the polygon
     polygon = gpd.GeoDataFrame({'geometry': [poly]})
     polygon.crs = "epsg:2056"
 
-    edges = gpd.read_file(r"data\Network\processed\edges.gpkg")
-    points = gpd.read_file(r"data\Network\processed\points.gpkg")
+    edges = gpd.read_file("data/Network/processed/edges.gpkg")
+    points = gpd.read_file("data/Network/processed/points.gpkg")
 
-    print(edges.head(10).to_string())
-    print(points.head(10).to_string())
-    print(points.shape)
 
     # connect the two edges with id 81 and 70 by their closest end points to make one new out of it
 
     # filter points in polygon
     points_corridor = gpd.sjoin(points, polygon, how="inner")
-    points_corridor = points_corridor.drop(columns=["index_right"]) # , "FID"
-    points_corridor.to_file(r"data\Network\processed\points_corridor.gpkg")
+    points_corridor = points_corridor.drop(columns=["index_right"]) 
+    points_corridor.to_file("data/Network/processed/points_corridor.gpkg")
 
     # Check if point are in polygon if so add True as "within_corridor" attribute otherwise False
     points['within_corridor'] = points.apply(lambda row: polygon.contains(row.geometry), axis=1)
@@ -928,7 +924,7 @@ def network_in_corridor(poly):
     edges_corridor = gpd.sjoin(edges, polygon, how="inner")
     #edges_corridor = edges_corridor.drop(columns=["start_access", "end_access", "index_right"])
     edges_corridor = edges_corridor.drop(columns=["index_right"])
-    edges_corridor.to_file(r"data\Network\processed\edges_in_corridor.gpkg")
+    edges_corridor.to_file("data/Network/processed/edges_in_corridor.gpkg")
 
     # Get edges crossed by polygon frame
     # Only keep edges with exactly on endpoint in the polygon and the other outside the polygon (= point_corridor)
@@ -936,7 +932,7 @@ def network_in_corridor(poly):
     def is_one_endpoint_inside(edge_geom, poly):
         start_point = Point(edge_geom.coords[0])
         end_point = Point(edge_geom.coords[-1])
-        return poly.contains(start_point) != poly.contains(end_point)  # True if only one point is inside
+        return poly.contains(start_point) != poly.contains(end_point)
 
     # Apply the function directly in the apply method
     edges['polygon_border'] = edges['geometry'].apply(lambda x: is_one_endpoint_inside(x, polygon))
@@ -944,7 +940,7 @@ def network_in_corridor(poly):
     # Apply the function to filter edges and save the filtered edges in seperate file
     #edges_crossing_polygon = edges[edges.apply(lambda x: is_one_endpoint_inside(x, polygon), axis=1)]
     edges_crossing_polygon = edges[edges["polygon_border"] == True]
-    edges_crossing_polygon.to_file(r"data\Network\processed\edges_on_corridor_border.gpkg")
+    edges_crossing_polygon.to_file("data/Network/processed/edges_on_corridor_border.gpkg")
 
     points_temp = points.copy()
     points_temp['buffered_points'] = points_temp['geometry'].buffer(1e-6)
@@ -954,17 +950,31 @@ def network_in_corridor(poly):
     temp_joined = gpd.sjoin(points_temp, edges_crossing_polygon, how="left", predicate="intersects", lsuffix="left",
                             rsuffix="right")
     temp_joined = temp_joined.drop_duplicates('ID_point')
+    
     # Add 'on_corridor_border' attribute to points
     # A point is on the corridor border if it has a match in the spatial join (non-null index_right)
     points['on_corridor_border'] = temp_joined['index_right'].notna()
 
-    # Link the point ID (from points) to each endpoint of the edges
-    # Create a temporary DataFrame with the endpoints of the edges
+    # Step 4 & 5: Apply the function to each edge in df2
+    edges = edges.rename(columns={'Link NR': 'ID_edge', 'Capacity': 'TrainCapacity', 'TotalPeakCapacity': 'capacity',
+                                  'TravelTime': 'tt'})
+    edges = edges.drop(
+        ['FromStation', 'ToStation', 'FromCode', 'ToCode', 'FromGde', 'ToGde', 'E_KOORD_O', 'E_KOORD_D', 'N_KOORD_O',
+         'N_KOORD_D', 'Speed'], axis=1)
 
+    # Store values as integer
+    # Drop rows with None values
+    edges.dropna(inplace=True)
+    edges['capacity'] = edges['capacity'].astype(int)
+    edges['tt'] = edges['tt'].astype(int)
 
-    print(points.head(10).to_string())
+    # Check if there are None values in the capacity and ffs columns
+    print(edges[edges['capacity'].isnull()])
+    print(edges[edges['tt'].isnull()])
+
+    edges["ID_edge"] = edges.index
+
     print(edges.head(10).to_string())
-
 
     points.to_file(r"data\Network\processed\points_with_attribute.gpkg")
     edges.to_file(r"data\Network\processed\edges_with_attribute.gpkg")

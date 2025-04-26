@@ -17,7 +17,7 @@ from display_results import *
 import paths
 
 
-def print_hi():
+def infrascanrail():
 
     os.chdir(paths.MAIN)
     runtimes = {}
@@ -27,20 +27,7 @@ def print_hi():
     print("\nINITIALIZE VARIABLES \n")
     st = time.time()
 
-    # Define spatial limits of the research corridor
-    # The coordinates must end with 000 in order to match the coordinates of the input raster data
-    e_min, e_max = 2687000, 2708000     # 2688000, 2704000 - 2688000, 2705000
-    n_min, n_max = 1237000, 1254000     # 1238000, 1252000 - 1237000, 1252000
-
-    # For global operation a margin is added to the boundary
-    margin = 3000 # meters
-    outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
-
-    # Define the size of the resolution of the raster to 100 meter
-
-    #save spatial limits as shp
-    save_focus_area_shapefile(e_min, e_max, n_min, n_max)
-
+    outerboundary = create_focus_area()
 
     runtimes["Initialize variables"] = time.time() - st
     st = time.time()
@@ -71,47 +58,23 @@ def print_hi():
     ##################################################################################
     ##################################################################################
     # INFRASTRUCTURE NETWORK
-    # 1) Import network
-    # 2) Process network
-    # 3) Generate developments (new access points) and connection to existing infrastructure
+    # 1) Import&Process network
+    # 2) Generate developments (new access points) and connection to existing infrastructure
 
     print("\nINFRASTRUCTURE NETWORK \n")
-    ##################################################################################
-    # 1) Import network
-    # Import the railway network and preprocess it
-    # Data are stored as "data/temp/???.gpkg" ## To DO
 
-    # Read the network dataset to avoid running the function above
-
-    runtimes["Import network data"] = time.time() - st
-    st = time.time()
 
 
     ##################################################################################
     # 2) Process network
 
-    # Simplify the physical topology of the network
-    # One distinct edge between two nodes (currently multiple edges between nodes)
-    # Edges are stored in "data\Network\processed\edges.gpkg"
-    # Points in simplified network can be intersections ("intersection"==1) or access points ("intersection"==0)
-    # Points are stored in "data\Network\processed\points.gpkg"
+
     reformat_rail_nodes()
     create_railway_services_AK2035()
     reformat_rail_edges()
 
-
-    # Filter the infrastructure elements that lie within a given polygon
-    # Points within the corridor are stored in "data\Network\processed\points_corridor.gpkg"
-    # Edges within the corridor are stored in "data\Network\processed\edges_corridor.gpkg"
-    # Edges crossing the corridor border are stored in "data\Network\processed\edges_on_corridor.gpkg"
-
-    # In general, the final product of this function is edges_with_attributes.gpkg and points_with_attributes.gpkg
     network_in_corridor(poly=outerboundary)
 
-
-
-    # Removes invalid values and drops unnecessary columns
-    get_edge_attributes()
 
     runtimes["Preprocess the network"] = time.time() - st
     st = time.time()
@@ -120,41 +83,7 @@ def print_hi():
     ##################################################################################
     # 3) Generate developments (new connections) 
 
-    #Identifies railway service endpoints, creates a buffer around them, and selects nearby stations within a specified radius and count (n). 
-    #It then generates new edges between these points and saves the resulting datasets for further use.
-    #Then it calculates Traveltime, using only the existing infrastructure
-    #Then it creates a new Network for each development and saves them as a GPGK
-
-    generate_rail_edges(n=5,radius=20)
-
-   
-    #Filter out unnecessary links in the new_links GeoDataFrame by ensuring the connection is not redundant
-    #by ensuring the connection is not redundant within the existing Sline routes
-    filter_unnecessary_links()
-
-
-    #filtered_gdf.to_file(r"data/Network/processed/generated_nodes.gpkg")
-
-
-    # Import the generated points as dataframe
-
-    # Filter the generated links that connect to one of the access point within the considered corridor
-    # These access points are defined in the manually defined list of access points
-    # The links to corridor are stored in "data/Network/processed/developments_to_corridor_attribute.gpkg"
-    # The generated points with link to access point in the corridor are stored in "data/Network/processed/generated_nodes_connecting_corridor.gpkg"
-    # The end point [ID_new] of developments_to_corridor_attribute are equivlent to the points in generated_nodes_connecting_corridor
-    only_links_to_corridor()
-
-    calculate_new_service_time()
-
-    network_railway_service_path = r"data\temp\network_railway-services.gpkg"
-    new_links_updated_path = r"data\Network\processed\updated_new_links.gpkg"
-
-    #combined_gdf = delete_connections_back(file_path_updated=r"data\Network\processed\new_links.gpkg",
-    #                                        file_path_raw_edges=r"data/temp/network_railway-services.gpkg",
-    #                                        output_path=r"data/Network/processed/updated_new_links_cleaned.gpkg")
-
-    create_network_foreach_dev()
+    generate_infra_development()
 
     ##here insert other network generations and save them also as a GPGK at: data/Network/processed/developments/
 
@@ -469,11 +398,49 @@ def print_hi():
     # Run the display results function to launch the GUI
     # Specify the path to your CSV file
     csv_file_path = "data/costs/total_costs_with_geometry.csv"
-    # Call the function to create and display the GUI
-    create_scenario_analysis_viewer(csv_file_path)
+    # Call the function to ccreate_scenario_analysis_viewerreate and display the GUI
+    (csv_file_path)
 
-    
+
+def generate_infra_development():
+    # Identifies railway service endpoints, creates a buffer around them, and selects nearby stations within a specified radius and count (n).
+    # It then generates new edges between these points and saves the resulting datasets for further use.
+    # Then it calculates Traveltime, using only the existing infrastructure
+    # Then it creates a new Network for each development and saves them as a GPGK
+    generate_rail_edges(n=5, radius=20)
+    # Filter out unnecessary links in the new_links GeoDataFrame by ensuring the connection is not redundant
+    # by ensuring the connection is not redundant within the existing Sline routes
+    filter_unnecessary_links()
+    # Import the generated points as dataframe
+    # Filter the generated links that connect to one of the access point within the considered corridor
+    # These access points are defined in the manually defined list of access points
+    # The links to corridor are stored in "data/Network/processed/developments_to_corridor_attribute.gpkg"
+    # The generated points with link to access point in the corridor are stored in "data/Network/processed/generated_nodes_connecting_corridor.gpkg"
+    # The end point [ID_new] of developments_to_corridor_attribute are equivlent to the points in generated_nodes_connecting_corridor
+    only_links_to_corridor()
+    calculate_new_service_time()
+    network_railway_service_path = r"data\temp\network_railway-services.gpkg"
+    new_links_updated_path = r"data\Network\processed\updated_new_links.gpkg"
+    # combined_gdf = delete_connections_back(file_path_updated=r"data\Network\processed\new_links.gpkg",
+    #                                        file_path_raw_edges=r"data/temp/network_railway-services.gpkg",
+    #                                        output_path=r"data/Network/processed/updated_new_links_cleaned.gpkg")
+    create_network_foreach_dev()
+
+
+def create_focus_area():
+    # Define spatial limits of the research corridor
+    # The coordinates must end with 000 in order to match the coordinates of the input raster data
+    e_min, e_max = 2687000, 2708000  # 2688000, 2704000 - 2688000, 2705000
+    n_min, n_max = 1237000, 1254000  # 1238000, 1252000 - 1237000, 1252000
+    # For global operation a margin is added to the boundary
+    margin = 3000  # meters
+    outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
+    # Define the size of the resolution of the raster to 100 meter
+    # save spatial limits as shp
+    save_focus_area_shapefile(e_min, e_max, n_min, n_max)
+    return outerboundary
+
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    print_hi()
+    infrascanrail()
