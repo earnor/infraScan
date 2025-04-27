@@ -1312,7 +1312,7 @@ def aggregate_costs():
 
     print(f"Total costs raw saved to {total_costs_csv_path}")
 
-def transform_and_reshape_dataframe():
+def transform_and_reshape_cost_df():
     """
     Transform, reshape, and enhance the dataframe:
     - Drop specific columns.

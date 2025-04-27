@@ -19,7 +19,6 @@ import paths
 
 
 def infrascanrail():
-
     os.chdir(paths.MAIN)
     runtimes = {}
 
@@ -51,7 +50,7 @@ def infrascanrail():
     # Tif file of all unsuitable land cover and protected areas
     # File is stored to 'data\landuse_landcover\processed\zone_no_infra\protected_area_{suffix}.tif'
 
-    #all_protected_area_to_raster(suffix="corridor")
+    # all_protected_area_to_raster(suffix="corridor")
 
     runtimes["Import land use and land cover data"] = time.time() - st
     st = time.time()
@@ -64,11 +63,8 @@ def infrascanrail():
 
     print("\nINFRASTRUCTURE NETWORK \n")
 
-
-
     ##################################################################################
     # 2) Process network
-
 
     reformat_rail_nodes()
     create_railway_services_AK2035()
@@ -76,10 +72,8 @@ def infrascanrail():
 
     network_in_corridor(poly=outerboundary)
 
-
     runtimes["Preprocess the network"] = time.time() - st
     st = time.time()
-
 
     ##################################################################################
     # 3) Generate developments (new connections) 
@@ -91,39 +85,16 @@ def infrascanrail():
     runtimes["Generate infrastructure developments"] = time.time() - st
     st = time.time()
 
-
-    
-    ## PRO did comment the lines below raster and routing_raster() out
-    '''
-    # Find a routing for the generated links that considers protected areas
-    # The new links are stored in "data/Network/processed/new_links_realistic.gpkg"
-    # If a point is not accessible due to the banned zoned it is stored in "data/Network/processed/points_inaccessible.csv"
-    raster = r'data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif'
-    routing_raster(raster_path=raster)
-    '''
-
-
-    """
-    #plot_corridor(network, limits=limits_corridor, location=location, new_nodes=filtered_rand_gdf, access_link=True)
-    map_3 = CustomBasemap(boundary=outerboundary, network=network, frame=innerboundary)
-    map_3.new_development(new_nodes=filtered_rand_gdf)
-    map_3.show()
-    """
-
-    # Compute the catchement polygons for the status quo and for all developments based on access time to train station
-    # Dataframe with the voronoi polygons for the status quo is stored in "data/Voronoi/voronoi_status_quo_euclidian.gpkg"
-    # Dataframe with the voronoi polygons for the all developments is stored in "data/Voronoi/voronoi_developments_euclidian.gpkg"
-    
-    get_catchment(use_cache=True)
+    # Compute the catchement area for the status quo and for all developments based on access time to train station
+    get_catchment(use_cache=settings.use_cache)
 
     runtimes["Generate The Catchement based on the Bus network"] = time.time() - st
     st = time.time()
-    
 
     # here would code be needed to get all catchements for the different developments, if access point are added
-    
+
     limits_variables = [2680600, 1227700, 2724300, 1265600]
-    
+
     ##################################################################################
     ##################################################################################
     # SCENARIO
@@ -133,46 +104,15 @@ def infrascanrail():
     ##################################################################################
     # 1) Define scenario based on cantonal predictions
 
-    # Import the predicted scenario defined by the canton of Zürich
-
-    # Define the relative growth per scenario and district
-    # The growth rates are stored in "data/temp/data_scenario_n.shp"
-    #future_scenario_zuerich_2022(scenario_zh)
-    # Plot the growth rates as computed above for population and employment and over three scenarios
-    #plot_2x3_subplots(scenario_polygon, outerboundary, network, location)
-
-
-    # Calculates population growth allocation across nx3 scenarios for municipalities within a defined corridor.
-    # For each scenario, adjusts total growth and distributes it among municipalities with urban, equal, and rural biases.
-    # Merges growth results with spatial boundaries to form a GeoDataFrame of growth projections for mapping.
-    # Saves the resulting GeoDataFrame to a shapefile.
-    future_scenario_pop(n=3)
-    future_scenario_empl(n=3)
-
-
-    # Compute the predicted amount of population and employment in each raster cell (hectar) for each scenario
-    # The resulting raster data are stored in "data/independent_variables/scenario/{col}.tif" with col being pop or empl and the scenario
-    scenario_to_raster_pop(limits_variables)
-    scenario_to_raster_emp(limits_variables)
-    
-
-    # Aggregate the the scenario data to over the voronoi polygons, here euclidian polygons
-    # Store the resulting file to "data/Voronoi/voronoi_developments_euclidian_values.shp"
-    #scenario_to_voronoi(polygons_gdf, euclidean=True)
-
-    # Convert multiple tif files to one same tif with multiple bands
-    stack_tif_files(var="empl")
-    stack_tif_files(var="pop")
+    generate_scenarios(limits_variables)
     runtimes["Generate the scenarios"] = time.time() - st
     st = time.time()
-
 
     ##################################################################################
     ##################################################################################
     # IMPLEMENT THE SCORING
     # 1) Compute construction and maintenancecosts
     # 2) Compute Traveltime Savings
-
 
     print("\nIMPLEMENT SCORING \n")
 
@@ -184,7 +124,7 @@ def infrascanrail():
     # calculates travel times with penalties for line changes, and stores full path geometries.
     # Returns the graph (nx.DiGraph) and a DataFrame with OD travel data including adjusted travel times and geometries.
 
-    #network of status quo
+    # network of status quo
     if settings.rail_network == 'current':
         network_status_quo = [r"data/temp/network_railway-services.gpkg"]
     elif settings.rail_network == 'AK_2035':
@@ -192,96 +132,63 @@ def infrascanrail():
     G_status_quo = create_graphs_from_directories(network_status_quo)
     od_times_status_quo = calculate_od_pairs_with_times_by_graph(G_status_quo)
 
-    #Example usage Test1
+    # Example usage Test1
     origin_station = "Uster"
     destination_station = "Zürich HB"
     find_fastest_path(G_status_quo[0], origin_station, destination_station)
-    #Example usage Test2
+    # Example usage Test2
     origin_station = "Uster"
     destination_station = "Pfäffikon ZH"
     find_fastest_path(G_status_quo[0], origin_station, destination_station)
 
-    #networks with all developments
+    # networks with all developments
 
     # get the paths of all developments
-    directory_path = r"data/Network/processed/developments" # Define the target directory
-    directories_dev = [os.path.join(directory_path, filename) 
-             for filename in os.listdir(directory_path) if filename.endswith(".gpkg")]
+    directory_path = r"data/Network/processed/developments"  # Define the target directory
+    directories_dev = [os.path.join(directory_path, filename)
+                       for filename in os.listdir(directory_path) if filename.endswith(".gpkg")]
     directories_dev = [path.replace("\\", "/") for path in directories_dev]
 
     G_developments = create_graphs_from_directories(directories_dev)
     od_times_dev = calculate_od_pairs_with_times_by_graph(G_developments)
 
-    #Example usage Test1 for development 1007 (New Link Uster-Pfäffikon)
+    # Example usage Test1 for development 1007 (New Link Uster-Pfäffikon)
     origin_station = "Uster"
     destination_station = "Zürich HB"
     find_fastest_path(G_developments[5], origin_station, destination_station)
 
-    #Example usage Test2
+    # Example usage Test2
     origin_station = "Uster"
     destination_station = "Pfäffikon ZH"
     find_fastest_path(G_developments[5], origin_station, destination_station)
 
-    
-    #Example usage Development 8 (Wetikon to Hinwil (S3))
+    # Example usage Development 8 (Wetikon to Hinwil (S3))
     origin_station = "Kempten"
     destination_station = "Hinwil"
     find_fastest_path(G_status_quo[0], origin_station, destination_station)
-    #Example usage Test2
+    # Example usage Test2
     origin_station = "Kempten"
     destination_station = "Hinwil"
     find_fastest_path(G_developments[7], origin_station, destination_station)
 
-    selected_indices = [0,1,2,3,4, 5,6, 7]  # Indices of selected developments
+    selected_indices = [0, 1, 2, 3, 4, 5, 6, 7]  # Indices of selected developments
     od_nodes = [
         'main_Rüti ZH', 'main_Nänikon-Greifensee', 'main_Uster', 'main_Wetzikon ZH',
-        'main_Zürich Altstetten', 'main_Schwerzenbach ZH', 'main_Fehraltorf', 
-        'main_Bubikon', 'main_Zürich HB', 'main_Kempten', 'main_Pfäffikon ZH', 
+        'main_Zürich Altstetten', 'main_Schwerzenbach ZH', 'main_Fehraltorf',
+        'main_Bubikon', 'main_Zürich HB', 'main_Kempten', 'main_Pfäffikon ZH',
         'main_Zürich Oerlikon', 'main_Zürich Stadelhofen', 'main_Hinwil', 'main_Aathal'
     ]
 
     # Analyze the Delta TT
-    analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od_nodes)
     final_result = analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od_nodes)
 
     # Display the result
     print("\nFinal Travel Times and Delta Times:")
     print(final_result)
 
-
-    '''
-    G_status_quo = create_directed_graph(network_status_quo)
-    network_status_quo = [r"data/temp/network_railway-services.gpkg"]
-    G_status_quo = define_rail_network(network_status_quo)
-    plot_rail_network(G_status_quo)
-    od_matrix_stat_quo = calculate_od_matrices_with_penalties(G_status_quo)
-    '''
-
-    '''
-    G_developments = define_rail_network(directories_dev)
-    #plot_rail_network(G_developments)
-    od_matrix_dev = calculate_od_matrices_with_penalties(G_developments)
-    '''
-    # calculate traveltimes with google maps to compare and check accurancy
-    '''
-    # Assuming get_google_travel_time is a defined function that retrieves travel time from Google API.
-    # Ensure your API key is correctly set up.
-    api_key = 'AIzaSyCFByVXpNNrVY_HATr7NaJk2m3Tuix1u2Y'  # Replace with your actual API key
-
-    # Calculate the travel times and update od_matrix
-    od_matrix = calculate_travel_times(od_matrix, api_key)
-    '''
-
-   
-    #osm_nw_to_raster(limits_variables)
+    # osm_nw_to_raster(limits_variables)
     runtimes["Calculate Traveltimes for all OD_ for all developments"] = time.time() - st
     st = time.time()
-
-    # Write runtimes to a file
-    with open(r'runtimes.txt', 'w') as file:
-        for part, runtime in runtimes.items():
-            file.write(f"{part}: {runtime}\n")
-        
 
     ##################################################################################
     # 2) Compute construction costs
@@ -289,11 +196,10 @@ def infrascanrail():
     ##here a check for capacity could be added
 
     # Compute the construction costs for each development 
-    print(" -> Construction costs")
+    print(" -> Construction costs not computed at the moment")
 
     runtimes["Compute construction and maintenance costs"] = time.time() - st
     st = time.time()
-
 
     #################################################################################
     # Travel time delay on rail
@@ -304,32 +210,30 @@ def infrascanrail():
 
     GetCatchmentOD()
     combine_and_save_od_matrices(od_directory_dev, od_directory_stat_quo)
-    #compute_TT()
+    # compute_TT()
 
     # Compute the OD matrix for the infrastructure developments under all scenarios
-    #GetVoronoiOD_multi()
+    # GetVoronoiOD_multi()
 
     runtimes["Reallocate OD matrices to Catchement polygons"] = time.time() - st
     st = time.time()
 
+    # TTT for status quo (trips in Peak hour * OD-Times) [in hour]
 
-    #TTT for status quo (trips in Peak hour * OD-Times) [in hour]
-
-    #TTT for developments (trips in Peak hour * OD-Times) [in hour]
+    # TTT for developments (trips in Peak hour * OD-Times) [in hour]
 
     # Monetize travel time savings ()
 
-    '''
-    #tt_optimization_status_quo()
+    # tt_optimization_status_quo()
     # check if flow are possible
-    link_traffic_to_map()
+    """link_traffic_to_map()
     print('Flag: link_traffic_to_map is complete')
     # Run travel time optimization for infrastructure developments and all scenarios
     tt_optimization_all_developments()
     print('Flag: tt_optimization_all_developments is complete')
     # Monetize travel time savings
-    monetize_tts(VTTS=VTTS, duration=travel_time_duration)
-    '''
+    monetize_tts(VTTS=VTTS, duration=travel_time_duration)"""
+
     runtimes["Calculate the TTT Savings"] = time.time() - st
     st = time.time()
 
@@ -341,16 +245,14 @@ def infrascanrail():
     print(" -> Aggregate costs")
 
     aggregate_costs()
-    transform_and_reshape_dataframe()
-
+    transform_and_reshape_cost_df()
 
     runtimes["Aggregate costs"] = time.time() - st
 
     # Write runtimes to a file
-    with open(r'runtimes_2.txt', 'w') as file:
+    with open(r'runtimes.txt', 'w') as file:
         for part, runtime in runtimes.items():
             file.write(f"{part}: {runtime}/n")
-
 
     ##################################################################################
     # VISUALIZE THE RESULTS
@@ -373,6 +275,31 @@ def infrascanrail():
     create_scenario_analysis_viewer(csv_file_path)
 
 
+def generate_scenarios(limits_variables):
+    # Import the predicted scenario defined by the canton of Zürich
+    # Define the relative growth per scenario and district
+    # The growth rates are stored in "data/temp/data_scenario_n.shp"
+    # future_scenario_zuerich_2022(scenario_zh)
+    # Plot the growth rates as computed above for population and employment and over three scenarios
+    # plot_2x3_subplots(scenario_polygon, outerboundary, network, location)
+    # Calculates population growth allocation across nx3 scenarios for municipalities within a defined corridor.
+    # For each scenario, adjusts total growth and distributes it among municipalities with urban, equal, and rural biases.
+    # Merges growth results with spatial boundaries to form a GeoDataFrame of growth projections for mapping.
+    # Saves the resulting GeoDataFrame to a shapefile.
+    future_scenario_pop(n=3)
+    future_scenario_empl(n=3)
+    # Compute the predicted amount of population and employment in each raster cell (hectar) for each scenario
+    # The resulting raster data are stored in "data/independent_variables/scenario/{col}.tif" with col being pop or empl and the scenario
+    scenario_to_raster_pop(limits_variables)
+    scenario_to_raster_emp(limits_variables)
+    # Aggregate the the scenario data to over the voronoi polygons, here euclidian polygons
+    # Store the resulting file to "data/Voronoi/voronoi_developments_euclidian_values.shp"
+    # scenario_to_voronoi(polygons_gdf, euclidean=True)
+    # Convert multiple tif files to one same tif with multiple bands
+    stack_tif_files(var="empl")
+    stack_tif_files(var="pop")
+
+
 def visualize_results(clear_plot_directory=False):
     # Define the plot directory
     plot_dir = "plots"
@@ -390,9 +317,9 @@ def visualize_results(clear_plot_directory=False):
                 print(f"Removed: {file_path}")
             except Exception as e:
                 print(f"Error while clearing {file_path}: {e}")
-    
+
     # Generate all visualizations
-    
+
     plotting(input_file="data/costs/total_costs_with_geometry.gpkg",
              output_file="data/costs/processed_costs.gpkg",
              node_file="data/Network/Rail_Node.xlsx")
@@ -435,7 +362,7 @@ def generate_infra_development():
     # These access points are defined in the manually defined list of access points
     # The links to corridor are stored in "data/Network/processed/developments_to_corridor_attribute.gpkg"
     # The generated points with link to access point in the corridor are stored in "data/Network/processed/generated_nodes_connecting_corridor.gpkg"
-    # The end point [ID_new] of developments_to_corridor_attribute are equivlent to the points in generated_nodes_connecting_corridor
+    # The end point [ID_new] of developments_to_corridor_attribute are equivalent to the points in generated_nodes_connecting_corridor
     only_links_to_corridor()
     calculate_new_service_time()
 

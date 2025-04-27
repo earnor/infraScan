@@ -723,52 +723,6 @@ def reformat_rail_nodes():
     current_points.to_file(r"data\Network\processed\points.gpkg")
 
 
-
-# def required_manipulations_on_network():
-#     # This function is introduced to add/remoce some parts of the network enable some computations
-#     # Import the network
-#     edges = gpd.read_file(r"data\Network\processed\edges_with_attribute.gpkg")
-#     points = gpd.read_file(r"data\Network\processed\points_with_attribute.gpkg")
-#     print(edges.head(10).to_string())
-#     print(points.head(10).to_string())
-#
-#     def get_coords(point_id):
-#         return points.loc[points['ID_point'] == point_id, 'geometry'].iloc[0].coords[0]
-#
-#     # Add new links
-#     for start_id, end_id in pairs_to_connect:
-#         start_coords = get_coords(start_id)
-#         end_coords = get_coords(end_id)
-#
-#         # Create a new LineString
-#         new_line = LineString([start_coords, end_coords])
-#
-#         # Create a new row with the desired attributes
-#         new_row = {
-#             'start': start_id,
-#             'end': end_id,
-#             'start_access': False,
-#             'end_access': False,
-#             'polygon_border': False,
-#             'capacity': 2200,
-#             'ffs': 100,
-#             'ID_edge': edges['ID_edge'].max() + 1,
-#             'geometry': new_line
-#         }
-#
-#         # Append the new row to edges_df
-#         #edges = edges.append(new_row, ignore_index=True)
-#         edges = gpd.GeoDataFrame(pd.concat([pd.DataFrame(edges), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
-#
-#     # Store the updated edges DataFrame
-#     edges.to_file(r"data/Network/processed/edges_with_attribute.gpkg")
-#     points.to_file(r"data/Network/processed/points_with_attribute.gpkg")
-
-
-
-
-
-
 def create_railway_services_AK2035():
     def add_new_line(stations, frequency, service_name, travel_times, edges, points):
         """
@@ -869,18 +823,18 @@ def create_railway_services_AK2035():
 
     # Add new lines to the network which are introduced with AK2035
     edges_ak2035=add_new_line(
-        stations=['Zürich Oerlikon', 'Uster', 'Wetzikon', 'Hinwil'],
+        stations=['Zürich HB', 'Zürich Oerlikon', 'Uster', 'Wetzikon', 'Hinwil'],
         frequency=2,
         service_name='G',
-        travel_times=[10, 6, 4],  # TT Oerlikon-Uster 1 min faster
+        travel_times=[5, 10, 6, 4],  # TT Oerlikon-Uster 1 min faster
         edges=edges_ak2035,
         points=points)
 
     edges_ak2035=add_new_line(
-        stations=['Zürich Stadelhofen', 'Stettbach', 'Dietlikon', 'Effretikon', 'Illnau', 'Fehraltorf', 'Pfäffikon ZH'],
+        stations=['Zürich HB', 'Zürich Stadelhofen', 'Stettbach', 'Dietlikon', 'Effretikon', 'Illnau', 'Fehraltorf', 'Pfäffikon ZH'],
         frequency=2,
         service_name='P',
-        travel_times=[5, 3, 6, 4, 5, 4],
+        travel_times=[3, 5, 3, 6, 4, 5, 4],
         edges=edges_ak2035,
         points=points)
     edges_ak2035 = edges_ak2035.fillna(0)
@@ -969,12 +923,8 @@ def network_in_corridor(poly):
     edges['tt'] = edges['tt'].astype(int)
 
     # Check if there are None values in the capacity and ffs columns
-    print(edges[edges['capacity'].isnull()])
-    print(edges[edges['tt'].isnull()])
 
     edges["ID_edge"] = edges.index
-
-    print(edges.head(10).to_string())
 
     points.to_file(r"data\Network\processed\points_with_attribute.gpkg")
     edges.to_file(r"data\Network\processed\edges_with_attribute.gpkg")
