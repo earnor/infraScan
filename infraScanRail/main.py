@@ -5,7 +5,7 @@ import time
 import shutil
 
 import pandas as pd
-
+import cost_parameters
 from data_import import *
 from catchment_pt import *
 from scenarios import *
@@ -19,6 +19,9 @@ import paths
 
 
 def infrascanrail():
+
+
+
     os.chdir(paths.MAIN)
     runtimes = {}
 
@@ -78,7 +81,7 @@ def infrascanrail():
     ##################################################################################
     # 3) Generate developments (new connections) 
 
-    generate_infra_development()
+    generate_infra_development(use_cache=settings.use_cache_developments)
 
     ##here insert other network generations and save them also as a GPGK at: data/Network/processed/developments/
 
@@ -86,14 +89,14 @@ def infrascanrail():
     st = time.time()
 
     # Compute the catchement area for the status quo and for all developments based on access time to train station
-    get_catchment(use_cache=settings.use_cache)
+    get_catchment(use_cache=settings.use_cache_pt_catchment)
 
     runtimes["Generate The Catchement based on the Bus network"] = time.time() - st
     st = time.time()
 
     # here would code be needed to get all catchements for the different developments, if access point are added
 
-    limits_variables = [2680600, 1227700, 2724300, 1265600]
+
 
     ##################################################################################
     ##################################################################################
@@ -104,7 +107,7 @@ def infrascanrail():
     ##################################################################################
     # 1) Define scenario based on cantonal predictions
 
-    generate_scenarios(limits_variables)
+    generate_scenarios()
     runtimes["Generate the scenarios"] = time.time() - st
     st = time.time()
 
@@ -180,11 +183,10 @@ def infrascanrail():
     ]
 
     # Analyze the Delta TT
-    final_result = analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od_nodes)
+    analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od_nodes)
 
     # Display the result
     print("\nFinal Travel Times and Delta Times:")
-    print(final_result)
 
     # osm_nw_to_raster(limits_variables)
     runtimes["Calculate Traveltimes for all OD_ for all developments"] = time.time() - st
@@ -222,17 +224,18 @@ def infrascanrail():
 
     # TTT for developments (trips in Peak hour * OD-Times) [in hour]
 
-    # Monetize travel time savings ()
+    #Monetize travel time savings ()
 
     # tt_optimization_status_quo()
     # check if flow are possible
-    """link_traffic_to_map()
+
+    link_traffic_to_map() #only makes a nice graph, not necessary for functioning of tool
     print('Flag: link_traffic_to_map is complete')
     # Run travel time optimization for infrastructure developments and all scenarios
-    tt_optimization_all_developments()
+    #tt_optimization_all_developments() #TODO: I suspect this is from highway part
     print('Flag: tt_optimization_all_developments is complete')
     # Monetize travel time savings
-    monetize_tts(VTTS=VTTS, duration=travel_time_duration)"""
+    monetize_tts(VTTS=cost_parameters.VTTS, duration=cost_parameters.tts_valuation_period)
 
     runtimes["Calculate the TTT Savings"] = time.time() - st
     st = time.time()
@@ -275,7 +278,7 @@ def infrascanrail():
     create_scenario_analysis_viewer(csv_file_path)
 
 
-def generate_scenarios(limits_variables):
+def generate_scenarios():
     # Import the predicted scenario defined by the canton of Zürich
     # Define the relative growth per scenario and district
     # The growth rates are stored in "data/temp/data_scenario_n.shp"
@@ -286,6 +289,7 @@ def generate_scenarios(limits_variables):
     # For each scenario, adjusts total growth and distributes it among municipalities with urban, equal, and rural biases.
     # Merges growth results with spatial boundaries to form a GeoDataFrame of growth projections for mapping.
     # Saves the resulting GeoDataFrame to a shapefile.
+    limits_variables = [2680600, 1227700, 2724300, 1265600]
     future_scenario_pop(n=3)
     future_scenario_empl(n=3)
     # Compute the predicted amount of population and employment in each raster cell (hectar) for each scenario
@@ -348,7 +352,10 @@ def visualize_results(clear_plot_directory=False):
     create_and_save_plots(results_raw)
 
 
-def generate_infra_development():
+def generate_infra_development(use_cache):
+    if use_cache:
+        print("use cache for developments")
+        return
     # Identifies railway service endpoints, creates a buffer around them, and selects nearby stations within a specified radius and count (n).
     # It then generates new edges between these points and saves the resulting datasets for further use.
     # Then it calculates Traveltime, using only the existing infrastructure

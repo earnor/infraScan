@@ -2440,6 +2440,28 @@ def GetVoronoiOD_multi():
 
 
 def link_traffic_to_map():
+    """
+    Links traffic flow data to a geospatial map representation and processes it for analysis. The
+    function imports traffic flow data and geospatial link data, integrates them, and outputs a file
+    with combined attributes for further use. It ensures data consistency by comparing lengths of
+    datasets and sorts the geospatial link data for correct assignment of traffic flow values.
+    The resulting dataset is saved in the specified file format, keeping only relevant columns such
+    as geometric and traffic flow information.
+
+    Raises:
+        FileNotFoundError: If the specified CSV or geopackage files are not found or improperly specified.
+
+    Imports:
+        - pandas: Used for handling the traffic flow dataset.
+        - geopandas: Used for handling geospatial data structures and operations.
+
+    Side Effects:
+        - Prints the first few rows of datasets for debugging or verification.
+        - Outputs a file containing the geospatial links enriched with traffic flow data.
+
+    File Output:
+        Generates a processed geopackage file at "data/Network/processed/edges_only_flow.gpkg".
+    """
     # Import travel flows from matrix to df, no index, set column name to flow
     # flow = pd.read_csv(r"data/traffic_flow/Xi_sum.csv", header=None, index_col=False)
     flow = pd.read_csv(r"data/traffic_flow/developments/D_i/Xi_sum_status_quo_20.csv", header=None, index_col=False)
@@ -3180,6 +3202,26 @@ def travel_flow_optimization(OD_matrix, points, edges, voronoi, dev, scen):
 
 
 def tt_optimization_all_developments():
+    """
+    Executes a travel time optimization analysis for various infrastructure developments and scenarios.
+
+    The function performs optimization for different developments within a traffic network under
+    specific scenarios represented by OD (Origin-Destination) matrices. It processes available
+    infrastructure changes (developments), filters necessary data, and integrates these developments
+    into the network. For each scenario, it computes travel time metrics utilizing the `travel_flow_optimization`
+    function. The final results are compiled and saved in CSV files for further analysis or reporting.
+
+    Raises:
+        FileNotFoundError: If specific required files or directories are not found.
+        KeyError: If expected columns or keys are missing from the DataFrame or GeoDataFrame during processing.
+        ValueError: If the provided data encounters format or content issues.
+
+    Attributes:
+        scenario (list[str]): List of traffic demand scenarios used in analysis, i.e., "low", "medium", and "high".
+        directory_path (str): Path to the directory containing OD matrix development CSV files.
+        developments (list[int]): List of infrastructure developments identified by unique integers extracted from filenames.
+        costs_travel_time (pd.DataFrame): DataFrame used to store travel time optimization results for each development and scenario.
+    """
     # Run travel time optimization for infrastructure developments and all scenarios
     # Scenario = OD matrix
     # Development = new network
@@ -3368,20 +3410,22 @@ def tt_optimization_status_quo():
 
 
 def monetize_tts(VTTS, duration):
+    """
+    Processes travel time data from multiple scenarios, monetizes the time differences
+    from a reference scenario, and outputs the calculated cost savings to a new file.
+
+    Args:
+        VTTS (float): Value of travel time savings expressed in CHF/h.
+        duration (int): Duration over which the travel time is monetized in years.
+
+    Raises:
+        FileNotFoundError: If the required CSV files are not found.
+        KeyError: If specified columns do not exist in the input data files.
+        ValueError: If input data cannot be converted to the required types.
+    """
     # Import total travel time for each scenario and each development
     tt_total = pd.read_csv(r"data/traffic_flow/travel_time.csv")
-    # tt_total_low = pd.read_csv(r"data/traffic_flow/travel_time_low.csv")
-    # tt_total["low"] = tt_total_low["low"]
-    # Some values are stored in list format, convert them to float
 
-    # convert columns object to float
-    # for i in [1,len(tt_total["low"])]:
-    #	tt_total["low"][i-1]=tt_total["low"][i-1].strip('][')
-    #	tt_total["medium"][i-1]=tt_total["medium"][i-1].strip('][')
-    #	tt_total["high"][i-1]=tt_total["high"][i-1].strip('][')
-    # tt_total["low"] = tt_total["low"].astype(float)
-    # tt_total["medium"] = tt_total["medium"].astype(float)
-    # tt_total["high"] = tt_total["high"].astype(float)
     tt_total["low"] = tt_total["low"].apply(lambda x: float(x[1:-1]))
     tt_total["medium"] = tt_total["medium"].apply(lambda x: float(x[1:-1]))
     tt_total["high"] = tt_total["high"].apply(lambda x: float(x[1:-1]))
@@ -3389,9 +3433,9 @@ def monetize_tts(VTTS, duration):
     # Import reference travel time for each scenario and current infrastructure
     tt_status_quo = pd.read_csv(fr"data/traffic_flow/travel_time_status_quo.csv")
 
-    # monetization factor of travel time (peak hour * CHF/h * 365 d/a * 30 a)
+    # monetization factor of travel time (peak hour * CHF/h * 365 d/a * 50 a)
     mon_factor = VTTS * 365 * duration
-    # mon_factor = VTTS * 2.5 * 250 * duration
+
     # Compute difference in travel time for each scenario and each development
     tt_total["tt_low"] = (tt_status_quo["low"].iloc[0] - tt_total["low"]) * mon_factor
     tt_total["tt_medium"] = (tt_status_quo["medium"].iloc[0] - tt_total["medium"]) * mon_factor
