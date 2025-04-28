@@ -4,6 +4,7 @@ import re
 import tkinter as tk
 import zipfile
 
+import fiona
 import geopandas
 import networkx
 import numpy
@@ -13,9 +14,14 @@ import rasterio
 import requests
 from matplotlib import pyplot, lines, patches
 from rasterio.features import geometry_mask
+from scipy.stats._qmc import LatinHypercube
 from shapely import LineString
-from shapely.ops import split
+from shapely.geometry import shape
+from shapely.ops import split, nearest_points
 from tqdm import tqdm
+
+from generate_infrastructure import create_lines
+from scoring import split_via_nodes, merge_lines
 
 
 def tunnel_bridges(df):
@@ -904,3 +910,458 @@ def line_scoring(lines_gdf,raster_location):
     lines_gdf['raster_sum'] = sums
 
     return lines_gdf
+
+
+def generated_access_points(extent,number):
+    e_min, n_min, e_max, n_max = extent.bounds
+    e = int(e_max - e_min)
+    n = int(n_max+100 - n_min+100)
+
+    N = number
+
+    engine = LatinHypercube(d=2, seed=42)  # seed=42
+    sample = engine.random(n=N)
+
+    n_sample = np.asarray(list(sample[:, 0]))
+    e_sample = np.asarray(list(sample[:, 1]))
+
+    n_gen = np.add(np.multiply(n_sample, n), int(n_min))
+    e_gen = np.add(np.multiply(e_sample, e), int(e_min))
+
+    idlist = list(range(0,N))
+    gen_df = pd.DataFrame({"ID": idlist, "XKOORD": e_gen,"YKOORD":n_gen})
+    gen_gdf = gpd.GeoDataFrame(gen_df,geometry=gpd.points_from_xy(gen_df.XKOORD,gen_df.YKOORD),crs="epsg:2056")
+
+    return gen_gdf
+
+
+def filter_access_points(gdf):
+    newgdf = gdf.copy()
+    print("All")
+    print(len(newgdf))
+    # idx = list(np.zeros(N))
+    """
+    print("Lake")
+    idx = get_idx_todrop(newgdf, r"data\landuse_landcover\landcover\lake\WB_GEWAESSERRAUM_F.shp")
+    newgdf.loc[:, "index"] = idx
+    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx,:]
+
+    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
+    newgdf.loc[:, "index"] = idx
+    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx,:]
+    print(len(newgdf))
+    """
+
+
+    """
+    # Perform a spatial join
+    FFF_gdf = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Fruchtfolgeflachen_-OGD\FFF_F.shp")
+    print(FFF_gdf.head().to_string())
+    joined = gpd.sjoin(newgdf, FFF_gdf, how="left", predicate="within")
+    print(joined.head().to_string())
+    # Filter points that are within polygons
+    newgdf = newgdf[~joined["index_right"].isna()]
+    print(newgdf.head().to_string())
+
+    #newgdf.loc[:, "index"] = idx
+    #print(newgdf.head().to_string())
+    #newgdf.drop(newgdf.loc[newgdf['index'] == 1],inplace=True)
+    print(len(newgdf))
+    """
+
+    print("Schutzanordnung Natur und Landschaft")
+    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\Schutzzonen\Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD\FNS_SCHUTZZONE_F.shp")
+    newgdf.loc[:, "index"] = idx
+    keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx, :]
+    print(len(newgdf))
+    """
+    print("Naturschutzobjekte")
+    idx = get_idx_todrop(newgdf, r"data\landuse_landcover\Schutzzonen\Inventar_der_Natur-_und_Landsch...uberkommunaler_Bedeutung_-OGD\INV80_NATURSCHUTZOBJEKTE_F.shp")
+    newgdf.loc[:, "index"] = idx
+    keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx, :]
+
+    idx = get_idx_todrop(newgdf, r"data\landuse_landcover\Schutzzonen\Inventar_der_Natur-_und_Landsch...uberkommunaler_Bedeutung_-OGD\INVERG_NATURSCHUTZOBJEKTE_F.shp")
+    newgdf.loc[:, "index"] = idx
+    keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx, :]
+    print(len(newgdf))
+    """
+
+    print("Forest")
+    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\Schutzzonen\Waldareal_-OGD\WALD_WALDAREAL_F.shp")
+    newgdf.loc[:, "index"] = idx
+    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx,:]
+    print(len(newgdf))
+
+    ###########################################################################3
+    """
+    print("Wetlands")
+    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
+    newgdf.loc[:, "index"] = idx
+    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx,:]
+    print(len(newgdf))
+    """
+
+    print("Network buffer")
+    network_gdf = gpd.read_file(r"data\Network\processed\edges.gpkg")
+    network_gdf['geometry'] = network_gdf['geometry'].buffer(1000)
+    network_gdf.to_file(r"data\temp\buffered_network.gpkg")
+
+    idx = get_idx_todrop(newgdf, r"data\temp\buffered_network.gpkg")
+    newgdf.loc[:, "index"] = idx
+    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx,:]
+    print(len(newgdf))
+    """
+    print("Residential area")
+    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\landcover\Quartieranalyse_-OGD\QUARTIERE_F.shp")
+    newgdf.loc[:, "index"] = idx
+    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx,:]
+    print(len(newgdf))
+    """
+
+    print("Protected zones")
+    # List to store indices to drop
+    indices_to_drop = []
+
+    with rasterio.open("data\landuse_landcover\processed\zone_no_infra\protected_area_corridor.tif") as src:
+        # Read the raster data once outside the loop
+        raster_data = src.read(1)
+
+        # Loop through each point in the GeoDataFrame
+        for index, row in newgdf.iterrows():
+            # Convert the point geometry to raster space
+            row_x, row_y = row['geometry'].x, row['geometry'].y
+            row_col, row_row = src.index(row_x, row_y)
+
+            if 0 <= row_col < raster_data.shape[0] and 0 <= row_row < raster_data.shape[1]:
+                # Read the value of the corresponding raster cell
+                value = raster_data[row_col, row_row]
+
+                # If the value is not NaN, mark the index for dropping
+                if not np.isnan(value):
+                    indices_to_drop.append(index)
+
+            else:
+                print(f"Point outside the polygon {row_x, row_y}")
+                indices_to_drop.append(index)
+
+        # Drop the points
+    newgdf = newgdf.drop(indices_to_drop)
+    print(len(newgdf))
+
+    print("FFF")
+    idx = get_idx_todrop(newgdf, r"data\landuse_landcover\Schutzzonen\Fruchtfolgeflachen_-OGD\FFF_F.shp")
+    newgdf.loc[:, "index"] = idx
+    keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
+    newgdf = newgdf.loc[keepidx, :]
+    print(len(newgdf))
+
+    newgdf = newgdf.rename(columns={"ID": "ID_new"})
+    newgdf = newgdf.to_crs("epsg:2056")
+
+    return newgdf
+
+
+def generate_highway_access_points(n,filter=False):
+    num_rand=n
+    random_gdf = generated_access_points(extent=innerboundary, number=num_rand)
+    if filter ==False:
+        random_gdf.to_file(r"data\Network\processed\generated_nodes.gpkg")
+    else:
+        filtered_gdf = filter_access_points(random_gdf)
+        filtered_gdf.to_file(r"data\Network\processed\generated_nodes.gpkg")
+    generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
+    # Import current points as dataframe and filter only access points (no intersection points)
+    current_points = gpd.read_file(r"data/Network/processed/points_corridor_attribute.gpkg")
+    current_access_points = current_points.loc[current_points["intersection"] == 0]
+
+
+
+    # Connect the generated points to the existing access points
+    # New lines are stored in "data/Network/processed/new_links.gpkg"
+    filtered_rand_temp = connect_points_to_network(generated_points, current_access_points)
+    filtered_rand_temp.to_file(r"data\Network\temp\filtered_nodes.gpkg")
+    link_new_access_points_to_highway(generated_points,filtered_rand_temp)
+    return
+
+
+def link_new_access_points_to_highway(generated_points,filtered_rand_temp):
+    nearest_gdf = create_nearest_gdf(filtered_rand_temp)
+    create_lines(generated_points, nearest_gdf)
+    return
+
+
+def get_idx_todrop(pt, filename):
+    #with fiona.open(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp") as input:
+    with fiona.open(filename, crs="epsg:2056") as input:
+        #pt = newgdf.copy() #for testing
+        idx = np.ones(len(pt))
+        for feat in input:
+            geom = shape(feat['geometry'])
+            temptempidx = pt.within(geom)
+            temptempidx = np.multiply(np.array(temptempidx), 1)
+            tempidx = [i ^ 1 for i in temptempidx]
+            #tempidx = np.multiply(np.array(tempidx),1)
+            idx = np.multiply(idx, tempidx)
+        intidx = [int(i) for i in idx]
+        newidx = [i ^ 1 for i in intidx]
+        #print(newidx)
+    return newidx
+
+
+def connect_points_to_network(new_point_gdf, network_gdf):
+    #unary_union = network_gdf.unary_union
+    #new_gdf=point_gdf.copy()
+    ###
+    #network_gdf = network_gdf.rename(columns={'geometry': 'geometry_current'})
+    #network_gdf = network_gdf.set_geometry("geometry_current")
+    network_gdf["geometry_current"] = network_gdf["geometry"]
+    network_gdf = network_gdf[['intersection', 'ID_point', 'name', 'end', 'cor_1',
+       'geometry', 'geometry_current']]
+    new_gdf = gpd.sjoin_nearest(new_point_gdf,network_gdf,distance_col="distances")[["ID_new","XKOORD","YKOORD","geometry","distances","geometry_current", "ID_point"]] # "geometry",
+    ###
+    #new_gdf['straight_line'] = new_gdf.apply(lambda row: LineString([row['geometry'], row['nearest_node']]), axis=1) #Create a linestring column
+    return new_gdf
+
+
+def create_nearest_gdf(filtered_rand_gdf):
+    nearest_gdf = filtered_rand_gdf[["ID_new", "ID_point", "geometry_current"]].set_geometry("geometry_current")
+    #nearest_gdf = nearest_gdf.rename({"ID":"PointID", "index_right":"NearestAccID"})
+    #nearest_df = filtered_rand_gdf.assign(PointID=filtered_rand_gdf["ID"],NearestAccID=filtered_rand_gdf["index_right"],x=filtered_rand_gdf["x"],y=filtered_rand_gdf["y"])
+    #nearest_gdf = gpd.GeoDataFrame(nearest_df,geometry=gpd.points_from_xy(nearest_df.x,nearest_df.y),crs="epsg:2056")
+    return nearest_gdf
+
+
+def delete_connections_back(file_path_updated, file_path_raw_edges, output_path):
+    """
+    Deletes rows from `updated_new_links` if connections in `raw_edges` lead back to existing nodes.
+
+    Parameters:
+        file_path_updated (str): Path to the GeoPackage file `updated_new_links`.
+        file_path_raw_edges (str): Path to the GeoPackage file `raw_edges`.
+        output_path (str): Path to save the updated file.
+
+    Returns:
+        None: Saves the updated file as a GeoPackage.
+    """
+    # Read the GeoPackage files
+    updated_new_links = gpd.read_file(file_path_updated)
+    raw_edges = gpd.read_file(file_path_raw_edges)
+
+    # List to keep track of rows to be removed
+    rows_to_remove = []
+
+    # Iterate through each row in `updated_new_links`
+    for idx, row in updated_new_links.iterrows():
+        from_id_new = row["from_ID_new"]
+        sline = row["Sline"]
+
+        # Filter `raw_edges` where Service matches and FromNode/ToNode corresponds to from_ID_NEW
+        matching_edges = raw_edges[
+            (raw_edges["Service"] == sline) &
+            ((raw_edges["FromNode"] == from_id_new) | (raw_edges["ToNode"] == from_id_new))
+        ]
+
+        # If matching edges are found, mark this row for removal
+        if not matching_edges.empty:
+            rows_to_remove.append(idx)
+
+    # Remove the marked rows
+    updated_new_links = updated_new_links.drop(index=rows_to_remove)
+
+    # Save the updated GeoDataFrame
+    updated_new_links.to_file(output_path, driver="GPKG")
+    print(f"Updated file saved to: {output_path}")
+    return updated_new_links
+
+
+def get_via(new_connections):
+    """
+    Calculate the list of nodes traversed for each new connection based on the existing connections.
+
+    Parameters:
+        new_connections (pd.DataFrame): New connections with columns 'from_ID_new' and 'to_ID'.
+
+    Returns:
+        pd.DataFrame: A DataFrame with the new connections and a list of nodes traversed for each connection,
+                      represented as a string or an integer (-99 if no path exists).
+    """
+    # File path for the construction cost data
+    file_path = r"data/Network/Rail-Service_Link_construction_cost.csv"
+
+    try:
+        # Load the data
+        df_construction_cost = pd.read_csv(file_path, sep=";", decimal=",", encoding="utf-8-sig")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"File not found: {file_path}")
+    except Exception as e:
+        raise RuntimeError(f"An error occurred while reading the file: {e}")
+
+    # Create an undirected graph
+    G = nx.Graph()
+
+    # Split the lines with a Via column
+    df_split = split_via_nodes(df_construction_cost)
+    df_split = merge_lines(df_split)
+
+    # Add edges to the graph
+    for _, row in df_split.iterrows():
+        G.add_edge(row['FromNode'], row['ToNode'], weight=row['TotalTravelTime'])
+
+    # Ensure nodes and connections IDs are integers
+    G = nx.relabel_nodes(G, {n: int(n) for n in G.nodes})
+    new_connections['from_ID_new'] = new_connections['from_ID_new'].astype(int)
+    new_connections['to_ID'] = new_connections['to_ID'].astype(int)
+
+    # Compute the routes
+    results = []
+    for _, row in new_connections.iterrows():
+        from_node = row['from_ID_new']
+        to_node = row['to_ID']
+
+        # Find the shortest path based on TravelTime
+        try:
+            path = nx.shortest_path(G, source=from_node, target=to_node, weight='weight')
+            # Convert path to a string
+            path_str = ",".join(map(str, path))  # Convert list to comma-separated string
+        except nx.NetworkXNoPath:
+            path_str = -99  # No path exists
+
+        # Add the result to the list
+        results.append({
+            'from_ID_new': from_node,
+            'to_ID': to_node,
+            'via_nodes': path_str  # Path as string or -99
+        })
+
+    # Convert results to a DataFrame
+    result_df = pd.DataFrame(results)
+
+    return result_df
+
+
+def update_network_with_new_links(network_railway_service_path, new_links_updated_path):
+    """
+    Add new links to the railway network, marking them as new and generating both directions.
+    Ensure FromStation and ToStation are mapped correctly using Rail_Node data.
+    """
+    # Load data
+    network_railway_service = gpd.read_file(network_railway_service_path)
+    new_links_updated = gpd.read_file(new_links_updated_path)
+    rail_node = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";", decimal=",", encoding="ISO-8859-1")
+
+    # Ensure Rail_Node has required columns
+    if not {"NR", "NAME"}.issubset(rail_node.columns):
+        raise ValueError("Rail_Node file must contain 'NR' and 'NAME' columns.")
+
+    # Map NR to NAME for station names
+    rail_node_mapping = rail_node.set_index("NR")["NAME"].to_dict()
+
+    # Populate required columns for new links
+    new_links_updated = new_links_updated.assign(
+        new_dev="Yes",
+        FromNode=new_links_updated["from_ID_new"],
+        ToNode=new_links_updated["to_ID"],
+        FromStation=new_links_updated["from_ID_new"].map(rail_node_mapping),
+        ToStation=new_links_updated["to_ID"].map(rail_node_mapping),
+        Direction="B",  # Default direction
+    )
+
+    # Ensure `new_dev` in the original network remains unchanged
+    network_railway_service["new_dev"] = network_railway_service.get("new_dev", "No")
+
+    # Assign additional columns directly
+    new_links_updated["TravelTime"] = new_links_updated["time"]
+    new_links_updated["InVehWait"] = 0
+    new_links_updated["Service"] = new_links_updated["Sline"]
+    new_links_updated["Frequency"] = 2
+    new_links_updated["TotalPeakCapacity"] = 690
+    new_links_updated["Capacity"] = 345
+
+    # Calculate the Via nodes for all the new connections
+    via_df = get_via(new_links_updated)
+
+    # Merge the 'via_nodes' from 'via_df' into 'new_links_updated' based on 'from_ID_new' and 'to_ID'
+    new_links_updated = pd.merge(
+        new_links_updated,
+        via_df[['from_ID_new', 'to_ID', 'via_nodes']],
+        left_on=['from_ID_new', 'to_ID'],
+        right_on=['from_ID_new', 'to_ID'],
+        how='left'
+    )
+
+    # Rename the 'via_nodes' column to 'Via' for clarity
+    new_links_updated.rename(columns={'via_nodes': 'Via'}, inplace=True)
+
+    # Ensure all Via values are strings or -99 for empty paths
+    new_links_updated['Via'] = new_links_updated['Via'].apply(
+        lambda x: '-99' if not x or x == [-99] else ','.join(map(str, x))
+    )
+
+    # Identify and report missing node mappings
+    missing_from_nodes = new_links_updated["FromNode"][new_links_updated["FromStation"].isna()].unique()
+    missing_to_nodes = new_links_updated["ToNode"][new_links_updated["ToStation"].isna()].unique()
+
+    if len(missing_from_nodes) > 0 or len(missing_to_nodes) > 0:
+        print("Warning: Missing mappings for the following nodes:")
+        if len(missing_from_nodes) > 0:
+            print(f"FromNodes: {missing_from_nodes}")
+        if len(missing_to_nodes) > 0:
+            print(f"ToNodes: {missing_to_nodes}")
+
+    # Generate rows for Direction A while preserving dev_id
+    direction_A = new_links_updated.copy()
+    direction_A["Direction"] = "A"
+    direction_A["FromNode"], direction_A["ToNode"] = direction_A["ToNode"], direction_A["FromNode"]
+    direction_A["FromStation"], direction_A["ToStation"] = direction_A["ToStation"], direction_A["FromStation"]
+
+    # Combine A and B directions, preserving the same dev_id
+    combined_new_links = pd.concat([new_links_updated, direction_A], ignore_index=True)
+
+    # Ensure GeoDataFrame compatibility
+    combined_new_links_gdf = gpd.GeoDataFrame(combined_new_links, geometry=new_links_updated.geometry)
+
+    # Standardize station names in FromStation and ToStation
+    standardize_station_names = {
+        "Wetzikon": "Wetzikon ZH",
+        # Add more mappings here if needed
+    }
+    new_links_updated["FromStation"] = new_links_updated["FromStation"].replace(standardize_station_names)
+    new_links_updated["ToStation"] = new_links_updated["ToStation"].replace(standardize_station_names)
+
+    combined_new_links["FromStation"] = combined_new_links["FromStation"].replace(standardize_station_names)
+    combined_new_links["ToStation"] = combined_new_links["ToStation"].replace(standardize_station_names)
+
+
+    # Combine with original network
+    combined_network = pd.concat([network_railway_service, combined_new_links_gdf], ignore_index=True)
+
+
+    return combined_network
+
+
+def nearest(row, geom_union, df2, geom1_col='geometry', geom2_col='geometry', src_column=None):
+    """Find the nearest point and return the corresponding value from specified column."""
+
+    # Find the geometry that is closest
+    #nearest = df2[geom2_col] == nearest_points(row[geom1_col], geom_union)[1]
+    nearest = df2[geom2_col] == nearest_points(geom_union,row[geom1_col])[1]
+
+    # Get the corresponding value from df2 (matching is based on the geometry)
+    value = df2[nearest][src_column].values()[0]
+
+    return value
+
+
+def near(point, network_gdf,pts):
+    # find the nearest point and return the corresponding Place value
+    nearest = network_gdf.geometry == nearest_points(point, pts)[1]
+    return network_gdf[nearest].geometry.values()[0]
