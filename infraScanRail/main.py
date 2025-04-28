@@ -228,38 +228,7 @@ def infrascanrail():
     output_path = "data/costs/traveltime_savings.csv"
     monetized_tt, scenario_list, dev_list = calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, cp.VTTS, cp.tts_valuation_period,
                                                   output_path)
-    # check if flow are possible
-    #scenario_list = [item.replace("od_matrix_combined_", "") for item in scenario_list]
-
-    index = pd.MultiIndex.from_product(
-        [dev_list, scenario_list, list(range(1,cp.duration+1))],
-        names=["development","scenario", "year"]
-    )
-
-    # Create an empty DataFrame with 'cost' and 'benefit' columns
-    costs_and_benefits_dev = pd.DataFrame(index=index, columns=["const_cost","maint_cost", "benefit"]) #contains benefits and costs for each year for every scenario and development
-
-    # Create a DataFrame with the yearly savings repeated for each year
-    yearly_benefits = pd.DataFrame(
-        index=pd.MultiIndex.from_product(
-            [dev_list, scenario_list, list(range(1, cp.duration + 1))],
-            names=["development", "scenario", "year"]
-        )
-    )
-
-    # Reshape monetized_tt to match the index structure
-    monetized_benefits = (
-        monetized_tt[["development", "scenario", "monetized_savings_yearly"]]
-        .set_index(["development", "scenario"])
-    )
-
-    # Use DataFrame.loc for efficient assignment
-    costs_and_benefits_dev.loc[:, "benefit"] = (
-        monetized_benefits
-        .loc[yearly_benefits.index.droplevel("year")]
-        .reindex(yearly_benefits.index, level=["development", "scenario"])
-        .values
-    )
+    
 
     file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
     construction_and_maintenance_costs = construction_costs(file_path=file_path,
@@ -270,9 +239,99 @@ def infrascanrail():
                                                             tunnel_maintenance_cost=cp.tunnel_maintenance_cost,
                                                             bridge_maintenance_cost=cp.bridge_maintenance_cost,
                                                             duration=cp.duration)
+    
+    # check if flow are possible
+    #scenario_list = [item.replace("od_matrix_combined_", "") for item in scenario_list]
+
+    # Create full index for the complete DataFrame
+    full_index = pd.MultiIndex.from_product(
+        [dev_list, scenario_list, list(range(1, cp.duration + 1))],
+        names=["development", "scenario", "year"]
+    )
+
+    # Create an index for costs (which only vary by development and year)
+    cost_index = pd.MultiIndex.from_product(
+        [dev_list, list(range(1, cp.duration + 1))],
+        names=["development", "year"]
+    )
+
+    # Create an empty DataFrame for costs with the development-year index
+    cost_df = pd.DataFrame(index=cost_index, columns=["const_cost", "maint_cost"])
+
+    # Fill the cost_df DataFrame with construction and maintenance costs
+    for _, row in construction_and_maintenance_costs.iterrows():
+        dev_name = row["Development"]
+        total_construction_cost = row["TotalConstructionCost"]
+        yearly_maintenance_cost = row["YearlyMaintenanceCost"]
+        
+        # Add construction cost only in year 1
+        cost_df.loc[(dev_name, 1), "const_cost"] = total_construction_cost
+        
+        # Set maintenance cost to 0 for year 1
+        cost_df.loc[(dev_name, 1), "maint_cost"] = 0
+        
+        # Add yearly maintenance costs for years 2 through duration
+        for year in range(2, cp.duration + 1):
+            cost_df.loc[(dev_name, year), "const_cost"] = 0  # No construction costs after year 1
+            cost_df.loc[(dev_name, year), "maint_cost"] = yearly_maintenance_cost
+    
+    # Create the full DataFrame with all columns
+    costs_and_benefits_dev = pd.DataFrame(index=full_index, columns=["const_cost", "maint_cost",
+                                                                     "benefit"])  # contains benefits and costs for each year for every scenario and development
+
+    # Convert monetized benefits directly to a dictionary for safer lookup
+    monetized_benefits_dict = monetized_tt.set_index(["development", "scenario"])["monetized_savings_yearly"].to_dict()
+    
+    # Safely assign benefits using loop to avoid index mismatches
+    for idx in costs_and_benefits_dev.index:
+        dev, scenario, year = idx
+        key = (dev, scenario)
+        if key in monetized_benefits_dict:
+            costs_and_benefits_dev.loc[idx, "benefit"] = monetized_benefits_dict[key]
+    
+    # Manual filling of costs for each scenario-development-year combination
+    # This approach ensures no index mismatches
+    print("Filling in costs for each development and year...")
+    for idx in costs_and_benefits_dev.index:
+        dev, scenario, year = idx
+        dev_year_key = (dev, year)
+        
+        if dev_year_key in cost_df.index:
+            # Assign construction cost for this development-year
+            costs_and_benefits_dev.loc[idx, "const_cost"] = cost_df.loc[dev_year_key, "const_cost"]
+            
+            # Assign maintenance cost for this development-year
+            costs_and_benefits_dev.loc[idx, "maint_cost"] = cost_df.loc[dev_year_key, "maint_cost"]
+    
+    # Print a summary of the data to verify values are present
+    print("\nSummary of costs and benefits:")
+    print(f"Number of entries: {len(costs_and_benefits_dev)}")
+    print(f"Entries with construction costs: {costs_and_benefits_dev['const_cost'].count()}")
+    print(f"Entries with maintenance costs: {costs_and_benefits_dev['maint_cost'].count()}")
+    print(f"Entries with benefits: {costs_and_benefits_dev['benefit'].count()}")
+    
+    # Save the costs and benefits DataFrame to CSV
+    costs_benefits_csv_path = "data/costs/costs_and_benefits_dev.csv"
+    print(f"Saving costs and benefits to {costs_benefits_csv_path}")
+    costs_and_benefits_dev.to_csv(costs_benefits_csv_path)
+    
+    # Save a reset_index version for easier analysis if needed
+    costs_benefits_flat_csv_path = "data/costs/costs_and_benefits_flat.csv"
+    costs_and_benefits_dev.reset_index().to_csv(costs_benefits_flat_csv_path, index=False)
+    print(f"Saving flattened version to {costs_benefits_flat_csv_path}")
+    
 
     #TODO: CREATE MULTIDIM DATAFRAME WITH COSTS/BENEFIT FOR DISCOUNTING
 
+    # Save the costs and benefits DataFrame to CSV
+    costs_benefits_csv_path = "data/costs/costs_and_benefits_dev.csv"
+    print(f"Saving costs and benefits to {costs_benefits_csv_path}")
+    costs_and_benefits_dev.to_csv(costs_benefits_csv_path)
+    
+    # Save a reset_index version for easier analysis if needed
+    costs_benefits_flat_csv_path = "data/costs/costs_and_benefits_flat.csv"
+    costs_and_benefits_dev.reset_index().to_csv(costs_benefits_flat_csv_path, index=False)
+    
 
 
     link_traffic_to_map() #only makes a nice graph, not necessary for functioning of tool
