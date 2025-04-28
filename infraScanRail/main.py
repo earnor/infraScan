@@ -5,7 +5,7 @@ import time
 import shutil
 
 import pandas as pd
-import cost_parameters
+import cost_parameters as cp
 from data_import import *
 from catchment_pt import *
 from scenarios import *
@@ -198,7 +198,16 @@ def infrascanrail():
     ##here a check for capacity could be added
 
     # Compute the construction costs for each development 
-    print(" -> Construction costs not computed at the moment")
+    file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
+
+    construction_and_maintenance_costs = construction_costs(file_path=file_path,
+                                                            cost_per_meter=cp.cost_per_meter,
+                                                            tunnel_cost_per_meter=cp.tunnel_cost_per_meter,
+                                                            bridge_cost_per_meter=cp.bridge_cost_per_meter,
+                                                            track_maintenance_cost=cp.track_maintenance_cost,
+                                                            tunnel_maintenance_cost=cp.tunnel_maintenance_cost,
+                                                            bridge_maintenance_cost=cp.bridge_maintenance_cost,
+                                                            duration=cp.duration)
 
     runtimes["Compute construction and maintenance costs"] = time.time() - st
     st = time.time()
@@ -212,31 +221,33 @@ def infrascanrail():
 
     GetCatchmentOD()
     combine_and_save_od_matrices(od_directory_dev, od_directory_stat_quo)
-    # compute_TT()
 
     # Compute the OD matrix for the infrastructure developments under all scenarios
     # GetVoronoiOD_multi()
 
     runtimes["Reallocate OD matrices to Catchement polygons"] = time.time() - st
     st = time.time()
-
-    # TTT for status quo (trips in Peak hour * OD-Times) [in hour]
+    # compute_TT()
+    df_access = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";", decimal=",", encoding="ISO-8859-1")
+    TTT_status_quo = calculate_total_travel_times(od_times_status_quo, od_directory_stat_quo, df_access)
 
     # TTT for developments (trips in Peak hour * OD-Times) [in hour]
+    TTT_developments = calculate_total_travel_times(od_times_dev, od_directory_dev, df_access)
 
-    #Monetize travel time savings ()
-
-    # tt_optimization_status_quo()
+    # Monetize travel time savings ()
+    output_path = "data/costs/traveltime_savings.csv"
+    monetized_tt = calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, cp.VTTS, cp.tts_valuation_period,
+                                                  output_path)
     # check if flow are possible
 
-    link_traffic_to_map() #only makes a nice graph, not necessary for functioning of tool
+    """link_traffic_to_map() #only makes a nice graph, not necessary for functioning of tool
     print('Flag: link_traffic_to_map is complete')
     # Run travel time optimization for infrastructure developments and all scenarios
     #tt_optimization_all_developments() #TODO: I suspect this is from highway part
     print('Flag: tt_optimization_all_developments is complete')
     # Monetize travel time savings
     monetize_tts(VTTS=cost_parameters.VTTS, duration=cost_parameters.tts_valuation_period)
-
+"""
     runtimes["Calculate the TTT Savings"] = time.time() - st
     st = time.time()
 

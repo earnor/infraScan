@@ -141,7 +141,6 @@ def read_development_files():
         list of pd.DataFrame: A list of DataFrames, each containing filtered data for a development.
     """
     development_dir = 'data/Network/processed/developments'
-
     # List to store filtered DataFrames for each development
     developments = []
 
