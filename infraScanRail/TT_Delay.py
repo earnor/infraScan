@@ -297,35 +297,38 @@ def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, durat
     results = []
 
     # Iterate over each development
-    for dev_name, scenarios in TTT_developments.items():
-        for scenario_name, dev_tt in scenarios.items():
+    for scenario_name, development in TTT_developments.items():
+        for dev_id, dev_tt in development.items():
             # Get the corresponding status quo travel time
-            status_quo_tt = TTT_status_quo.get(dev_name, {}).get(scenario_name, 0)
+            status_quo_tt = TTT_status_quo.get(scenario_name, {}).get(dev_id, 0)
 
             # Calculate travel time savings (negative if no savings), scaled to daily trips
             tt_savings_daily = (status_quo_tt - dev_tt) / tau  # Scale peak hour savings to daily trips
-
+            tt_savings_yearly = tt_savings_daily * 365 * VTTS
             # Monetize the travel time savings
             monetized_savings = tt_savings_daily * mon_factor
 
             # Append the results
             results.append({
-                "development": dev_name,
+                "development": dev_id,
                 "scenario": scenario_name,
                 "status_quo_tt": status_quo_tt,
                 "development_tt": dev_tt,
                 "tt_savings_daily": tt_savings_daily,
-                "monetized_savings": monetized_savings
+                "monetized_savings": monetized_savings,
+                "monetized_savings_yearly": tt_savings_yearly
             })
 
     # Convert results to a DataFrame
     results_df = pd.DataFrame(results)
+    scenario_list = sorted(results_df["scenario"].unique().tolist())
+    dev_list = sorted(results_df["development"].unique().tolist())
 
     # Save the results to CSV
     results_df.to_csv(output_path, index=False)
     print(f"Monetized travel time savings saved to: {output_path}")
 
-    return results_df
+    return results_df, scenario_list, dev_list
 
 
 def analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od_nodes):

@@ -197,17 +197,7 @@ def infrascanrail():
 
     ##here a check for capacity could be added
 
-    # Compute the construction costs for each development 
-    file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
-
-    construction_and_maintenance_costs = construction_costs(file_path=file_path,
-                                                            cost_per_meter=cp.cost_per_meter,
-                                                            tunnel_cost_per_meter=cp.tunnel_cost_per_meter,
-                                                            bridge_cost_per_meter=cp.bridge_cost_per_meter,
-                                                            track_maintenance_cost=cp.track_maintenance_cost,
-                                                            tunnel_maintenance_cost=cp.tunnel_maintenance_cost,
-                                                            bridge_maintenance_cost=cp.bridge_maintenance_cost,
-                                                            duration=cp.duration)
+    # Compute the construction costs for each development
 
     runtimes["Compute construction and maintenance costs"] = time.time() - st
     st = time.time()
@@ -236,18 +226,57 @@ def infrascanrail():
 
     # Monetize travel time savings ()
     output_path = "data/costs/traveltime_savings.csv"
-    monetized_tt = calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, cp.VTTS, cp.tts_valuation_period,
+    monetized_tt, scenario_list, dev_list = calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, cp.VTTS, cp.tts_valuation_period,
                                                   output_path)
     # check if flow are possible
+    #scenario_list = [item.replace("od_matrix_combined_", "") for item in scenario_list]
 
-    """link_traffic_to_map() #only makes a nice graph, not necessary for functioning of tool
-    print('Flag: link_traffic_to_map is complete')
-    # Run travel time optimization for infrastructure developments and all scenarios
-    #tt_optimization_all_developments() #TODO: I suspect this is from highway part
-    print('Flag: tt_optimization_all_developments is complete')
-    # Monetize travel time savings
-    monetize_tts(VTTS=cost_parameters.VTTS, duration=cost_parameters.tts_valuation_period)
-"""
+    index = pd.MultiIndex.from_product(
+        [dev_list, scenario_list, list(range(1,cp.duration+1))],
+        names=["development","scenario", "year"]
+    )
+
+    # Create an empty DataFrame with 'cost' and 'benefit' columns
+    costs_and_benefits_dev = pd.DataFrame(index=index, columns=["const_cost","maint_cost", "benefit"]) #contains benefits and costs for each year for every scenario and development
+
+    # Create a DataFrame with the yearly savings repeated for each year
+    yearly_benefits = pd.DataFrame(
+        index=pd.MultiIndex.from_product(
+            [dev_list, scenario_list, list(range(1, cp.duration + 1))],
+            names=["development", "scenario", "year"]
+        )
+    )
+
+    # Reshape monetized_tt to match the index structure
+    monetized_benefits = (
+        monetized_tt[["development", "scenario", "monetized_savings_yearly"]]
+        .set_index(["development", "scenario"])
+    )
+
+    # Use DataFrame.loc for efficient assignment
+    costs_and_benefits_dev.loc[:, "benefit"] = (
+        monetized_benefits
+        .loc[yearly_benefits.index.droplevel("year")]
+        .reindex(yearly_benefits.index, level=["development", "scenario"])
+        .values
+    )
+
+    file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
+    construction_and_maintenance_costs = construction_costs(file_path=file_path,
+                                                            cost_per_meter=cp.cost_per_meter,
+                                                            tunnel_cost_per_meter=cp.tunnel_cost_per_meter,
+                                                            bridge_cost_per_meter=cp.bridge_cost_per_meter,
+                                                            track_maintenance_cost=cp.track_maintenance_cost,
+                                                            tunnel_maintenance_cost=cp.tunnel_maintenance_cost,
+                                                            bridge_maintenance_cost=cp.bridge_maintenance_cost,
+                                                            duration=cp.duration)
+
+    #TODO: CREATE MULTIDIM DATAFRAME WITH COSTS/BENEFIT FOR DISCOUNTING
+
+
+
+    link_traffic_to_map() #only makes a nice graph, not necessary for functioning of tool
+
     runtimes["Calculate the TTT Savings"] = time.time() - st
     st = time.time()
 
@@ -385,6 +414,7 @@ def generate_infra_development(use_cache):
     calculate_new_service_time()
 
     create_network_foreach_dev()
+
 
 
 def create_focus_area():

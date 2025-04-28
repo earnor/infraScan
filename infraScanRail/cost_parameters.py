@@ -7,4 +7,4 @@ track_maintenance_cost = 132  # CHF per meter per track per year
 tunnel_maintenance_cost = 132  # CHF/m/a
 bridge_maintenance_cost = 368.8  # CHF/m/a
 duration = 50  # 50 years
-tts_valuation_period = 50
+tts_valuation_period = duration

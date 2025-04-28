@@ -312,7 +312,8 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
         development_costs.append({
             "Development": f"Development_{i+1}",
             "TotalConstructionCost": total_construction_cost,
-            "TotalMaintenanceCost": total_maintenance_cost
+            "TotalMaintenanceCost": total_maintenance_cost,
+            "YearlyMaintenanceCost": total_maintenance_cost / duration
         })
 
         # Update the base construction cost data for the next iteration
