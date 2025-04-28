@@ -153,7 +153,7 @@ def infrascanrail():
     directories_dev = [path.replace("\\", "/") for path in directories_dev]
 
     G_developments = create_graphs_from_directories(directories_dev)
-    od_times_dev = calculate_od_pairs_with_times_by_graph(G_developments)
+    od_times_dev = calculate_od_pairs_with_times_by_graph(G_developments)   #OD-time for each development
 
     # Example usage Test1 for development 1007 (New Link Uster-Pfäffikon)
     origin_station = "Uster"
