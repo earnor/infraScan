@@ -1,8 +1,8 @@
-Initialize variables: 5.5609917640686035
-Import land use and land cover data: 3.967613935470581
-Import network data: 0.061328887939453125
-Preprocess the network: 18.69242000579834
-Generate infrastructure developments: 65.39724111557007
-Generate The Catchement based on the Bus network: 98.94571185112
-Generate the scenarios: 20.65918731689453
-Calculate Traveltimes for all OD_ for all developments: 37.009299993515015
+Initialize variables: 0.24762630462646484
+Import land use and land cover data: 0.2615957260131836
+Import network data: 0.01527857780456543
+Preprocess the network: 1.3814198970794678
+Generate infrastructure developments: 42.67466974258423
+Generate The Catchement based on the Bus network: 105.74517178535461
+Generate the scenarios: 11.784557104110718
+Calculate Traveltimes for all OD_ for all developments: 55.9609100818634
