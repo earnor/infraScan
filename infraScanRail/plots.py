@@ -7,6 +7,7 @@ import pandas as pd
 
 # Geospatial Libraries
 import geopandas as gpd
+import seaborn
 from shapely.geometry import Point, LineString, box
 from shapely import make_valid
 # Raster Data Libraries
@@ -29,7 +30,7 @@ import seaborn as sns
 import contextily as ctx
 import contextily as cx
 from geo_northarrow import add_north_arrow
-from matplotlib import patches as mpatches
+from matplotlib import patches as mpatches, pyplot
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.interpolate import griddata
 import matplotlib.lines as mlines
@@ -2125,8 +2126,84 @@ def plot_catchment_and_distributions(
     print(f"Plots saved to {output_path}")
 
 
+def plot_costs_benefits_example(cost_benefit_df):
+    """
+    Create a scientific-looking bar chart of costs and benefits over years
+    for the development with the highest benefit in year 1.
 
+    Args:
+        cost_benefit_df: DataFrame with discounted costs and benefits
+    """
+    # Find development with highest benefit in year 1
+    year1_benefits = cost_benefit_df.xs(1, level='year')
+    max_benefit_dev = year1_benefits.groupby('development')['benefit'].mean().idxmax()
 
+    # Get data for the selected development
+    dev_data = cost_benefit_df.xs(max_benefit_dev, level='development')
 
+    # Calculate mean values across scenarios for each year
+    plot_data = dev_data.groupby('year').mean()
 
+    # Create a figure with two subplots sharing the x-axis
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True, 
+                                   gridspec_kw={'height_ratios': [2, 1], 'hspace': 0.1})
 
+    # Set style for scientific plot
+    sns.set_style('whitegrid')
+    plt.rcParams['font.family'] = 'serif'
+
+    width = 0.8
+
+    # Top subplot for costs (using appropriate scale)
+    # Plot stacked bars for costs
+    costs_bars1 = ax1.bar(plot_data.index, plot_data['const_cost'], width,
+            label='Construction Costs', color='#1f77b4', alpha=0.8)
+    costs_bars2 = ax1.bar(plot_data.index, plot_data['maint_cost'], width,
+            bottom=plot_data['const_cost'], label='Maintenance Costs',
+            color='#ff7f0e', alpha=0.8)
+    
+    # Customize top subplot
+    ax1.set_ylabel('Costs (CHF)', fontsize=12)
+    ax1.set_title(f'Discounted Costs and Benefits Over Time\nDevelopment: {max_benefit_dev}',
+             fontsize=14, pad=20)
+    ax1.legend(loc='upper right', frameon=True, edgecolor='black')
+    ax1.grid(True, which="both", ls="-", alpha=0.2)
+    ax1.set_yscale('log')
+    
+    # If zero or negative values exist, handle them for log scale
+    min_positive_cost = plot_data[['const_cost', 'maint_cost']].stack().replace(0, float('nan')).min()
+    ax1.set_ylim(bottom=min_positive_cost * 0.1 if pd.notna(min_positive_cost) else 1)
+    
+    # Bottom subplot for benefits (using linear scale)
+    benefit_bars = ax2.bar(plot_data.index, plot_data['benefit'], width,
+                label='Benefits', color='#2ca02c', alpha=0.8)
+    
+    # Customize bottom subplot
+    ax2.set_xlabel('Year', fontsize=12)
+    ax2.set_ylabel('Benefits (CHF)', fontsize=12)
+    ax2.legend(loc='upper right', frameon=True, edgecolor='black')
+    ax2.grid(True, which="both", ls="-", alpha=0.2)
+    
+    # Auto-adjust y-limits for benefits based on data
+    if plot_data['benefit'].max() > 0:
+        ax2.set_ylim(bottom=0, top=plot_data['benefit'].max() * 1.2)
+    
+    # Adjust layout to prevent label cutoff
+    plt.tight_layout()
+    
+    # Ensure plots directory exists
+    os.makedirs('plots', exist_ok=True)
+    
+    # Create filename with development name
+    filename = f'plots/discounted_costs_benefits_{max_benefit_dev}.png'
+    
+    # Delete the file if it already exists
+    if os.path.exists(filename):
+        os.remove(filename)
+        print(f"Deleted existing file: {filename}")
+
+    # Save the plot
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Plot saved for development {max_benefit_dev} as {filename}")

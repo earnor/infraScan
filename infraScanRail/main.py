@@ -1,17 +1,12 @@
 # import packages
-import os
-import math
 import time
 import shutil
 
-import pandas as pd
-import cost_parameters as cp
-from data_import import *
 from catchment_pt import *
 from scenarios import *
-from plots import *
 from generate_infrastructure import *
 from scoring import *
+from scoring import create_cost_and_benefit_df
 from traveltime_delay import *
 from TT_Delay import *
 from display_results import *
@@ -128,65 +123,7 @@ def infrascanrail():
     # Returns the graph (nx.DiGraph) and a DataFrame with OD travel data including adjusted travel times and geometries.
 
     # network of status quo
-    if settings.rail_network == 'current':
-        network_status_quo = [r"data/temp/network_railway-services.gpkg"]
-    elif settings.rail_network == 'AK_2035':
-        network_status_quo = [paths.RAIL_SERVICES_AK2035_PATH]
-    G_status_quo = create_graphs_from_directories(network_status_quo)
-    od_times_status_quo = calculate_od_pairs_with_times_by_graph(G_status_quo)
-
-    # Example usage Test1
-    origin_station = "Uster"
-    destination_station = "Zürich HB"
-    find_fastest_path(G_status_quo[0], origin_station, destination_station)
-    # Example usage Test2
-    origin_station = "Uster"
-    destination_station = "Pfäffikon ZH"
-    find_fastest_path(G_status_quo[0], origin_station, destination_station)
-
-    # networks with all developments
-
-    # get the paths of all developments
-    directory_path = r"data/Network/processed/developments"  # Define the target directory
-    directories_dev = [os.path.join(directory_path, filename)
-                       for filename in os.listdir(directory_path) if filename.endswith(".gpkg")]
-    directories_dev = [path.replace("\\", "/") for path in directories_dev]
-
-    G_developments = create_graphs_from_directories(directories_dev)
-    od_times_dev = calculate_od_pairs_with_times_by_graph(G_developments)   #OD-time for each development
-
-    # Example usage Test1 for development 1007 (New Link Uster-Pfäffikon)
-    origin_station = "Uster"
-    destination_station = "Zürich HB"
-    find_fastest_path(G_developments[5], origin_station, destination_station)
-
-    # Example usage Test2
-    origin_station = "Uster"
-    destination_station = "Pfäffikon ZH"
-    find_fastest_path(G_developments[5], origin_station, destination_station)
-
-    # Example usage Development 8 (Wetikon to Hinwil (S3))
-    origin_station = "Kempten"
-    destination_station = "Hinwil"
-    find_fastest_path(G_status_quo[0], origin_station, destination_station)
-    # Example usage Test2
-    origin_station = "Kempten"
-    destination_station = "Hinwil"
-    find_fastest_path(G_developments[7], origin_station, destination_station)
-
-    selected_indices = [0, 1, 2, 3, 4, 5, 6, 7]  # Indices of selected developments
-    od_nodes = [
-        'main_Rüti ZH', 'main_Nänikon-Greifensee', 'main_Uster', 'main_Wetzikon ZH',
-        'main_Zürich Altstetten', 'main_Schwerzenbach ZH', 'main_Fehraltorf',
-        'main_Bubikon', 'main_Zürich HB', 'main_Kempten', 'main_Pfäffikon ZH',
-        'main_Zürich Oerlikon', 'main_Zürich Stadelhofen', 'main_Hinwil', 'main_Aathal'
-    ]
-
-    # Analyze the Delta TT
-    analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od_nodes)
-
-    # Display the result
-    print("\nFinal Travel Times and Delta Times:")
+    od_times_dev, od_times_status_quo = create_travel_time_graphs(settings.rail_network)
 
     # osm_nw_to_raster(limits_variables)
     runtimes["Calculate Traveltimes for all OD_ for all developments"] = time.time() - st
@@ -243,111 +180,19 @@ def infrascanrail():
     # check if flow are possible
     #scenario_list = [item.replace("od_matrix_combined_", "") for item in scenario_list]
 
-    # Create full index for the complete DataFrame
-    full_index = pd.MultiIndex.from_product(
-        [dev_list, scenario_list, list(range(1, cp.duration + 1))],
-        names=["development", "scenario", "year"]
-    )
+    cost_and_benefits_dev = create_cost_and_benefit_df(construction_and_maintenance_costs, dev_list, monetized_tt, scenario_list)
+    costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=0.03)
+    discounted_costs_benefits_csv_path = "data/costs/costs_and_benefits_dev_discounted.csv"
+    costs_and_benefits_dev_discounted.to_csv(discounted_costs_benefits_csv_path)
 
-    # Create an index for costs (which only vary by development and year)
-    cost_index = pd.MultiIndex.from_product(
-        [dev_list, list(range(1, cp.duration + 1))],
-        names=["development", "year"]
-    )
-
-    # Create an empty DataFrame for costs with the development-year index
-    cost_df = pd.DataFrame(index=cost_index, columns=["const_cost", "maint_cost"])
-
-    # Fill the cost_df DataFrame with construction and maintenance costs
-    for _, row in construction_and_maintenance_costs.iterrows():
-        dev_name = row["Development"]
-        total_construction_cost = row["TotalConstructionCost"]
-        yearly_maintenance_cost = row["YearlyMaintenanceCost"]
-        
-        # Add construction cost only in year 1
-        cost_df.loc[(dev_name, 1), "const_cost"] = total_construction_cost
-        
-        # Set maintenance cost to 0 for year 1
-        cost_df.loc[(dev_name, 1), "maint_cost"] = 0
-        
-        # Add yearly maintenance costs for years 2 through duration
-        for year in range(2, cp.duration + 1):
-            cost_df.loc[(dev_name, year), "const_cost"] = 0  # No construction costs after year 1
-            cost_df.loc[(dev_name, year), "maint_cost"] = yearly_maintenance_cost
-    
-    # Create the full DataFrame with all columns
-    costs_and_benefits_dev = pd.DataFrame(index=full_index, columns=["const_cost", "maint_cost",
-                                                                     "benefit"])  # contains benefits and costs for each year for every scenario and development
-
-    # Convert monetized benefits directly to a dictionary for safer lookup
-    monetized_benefits_dict = monetized_tt.set_index(["development", "scenario"])["monetized_savings_yearly"].to_dict()
-    
-    # Safely assign benefits using loop to avoid index mismatches
-    for idx in costs_and_benefits_dev.index:
-        dev, scenario, year = idx
-        key = (dev, scenario)
-        if key in monetized_benefits_dict:
-            costs_and_benefits_dev.loc[idx, "benefit"] = monetized_benefits_dict[key]
-    
-    # Manual filling of costs for each scenario-development-year combination
-    # This approach ensures no index mismatches
-    print("Filling in costs for each development and year...")
-    for idx in costs_and_benefits_dev.index:
-        dev, scenario, year = idx
-        dev_year_key = (dev, year)
-        
-        if dev_year_key in cost_df.index:
-            # Assign construction cost for this development-year
-            costs_and_benefits_dev.loc[idx, "const_cost"] = cost_df.loc[dev_year_key, "const_cost"]
-            
-            # Assign maintenance cost for this development-year
-            costs_and_benefits_dev.loc[idx, "maint_cost"] = cost_df.loc[dev_year_key, "maint_cost"]
-    
-    # Print a summary of the data to verify values are present
-    print("\nSummary of costs and benefits:")
-    print(f"Number of entries: {len(costs_and_benefits_dev)}")
-    print(f"Entries with construction costs: {costs_and_benefits_dev['const_cost'].count()}")
-    print(f"Entries with maintenance costs: {costs_and_benefits_dev['maint_cost'].count()}")
-    print(f"Entries with benefits: {costs_and_benefits_dev['benefit'].count()}")
-    
-    # Save the costs and benefits DataFrame to CSV
-    costs_benefits_csv_path = "data/costs/costs_and_benefits_dev.csv"
-    print(f"Saving costs and benefits to {costs_benefits_csv_path}")
-    costs_and_benefits_dev.to_csv(costs_benefits_csv_path)
-    
-    # Save a reset_index version for easier analysis if needed
-    costs_benefits_flat_csv_path = "data/costs/costs_and_benefits_flat.csv"
-    costs_and_benefits_dev.reset_index().to_csv(costs_benefits_flat_csv_path, index=False)
-    print(f"Saving flattened version to {costs_benefits_flat_csv_path}")
-    
-
-    #TODO: CREATE MULTIDIM DATAFRAME WITH COSTS/BENEFIT FOR DISCOUNTING
-
-    # Save the costs and benefits DataFrame to CSV
-    costs_benefits_csv_path = "data/costs/costs_and_benefits_dev.csv"
-    print(f"Saving costs and benefits to {costs_benefits_csv_path}")
-    costs_and_benefits_dev.to_csv(costs_benefits_csv_path)
-    
-    # Save a reset_index version for easier analysis if needed
-    costs_benefits_flat_csv_path = "data/costs/costs_and_benefits_flat.csv"
-    costs_and_benefits_dev.reset_index().to_csv(costs_benefits_flat_csv_path, index=False)
-    
-
+    plot_costs_benefits_example(costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
 
     link_traffic_to_map() #only makes a nice graph, not necessary for functioning of tool
 
     runtimes["Calculate the TTT Savings"] = time.time() - st
     st = time.time()
 
-    ##################################################################################
-    # Aggregate the single cost elements to one dataframe
-    # New dataframe is stored in "data/costs/total_costs.gpkg"
-    # New dataframe also stored in "data/costs/total_costs.csv"
-    # Convert all costs in million CHF
-    print(" -> Aggregate costs")
-
-    aggregate_costs()
-    transform_and_reshape_cost_df()
+    rearange_costs()
 
     runtimes["Aggregate costs"] = time.time() - st
 
@@ -363,18 +208,77 @@ def infrascanrail():
 
     visualize_results(clear_plot_directory=True)
 
-    '''
-    plot_developments_and_table_for_scenarios(
-    osm_file="data/osm_map.gpkg",  # Use the converted GeoPackage file
-    input_dir="data/costs",
-    output_dir="data/plots")
-    '''
+
 
     # Run the display results function to launch the GUI
     # Specify the path to your CSV file
     csv_file_path = "data/costs/total_costs_with_geometry.csv"
-    # Call the function to ccreate_scenario_analysis_viewerreate and display the GUI
+    # Call the function to create_scenario_analysis_viewerreate and display the GUI
     create_scenario_analysis_viewer(csv_file_path)
+
+
+def create_travel_time_graphs(network_selection):
+    if network_selection == 'current':
+        network_status_quo = [r"data/temp/network_railway-services.gpkg"]
+    elif network_selection == 'AK_2035':
+        network_status_quo = [paths.RAIL_SERVICES_AK2035_PATH]
+    G_status_quo = create_graphs_from_directories(network_status_quo)
+    od_times_status_quo = calculate_od_pairs_with_times_by_graph(G_status_quo)
+    # Example usage Test1
+    origin_station = "Uster"
+    destination_station = "Zürich HB"
+    find_fastest_path(G_status_quo[0], origin_station, destination_station)
+    # Example usage Test2
+    origin_station = "Uster"
+    destination_station = "Pfäffikon ZH"
+    find_fastest_path(G_status_quo[0], origin_station, destination_station)
+    # networks with all developments
+    # get the paths of all developments
+    directory_path = r"data/Network/processed/developments"  # Define the target directory
+    directories_dev = [os.path.join(directory_path, filename)
+                       for filename in os.listdir(directory_path) if filename.endswith(".gpkg")]
+    directories_dev = [path.replace("\\", "/") for path in directories_dev]
+    G_developments = create_graphs_from_directories(directories_dev)
+    od_times_dev = calculate_od_pairs_with_times_by_graph(G_developments)  # OD-time for each development
+    # Example usage Test1 for development 1007 (New Link Uster-Pfäffikon)
+    origin_station = "Uster"
+    destination_station = "Zürich HB"
+    find_fastest_path(G_developments[5], origin_station, destination_station)
+    # Example usage Test2
+    origin_station = "Uster"
+    destination_station = "Pfäffikon ZH"
+    find_fastest_path(G_developments[5], origin_station, destination_station)
+    # Example usage Development 8 (Wetikon to Hinwil (S3))
+    origin_station = "Kempten"
+    destination_station = "Hinwil"
+    find_fastest_path(G_status_quo[0], origin_station, destination_station)
+    # Example usage Test2
+    origin_station = "Kempten"
+    destination_station = "Hinwil"
+    find_fastest_path(G_developments[7], origin_station, destination_station)
+    selected_indices = [0, 1, 2, 3, 4, 5, 6, 7]  # Indices of selected developments
+    od_nodes = [
+        'main_Rüti ZH', 'main_Nänikon-Greifensee', 'main_Uster', 'main_Wetzikon ZH',
+        'main_Zürich Altstetten', 'main_Schwerzenbach ZH', 'main_Fehraltorf',
+        'main_Bubikon', 'main_Zürich HB', 'main_Kempten', 'main_Pfäffikon ZH',
+        'main_Zürich Oerlikon', 'main_Zürich Stadelhofen', 'main_Hinwil', 'main_Aathal'
+    ]
+    # Analyze the Delta TT
+    analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od_nodes) #output of this is not used!
+    # Display the result
+    print("\nFinal Travel Times and Delta Times:")
+    return od_times_dev, od_times_status_quo
+
+
+def rearange_costs():
+    ##################################################################################
+    # Aggregate the single cost elements to one dataframe
+    # New dataframe is stored in "data/costs/total_costs.gpkg"
+    # New dataframe also stored in "data/costs/total_costs.csv"
+    # Convert all costs in million CHF
+    print(" -> Aggregate costs")
+    aggregate_costs()
+    transform_and_reshape_cost_df()
 
 
 def generate_scenarios():
@@ -449,6 +353,13 @@ def visualize_results(clear_plot_directory=False):
     # Plots are saved in the 'plots' directory.
     results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
     create_and_save_plots(results_raw)
+
+    '''
+    plot_developments_and_table_for_scenarios(
+    osm_file="data/osm_map.gpkg",  # Use the converted GeoPackage file
+    input_dir="data/costs",
+    output_dir="data/plots")
+    '''
 
 
 def generate_infra_development(use_cache):
