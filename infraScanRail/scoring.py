@@ -330,25 +330,16 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
     return development_costs_df
 
 
-def aggregate_costs():
+def aggregate_costs(cost_and_benefits):
     """
     Aggregate and calculate total costs for each development and scenario.
+    Uses the cost_and_benefits DataFrame to sum up construction costs,
+    maintenance costs, and benefits over the entire 50-year period.
 
     Parameters:
-        construction_path (str): Path to the construction costs GeoPackage.
-        maintenance_path (str): Path to the maintenance costs GeoPackage.
-        access_time_path (str): Path to the local accessibility CSV.
-        travel_time_path (str): Path to the travel time savings CSV.
-        externalities_path (str): Path to the externalities GeoPackage.
-        noise_path (str): Path to the noise costs GeoPackage.
-        nodes_path (str): Path to the generated nodes GeoPackage.
-        total_costs_csv_path (str): Path to save the total costs CSV.
-        total_costs_gpkg_path (str): Path to save the total costs GeoPackage.
+        cost_and_benefits (pd.DataFrame): DataFrame with costs and benefits for each development,
+                                          scenario, and year, with MultiIndex (development, scenario, year).
     """
-
-    # Paths for components
-    travel_time_path = "data/costs/traveltime_savings.csv"
-    construction_maintenance_cost = "data/costs/construction_cost.csv"
     total_costs_csv_path = "data/costs/total_costs_raw.csv"
 
     # Define scenarios for population and employment
@@ -362,12 +353,22 @@ def aggregate_costs():
         "empl_urb_1", "empl_equ_1", "empl_rur_1",
         "empl_urb_2", "empl_equ_2", "empl_rur_2"]
 
-    # Load travel time savings
-    c_travel_time = pd.read_csv(travel_time_path)
-    c_construction =  pd.read_csv(construction_maintenance_cost)
+    # Group by development and scenario, summing costs and benefits across all years
+    aggregated = cost_and_benefits.groupby(['development', 'scenario']).agg({
+        'const_cost': 'sum',
+        'maint_cost': 'sum',
+        'benefit': 'sum'
+    }).reset_index()
 
-    # Initialize total costs with zeros for missing components
-    total_costs = c_travel_time.rename(columns={'development': 'ID_new'})
+    # Load travel time savings for compatibility with existing structure
+    # This provides the necessary structure for the output DataFrame
+    travel_time_path = "data/costs/traveltime_savings.csv"
+    c_travel_time = pd.read_csv(travel_time_path)
+    total_costs = c_travel_time
+    # Initialize total costs DataFrame with the existing structure
+    # but using the aggregated values from cost_and_benefits
+    
+    # Initialize columns with zeros
     total_costs["construction_cost"] = 0
     total_costs["maintenance"] = 0
     total_costs["climate_cost"] = 0
@@ -376,30 +377,21 @@ def aggregate_costs():
     total_costs["noise_s1"] = 0
     total_costs["noise_s2"] = 0
     total_costs["noise_s3"] = 0
+    
+    # Update the construction and maintenance costs from the aggregated data
+    for _, row in aggregated.iterrows():
+        dev = row['development']
+        scenario = row['scenario']
+        mask = (total_costs['development'] == dev) & (total_costs['scenario'] == scenario)
+        
+        if any(mask):
+            total_costs.loc[mask, 'construction_cost'] = row['const_cost']
+            total_costs.loc[mask, 'maintenance'] = row['maint_cost']
+            # Use negative of the benefit as monetized_savings
+            # Assuming benefits are positive when they save money, so costs should be negative
+            total_costs.loc[mask, 'monetized_savings'] = row['benefit']
 
-    # Merge TotalCost from c_construction into total_costs
-    c_construction = c_construction.rename(columns={"Development": "scenario"})
-    total_costs = total_costs.merge(
-        c_construction[["scenario", "TotalConstructionCost"]],
-        how="left",
-        on="scenario"
-    )
-
-    # Update construction_cost with TotalConstructionCost values
-    total_costs["construction_cost"] = total_costs["TotalConstructionCost"].fillna(0)
-
-    # Merge TotalCost from c_construction (maintenance) into total_costs
-    c_construction = c_construction.rename(columns={"Development": "scenario"})
-    total_costs = total_costs.merge(
-        c_construction[["scenario", "TotalMaintenanceCost"]],
-        how="left",
-        on="scenario"
-    )
-
-    # Update construction_cost with TotalMaintenanceCost values
-    total_costs["maintenance"] = total_costs["TotalMaintenanceCost"].fillna(0)
-
-    # Dynamically compute costs for each scenario
+    # Dynamically compute total costs for each scenario
     for pop_scenario, empl_scenario in zip(pop_scenarios, empl_scenarios):
         total_costs[f"total_{pop_scenario}"] = (
             total_costs["construction_cost"] +
@@ -409,6 +401,8 @@ def aggregate_costs():
             total_costs.get(f"externalities_{pop_scenario}", 0)
         )
 
+    total_costs["TotalConstructionCost"] = total_costs["construction_cost"]
+    total_costs["TotalMaintenanceCost"] = total_costs["maintenance"]
     # Save results to CSV
     total_costs.to_csv(total_costs_csv_path, index=False)
 
@@ -438,13 +432,10 @@ def transform_and_reshape_cost_df():
     ]
     df = df.drop(columns=columns_to_drop, errors='ignore')
 
-    # Rename 'scenario' to 'development'
-    df = df.rename(columns={'scenario': 'development'})
-
     # Reshaping the dataframe
     reshaped_df = df.pivot_table(
         index='development',
-        columns='ID_new',
+        columns='scenario',
         values=['monetized_savings', 'construction_cost','maintenance' ],
         aggfunc='first'
     )
@@ -456,6 +447,7 @@ def transform_and_reshape_cost_df():
     reshaped_df = reshaped_df.reset_index()
 
     # Calculate total costs for each scenario
+    construction_cost_columns = [col for col in reshaped_df.columns if col.startswith("construction_cost_")]
     savings_columns = [col for col in reshaped_df.columns if col.startswith("monetized_savings_")]
     
     for savings_col in savings_columns:
@@ -533,7 +525,7 @@ def transform_and_reshape_cost_df():
     print("Transformed dataframe saved to:")
     print("- CSV: 'data/costs/total_costs_with_geometry.csv'")
     print("- GeoPackage: 'data/costs/total_costs_with_geometry.gpkg'")
-    
+
     return gdf
 
 # Rename the columns

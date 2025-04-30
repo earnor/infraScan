@@ -49,7 +49,7 @@ def plotting(input_file, output_file, node_file):
     # Read the mapping file
     mapping_file = gpd.read_file("data/Network/processed/updated_new_links.gpkg")
 
-    # Correct regex for extracting numeric part of 'development'
+    # Correct regex for extracting numeric part of 'ID_new'
     gdf['dev_numeric'] = gdf['development'].str.extract(r'Development_(\d+)', expand=False)
 
     # Handle NaN values by replacing them with a placeholder
@@ -221,7 +221,7 @@ def plot_developments_and_table_for_scenarios(input_dir, output_dir):
             gdf.plot(ax=ax, color='red', edgecolor='black', linewidth=1, alpha=0.8)
 
             # Add labels for developments
-            for x, y, label in zip(gdf.geometry.centroid.x, gdf.geometry.centroid.y, gdf['development']):
+            for x, y, label in zip(gdf.geometry.centroid.x, gdf.geometry.centroid.y, gdf['ID_new']):
                 ax.text(x, y, label, fontsize=8, color='black', ha='center', va='center', weight='bold')
 
             # Add scalebar
@@ -242,7 +242,7 @@ def plot_developments_and_table_for_scenarios(input_dir, output_dir):
             fig, ax = plt.subplots(1, 1, figsize=(10, 8))
             
             # Prepare data for the table
-            table_data = gdf[['development', 'Source_Name', 'Target_Name']]
+            table_data = gdf[['ID_new', 'Source_Name', 'Target_Name']]
             divider = make_axes_locatable(ax)
             table_ax = divider.append_axes("bottom", size="75%", pad=0.1)
 
@@ -1921,7 +1921,7 @@ def create_and_save_plots(df, plot_directory="plots"):
     os.makedirs(plot_directory, exist_ok=True)
 
     # Rename the column 'scenario' to 'Development' and 'ID_new' to 'Scenario'
-    df.rename(columns={'scenario': 'Development', 'ID_new': 'Scenario'}, inplace=True)
+    df.rename(columns={'ID_new': 'Scenario'}, inplace=True)
 
     # Ensure all monetized savings are positive
     df['monetized_savings'] = df['monetized_savings'].abs()
@@ -1949,7 +1949,7 @@ def create_and_save_plots(df, plot_directory="plots"):
         return f"{scenario_type} ({level})"
 
     # Apply the renaming function to the 'Scenario' column
-    df['Scenario'] = df['Scenario'].apply(rename_scenario)
+    df['scenario'] = df['scenario'].apply(rename_scenario)
 
     # Map consistent colors based on scenario type
     def assign_color_by_type(scenario):
@@ -1962,13 +1962,13 @@ def create_and_save_plots(df, plot_directory="plots"):
         else:
             return 'gray'
 
-    df['Color'] = df['Scenario'].apply(assign_color_by_type)
+    df['Color'] = df['scenario'].apply(assign_color_by_type)
 
     # Create and save the enhanced boxplot
     plt.figure(figsize=(14, 8))
     sns.boxplot(
         data=df,
-        x='Development',
+        x='development',
         y='monetized_savings',
         palette="Set2",
         showmeans=True,
@@ -1981,7 +1981,7 @@ def create_and_save_plots(df, plot_directory="plots"):
     )
     sns.stripplot(
         data=df,
-        x='Development',
+        x='development',
         y='monetized_savings',
         color='black',
         size=5,
@@ -2002,17 +2002,17 @@ def create_and_save_plots(df, plot_directory="plots"):
     plt.figure(figsize=(14, 8))
     sns.stripplot(
         data=df,
-        x='Development',
+        x='development',
         y='monetized_savings',
-        hue='Scenario',
-        palette=dict(zip(df['Scenario'], df['Color'])),
+        hue='scenario',
+        palette=dict(zip(df['scenario'], df['Color'])),
         jitter=True,
         dodge=True,
         size=8,
     )
     plt.xlabel('Development', fontsize=12)
     plt.ylabel('Monetized Savings in CHF', fontsize=12)
-    plt.legend(title='Scenario', bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.legend(title='scenario', bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.xticks(rotation=45)
     plt.tight_layout()
     plt.savefig(os.path.join(plot_directory, "strip_plot_with_scenarios.png"))

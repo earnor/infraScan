@@ -192,7 +192,7 @@ def infrascanrail():
     runtimes["Calculate the TTT Savings"] = time.time() - st
     st = time.time()
 
-    rearange_costs()
+    rearange_costs(costs_and_benefits_dev_discounted)
 
     runtimes["Aggregate costs"] = time.time() - st
 
@@ -270,14 +270,14 @@ def create_travel_time_graphs(network_selection):
     return od_times_dev, od_times_status_quo
 
 
-def rearange_costs():
+def rearange_costs(cost_and_benefits):
     ##################################################################################
     # Aggregate the single cost elements to one dataframe
     # New dataframe is stored in "data/costs/total_costs.gpkg"
     # New dataframe also stored in "data/costs/total_costs.csv"
     # Convert all costs in million CHF
     print(" -> Aggregate costs")
-    aggregate_costs()
+    aggregate_costs(cost_and_benefits)
     transform_and_reshape_cost_df()
 
 

@@ -1,29 +1,11 @@
-import networkx as nx
-import os
-import numpy as np
-from shapely.geometry import Point, Polygon
-import geopandas as gpd
-import matplotlib.pyplot as plt
 import pandas as pd
-from geopy.distance import geodesic
-from scipy.spatial import Voronoi
-import matplotlib.pyplot as plt
-from scipy.spatial import cKDTree
-# Additional imports for grid creation
-from shapely.geometry import box
-from scipy.spatial import Voronoi, voronoi_plot_2d
-from shapely.geometry import Polygon, MultiPolygon
-from shapely.ops import unary_union
-from plots import *
-import alphashape
-from data_import import *
-from shapely.geometry import MultiPoint
-from rasterio.features import rasterize
-from shapely import wkt
 import rasterio
-from rasterio.transform import from_origin
+from rasterio.features import rasterize
 from rasterio.transform import from_bounds
+from rasterio.transform import from_origin
 
+# Additional imports for grid creation
+from data_import import *
 
 
 # 1.) Define Access Points (Train Stations):
@@ -171,8 +153,6 @@ def resolve_overlaps(bus_buffers, train_buffers, output_path):
     final_buffers.to_file(output_path, driver="GPKG")
     print(f"Final merged polygons saved to {output_path}")
 
-import geopandas as gpd
-from shapely.geometry import Polygon
 
 def clip_and_fill_polygons(merged_buffers_path, innerboundary_path, output_path):
     '''
@@ -483,11 +463,9 @@ def calculate_nearest_bus_stop_time(grid_points_within_buffer, stops_filtered):
     
     return pd.DataFrame(walking_times)
 
-import geopandas as gpd
-from shapely.ops import unary_union
 
 import geopandas as gpd
-from shapely.ops import unary_union, split
+from shapely.ops import unary_union
 from shapely.geometry import Polygon
 
 def create_merged_trainstation_buffers(closest_trainstations_df, stops, output_path):
