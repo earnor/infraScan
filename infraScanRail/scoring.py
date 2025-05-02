@@ -3,6 +3,8 @@ import pandas
 import cost_parameters as cp
 from data_import import *
 from plots import plot_costs_benefits_example
+import os
+import pandas as pd
 
 os.environ['USE_PYGEOS'] = '0'
 import geopandas as gpd
@@ -768,7 +770,7 @@ def GetCommuneEmployment(y0):  # we find employment in each commune.
     return jobvec
 
 
-def GetHighwayPHDemandPerCommune():
+def GetOevDemandPerCommune(tau = 0.13):
     # now we extract an od matrix for oev tripps from year 2019
     # we then modify the OD matrix to fit our needs of expressing peak hour travel demand
     rawod = pd.read_excel('data/_basic_data/KTZH_00001982_00003903.xlsx')
@@ -922,7 +924,7 @@ def GetCatchmentOD():
     # Get a polygon as limits for teh corridor
 
     # Import the required data or define the path to access it
-    catchement_tif_path = r'data/catchment_pt/catchement.tif'
+    catchment_tif_path = r'data/catchment_pt/catchement.tif'
     catchmentdf = gpd.read_file(r"data/catchment_pt/catchement.gpkg")
 
     # File paths for population and employment combined raster files
@@ -939,7 +941,6 @@ def GetCatchmentOD():
     # Paths to input and output files
     pop_combined_file = r"data/independent_variable/processed/scenario/pop_combined.tif"
     empl_combined_file = r"data/independent_variable/processed/scenario/empl_combined.tif"
-    catchment_tif_path = r"data/catchment_pt/catchement.tif"
 
     output_pop_path = r"data/independent_variable/processed/scenario/pop20_corrected.tif"
     output_empl_path = r"data/independent_variable/processed/scenario/empl20_corrected.tif"
@@ -966,11 +967,11 @@ def GetCatchmentOD():
     # todo When we iterate over devs and scens, maybe we can check if the VoronoiDF already has the communal data and then skip the following five lines
     popvec = GetCommunePopulation(y0="2021")
     jobvec = GetCommuneEmployment(y0=2021)
-    od = GetHighwayPHDemandPerCommune() ## check tau values for PT
+    od = GetOevDemandPerCommune() ## check tau values for PT
     odmat = GetODMatrix(od)
 
     # This function returns a np array of raster data storing the bfs number of the commune in each cell
-    commune_raster, commune_df = GetCommuneShapes(raster_path=catchement_tif_path)
+    commune_raster, commune_df = GetCommuneShapes(raster_path=catchment_tif_path)
 
     if jobvec.shape[0] != odmat.shape[0]:
         print(
@@ -1021,7 +1022,6 @@ def GetCatchmentOD():
     # Paths to input and output files
     empl_raster_path = r"data/independent_variable/processed/raw/empl20.tif"
     pop_raster_path = r"data/independent_variable/processed/raw/pop20.tif"
-    catchment_tif_path = r"data/catchment_pt/catchement.tif"
 
     output_empl_path = r"data/independent_variable/processed/raw/empl20_corrected.tif"
     output_pop_path = r"data/independent_variable/processed/raw/pop20_corrected.tif"
@@ -1044,7 +1044,7 @@ def GetCatchmentOD():
         scen_pop_20_tif = src.read(1)
 
     #Load the catchment raster data
-    with rasterio.open(catchement_tif_path) as src:
+    with rasterio.open(catchment_tif_path) as src:
         # Read the raster data
         catchment_tif = src.read(1)  # Read the first band, which holds id information
         bounds = src.bounds  # Get the spatial bounds of the raster
@@ -1264,8 +1264,6 @@ def GetCatchmentOD():
             commune_df.to_file(r"data/traffic_flow/od/OD_commune_filtered.gpkg", driver="GPKG")
     return
 
-import os
-import pandas as pd
 
 def combine_and_save_od_matrices(directory, status_quo_directory):
     """

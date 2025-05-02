@@ -18,7 +18,7 @@ from shapely import LineString, MultiPolygon, Polygon
 from shapely.geometry import shape, mapping, box
 from tqdm import tqdm
 
-from scoring import GetCommunePopulation, GetCommuneEmployment, GetHighwayPHDemandPerCommune, GetODMatrix, \
+from scoring import GetCommunePopulation, GetCommuneEmployment, GetOevDemandPerCommune, GetODMatrix, \
     GetCommuneShapes
 
 
@@ -1115,7 +1115,7 @@ def GetVoronoiOD_multi():
 
     popvec = GetCommunePopulation(y0="2021")
     jobvec = GetCommuneEmployment(y0=2021)
-    od = GetHighwayPHDemandPerCommune()
+    od = GetOevDemandPerCommune()
     odmat = GetODMatrix(od)
 
     # This function returns a np array of raster data storing the bfs number of the commune in each cell
