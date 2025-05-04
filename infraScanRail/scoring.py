@@ -770,21 +770,19 @@ def GetCommuneEmployment(y0):  # we find employment in each commune.
     return jobvec
 
 
-def GetOevDemandPerCommune(tau = 0.13):
+def GetOevDemandPerCommune(tau = 0.13): # Data is in trips per OD combination per day. Now we assume the number of trips gone in peak hour
     # now we extract an od matrix for oev tripps from year 2019
     # we then modify the OD matrix to fit our needs of expressing peak hour travel demand
-    rawod = pd.read_excel('data/_basic_data/KTZH_00001982_00003903.xlsx')
-    communalOD = rawod.loc[
-        (rawod['jahr'] == 2018) & (rawod['kategorie'] == 'Verkehrsaufkommen') & (rawod['verkehrsmittel'] == 'oev')]
+    rawOD = pd.read_excel('data/_basic_data/KTZH_00001982_00003903.xlsx')
+    communalOD = rawOD.loc[
+        (rawOD['jahr'] == 2018) & (rawOD['kategorie'] == 'Verkehrsaufkommen') & (rawOD['verkehrsmittel'] == 'oev')]
     # communalOD = data.drop(['jahr','quelle_name','quelle_gebietart','ziel_name','ziel_gebietart',"kategorie","verkehrsmittel","einheit","gebietsstand_jahr","zeit_dimension"],axis=1)
     # sum(communalOD['wert'])
-    # 1 Who will go on highway?
     # # # Not binnenverkehr ... removes about 50% of trips
     communalOD['wert'].loc[(communalOD['quelle_code'] == communalOD['ziel_code'])] = 0
     # sum(communalOD['wert'])
     # # Take share of OD
     # todo adapt this value
-    tau = 0.13  # Data is in trips per OD combination per day. Now we assume the number of trips gone in peak hour
     # This ratio explains the interzonal trips made in peak hour as a ratio of total interzonal trips made per day.
     # communalOD['wert'] = (communalOD['wert']*tau)
     communalOD.loc[:, 'wert'] = communalOD['wert'] * tau
@@ -967,7 +965,8 @@ def GetCatchmentOD():
     # todo When we iterate over devs and scens, maybe we can check if the VoronoiDF already has the communal data and then skip the following five lines
     popvec = GetCommunePopulation(y0="2021")
     jobvec = GetCommuneEmployment(y0=2021)
-    od = GetOevDemandPerCommune() ## check tau values for PT
+    od = GetOevDemandPerCommune(tau=1) ## check tau values for PT
+    #OD is list with from;to;traffic_volume
     odmat = GetODMatrix(od)
 
     # This function returns a np array of raster data storing the bfs number of the commune in each cell
