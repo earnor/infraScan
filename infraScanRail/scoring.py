@@ -792,6 +792,7 @@ def GetOevDemandPerCommune(tau = 0.13): # Data is in trips per OD combination pe
 
 def GetODMatrix(od):
     od_int = od.loc[(od['quelle_code'] < 9999) & (od['ziel_code'] < 9999)]
+    od_ext = od.loc[(od['quelle_code'] > 9999) | (od[                                                      'ziel_code'] > 9999)]  # here we separate the parts of the od matrix that are outside the canton. We can add them later.
     odmat = od_int.pivot(index='quelle_code', columns='ziel_code', values='wert')
     return odmat
 
@@ -915,11 +916,6 @@ def GetCatchmentOD():
         across populations, employment data, and origin-destination matrices. Errors are shown
         uniquely for OD matrix shapes.
     """
-    # Define spatial limits of the research corridor
-    # The coordinates must end with 000 in order to match the coordinates of the input raster data
-    e_min, e_max = 2687000, 2708000     # 2688000, 2704000 - 2688000, 2705000
-    n_min, n_max = 1237000, 1254000     # 1238000, 1252000 - 1237000, 1252000
-    # Get a polygon as limits for teh corridor
 
     # Import the required data or define the path to access it
     catchment_tif_path = r'data/catchment_pt/catchement.tif'
@@ -967,7 +963,7 @@ def GetCatchmentOD():
     jobvec = GetCommuneEmployment(y0=2021)
     od = GetOevDemandPerCommune(tau=1) ## check tau values for PT
     #OD is list with from;to;traffic_volume
-    odmat = GetODMatrix(od)
+    odmat = GetODMatrix(od) #Attention!!!! The demand from outer zones still must be added
 
     # This function returns a np array of raster data storing the bfs number of the commune in each cell
     commune_raster, commune_df = GetCommuneShapes(raster_path=catchment_tif_path)
@@ -975,14 +971,6 @@ def GetCatchmentOD():
     if jobvec.shape[0] != odmat.shape[0]:
         print(
             "Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
-    # com_idx = np.unique(od['quelle_code']) # previously od_mat
-    # 1. Define a new raster file that stores the Commune's BFS ID as cell value
-    # Think if new band or new tif makes more sense
-    # using communeShapes
-
-    # I guess here iterate over all developments
-    # voronoidf = voronoidf.loc[(voronoidf['ID_develop'] == dev)] # Work with temp gdf of voronoi
-    # If possible simplify all the amount of developments
 
     # Define scenario names for population and employment
     pop_scenarios = [
@@ -1009,15 +997,6 @@ def GetCatchmentOD():
         for idx, scenario in enumerate(empl_scenarios, start=1):  # Start from band 1
             empl_raster_data[scenario] = src.read(idx)  # Read each band
 
-    '''
-    correct_rasters_to_extent(r"data/independent_variable/processed/raw/empl20.tif",
-                              r"data/independent_variable/processed/raw/pop20.tif",
-        output_empl_path="data/independent_variable/processed/raw/empl20_corrected.tif",
-        output_pop_path="data/independent_variable/processed/raw/pop20_corrected.tif",
-        reference_boundary=innerboundary,
-        resolution=100,
-        crs="EPSG:2056")
-    '''
     # Paths to input and output files
     empl_raster_path = r"data/independent_variable/processed/raw/empl20.tif"
     pop_raster_path = r"data/independent_variable/processed/raw/pop20.tif"
@@ -1050,7 +1029,7 @@ def GetCatchmentOD():
 
     # Identify unique catchment IDs
     unique_catchment_id = np.sort(np.unique(catchment_tif))
-
+    catch_idx = unique_catchment_id.size  # Total number of unique catchments
     # Filter commune_df based on catchment raster bounds
     commune_df_filtered = commune_df.cx[bounds.left:bounds.right, bounds.bottom:bounds.top]
 
@@ -1059,23 +1038,40 @@ def GetCatchmentOD():
 
     # Ensure the OD matrix corresponds only to filtered communes
     odmat_frame = odmat.loc[commune_df_filtered, commune_df_filtered]
+    print(f"Total sum of the od matrix communes: {np.nansum(odmat_frame)}")
 
     # Initialize an OD matrix for catchments
     # Shape is [number of unique catchments, number of unique catchments]
-
+    od_mn = np.zeros([catch_idx, catch_idx])
     # Assume vectorized functions are defined for the below operations
+    def compute_cont_r(odmat, popvec, jobvec):
+        # Convert popvec and jobvec to 2D arrays for broadcasting
+        pop_matrix = np.array(popvec)[:, np.newaxis]
+        job_matrix = np.array(jobvec)[np.newaxis, :]
 
+        # Ensure odmat is a NumPy array
+        odmat = np.array(odmat)
+
+        # Perform the vectorized operation
+        cont_r = odmat / (pop_matrix * job_matrix)
+        return cont_r
+
+    def compute_cont_v(cont_r, pop_m, job_n):
+        # Sum over the cont_r matrix, multiply by pop_m and job_n
+        cont_v = np.sum(cont_r)
+        return cont_v
     ###############################################################################################################################
     # Step 1: generate unit_flow matrix from each commune to each other commune
-    cout_r = odmat / np.outer(popvec, jobvec)
+    outer = np.outer(popvec, jobvec)
+    cout_r = odmat / outer
     ###############################################################################################################################
     # Step 2: Get all pairs of combinations from communes to polygons
     unique_commune_id = np.sort(np.unique(commune_raster))
-
+    pairs = pd.DataFrame(columns=['commune_id', 'catchement_id'])
+    pop_empl = pd.DataFrame(columns=['commune_id', 'catchement_id', "empl", "pop"])
     # Initialize the DataFrame for storing results
     pop_empl = gpd.GeoDataFrame()
     pairs = gpd.GeoDataFrame()
-
     # Process each unique catchment and commune
     for i in tqdm(unique_catchment_id, desc='Processing Catchment IDs'):
         # Mask for the current catchment

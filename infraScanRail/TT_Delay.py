@@ -1,29 +1,8 @@
-import networkx as nx
-import geopandas as gpd
-import networkx as nx
-import os
-import numpy as np
-from shapely.geometry import Point, Polygon
-import geopandas as gpd
-import matplotlib.pyplot as plt
 import pandas as pd
-from geopy.distance import geodesic
-from scipy.spatial import Voronoi
-import matplotlib.pyplot as plt
-from scipy.spatial import cKDTree
+
+# from scipy.spatial import cKDTree
 # Additional imports for grid creation
-from shapely.geometry import box
-from scipy.spatial import Voronoi, voronoi_plot_2d
-from shapely.geometry import Polygon, MultiPolygon
-from shapely.ops import unary_union
-from plots import *
-import alphashape
 from data_import import *
-from shapely.geometry import MultiPoint
-from rasterio.features import rasterize
-from shapely import wkt
-import rasterio
-from rasterio.transform import from_origin
 
 
 def create_directed_graph(df):
@@ -303,7 +282,7 @@ def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, durat
             status_quo_tt = TTT_status_quo.get(scenario_name, {}).get(dev_id, 0)
 
             # Calculate travel time savings (negative if no savings), scaled to daily trips
-            tt_savings_daily = (status_quo_tt - dev_tt) / tau  # Scale peak hour savings to daily trips
+            tt_savings_daily = (status_quo_tt - dev_tt) #again scaling with tau?
             tt_savings_yearly = tt_savings_daily * 365 * VTTS
             # Monetize the travel time savings
             monetized_savings = tt_savings_daily * mon_factor

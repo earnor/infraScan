@@ -1,16 +1,16 @@
 # import packages
-import time
 import shutil
+import time
 
+import paths
+from TT_Delay import *
 from catchment_pt import *
-from scenarios import *
+from display_results import *
 from generate_infrastructure import *
+from scenarios import *
 from scoring import *
 from scoring import create_cost_and_benefit_df
 from traveltime_delay import *
-from TT_Delay import *
-from display_results import *
-import paths
 
 
 def infrascanrail():
@@ -160,7 +160,8 @@ def infrascanrail():
 
     # TTT for developments (trips in Peak hour * OD-Times) [in hour]
     TTT_developments = calculate_total_travel_times(od_times_dev, od_directory_dev, df_access)
-
+    print(TTT_status_quo)
+    print(TTT_developments)
     # Monetize travel time savings ()
     output_path = "data/costs/traveltime_savings.csv"
     monetized_tt, scenario_list, dev_list = calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, cp.VTTS, cp.tts_valuation_period,

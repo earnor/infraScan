@@ -22,7 +22,84 @@ import scoring
 
 from scipy.spatial import Voronoi
 
-os.chdir(paths.MAIN)
+
+
+
+
+def ODPrep_rail():
+    os.chdir(paths.MAIN)
+    # 0. Define extent
+    # Define spatial limits of the research corridor
+    # The coordinates must end with 000 in order to match the coordinates of the input raster data
+    e_min, e_max = 2687000, 2708000  # 2688000, 2704000 - 2688000, 2705000
+    n_min, n_max = 1237000, 1254000  # 1238000, 1252000 - 1237000, 1252000
+    limits_corridor = [e_min, n_min, e_max, n_max]
+    # Boudary for plot
+    boundary_plot = polygon_from_points(e_min=e_min + 1000, e_max=e_max - 500, n_min=n_min + 1000, n_max=n_max - 2000)
+    # Get a polygon as limits for teh corridor
+    inner = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max)
+    # For global operation a margin is added to the boundary
+    margin = 7000  # meters
+    outer = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
+    limits = [e_min - margin, n_min - margin, e_max + margin, n_max + margin]
+    # boundary = LineString([[e_min,n_min],[e_max,n_min],[e_max,n_max],[e_min,n_max],[e_min,n_min]])
+    # 1.	define TAZs defined in GVM
+    raster_path = r"data/Network/travel_time/source_id_raster.tif"
+    points_street_network_all = gpd.read_file(r"data\Network\processed\street_network_points.gpkg")
+    commune_raster, communedf = GetCommuneShapes(raster_path)
+    cantonshape = communedf.dissolve()
+    tazgdf = getTAZs(points_street_network_all)
+    tazgdf["scalecategory"] = 3
+    tazgdf.loc[tazgdf["code"] > 9999, "scalecategory"] = 4
+    tazgdf.loc[tazgdf.within(outer), "scalecategory"] = 2
+    tazgdf.loc[tazgdf.within(inner), "scalecategory"] = 1
+    # Save the tazgdf as a geopackage
+    # tazgdf.to_file(r"abc.gpkg", driver="GPKG")
+    # 2.	categorise TAZs as
+    ##a.	within extent
+    ##b.	within outer bounary
+    ##c.	within canton zurich
+    ##d.	within GVM
+    # scale categories:
+    # 1 inner boundary study extent (d.h. nur Gemeinden die vollständig im Rechteck sind)
+    # 2 outer boundary of study extent (alle gemeinden die irgendwas im Rechteck haben)
+    # 3 inside kanton
+    # 4 alles (gvm mit tesselation zones)
+    # 3.	Define trips between TAZs(use bfs)
+    # od = GetDemandPerCommune(tau=1, mode='miv')
+    od2 = scoring.GetOevDemandPerCommune(tau=1)
+    # 4.	Set up OD matrix (using bfs)
+    # odmat = GetODMatrix(od2)
+    # 5.	Identify ‚access points‘ to the extent network
+    # GetRasterNetwork(limits)
+    # GetVoronoiCells(limits,outer,inner)
+    ### todo: start from here to go from communal OD to newly tesselated OD for scoring
+    # 6.	Identify ‘access points‘ to the canton‘s network from the external tazs
+    points_all = gpd.read_file(r"data\Network\processed\points.gpkg")
+    points_in_outer = points_all[points_all.within(outer)]
+    points_outside_inner = points_in_outer[~points_in_outer.within(inner)]
+    # make sure that access points are served by an S-Bahn
+    rail_network = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
+    unique_nodes = rail_network['FromNode'].unique()
+    access_points_outer = points_outside_inner[points_outside_inner['ID_point'].isin(unique_nodes)]
+    # 7.	For each taz fully outside extent, identify shortest path to an extent access point and allocte the taz to that point.
+    # First add the access_point column with default value of -1
+    tazgdf['access_point'] = -1
+    # For each row in tazgdf where scalecategory is 4, find the nearest point from points_outside_inner_filtered
+    # For each commune taz, also identify nearest railway access point and assign it to the taz
+    for idx, row in tazgdf[tazgdf['scalecategory'].isin([3, 4])].iterrows():
+        # Calculate distances from current polygon to all points
+        distances = access_points_outer.geometry.distance(row.geometry)
+        # Get the ID_point of the nearest point
+        nearest_point_id = access_points_outer.loc[distances.idxmin()]['ID_point']
+        # Assign the nearest point's ID to the access_point column
+        tazgdf.at[idx, 'access_point'] = nearest_point_id
+    ##a.	Sum the trips in each of the tazs
+    # 8.	For all taz fully outside the extent Join all tazs that correspond to each access point.
+    # 9.	Make sure future grwoth is only distributed pauschal to TAZ outside the canton.
+    popvec = GetCommunePopulation(y0="2021")
+    jobvec = GetCommuneEmployment(y0=2021)
+
 
 def GetCommunePopulation(y0):  # We find population of each commune.
     rawpop = pd.read_excel('data/_basic_data/KTZH_00000127_00001245.xlsx', sheet_name='Gemeinden', header=None)
@@ -816,98 +893,12 @@ def getTAZs(points_for_voronoi):
     taz = GetTAZwithCommunes(basis)
     return taz
 
-#0. Define extent
-# Define spatial limits of the research corridor
-# The coordinates must end with 000 in order to match the coordinates of the input raster data
-e_min, e_max = 2687000, 2708000     # 2688000, 2704000 - 2688000, 2705000
-n_min, n_max = 1237000, 1254000     # 1238000, 1252000 - 1237000, 1252000
-limits_corridor = [e_min, n_min, e_max, n_max]
-
-# Boudary for plot
-boundary_plot = polygon_from_points(e_min=e_min+1000, e_max=e_max-500, n_min=n_min+1000, n_max=n_max-2000)
-
-# Get a polygon as limits for teh corridor
-inner = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max)
-
-# For global operation a margin is added to the boundary
-margin = 7000 # meters
-outer = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
-limits = [e_min-margin, n_min-margin, e_max+margin, n_max+margin]
-
-#boundary = LineString([[e_min,n_min],[e_max,n_min],[e_max,n_max],[e_min,n_max],[e_min,n_min]])
-
-#1.	define TAZs defined in GVM
-
-raster_path = r"data/Network/travel_time/source_id_raster.tif"
-points_street_network_all = gpd.read_file(r"data\Network\processed\street_network_points.gpkg")
-
-commune_raster, communedf = GetCommuneShapes(raster_path)
-cantonshape = communedf.dissolve()
-tazgdf = getTAZs(points_street_network_all)
-
-tazgdf["scalecategory"] = 3
-tazgdf.loc[tazgdf["code"]>9999,"scalecategory"] = 4
-tazgdf.loc[tazgdf.within(outer),"scalecategory"] = 2
-tazgdf.loc[tazgdf.within(inner),"scalecategory"] = 1
-
-# Save the tazgdf as a geopackage
-#tazgdf.to_file(r"abc.gpkg", driver="GPKG")
-
-#2.	categorise TAZs as
-##a.	within extent
-##b.	within outer bounary
-##c.	within canton zurich
-##d.	within GVM
-#scale categories:
-#1 inner boundary study extent (d.h. nur Gemeinden die vollständig im Rechteck sind)
-#2 outer boundary of study extent (alle gemeinden die irgendwas im Rechteck haben)
-#3 inside kanton
-#4 alles (gvm mit tesselation zones)
-
-#3.	Define trips between TAZs(use bfs)
-#od = GetDemandPerCommune(tau=1, mode='miv')
-od2 = scoring.GetOevDemandPerCommune(tau=1)
-#4.	Set up OD matrix (using bfs)
-#odmat = GetODMatrix(od2)
-#5.	Identify ‚access points‘ to the extent network
-#GetRasterNetwork(limits)
-#GetVoronoiCells(limits,outer,inner)
-
-### todo: start from here to go from communal OD to newly tesselated OD for scoring
-#6.	Identify ‘access points‘ to the canton‘s network from the external tazs
-points_all = gpd.read_file(r"data\Network\processed\points.gpkg")
-points_in_outer = points_all[points_all.within(outer)]
-points_outside_inner = points_in_outer[~points_in_outer.within(inner)]
-#make sure that access points are served by an S-Bahn
-rail_network = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
-unique_nodes = rail_network['FromNode'].unique()
-access_points_outer = points_outside_inner[points_outside_inner['ID_point'].isin(unique_nodes)]
-
-#7.	For each taz fully outside extent, identify shortest path to an extent access point and allocte the taz to that point.
-# First add the access_point column with default value of -1
-tazgdf['access_point'] = -1
-
-# For each row in tazgdf where scalecategory is 4, find the nearest point from points_outside_inner_filtered
-#For each commune taz, also identify nearest railway access point and assign it to the taz
-for idx, row in tazgdf[tazgdf['scalecategory'].isin([3, 4])].iterrows():
-    # Calculate distances from current polygon to all points
-    distances = access_points_outer.geometry.distance(row.geometry)
-    # Get the ID_point of the nearest point
-    nearest_point_id = access_points_outer.loc[distances.idxmin()]['ID_point']
-    # Assign the nearest point's ID to the access_point column
-    tazgdf.at[idx, 'access_point'] = nearest_point_id
 
 
 
-##a.	Sum the trips in each of the tazs
-#8.	For all taz fully outside the extent Join all tazs that correspond to each access point.
-#9.	Make sure future grwoth is only distributed pauschal to TAZ outside the canton.
 
-popvec = GetCommunePopulation(y0="2021")
-jobvec = GetCommuneEmployment(y0=2021)
-
-
-
+if __name__ == '__ODPrep_rail__':
+    ODPrep_rail()
 
 ### Define zones
 ### Check for 2050
