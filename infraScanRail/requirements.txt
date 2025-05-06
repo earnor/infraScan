@@ -1,137 +1,167 @@
 access==1.1.8
 affine==2.4.0
+alphashape==1.3.1
 attrs==22.2.0
 aws-requests-auth==0.4.3
 basemap==1.3.6
-basemap-data @ file:///C:/ci/basemap-split_1645455835166/work/packages/basemap_data
-beautifulsoup4 @ file:///C:/b/abs_88es_4clol/croot/beautifulsoup4-split_1680589977077/work
+basemap-data==1.3.2
+beautifulsoup4==4.12.0
 boto3==1.26.104
 botocore==1.29.104
-Bottleneck @ file:///C:/ci_311/bottleneck_1676500016583/work
-Brotli @ file:///C:/ci_311/brotli-split_1676435766766/work
+Bottleneck==1.3.5
+branca==0.6.0
+Brotli==1.0.9
 brotlipy==0.7.0
 certifi==2022.12.7
-cffi @ file:///C:/ci_311/cffi_1676423759166/work
+cffi==1.15.1
 chardet==5.2.0
-charset-normalizer @ file:///tmp/build/80754af9/charset-normalizer_1630003229654/work
+charset-normalizer==3.1.0
 click==8.1.3
-click-plugins @ file:///Users/ktietz/demo/mc3/conda-bld/click-plugins_1630665883852/work
+click-log==0.4.0
+click-plugins==1.1.1
 cligj==0.7.2
-colorama @ file:///C:/ci_311/colorama_1676422310965/work
+colorama==0.4.6
+contextily==1.6.2
 contourpy==1.0.7
-coverage @ file:///C:/b/abs_f1hnjmeyi_/croot/coverage_1680096319603/work
-cryptography @ file:///C:/b/abs_e8cnom_zw_/croot/cryptography_1702071486468/work
-cycler @ file:///tmp/build/80754af9/cycler_1637851556182/work
-deprecation @ file:///tmp/build/80754af9/deprecation_1628181869014/work
+coverage==7.2.2
+cryptography==41.0.7
+cycler==0.11.0
+cykhash==2.0.1
+Cython==3.0.12
+deprecation==2.1.0
 diagnostics==0.2.4
 esda==2.4.3
 et-xmlfile==1.1.0
 exceptiongroup==1.1.1
 Fiona==1.8.22
-fonttools==4.25.0
+flake8==7.2.0
+folium==0.14.0
+fonttools==4.39.3
+geo_northarrow @ git+https://github.com/pmdscully/geo_northarrow.git@963bdd271707a3bcaa47b2d83d92b88ae0b10950
+geographiclib==2.0
 geopandas==0.12.2
+geopy==2.4.1
 giddy==2.3.4
-html5lib @ file:///Users/ktietz/demo/mc3/conda-bld/html5lib_1629144453894/work
-idna @ file:///C:/ci_311/idna_1676424932545/work
+googlemaps==4.10.0
+html5lib==1.1
+idna==3.4
 imageio==2.31.5
-inequality @ file:///Users/ktietz/demo/mc3/conda-bld/inequality_1629799940949/work
-iniconfig @ file:///home/linux1/recipes/ci/iniconfig_1610983019677/work
-Jinja2 @ file:///C:/ci_311/jinja2_1676424968965/work
-jmespath @ file:///C:/b/abs_59jpuaows7/croot/jmespath_1700144635019/work
-joblib @ file:///C:/b/abs_1anqjntpan/croot/joblib_1685113317150/work
-jsonlines @ file:///tmp/build/80754af9/jsonlines_1601490534517/work
-jsonschema @ file:///C:/b/abs_d40z05b6r1/croot/jsonschema_1678983446576/work
-kiwisolver @ file:///C:/ci_311/kiwisolver_1676431979301/work
-lazy_loader @ file:///home/conda/feedstock_root/build_artifacts/lazy_loader_1692295373316/work
-libpysal @ file:///tmp/build/80754af9/libpysal_1625165595815/work
-llvmlite @ file:///C:/b/abs_da15r8vkf8/croot/llvmlite_1706910779994/work
-lxml @ file:///C:/b/abs_c2bg6ck92l/croot/lxml_1679646459966/work
-mapclassify @ file:///C:/ci_311/mapclassify_1678299389803/work
+importlib-resources==5.13.0
+inequality==1.0.0
+inflection==0.5.1
+iniconfig==2.0.0
+intel-cmplr-lib-ur==2025.1.1
+intel-openmp==2025.1.1
+Jinja2==3.1.2
+jmespath==1.0.1
+joblib==1.2.0
+jsonlines==1.2.0
+jsonschema==4.17.3
+kiwisolver==1.4.4
+lazy_loader==0.3
+libpysal==4.7.0
+llvmlite==0.42.0
+lxml==4.9.2
+mapclassify==2.5.0
 MarkupSafe==2.1.2
-matplotlib @ file:///D:/bld/matplotlib-suite_1674079016842/work
+matplotlib==3.6.3
 matplotlib-scalebar==0.8.1
-mgwr @ file:///tmp/build/80754af9/mgwr_1599703654170/work
-mkl-fft @ file:///C:/b/abs_19i1y8ykas/croot/mkl_fft_1695058226480/work
-mkl-random @ file:///C:/b/abs_edwkj1_o69/croot/mkl_random_1695059866750/work
-mkl-service==2.4.0
+mccabe==0.7.0
+mercantile==1.2.1
+mgwr==2.1.2
+mkl==2025.1.0
+mkl-fft==1.3.8
+mkl-random==1.2.4
+mkl-service==2.4.1
 momepy==0.7.0
-mpmath @ file:///C:/b/abs_7833jrbiox/croot/mpmath_1690848321154/work
-munch @ file:///Users/ktietz/demo/mc3/conda-bld/munch_1630566382504/work
+mpmath==1.3.0
+munch==2.5.0
 munkres==1.1.4
-networkx @ file:///home/conda/feedstock_root/build_artifacts/networkx_1698504735452/work
-numba @ file:///C:/b/abs_3e3co1qfvo/croot/numba_1707085143481/work
-numexpr @ file:///C:/b/abs_5fucrty5dc/croot/numexpr_1696515448831/work
-numpy @ file:///C:/Users/dev-admin/mkl/numpy_and_numpy_base_1682981337988/work
+networkx==3.2.1
+numba==0.59.0
+numexpr==2.8.7
+numpy==1.23.5
 openpyxl==3.0.10
 osmnx==1.7.1
-packaging @ file:///C:/b/abs_ed_kb9w6g4/croot/packaging_1678965418855/work
+packaging==23.0
 pandas==1.5.3
 patsy==0.5.3
-pillow @ file:///C:/b/abs_e22m71t0cb/croot/pillow_1707233126420/work
-platformdirs @ file:///C:/b/abs_b6z_yqw_ii/croot/platformdirs_1692205479426/work
+Pillow==9.5.0
+platformdirs==3.2.0
 plotly==5.14.1
-pluggy @ file:///C:/ci_311/pluggy_1676422178143/work
+pluggy==1.0.0
 ply==3.11
 pointpats==2.3.0
-pooch @ file:///C:/b/abs_a8nmng7d_x/croot/pooch_1695850149827/work
+pooch==1.7.0
 PuLP==2.7.0
 pycallgraph2==1.1.3
-pycparser @ file:///tmp/build/80754af9/pycparser_1636541352034/work
+pycodestyle==2.13.0
+pycparser==2.21
 pycryptodome==3.19.0
+pyflakes==3.3.2
 pygeos==0.14
-pyOpenSSL @ file:///C:/b/abs_08f38zyck4/croot/pyopenssl_1690225407403/work
-pyparsing @ file:///C:/ci_311/pyparsing_1678502182533/work
-pyproj @ file:///C:/ci_311/pyproj_1676454686083/work
+pyogrio==0.10.0
+pyOpenSSL==23.2.0
+pyparsing==3.0.9
+pyproj==3.4.1
 PyQt5==5.15.10
-PyQt5-sip @ file:///C:/b/abs_c0pi2mimq3/croot/pyqt-split_1698769125270/work/pyqt_sip
+PyQt5-Qt5==5.15.2
+PyQt5-sip==12.13.0
+pyrobuf==0.9.3
+pyrosm==0.6.2
 pyrsistent==0.19.3
 pysal==2.6.0
-pyshp @ file:///C:/b/abs_09wbovc984/croot/pyshp_1706101001476/work
-PySocks @ file:///C:/ci_311/pysocks_1676425991111/work
+pyshp==2.3.1
+PySocks==1.7.1
 pytest==7.2.2
-pytest-cov @ file:///C:/b/abs_f6fe62w9qf/croot/pytest-cov_1680096322346/work
-python-dateutil @ file:///tmp/build/80754af9/python-dateutil_1626374649649/work
+pytest-cov==4.0.0
+python-dateutil==2.8.2
+python-rapidjson==1.20
 pytz==2023.3
-PyYAML @ file:///C:/ci_311/pyyaml_1676432488822/work
-quantecon @ file:///home/conda/feedstock_root/build_artifacts/quantecon_1655746571862/work
+PyYAML==6.0
+quantecon==0.5.3
 quilt3==5.4.0
 rasterio==1.3.6
 rasterstats==0.18.0
 regression-diagnostics==0.1
 requests==2.28.2
 requests-futures==1.0.0
-Rtree @ file:///C:/ci_311/rtree_1676455758391/work
-rvlib @ file:///D:/bld/rvlib_1707076224104/work
-s3transfer @ file:///C:/ci_311/s3transfer_1676434371175/work
+Rtree==1.0.1
+s3transfer==0.6.2
 scikit-image==0.22.0
-scikit-learn @ file:///C:/b/abs_38k7ridbgr/croot/scikit-learn_1684954723009/work
-scipy==1.10.1
-seaborn @ file:///C:/ci_311/seaborn_1676446547861/work
-segregation==2.1.0
-shapely @ file:///C:/b/abs_e8n_rzfcjr/croot/shapely_1680636303476/work
-simplejson==3.18.4
-sip @ file:///D:/bld/sip_1697300573532/work
-six @ file:///tmp/build/80754af9/six_1644875935023/work
-snuggs @ file:///Users/ktietz/demo/mc3/conda-bld/snuggs_1629803886966/work
-soupsieve @ file:///C:/b/abs_a989exj3q6/croot/soupsieve_1680518492466/work
-spaghetti==1.7.2
-spglm @ file:///tmp/build/80754af9/spglm_1599705665839/work
-spint @ file:///tmp/build/80754af9/spint_1600554209284/work
-splot==1.1.5.post1
-spopt==0.5.0
-spreg @ file:///tmp/build/80754af9/spreg_1626462470540/work
+scikit-learn==1.6.1
+scipy==1.15.2
+seaborn==0.13.2
+segregation==2.5.2
+shapely==2.1.0
+simplejson==3.20.1
+sip==6.7.12
+six==1.17.0
+snuggs==1.4.7
+soupsieve==2.7
+spaghetti==1.7.6
+spglm==1.1.0
+spint==1.0.7
+splot==1.1.7
+spopt==0.6.1
+spreg==1.8.2
 spvcm==0.3.0
-statsmodels @ file:///C:/ci_311/statsmodels_1677728225600/work
-sympy @ file:///C:/ci_311_rebuilds/sympy_1679009400182/work
-tenacity @ file:///C:/b/abs_ddkoa9nju6/croot/tenacity_1682972298929/work
-threadpoolctl @ file:///Users/ktietz/demo/mc3/conda-bld/threadpoolctl_1629802263681/work
+statsmodels==0.14.4
+sympy==1.14.0
+tbb==2022.1.0
+tcmlib==1.3.0
+tenacity==9.1.2
+threadpoolctl==3.6.0
 tifffile==2023.9.26
-tobler==0.9.0
-toml @ file:///tmp/build/80754af9/toml_1616166611790/work
-tomli @ file:///C:/ci_311/tomli_1676422027483/work
-tornado @ file:///D:/bld/tornado_1708363244199/work
-tqdm @ file:///C:/b/abs_f76j9hg7pv/croot/tqdm_1679561871187/work
-tzdata @ file:///croot/python-tzdata_1690578112552/work
-urllib3 @ file:///C:/b/abs_3ce53vrdcr/croot/urllib3_1680254693505/work
+tobler==0.12.1
+toml==0.10.2
+tomli==2.0.1
+tornado==6.4
+tqdm==4.67.1
+trimesh==4.6.8
+tzdata==2025.2
+umf==0.10.0
+urllib3==1.26.20
 webencodings==0.5.1
-win-inet-pton @ file:///C:/ci_311/win_inet_pton_1676425458225/work
+win-inet-pton==1.1.0
+xyzservices==2025.4.0
