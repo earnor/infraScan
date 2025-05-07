@@ -921,17 +921,6 @@ def GetCatchmentOD():
     catchment_tif_path = r'data/catchment_pt/catchement.tif'
     catchmentdf = gpd.read_file(r"data/catchment_pt/catchement.gpkg")
 
-    # File paths for population and employment combined raster files
-
-    '''
-    correct_rasters_to_extent(pop_combined_file,
-        empl_combined_file,
-        output_empl_path="data/independent_variable/processed/scenario/empl20_corrected.tif",
-        output_pop_path="data/independent_variable/processed/scenario/pop20_corrected.tif",
-        reference_boundary=innerboundary,
-        resolution=100,
-        crs="EPSG:2056")
-    '''
     # Paths to input and output files
     pop_combined_file = r"data/independent_variable/processed/scenario/pop_combined.tif"
     empl_combined_file = r"data/independent_variable/processed/scenario/empl_combined.tif"
@@ -1027,9 +1016,7 @@ def GetCatchmentOD():
         catchment_tif = src.read(1)  # Read the first band, which holds id information
         bounds = src.bounds  # Get the spatial bounds of the raster
 
-    # Identify unique catchment IDs
-    unique_catchment_id = np.sort(np.unique(catchment_tif))
-    catch_idx = unique_catchment_id.size  # Total number of unique catchments
+
     # Filter commune_df based on catchment raster bounds
     commune_df_filtered = commune_df.cx[bounds.left:bounds.right, bounds.bottom:bounds.top]
 
@@ -1041,8 +1028,6 @@ def GetCatchmentOD():
     print(f"Total sum of the od matrix communes: {np.nansum(odmat_frame)}")
 
     # Initialize an OD matrix for catchments
-    # Shape is [number of unique catchments, number of unique catchments]
-    od_mn = np.zeros([catch_idx, catch_idx])
     # Assume vectorized functions are defined for the below operations
     def compute_cont_r(odmat, popvec, jobvec):
         # Convert popvec and jobvec to 2D arrays for broadcasting
@@ -1066,50 +1051,16 @@ def GetCatchmentOD():
     cout_r = odmat / outer
     ###############################################################################################################################
     # Step 2: Get all pairs of combinations from communes to polygons
-    unique_commune_id = np.sort(np.unique(commune_raster))
-    # Initialize the DataFrame for storing results
-    pop_empl = gpd.GeoDataFrame()
-    pairs = gpd.GeoDataFrame()
-    # Process each unique catchment and commune
-    for i in tqdm(unique_catchment_id, desc='Processing Catchment IDs'):
-        # Mask for the current catchment
-        mask_catchment = catchment_tif == i
 
-        for j in unique_commune_id:
-            if j > 0:
-                # Mask for the current commune
-                mask_commune = commune_raster == j
-
-                # Combined mask to find overlap
-                mask = mask_commune & mask_catchment
-
-                if np.nansum(mask) > 0:
-                    # Record the commune and catchment pair
-                    temp = pd.Series({'commune_id': j, 'catchment_id': i})
-                    pairs = gpd.GeoDataFrame(
-                        pd.concat([pairs, pd.DataFrame(temp).T], ignore_index=True)
-                    )
-
-                    # Extract population and employment data for all scenarios
-                    temp_dict = {'commune_id': j, 'catchment_id': i}
-
-                    # Status quo
-                    temp_dict['pop_20'] = np.nansum(scen_pop_20_tif[mask])
-                    temp_dict['empl_20'] = np.nansum(scen_empl_20_tif[mask])
-
-                    # Loop through each scenario for population and employment
-                    for scenario in pop_scenarios:
-                        temp_dict[f'{scenario}'] = np.nansum(pop_raster_data[scenario][mask])
-
-                    for scenario in empl_scenarios:
-                        temp_dict[f'{scenario}'] = np.nansum(empl_raster_data[scenario][mask])
-
-                    # Append the result for the current pair
-                    temp = pd.Series(temp_dict)
-                    pop_empl = gpd.GeoDataFrame(
-                        pd.concat([pop_empl, pd.DataFrame(temp).T], ignore_index=True)
-                    )
-
+    pairs, pop_empl = pop_empl_to_catchment_commune_pairs(
+        catchment_tif=catchment_tif,
+        commune_raster=commune_raster,
+        empl_raster_data=empl_raster_data,
+        empl_scenarios=empl_scenarios,
+        pop_raster_data=pop_raster_data,
+        pop_scenarios=pop_scenarios,
+        scen_empl_20_tif=scen_empl_20_tif,
+        scen_pop_20_tif=scen_pop_20_tif)
 
     ###############################################################################################################################
     # Step 3 complete exploded matrix
@@ -1243,7 +1194,7 @@ def GetCatchmentOD():
         catchmentdf_temp = catchmentdf_temp.merge(origin, how='left', left_on='ID_point', right_on='catchment_id')
         catchmentdf_temp = catchmentdf_temp.merge(destination, how='left', left_on='ID_point', right_on='catchment_id')
         catchmentdf_temp = catchmentdf_temp.rename(columns={'0_x': 'origin', '0_y': 'destination'})
-        catchmentdf_temp.to_file(fr"data/traffic_flow/od/catchment_id_{scen}.gpkg", driver="GPKG")
+        catchmentdf_temp.to_file(fr"data/traffic_flow/od/catchment_id_{scen}.gpkg", driver="GPKG") #only output
 
         # Same for odmat and commune_df
         if scen == "20":
@@ -1256,6 +1207,56 @@ def GetCatchmentOD():
             commune_df = commune_df.rename(columns={'0_x': 'origin', '0_y': 'destination'})
             commune_df.to_file(r"data/traffic_flow/od/OD_commune_filtered.gpkg", driver="GPKG")
     return
+
+
+def pop_empl_to_catchment_commune_pairs(catchment_tif, commune_raster, empl_raster_data, empl_scenarios,
+                                        pop_raster_data, pop_scenarios, scen_empl_20_tif, scen_pop_20_tif):
+    # Identify unique catchment and commune IDs
+    unique_catchment_id = np.sort(np.unique(catchment_tif))
+    unique_commune_id = np.sort(np.unique(commune_raster))
+    # Initialize the DataFrame for storing results
+    pop_empl = gpd.GeoDataFrame()
+    pairs = gpd.GeoDataFrame()
+    # Process each unique catchment and commune
+    for i in tqdm(unique_catchment_id, desc='Processing Catchment IDs'):
+        # Mask for the current catchment
+        mask_catchment = catchment_tif == i
+
+        for j in unique_commune_id:
+            if j > 0:
+                # Mask for the current commune
+                mask_commune = commune_raster == j
+
+                # Combined mask to find overlap
+                mask = mask_commune & mask_catchment
+
+                if np.nansum(mask) > 0:
+                    # Record the commune and catchment pair
+                    temp = pd.Series({'commune_id': j, 'catchment_id': i})
+                    pairs = gpd.GeoDataFrame(
+                        pd.concat([pairs, pd.DataFrame(temp).T], ignore_index=True)
+                    )
+
+                    # Extract population and employment data for all scenarios
+                    temp_dict = {'commune_id': j, 'catchment_id': i}
+
+                    # Status quo
+                    temp_dict['pop_20'] = np.nansum(scen_pop_20_tif[mask])
+                    temp_dict['empl_20'] = np.nansum(scen_empl_20_tif[mask])
+
+                    # Loop through each scenario for population and employment
+                    for scenario in pop_scenarios:
+                        temp_dict[f'{scenario}'] = np.nansum(pop_raster_data[scenario][mask])
+
+                    for scenario in empl_scenarios:
+                        temp_dict[f'{scenario}'] = np.nansum(empl_raster_data[scenario][mask])
+
+                    # Append the result for the current pair
+                    temp = pd.Series(temp_dict)
+                    pop_empl = gpd.GeoDataFrame(
+                        pd.concat([pop_empl, pd.DataFrame(temp).T], ignore_index=True)
+                    )
+    return pairs, pop_empl
 
 
 def combine_and_save_od_matrices(directory, status_quo_directory):

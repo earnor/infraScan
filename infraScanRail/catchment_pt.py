@@ -4,6 +4,7 @@ from rasterio.features import rasterize
 from rasterio.transform import from_bounds
 from rasterio.transform import from_origin
 
+import settings
 # Additional imports for grid creation
 from data_import import *
 
@@ -866,7 +867,7 @@ def get_catchment(use_cache):
     create_raster_from_gpkg(
     input_gpkg="data/catchment_pt/catchement.gpkg",
     output_tif="data/catchment_pt/catchement.tif",
-    raster_size=(100, 100))  # Raster size set to 100x100
+    raster_size=settings.raster_size)  # Raster size set to 100x100
     
     print("Catchment generation completed.")
     return
