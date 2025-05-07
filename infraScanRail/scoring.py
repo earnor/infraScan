@@ -949,7 +949,7 @@ def GetCatchmentOD():
 
 
 
-    
+
     pop_combined_file = r"data/independent_variable/processed/scenario/empl20_corrected.tif"
     empl_combined_file = r"data/independent_variable/processed/scenario/pop20_corrected.tif"
 
@@ -1067,8 +1067,6 @@ def GetCatchmentOD():
     ###############################################################################################################################
     # Step 2: Get all pairs of combinations from communes to polygons
     unique_commune_id = np.sort(np.unique(commune_raster))
-    pairs = pd.DataFrame(columns=['commune_id', 'catchement_id'])
-    pop_empl = pd.DataFrame(columns=['commune_id', 'catchement_id', "empl", "pop"])
     # Initialize the DataFrame for storing results
     pop_empl = gpd.GeoDataFrame()
     pairs = gpd.GeoDataFrame()
