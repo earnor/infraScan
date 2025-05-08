@@ -1,4 +1,6 @@
 import pandas as pd
+
+import settings
 from data_import import *
 from rasterio.features import geometry_mask
 from rasterstats import zonal_stats
@@ -147,32 +149,13 @@ def scenario_to_raster_pop(frame=False):
         for geom in scenario_polygon['geometry']:
             difference_poly = difference_poly.difference(geom)
 
-        # Calculate the mean values for the three columns
-        #mean_values = scenario_polygon.mean()
+        new_row = {'geometry': difference_poly}
+        for pop_scen in settings.pop_scenarios:
+            new_row[pop_scen] = scenario_polygon[pop_scen].mean()
 
-        # Create a new row for the difference polygon
-        #new_row = {'geometry': difference_poly, 's1_pop': mean_values['s1_pop'], 's2_pop': mean_values['s2_pop'],
-        #           's3_pop': mean_values['s3_pop'], 's1_empl': mean_values['s1_empl'], 's2_empl': mean_values['s2_empl'], 's3_empl': mean_values['s3_empl']}
-        #new_row = {'geometry': difference_poly, 's1_pop': scenario_polygon['s1_pop'].mean(),
-        #          's2_pop': scenario_polygon['s2_pop'].mean(), 's3_pop': scenario_polygon['s3_pop'].mean(),
-        #          's1_empl': scenario_polygon['s1_empl'].mean(), 's2_empl': scenario_polygon['s2_empl'].mean(),
-        #          's3_empl': scenario_polygon['s3_empl'].mean()}
-        new_row = {'geometry': difference_poly,
-                   'pop_urban_': scenario_polygon['pop_urban_'].mean(),
-                   'pop_equal_': scenario_polygon['pop_equal_'].mean(),
-                   'pop_rural_': scenario_polygon['pop_rural_'].mean(),
-                   'pop_urba_1': scenario_polygon['pop_urba_1'].mean(),
-                   'pop_equa_1': scenario_polygon['pop_equa_1'].mean(),
-                   'pop_rura_1': scenario_polygon['pop_rura_1'].mean(),
-                   'pop_urba_2': scenario_polygon['pop_urba_2'].mean(),
-                   'pop_equa_2': scenario_polygon['pop_equa_2'].mean(),
-                   'pop_rura_2': scenario_polygon['pop_rura_2'].mean()}
         print("New row added")
         scenario_polygon = gpd.GeoDataFrame(pd.concat([pd.DataFrame(scenario_polygon), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
 
-    growth_rate_columns_pop = ["pop_urban_", "pop_equal_", "pop_rural_",
-                               "pop_urba_1", "pop_equa_1", "pop_rura_1",
-                               "pop_urba_2", "pop_equa_2", "pop_rura_2"]
     
     #growth_rate_columns_pop = ["s1_pop", "s2_pop", "s3_pop"]
     path_pop = r"data\independent_variable\processed\raw\pop20.tif"
@@ -180,18 +163,15 @@ def scenario_to_raster_pop(frame=False):
     #growth_rate_columns_empl = ["s1_empl", "s2_empl", "s3_empl"]
     #path_empl = r"data\independent_variable\processed\raw\empl20.tif"
 
-    growth_to_tif(scenario_polygon, path=path_pop, columns=growth_rate_columns_pop)
+    growth_to_tif(scenario_polygon, path=path_pop, columns=settings.pop_scenarios)
     #growth_to_tif(scenario_polygon, path=path_empl, columns=growth_rate_columns_empl)
     print('Scenario_To_Raster complete')
 
 
     base_path = r"data/independent_variable/processed/scenario"
     output_file = r"data/independent_variable/processed/scenario/pop_combined.tif"
-    file_names = ["pop_urban_", "pop_equal_", "pop_rural_",
-                "pop_urba_1", "pop_equa_1", "pop_rura_1",
-                "pop_urba_2", "pop_equa_2", "pop_rura_2"]
 
-    create_single_tif_with_bands(base_path, file_names, output_file)
+    create_single_tif_with_bands(base_path, settings.pop_scenarios, output_file)
     return
 
 #########################################################################################################################################################################
@@ -343,38 +323,26 @@ def scenario_to_raster_emp(frame=False):
         #          's2_pop': scenario_polygon['s2_pop'].mean(), 's3_pop': scenario_polygon['s3_pop'].mean(),
         #          's1_empl': scenario_polygon['s1_empl'].mean(), 's2_empl': scenario_polygon['s2_empl'].mean(),
         #          's3_empl': scenario_polygon['s3_empl'].mean()}
-        new_row = {'geometry': difference_poly,
-                   'empl_urban': scenario_polygon['empl_urban'].mean(),
-                   'empl_equal': scenario_polygon['empl_equal'].mean(),
-                   'empl_rural': scenario_polygon['empl_rural'].mean(),
-                   'empl_urb_1': scenario_polygon['empl_urb_1'].mean(),
-                   'empl_equ_1': scenario_polygon['empl_equ_1'].mean(),
-                   'empl_rur_1': scenario_polygon['empl_rur_1'].mean(),
-                   'empl_urb_2': scenario_polygon['empl_urb_2'].mean(),
-                   'empl_equ_2': scenario_polygon['empl_equ_2'].mean(),
-                   'empl_rur_2': scenario_polygon['empl_rur_2'].mean()}
+
+        new_row = {'geometry': difference_poly}
+        for empl_scen in settings.empl_scenarios:
+            new_row[empl_scen] = scenario_polygon[empl_scen].mean()
+
         print("New row added")
         scenario_polygon = gpd.GeoDataFrame(pd.concat([pd.DataFrame(scenario_polygon), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
-
-    growth_rate_columns_empl = ["empl_urban", "empl_equal", "empl_rural",
-                               "empl_urb_1", "empl_equ_1", "empl_rur_1",
-                               "empl_urb_2", "empl_equ_2", "empl_rur_2"]
     
     #growth_rate_columns_empl = ["s1_empl", "s2_empl", "s3_empl"]
     path_empl = r"data\independent_variable\processed\raw\empl20.tif"
 
-    growth_to_tif(scenario_polygon, path=path_empl, columns=growth_rate_columns_empl)
+    growth_to_tif(scenario_polygon, path=path_empl, columns=settings.empl_scenarios)
     #growth_to_tif(scenario_polygon, path=path_empl, columns=growth_rate_columns_empl)
     print('Scenario_To_Raster complete')
 
 
     base_path = r"data/independent_variable/processed/scenario"
     output_file = r"data/independent_variable/processed/scenario/empl_combined.tif"
-    file_names = ["empl_urban", "empl_equal", "empl_rural",
-                   "empl_urb_1", "empl_equ_1", "empl_rur_1",
-                   "empl_urb_2", "empl_equ_2", "empl_rur_2"]
 
-    create_single_tif_with_bands(base_path, file_names, output_file)
+    create_single_tif_with_bands(base_path, settings.empl_scenarios, output_file)
     return
 
 

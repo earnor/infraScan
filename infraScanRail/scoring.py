@@ -1,6 +1,7 @@
 import pandas
 
 import cost_parameters as cp
+
 from data_import import *
 from plots import plot_costs_benefits_example
 import os
@@ -13,7 +14,7 @@ from shapely.ops import unary_union
 from tqdm import tqdm
 from rasterio.warp import reproject
 import glob
-
+import settings
 
 def split_via_nodes(df):
     """
@@ -345,15 +346,8 @@ def aggregate_costs(cost_and_benefits):
     total_costs_csv_path = "data/costs/total_costs_raw.csv"
 
     # Define scenarios for population and employment
-    pop_scenarios = [
-        "pop_urban_", "pop_equal_", "pop_rural_",
-        "pop_urba_1", "pop_equa_1", "pop_rura_1",
-        "pop_urba_2", "pop_equa_2", "pop_rura_2"]
-
-    empl_scenarios = [
-        "empl_urban", "empl_equal", "empl_rural",
-        "empl_urb_1", "empl_equ_1", "empl_rur_1",
-        "empl_urb_2", "empl_equ_2", "empl_rur_2"]
+    pop_scenarios = settings.pop_scenarios
+    empl_scenarios = settings.empl_scenarios
 
     # Group by development and scenario, summing costs and benefits across all years
     aggregated = cost_and_benefits.groupby(['development', 'scenario']).agg({
@@ -938,15 +932,6 @@ def GetCatchmentOD():
 
 
 
-
-    pop_combined_file = r"data/independent_variable/processed/scenario/empl20_corrected.tif"
-    empl_combined_file = r"data/independent_variable/processed/scenario/pop20_corrected.tif"
-
-    # define dev (=ID of the polygons of a development)
-
-    # Get voronoidf crs
-    print(catchmentdf.crs)
-
     # todo When we iterate over devs and scens, maybe we can check if the VoronoiDF already has the communal data and then skip the following five lines
     popvec = GetCommunePopulation(y0="2021")
     jobvec = GetCommuneEmployment(y0=2021)
@@ -962,27 +947,20 @@ def GetCatchmentOD():
             "Error: The number of communes in the OD matrix and the number of communes in the employment data do not match.")
 
     # Define scenario names for population and employment
-    pop_scenarios = [
-        "pop_urban_", "pop_equal_", "pop_rural_",
-        "pop_urba_1", "pop_equa_1", "pop_rura_1",
-        "pop_urba_2", "pop_equa_2", "pop_rura_2"]
-
-    empl_scenarios = [
-        "empl_urban", "empl_equal", "empl_rural",
-        "empl_urb_1", "empl_equ_1", "empl_rur_1",
-        "empl_urb_2", "empl_equ_2", "empl_rur_2"]
+    pop_scenarios = settings.pop_scenarios
+    empl_scenarios = settings.empl_scenarios
 
     # Create dictionaries to store the raster data for each scenario
     pop_raster_data = {}
     empl_raster_data = {}
 
     # Read population scenarios from the combined raster file
-    with rasterio.open(pop_combined_file) as src:
+    with rasterio.open(output_pop_path) as src:
         for idx, scenario in enumerate(pop_scenarios, start=1):  # Start from band 1
             pop_raster_data[scenario] = src.read(idx)  # Read each band
 
     # Read employment scenarios from the combined raster file
-    with rasterio.open(empl_combined_file) as src:
+    with rasterio.open(output_empl_path) as src:
         for idx, scenario in enumerate(empl_scenarios, start=1):  # Start from band 1
             empl_raster_data[scenario] = src.read(idx)  # Read each band
 
@@ -1004,10 +982,10 @@ def GetCatchmentOD():
 
     
     # Open status quo
-    with rasterio.open(r"data/independent_variable/processed/raw/empl20_corrected.tif") as src:
+    with rasterio.open(output_empl_path) as src:
         scen_empl_20_tif = src.read(1)
 
-    with rasterio.open(r"data/independent_variable/processed/raw/pop20_corrected.tif") as src:
+    with rasterio.open(output_pop_path) as src:
         scen_pop_20_tif = src.read(1)
 
     #Load the catchment raster data
@@ -1115,30 +1093,33 @@ def GetCatchmentOD():
     # SEt index of df to access its single components
     pop_empl = pop_empl.set_index(['catchment_id', 'commune_id'])
     pop_empl_scenarios = pop_empl.columns.tolist()
-
+    pop_scenarios = [col for col in pop_empl.columns if 'pop' in col.lower()]   #only keep population columns
+    empl_scenarios = [col for col in pop_empl.columns if 'empl' in col.lower()]
     # for each of these scenarios make an own copy of od_matrix named od_matrix+scen
-    for scen in pop_empl_scenarios:
-        print(f"Processing scenario {scen}")
+    for i in range(len(pop_scenarios)):
+        print(f"Processing scenario {pop_scenarios[i],empl_scenarios[i]}")
         od_matrix_temp = od_matrix.copy()
 
 
         for polygon_id, row in tqdm(pop_empl.iterrows(), desc='Allocating pop and empl to OD matrix'):
             # Debug: Print the current polygon_id and row data
-            print(f"Processing polygon_id: {polygon_id}, scenario: {scen}")
+            print(f"Processing polygon_id: {polygon_id}, scenario: {pop_scenarios[i],empl_scenarios[i]}")
             print(f"Row data: {row}")
 
             # Debug: Print the sum before scaling
             print(f"Sum before scaling: {od_matrix_temp.sum().sum()}")
 
             # Multiply all values in the row/column
-            scaling_factor = row[f'{scen}']  # Extract scaling factor
-            print(f"Scaling factor: {scaling_factor}")  # Debug: Check scaling factor
+            scaling_factor_pop = row[pop_scenarios[i]]  # Extract scaling factor
+            scaling_factor_empl = row[empl_scenarios[i]]  # Extract scaling factor
+            print(f"Scaling factor: {scaling_factor_pop,scaling_factor_empl}")  # Debug: Check scaling factor
 
-            od_matrix_temp.loc[polygon_id] *= scaling_factor
-            od_matrix_temp.loc[:, polygon_id] *= scaling_factor
+            od_matrix_temp.loc[polygon_id] *= scaling_factor_pop
+            od_matrix_temp.loc[:, polygon_id] *= scaling_factor_empl
 
             # Debug: Print the sum after scaling
             print(f"Sum after scaling: {od_matrix_temp.sum().sum()}")
+
 
         ###############################################################################################################################
         # Step 4: Group the OD matrix by polygon_id
@@ -1167,7 +1148,7 @@ def GetCatchmentOD():
         print(f"Sum of OD matrix before {temp_sum} and after {temp_sum2} removing diagonal values")
 
         # Save pd df to csv
-        od_grouped.to_csv(fr"data/traffic_flow/od/rail/od_matrix_{scen}.csv")
+        od_grouped.to_csv(fr"data/traffic_flow/od/rail/od_matrix_{pop_scenarios[i],empl_scenarios[i]}.csv")
         # odmat.to_csv(r"data/traffic_flow/od/od_matrix_raw.csv")
 
         # Print sum of all values in od df
@@ -1194,9 +1175,9 @@ def GetCatchmentOD():
         catchmentdf_temp = catchmentdf_temp.merge(origin, how='left', left_on='ID_point', right_on='catchment_id')
         catchmentdf_temp = catchmentdf_temp.merge(destination, how='left', left_on='ID_point', right_on='catchment_id')
         catchmentdf_temp = catchmentdf_temp.rename(columns={'0_x': 'origin', '0_y': 'destination'})
-        catchmentdf_temp.to_file(fr"data/traffic_flow/od/catchment_id_{scen}.gpkg", driver="GPKG") #only output
+        catchmentdf_temp.to_file(fr"data/traffic_flow/od/catchment_id_{pop_scenarios[i]}.gpkg", driver="GPKG") #only output
 
-        # Same for odmat and commune_df
+        """        # Same for odmat and commune_df
         if scen == "20":
             origin_commune = odmat_frame.sum(axis=1).reset_index()
             origin_commune.colum = ["commune_id", "origin"]
@@ -1206,6 +1187,7 @@ def GetCatchmentOD():
             commune_df = commune_df.merge(destination_commune, how='left', left_on='BFS', right_on='ziel_code')
             commune_df = commune_df.rename(columns={'0_x': 'origin', '0_y': 'destination'})
             commune_df.to_file(r"data/traffic_flow/od/OD_commune_filtered.gpkg", driver="GPKG")
+            """
     return
 
 
@@ -1281,15 +1263,9 @@ def combine_and_save_od_matrices(directory, status_quo_directory):
     os.makedirs(status_quo_directory, exist_ok=True)
 
     # Define scenarios for population and employment
-    pop_scenarios = [
-        "pop_urban_", "pop_equal_", "pop_rural_",
-        "pop_urba_1", "pop_equa_1", "pop_rura_1",
-        "pop_urba_2", "pop_equa_2", "pop_rura_2"]
+    pop_scenarios = settings.pop_scenarios
 
-    empl_scenarios = [
-        "empl_urban", "empl_equal", "empl_rural",
-        "empl_urb_1", "empl_equ_1", "empl_rur_1",
-        "empl_urb_2", "empl_equ_2", "empl_rur_2"]
+    empl_scenarios = settings.empl_scenarios
 
     # Process status quo files separately
     status_quo_pop_file = os.path.join(directory, "od_matrix_pop_20.csv")

@@ -122,7 +122,7 @@ def plotting(input_file, output_file, node_file):
 
         # Retain all other columns and geometry
         other_columns = [col for col in gdf.columns if col not in construction_costs_columns or col == first_column]
-        gdf = gdf[other_columns + ['geometry']]
+        gdf = gdf[other_columns]
 
         # Rename the first 'construction_cost' column
         gdf.rename(columns={first_column: "Construction and Maintenance Cost in Mio. CHF"}, inplace=True)
