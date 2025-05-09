@@ -5,14 +5,9 @@ import tkinter as tk
 import zipfile
 
 import fiona
-import geopandas
-import networkx
-import numpy
-import pandas
 import pulp
 import rasterio
 import requests
-from matplotlib import pyplot, lines, patches
 from rasterio.features import geometry_mask
 from scipy.stats._qmc import LatinHypercube
 from shapely import LineString
@@ -21,7 +16,6 @@ from shapely.ops import split, nearest_points
 from tqdm import tqdm
 
 from generate_infrastructure import create_lines
-from scoring import split_via_nodes, merge_lines
 
 
 def tunnel_bridges(df):
@@ -1181,171 +1175,6 @@ def delete_connections_back(file_path_updated, file_path_raw_edges, output_path)
     updated_new_links.to_file(output_path, driver="GPKG")
     print(f"Updated file saved to: {output_path}")
     return updated_new_links
-
-
-def get_via(new_connections):
-    """
-    Calculate the list of nodes traversed for each new connection based on the existing connections.
-
-    Parameters:
-        new_connections (pd.DataFrame): New connections with columns 'from_ID_new' and 'to_ID'.
-
-    Returns:
-        pd.DataFrame: A DataFrame with the new connections and a list of nodes traversed for each connection,
-                      represented as a string or an integer (-99 if no path exists).
-    """
-    # File path for the construction cost data
-    file_path = r"data/Network/Rail-Service_Link_construction_cost.csv"
-
-    try:
-        # Load the data
-        df_construction_cost = pd.read_csv(file_path, sep=";", decimal=",", encoding="utf-8-sig")
-    except FileNotFoundError:
-        raise FileNotFoundError(f"File not found: {file_path}")
-    except Exception as e:
-        raise RuntimeError(f"An error occurred while reading the file: {e}")
-
-    # Create an undirected graph
-    G = nx.Graph()
-
-    # Split the lines with a Via column
-    df_split = split_via_nodes(df_construction_cost)
-    df_split = merge_lines(df_split)
-
-    # Add edges to the graph
-    for _, row in df_split.iterrows():
-        G.add_edge(row['FromNode'], row['ToNode'], weight=row['TotalTravelTime'])
-
-    # Ensure nodes and connections IDs are integers
-    G = nx.relabel_nodes(G, {n: int(n) for n in G.nodes})
-    new_connections['from_ID_new'] = new_connections['from_ID_new'].astype(int)
-    new_connections['to_ID'] = new_connections['to_ID'].astype(int)
-
-    # Compute the routes
-    results = []
-    for _, row in new_connections.iterrows():
-        from_node = row['from_ID_new']
-        to_node = row['to_ID']
-
-        # Find the shortest path based on TravelTime
-        try:
-            path = nx.shortest_path(G, source=from_node, target=to_node, weight='weight')
-            # Convert path to a string
-            path_str = ",".join(map(str, path))  # Convert list to comma-separated string
-        except nx.NetworkXNoPath:
-            path_str = -99  # No path exists
-
-        # Add the result to the list
-        results.append({
-            'from_ID_new': from_node,
-            'to_ID': to_node,
-            'via_nodes': path_str  # Path as string or -99
-        })
-
-    # Convert results to a DataFrame
-    result_df = pd.DataFrame(results)
-
-    return result_df
-
-
-def update_network_with_new_links(network_railway_service_path, new_links_updated_path):
-    """
-    Add new links to the railway network, marking them as new and generating both directions.
-    Ensure FromStation and ToStation are mapped correctly using Rail_Node data.
-    """
-    # Load data
-    network_railway_service = gpd.read_file(network_railway_service_path)
-    new_links_updated = gpd.read_file(new_links_updated_path)
-    rail_node = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";", decimal=",", encoding="ISO-8859-1")
-
-    # Ensure Rail_Node has required columns
-    if not {"NR", "NAME"}.issubset(rail_node.columns):
-        raise ValueError("Rail_Node file must contain 'NR' and 'NAME' columns.")
-
-    # Map NR to NAME for station names
-    rail_node_mapping = rail_node.set_index("NR")["NAME"].to_dict()
-
-    # Populate required columns for new links
-    new_links_updated = new_links_updated.assign(
-        new_dev="Yes",
-        FromNode=new_links_updated["from_ID_new"],
-        ToNode=new_links_updated["to_ID"],
-        FromStation=new_links_updated["from_ID_new"].map(rail_node_mapping),
-        ToStation=new_links_updated["to_ID"].map(rail_node_mapping),
-        Direction="B",  # Default direction
-    )
-
-    # Ensure `new_dev` in the original network remains unchanged
-    network_railway_service["new_dev"] = network_railway_service.get("new_dev", "No")
-
-    # Assign additional columns directly
-    new_links_updated["TravelTime"] = new_links_updated["time"]
-    new_links_updated["InVehWait"] = 0
-    new_links_updated["Service"] = new_links_updated["Sline"]
-    new_links_updated["Frequency"] = 2
-    new_links_updated["TotalPeakCapacity"] = 690
-    new_links_updated["Capacity"] = 345
-
-    # Calculate the Via nodes for all the new connections
-    via_df = get_via(new_links_updated)
-
-    # Merge the 'via_nodes' from 'via_df' into 'new_links_updated' based on 'from_ID_new' and 'to_ID'
-    new_links_updated = pd.merge(
-        new_links_updated,
-        via_df[['from_ID_new', 'to_ID', 'via_nodes']],
-        left_on=['from_ID_new', 'to_ID'],
-        right_on=['from_ID_new', 'to_ID'],
-        how='left'
-    )
-
-    # Rename the 'via_nodes' column to 'Via' for clarity
-    new_links_updated.rename(columns={'via_nodes': 'Via'}, inplace=True)
-
-    # Ensure all Via values are strings or -99 for empty paths
-    new_links_updated['Via'] = new_links_updated['Via'].apply(
-        lambda x: '-99' if not x or x == [-99] else ','.join(map(str, x))
-    )
-
-    # Identify and report missing node mappings
-    missing_from_nodes = new_links_updated["FromNode"][new_links_updated["FromStation"].isna()].unique()
-    missing_to_nodes = new_links_updated["ToNode"][new_links_updated["ToStation"].isna()].unique()
-
-    if len(missing_from_nodes) > 0 or len(missing_to_nodes) > 0:
-        print("Warning: Missing mappings for the following nodes:")
-        if len(missing_from_nodes) > 0:
-            print(f"FromNodes: {missing_from_nodes}")
-        if len(missing_to_nodes) > 0:
-            print(f"ToNodes: {missing_to_nodes}")
-
-    # Generate rows for Direction A while preserving dev_id
-    direction_A = new_links_updated.copy()
-    direction_A["Direction"] = "A"
-    direction_A["FromNode"], direction_A["ToNode"] = direction_A["ToNode"], direction_A["FromNode"]
-    direction_A["FromStation"], direction_A["ToStation"] = direction_A["ToStation"], direction_A["FromStation"]
-
-    # Combine A and B directions, preserving the same dev_id
-    combined_new_links = pd.concat([new_links_updated, direction_A], ignore_index=True)
-
-    # Ensure GeoDataFrame compatibility
-    combined_new_links_gdf = gpd.GeoDataFrame(combined_new_links, geometry=new_links_updated.geometry)
-
-    # Standardize station names in FromStation and ToStation
-    standardize_station_names = {
-        "Wetzikon": "Wetzikon ZH",
-        # Add more mappings here if needed
-    }
-    new_links_updated["FromStation"] = new_links_updated["FromStation"].replace(standardize_station_names)
-    new_links_updated["ToStation"] = new_links_updated["ToStation"].replace(standardize_station_names)
-
-    combined_new_links["FromStation"] = combined_new_links["FromStation"].replace(standardize_station_names)
-    combined_new_links["ToStation"] = combined_new_links["ToStation"].replace(standardize_station_names)
-
-
-    # Combine with original network
-    combined_network = pd.concat([network_railway_service, combined_new_links_gdf], ignore_index=True)
-
-
-    return combined_network
 
 
 def nearest(row, geom_union, df2, geom1_col='geometry', geom2_col='geometry', src_column=None):

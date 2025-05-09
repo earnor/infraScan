@@ -384,6 +384,17 @@ def generate_infra_development(use_cache):
     only_links_to_corridor()
     calculate_new_service_time()
 
+    new_links_updated_path = r"data\Network\processed\updated_new_links.gpkg"
+    output_path = r"data\Network\processed\combined_network_with_new_links.gpkg"
+
+    # combined_gdf = delete_connections_back(file_path_updated=r"data\Network\processed\new_links.gpkg",
+    #                                        file_path_raw_edges=r"data/temp/network_railway-services.gpkg",
+    #                                        output_path=r"data/Network/processed/updated_new_links_cleaned.gpkg")
+
+    combined_gdf = update_network_with_new_links(paths.RAIL_SERVICES_AK2035_PATH, new_links_updated_path)
+    update_stations(combined_gdf, output_path)
+
+
     create_network_foreach_dev()
 
 
