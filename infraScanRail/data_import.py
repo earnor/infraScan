@@ -235,6 +235,8 @@ def create_railway_services_AK2035():
         edges=edges_ak2035,
         points=points)
     edges_ak2035 = edges_ak2035.fillna(0)
+    edges_ak2035.loc[edges_ak2035['Via'] == 0, 'Via'] = '-99'
+
     edges_ak2035.to_file(paths.RAIL_SERVICES_AK2035_PATH)
 
 

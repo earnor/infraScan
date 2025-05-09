@@ -16,6 +16,7 @@ from tqdm import tqdm
 from rasterio.warp import reproject
 import glob
 import settings
+import ast  # For safely evaluating string representations of lists
 
 def split_via_nodes(df):
     """
@@ -29,8 +30,7 @@ def split_via_nodes(df):
     Returns:
         pd.DataFrame: Expanded DataFrame with all sub-edges and updated station names.
     """
-    import pandas as pd
-    import ast  # For safely evaluating string representations of lists
+
 
     # Ensure '-99' strings in the Via column are converted to an integer -99
     df['Via'] = df['Via'].apply(lambda x: str(x).replace("[-99]", "-99"))

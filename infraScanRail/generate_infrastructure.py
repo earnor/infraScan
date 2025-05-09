@@ -2,6 +2,7 @@ from shapely.geometry import MultiLineString
 from shapely.ops import split
 import gc
 
+import paths
 from scoring import *
 from scoring import split_via_nodes, merge_lines
 
@@ -484,13 +485,12 @@ def get_via(new_connections):
                       represented as a string or an integer (-99 if no path exists).
     """
     # File path for the construction cost data
-    file_path = r"data/Network/Rail-Service_Link_construction_cost.csv"
 
     try:
         # Load the data
-        df_construction_cost = pd.read_csv(file_path, sep=";", decimal=",", encoding="utf-8-sig")
+        df_network = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
     except FileNotFoundError:
-        raise FileNotFoundError(f"File not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {paths.RAIL_SERVICES_AK2035_PATH}")
     except Exception as e:
         raise RuntimeError(f"An error occurred while reading the file: {e}")
 
@@ -498,7 +498,7 @@ def get_via(new_connections):
     G = nx.Graph()
 
     # Split the lines with a Via column
-    df_split = split_via_nodes(df_construction_cost)
+    df_split = split_via_nodes(df_network)
     df_split = merge_lines(df_split)
 
     # Add edges to the graph
