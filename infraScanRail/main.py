@@ -144,10 +144,10 @@ def infrascanrail():
 
     # Compute the OD matrix for the current infrastructure under all scenarios
     od_directory_stat_quo = r"data/traffic_flow/od/rail/stat_quo"
-    od_directory_dev = r"data/traffic_flow/od/rail"
+    od_directory_scenario = r"data/traffic_flow/od/rail"
 
     GetCatchmentOD()
-    combine_and_save_od_matrices(od_directory_dev, od_directory_stat_quo)
+    combine_and_save_od_matrices(od_directory_scenario, od_directory_stat_quo)
 
     # Compute the OD matrix for the infrastructure developments under all scenarios
     # GetVoronoiOD_multi()
@@ -159,7 +159,7 @@ def infrascanrail():
     TTT_status_quo = calculate_total_travel_times(od_times_status_quo, od_directory_stat_quo, df_access)
 
     # TTT for developments (trips in Peak hour * OD-Times) [in hour]
-    TTT_developments = calculate_total_travel_times(od_times_dev, od_directory_dev, df_access)
+    TTT_developments = calculate_total_travel_times(od_times_dev, od_directory_scenario, df_access)
     print(TTT_status_quo)
     print(TTT_developments)
     # Monetize travel time savings ()
@@ -220,7 +220,7 @@ def infrascanrail():
 
 def create_travel_time_graphs(network_selection):
     if network_selection == 'current':
-        network_status_quo = [r"data/temp/network_railway-services.gpkg"]
+        network_status_quo = [paths.RAIL_SERVICES_2024_PATH]
     elif network_selection == 'AK_2035':
         network_status_quo = [paths.RAIL_SERVICES_AK2035_PATH]
     G_status_quo = create_graphs_from_directories(network_status_quo)

@@ -1,6 +1,7 @@
 import pandas
 
 import cost_parameters as cp
+import paths
 
 from data_import import *
 from plots import plot_costs_benefits_example
@@ -587,7 +588,10 @@ def filter_unnecessary_links():
     GeoPackage file.
     """
     # Load data
-    raw_edges = gpd.read_file(r"data/temp/network_railway-services.gpkg")  # Use raw string
+    if settings.rail_network == 'current':
+        raw_edges = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)  # Use raw string
+    elif settings.rail_network == 'AK_2035':
+        raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
     line_gdf = gpd.read_file(r"data/Network/processed/new_links.gpkg")      # Use raw string
 
     # Step 1: Build Sline routes

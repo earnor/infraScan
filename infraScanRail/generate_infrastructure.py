@@ -22,7 +22,7 @@ def generate_rail_edges(n, radius):
     current_points = gpd.read_file(r"data/Network/processed/points.gpkg")
     current_points = current_points[~current_points['ID_point'].isin([112, 113, 720, 2200])]
     if settings.rail_network == 'current':
-        raw_edges = gpd.read_file(r"data/temp/network_railway-services.gpkg")
+        raw_edges = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
     elif settings.rail_network == 'AK_2035':
         raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
     else:

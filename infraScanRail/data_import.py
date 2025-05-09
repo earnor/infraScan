@@ -55,7 +55,7 @@ def reformat_rail_edges():
     the closest railway segment. The railway segments are then split at the access points.
     """
     if settings.rail_network == 'current':
-        edges_gdf = gpd.read_file(r"data/temp/network_railway-services.gpkg")
+        edges_gdf = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
     elif settings.rail_network == 'AK_2035':
         print("Using AK2035 network")
         edges_gdf = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
@@ -198,7 +198,7 @@ def create_railway_services_AK2035():
 
 
 
-    edges_ak2035 = gpd.read_file(r'data/temp/network_railway-services.gpkg')
+    edges_ak2035 = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
     points = gpd.read_file(r'data\Network\processed\points.gpkg')
 
     # Double the frequency and capacity for rows where "Service" contains "S9"
