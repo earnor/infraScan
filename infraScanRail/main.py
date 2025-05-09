@@ -57,6 +57,11 @@ def infrascanrail():
     ##################################################################################
     # INFRASTRUCTURE NETWORK
     # 1) Import&Process network
+
+    # Import the railway network and preprocess it
+    # Data are stored as "data/temp/???.gpkg" ## To DO
+    #load_nw()
+
     # 2) Generate developments (new access points) and connection to existing infrastructure
 
     print("\nINFRASTRUCTURE NETWORK \n")

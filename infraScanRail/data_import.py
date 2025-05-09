@@ -176,8 +176,8 @@ def create_railway_services_AK2035():
 
             # Create a new row for the edge in direction "B"
             new_edge_b = {
-                'FromStation': from_station,
-                'ToStation': to_station,
+                'FromStation': to_station, # to and from must be swapped
+                'ToStation': from_station,
                 'FromNode': to_id,
                 'ToNode': from_id,
                 'Service': service_name,

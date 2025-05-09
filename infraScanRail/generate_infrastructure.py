@@ -29,6 +29,10 @@ def generate_rail_edges(n, radius):
     else:
         exit("No rail network specified.")
     # Identify endpoint nodes
+
+    raw_edges['FromEnd'] = raw_edges['FromEnd'].astype(bool)
+    raw_edges['ToEnd'] = raw_edges['ToEnd'].astype(bool)
+
     endpoints = set(
         raw_edges.loc[raw_edges['FromEnd'] == True, 'FromNode']
     ).union(
