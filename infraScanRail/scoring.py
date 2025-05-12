@@ -887,7 +887,7 @@ def correct_rasters_to_extent(
     process_raster(empl_path, output_empl_path)
     process_raster(pop_path, output_pop_path)
 
-def GetCatchmentOD():
+def GetCatchmentOD(use_cache = False):
     """
     Defines the `GetCatchmentOD` function, which performs operations to analyze spatial and raster
     data for a defined research corridor. This includes managing raster data, defining spatial
@@ -914,7 +914,8 @@ def GetCatchmentOD():
         across populations, employment data, and origin-destination matrices. Errors are shown
         uniquely for OD matrix shapes.
     """
-
+    if use_cache == True:
+        return
     # Import the required data or define the path to access it
     catchment_tif_path = r'data/catchment_pt/catchement.tif'
     catchmentdf = gpd.read_file(r"data/catchment_pt/catchement.gpkg")
@@ -1152,7 +1153,10 @@ def GetCatchmentOD():
         print(f"Sum of OD matrix before {temp_sum} and after {temp_sum2} removing diagonal values")
 
         # Save pd df to csv
-        od_grouped.to_csv(fr"data/traffic_flow/od/rail/od_matrix_{pop_scenarios[i],empl_scenarios[i]}.csv")
+        if pop_scenarios[i] == 'pop_20':
+            od_grouped.to_csv(fr"data/traffic_flow/od/rail/stat_quo/od_matrix_{pop_scenarios[i], empl_scenarios[i]}.csv")
+        else:
+            od_grouped.to_csv(fr"data/traffic_flow/od/rail/od_matrix_{pop_scenarios[i],empl_scenarios[i]}.csv")
         # odmat.to_csv(r"data/traffic_flow/od/od_matrix_raw.csv")
 
         # Print sum of all values in od df

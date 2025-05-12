@@ -136,11 +136,15 @@ def create_railway_services_AK2035():
         Returns:
             None
         """
+
         # Iterate through consecutive station pairs
         for i in range(len(stations) - 1):
+
             # Get the IDs and geometries of the two stations
             from_station = stations[i]
             to_station = stations[i + 1]
+
+
             from_id = points.loc[points['NAME'] == from_station, 'ID_point'].iloc[0]
             to_id = points.loc[points['NAME'] == to_station, 'ID_point'].iloc[0]
             from_geom = points.loc[points['ID_point'] == from_id, 'geometry'].iloc[0]
@@ -153,6 +157,13 @@ def create_railway_services_AK2035():
             # Determine FromEnd and ToEnd for direction "A"
             from_end_a = 1 if i == 0 else 0
             to_end_a = 1 if i == len(stations) - 2 else 0
+
+            #in the points file, its 'Wetzikon' but in the Railway Services file, it is 'Wetzikon ZH'
+            if from_station == 'Wetzikon':
+                from_station = 'Wetzikon ZH'
+            if to_station == 'Wetzikon':
+                to_station = 'Wetzikon ZH'
+
 
             # Create a new row for the edge in direction "A"
             new_edge_a = {

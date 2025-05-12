@@ -2,15 +2,7 @@
 import shutil
 import time
 
-from plots import (
-    plotting,
-    plot_scenarios,
-    plot_costs_benefits_example,
-    plot_develompments_rail,
-    link_traffic_to_map,
-    create_and_save_plots
-)
-
+import settings
 from TT_Delay import *
 from catchment_pt import *
 from display_results import *
@@ -162,8 +154,8 @@ def infrascanrail():
     od_directory_stat_quo = r"data/traffic_flow/od/rail/stat_quo"
     od_directory_scenario = r"data/traffic_flow/od/rail"
 
-    GetCatchmentOD()
-    combine_and_save_od_matrices(od_directory_scenario, od_directory_stat_quo)
+    GetCatchmentOD(settings.use_cache_catchmentOD)
+    #combine_and_save_od_matrices(od_directory_scenario, od_directory_stat_quo)
 
     # Compute the OD matrix for the infrastructure developments under all scenarios
     # GetVoronoiOD_multi()

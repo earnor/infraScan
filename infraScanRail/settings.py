@@ -1,7 +1,8 @@
 rail_network = 'AK_2035' # either 'AK_2035' or 'current'
 
 use_cache_pt_catchment = True
-use_cache_developments = False
+use_cache_developments = True
+use_cache_catchmentOD = False
 
 raster_size = (170,210)
 
