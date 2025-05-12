@@ -2,7 +2,15 @@
 import shutil
 import time
 
-import paths
+from plots import (
+    plotting,
+    plot_scenarios,
+    plot_costs_benefits_example,
+    plot_develompments_rail,
+    link_traffic_to_map,
+    create_and_save_plots
+)
+
 from TT_Delay import *
 from catchment_pt import *
 from display_results import *
@@ -11,7 +19,8 @@ from scenarios import *
 from scoring import *
 from scoring import create_cost_and_benefit_df
 from traveltime_delay import *
-
+import geopandas as gpd
+import networkx as nx
 
 def infrascanrail():
 
@@ -72,6 +81,8 @@ def infrascanrail():
     reformat_rail_nodes()
     create_railway_services_AK2035()
     reformat_rail_edges()
+
+    add_construction_info_to_network()
 
     network_in_corridor(poly=outerboundary)
 
@@ -221,6 +232,29 @@ def infrascanrail():
     csv_file_path = "data/costs/total_costs_with_geometry.csv"
     # Call the function to create_scenario_analysis_viewerreate and display the GUI
     create_scenario_analysis_viewer(csv_file_path)
+
+
+def add_construction_info_to_network():
+    const_cost_path = r"data/Network/Rail-Service_Link_construction_cost.csv"
+    rows = ['NumOfTracks', 'Bridges m', 'Tunnel m', 'TunnelTrack',
+            'tot length m', 'length of 1', 'length of 2 ', 'length of 3 and more']
+    df_railway_network = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
+    df_const_costs = pd.read_csv(const_cost_path, sep=";", decimal=",")
+    # Aggregate costs in case of duplicates
+    df_const_costs_grouped = df_const_costs.groupby(['FromNode', 'ToNode'], as_index=False)[rows].sum()
+    # Add missing columns to the main df
+    new_columns = [col for col in rows if col not in df_railway_network.columns]
+    if new_columns:
+        df_railway_network[new_columns] = 0
+    # Merge on FromNode and ToNode
+    df_railway_network = df_railway_network.merge(df_const_costs_grouped, on=['FromNode', 'ToNode'], how='left',
+                                                  suffixes=('', '_new'))
+    # Update values only if not already present
+    for col in rows:
+        df_railway_network[col] = df_railway_network[col + '_new'].fillna(df_railway_network[col])
+        df_railway_network.drop(columns=[col + '_new'], inplace=True)
+    # Save the updated DataFrame to a new file
+    df_railway_network.to_file(paths.RAIL_SERVICES_AK2035_PATH)
 
 
 def create_travel_time_graphs(network_selection):

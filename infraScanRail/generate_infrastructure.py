@@ -31,8 +31,11 @@ def generate_rail_edges(n, radius):
         exit("No rail network specified.")
     # Identify endpoint nodes
 
-    raw_edges['FromEnd'] = raw_edges['FromEnd'].astype(bool)
-    raw_edges['ToEnd'] = raw_edges['ToEnd'].astype(bool)
+    #raw_edges['FromEnd'] = raw_edges['FromEnd'].astype(bool)
+    #raw_edges['ToEnd'] = raw_edges['ToEnd'].astype(bool)
+
+    raw_edges['FromEnd'] = raw_edges['FromEnd'].astype(str).map({'1': True, '0': False})
+    raw_edges['ToEnd'] = raw_edges['ToEnd'].astype(str).map({'1': True, '0': False})
 
     endpoints = set(
         raw_edges.loc[raw_edges['FromEnd'] == True, 'FromNode']
@@ -510,11 +513,25 @@ def get_via(new_connections):
     new_connections['from_ID_new'] = new_connections['from_ID_new'].astype(int)
     new_connections['to_ID'] = new_connections['to_ID'].astype(int)
 
+    # Get all nodes available in the graph
+    available_nodes = set(G.nodes())
+
     # Compute the routes
     results = []
     for _, row in new_connections.iterrows():
         from_node = row['from_ID_new']
         to_node = row['to_ID']
+
+        if from_node not in available_nodes or to_node not in available_nodes:
+            # Skip this iteration if either node is not in the network
+            """            
+                results.append({
+                'from_ID_new': from_node,
+                'to_ID': to_node,
+                'via_nodes': -99  # No path exists because nodes aren't in the network
+            })
+            """
+            continue
 
         # Find the shortest path based on TravelTime
         try:
