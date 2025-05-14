@@ -34,6 +34,8 @@ from matplotlib import patches as mpatches, pyplot
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.interpolate import griddata
 import matplotlib.lines as mlines
+import matplotlib.colors as mcolors
+
 
 
 
@@ -1785,7 +1787,7 @@ def plot_develompments_rail():
     trainstations_path = "data/Network/processed/points.gpkg"
     lakes_path = "data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
     s_bahn_lines_path = "data/Network/processed/split_s_bahn_lines.gpkg"
-    developments_path = "data/costs/processed_costs_Urban_High.gpkg"
+    developments_path = "data/costs/total_costs_with_geometry.gpkg"
     endnodes_path = "data/Network/processed/endnodes.gpkg"
     boundary_path = "data/_basic_data/outerboundary.shp"
     output_path = "plots/developments.png"
@@ -1846,17 +1848,25 @@ def plot_develompments_rail():
     # Plot endnodes (above trainstations)
     clipped_layers["endnodes"].plot(ax=ax, color="orange", markersize=250, zorder=8)
 
-    # Assign colors to developments and create a legend
-    development_colors = {
-        "Development_1": "purple",
-        "Development_2": "green",
-        "Development_3": "brown",
-        "Development_4": "blue",
-        "Development_5": "pink",
-        "Development_6": "cyan",
-        "Development_7": "yellow",
-        "Development_8": "orange"
-    }
+    def generate_color_scheme(n_developments):
+        # Use different colormaps based on number of developments
+        if n_developments <= 10:
+            cmap = plt.cm.tab10
+        elif n_developments <= 20:
+            cmap = plt.cm.tab20
+        else:
+            cmap = plt.cm.nipy_spectral
+
+        # Generate colors
+        colors = [mcolors.rgb2hex(cmap(i / n_developments)) for i in range(n_developments)]
+
+        # Create development color dictionary
+        return {f"Development_{i + 1}": color for i, color in enumerate(colors)}
+
+    # Generate color scheme for developments
+    # Get unique developments and create color mapping
+    unique_developments = clipped_layers["developments"]["development"].unique()
+    development_colors = generate_color_scheme(len(unique_developments))
 
     # Plot developments (above endnodes) with colors
     for idx, row in clipped_layers["developments"].iterrows():

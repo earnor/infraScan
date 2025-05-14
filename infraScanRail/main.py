@@ -164,7 +164,7 @@ def infrascanrail():
     st = time.time()
     # compute_TT()
     df_access = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";", decimal=",", encoding="ISO-8859-1")
-    TTT_status_quo = calculate_total_travel_times(od_times_status_quo, od_directory_stat_quo, df_access)
+    TTT_status_quo = calculate_total_travel_times(od_times_status_quo, od_directory_scenario, df_access)
 
     # TTT for developments (trips in Peak hour * OD-Times) [in hour]
     TTT_developments = calculate_total_travel_times(od_times_dev, od_directory_scenario, df_access)
@@ -194,7 +194,7 @@ def infrascanrail():
     discounted_costs_benefits_csv_path = "data/costs/costs_and_benefits_dev_discounted.csv"
     costs_and_benefits_dev_discounted.to_csv(discounted_costs_benefits_csv_path)
 
-    plot_costs_benefits_example(costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
+
 
     link_traffic_to_map() #only makes a nice graph, not necessary for functioning of tool
 
@@ -216,7 +216,8 @@ def infrascanrail():
     print("\nVISUALIZE THE RESULTS \n")
 
     visualize_results(clear_plot_directory=True)
-
+    plot_costs_benefits_example(
+    costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
 
 
     # Run the display results function to launch the GUI
@@ -288,7 +289,8 @@ def create_travel_time_graphs(network_selection):
     origin_station = "Kempten"
     destination_station = "Hinwil"
     find_fastest_path(G_developments[7], origin_station, destination_station)
-    selected_indices = [0, 1, 2, 3, 4, 5, 6, 7]  # Indices of selected developments
+    #selected_indices = [0, 1, 2, 3, 4, 5, 6, 7]  # Indices of selected developments
+
     od_nodes = [
         'main_Rüti ZH', 'main_Nänikon-Greifensee', 'main_Uster', 'main_Wetzikon ZH',
         'main_Zürich Altstetten', 'main_Schwerzenbach ZH', 'main_Fehraltorf',
@@ -296,7 +298,7 @@ def create_travel_time_graphs(network_selection):
         'main_Zürich Oerlikon', 'main_Zürich Stadelhofen', 'main_Hinwil', 'main_Aathal'
     ]
     # Analyze the Delta TT
-    analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od_nodes) #output of this is not used!
+    analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes) #output of this is not used!
     # Display the result
     print("\nFinal Travel Times and Delta Times:")
     return od_times_dev, od_times_status_quo

@@ -111,7 +111,10 @@ def filter_unnecessary_links():
     """
     try:
         # Load raw edges and new links
-        raw_edges = gpd.read_file(r"data\temp\network_railway-services.gpkg")
+        if settings.rail_network == 'current':
+            raw_edges = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
+        elif settings.rail_network == 'AK_2035':
+            raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
         time.sleep(1)  # Ensure file access is sequential
         line_gdf = gpd.read_file(r"data\Network\processed\new_links.gpkg")
     except Exception as e:
@@ -444,6 +447,9 @@ def create_lines(gen_pts_gdf, nearest_infra_pt_gdf):
         # Filter rows in `nearest_infra_pt_gdf` that correspond to the current generated point
         potential_matches = nearest_infra_pt_gdf[nearest_infra_pt_gdf['ID_point'] == gen_row['To_ID-point']]
 
+        # Remove rows where ID_point equals To_ID-point
+        potential_matches = potential_matches[potential_matches['TO_ID_new'] != gen_row['ID_point']]
+
         # If multiple matches exist, find the closest one
         if not potential_matches.empty:
             closest_row = potential_matches.loc[
@@ -451,12 +457,18 @@ def create_lines(gen_pts_gdf, nearest_infra_pt_gdf):
             ]
 
             # Create the connection
-            connections.append({
-                'from_ID_new': gen_row['ID_point'],
-                'to_ID': closest_row['TO_ID_new'],
-                'Sline' : gen_row['Service'],
-                'geometry': LineString([gen_row['geometry'], closest_row['geometry_current']])
-            })
+            tolerance = 1e-3  # or another small value depending on your needs
+            if gen_row['geometry'].distance(closest_row['geometry_current']) < tolerance:
+                # If the geometries are almost equal, skip this connection
+                continue
+            else:
+                # Create a connection with the geometry of the generated point and the closest infrastructure point
+                connections.append({
+                    'from_ID_new': gen_row['ID_point'],
+                    'to_ID': closest_row['TO_ID_new'],
+                    'Sline' : gen_row['Service'],
+                    'geometry': LineString([gen_row['geometry'], closest_row['geometry_current']])
+                })
 
     # Create GeoDataFrame for lines
     line_gdf = gpd.GeoDataFrame(connections, geometry='geometry', crs=gen_pts_gdf.crs)

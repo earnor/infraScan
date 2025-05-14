@@ -279,7 +279,7 @@ def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, durat
     for scenario_name, development in TTT_developments.items():
         for dev_id, dev_tt in development.items():
             # Get the corresponding status quo travel time
-            status_quo_tt = TTT_status_quo.get(scenario_name, {}).get(dev_id, 0)
+            status_quo_tt = TTT_status_quo.get(scenario_name, {}).get('Development_1', 0)
 
             # Calculate travel time savings (negative if no savings), scaled to daily trips
             tt_savings_daily = (status_quo_tt - dev_tt) #again scaling with tau?
@@ -310,7 +310,7 @@ def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, durat
     return results_df, scenario_list, dev_list
 
 
-def analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od_nodes):
+def analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes):
     """
     Analyze travel times for the status quo and selected developments.
 
@@ -335,7 +335,7 @@ def analyze_travel_times(od_times_status_quo, od_times_dev, selected_indices, od
 
     # Extract the status quo DataFrame
     status_quo_df = od_times_status_quo[0]
-
+    selected_indices = [i for i in range(len(od_times_dev))]  # Exclude the first element (status quo)
     # Filter the required developments
     selected_developments = [od_times_dev[i] for i in selected_indices]
 

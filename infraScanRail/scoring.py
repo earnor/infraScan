@@ -455,15 +455,15 @@ def transform_and_reshape_cost_df():
             reshaped_df[f"total_cost_{scenario_name}"] = reshaped_df[savings_col] + reshaped_df[construction_cost_col] + reshaped_df[maintenance_cost_col]
 
     # Identify columns to keep
-    construction_cost_col = [col for col in reshaped_df.columns if col.startswith('construction_cost_od_matrix_combined_')][0]
-    maintenance_cost_col = [col for col in reshaped_df.columns if col.startswith('maintenance_od_matrix_combined_')][0]
+    construction_cost_col = [col for col in reshaped_df.columns if col.startswith('construction_cost_od_matrix_')][0]
+    maintenance_cost_col = [col for col in reshaped_df.columns if col.startswith('maintenance_od_matrix_')][0]
 
     # Create new columns with scaled values
     reshaped_df['Construction Cost [in Mio. CHF]'] = reshaped_df[construction_cost_col] / 1_000_000
     reshaped_df['Maintenance Costs [in Mio. CHF]'] = reshaped_df[maintenance_cost_col] / 1_000_000
 
     # Drop all original construction and maintenance columns
-    columns_to_drop = [col for col in reshaped_df.columns if col.startswith('construction_cost_od_matrix_combined_') or col.startswith('maintenance_od_matrix_combined_')]
+    columns_to_drop = [col for col in reshaped_df.columns if col.startswith('construction_cost_od_matrix_') or col.startswith('maintenance_od_matrix_combined_')]
     reshaped_df = reshaped_df.drop(columns=columns_to_drop, errors='ignore')
 
     # Apply renaming function to all columns
@@ -1153,10 +1153,8 @@ def GetCatchmentOD(use_cache = False):
         print(f"Sum of OD matrix before {temp_sum} and after {temp_sum2} removing diagonal values")
 
         # Save pd df to csv
-        if pop_scenarios[i] == 'pop_20':
-            od_grouped.to_csv(fr"data/traffic_flow/od/rail/stat_quo/od_matrix_{pop_scenarios[i], empl_scenarios[i]}.csv")
-        else:
-            od_grouped.to_csv(fr"data/traffic_flow/od/rail/od_matrix_{pop_scenarios[i],empl_scenarios[i]}.csv")
+
+        od_grouped.to_csv(fr"data/traffic_flow/od/rail/od_matrix_{pop_scenarios[i],empl_scenarios[i]}.csv")
         # odmat.to_csv(r"data/traffic_flow/od/od_matrix_raw.csv")
 
         # Print sum of all values in od df
