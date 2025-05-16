@@ -4,6 +4,7 @@ import settings
 from shapely.geometry import Polygon
 import paths
 from plots import *
+import ast
 
 
 def import_cities():
@@ -121,7 +122,7 @@ def reformat_rail_nodes():
 
 
 def create_railway_services_AK2035():
-    def add_new_line(stations, frequency, service_name, travel_times, edges, points):
+    def add_new_line(stations, frequency, service_name, travel_times, edges, points, via=[]):
         """
         Add a new line to the network with bidirectional edges and travel times.
 
@@ -136,6 +137,9 @@ def create_railway_services_AK2035():
         Returns:
             None
         """
+        if not via:
+            via = ['-99'] * (len(stations) - 1)
+
 
         # Iterate through consecutive station pairs
         for i in range(len(stations) - 1):
@@ -149,6 +153,12 @@ def create_railway_services_AK2035():
             to_id = points.loc[points['NAME'] == to_station, 'ID_point'].iloc[0]
             from_geom = points.loc[points['ID_point'] == from_id, 'geometry'].iloc[0]
             to_geom = points.loc[points['ID_point'] == to_id, 'geometry'].iloc[0]
+
+            # Get the coordinate values from the points dataframe
+            from_xkoord = points.loc[points['ID_point'] == from_id, 'XKOORD'].iloc[0]
+            from_ykoord = points.loc[points['ID_point'] == from_id, 'YKOORD'].iloc[0]
+            to_xkoord = points.loc[points['ID_point'] == to_id, 'XKOORD'].iloc[0]
+            to_ykoord = points.loc[points['ID_point'] == to_id, 'YKOORD'].iloc[0]
 
             # Create LineString geometries
             line_geom_a = LineString([from_geom, to_geom])
@@ -164,6 +174,15 @@ def create_railway_services_AK2035():
             if to_station == 'Wetzikon':
                 to_station = 'Wetzikon ZH'
 
+            via_numeric = ast.literal_eval(via[i])
+            # Result: [2487, 644, 1977, 1503]
+
+            if isinstance(via_numeric, list):
+                via_b = list(reversed(via_numeric))
+            else:
+                via_b = via[i]
+
+            via_b = str(via_b)
 
             # Create a new row for the edge in direction "A"
             new_edge_a = {
@@ -174,10 +193,15 @@ def create_railway_services_AK2035():
                 'Service': service_name,
                 'Frequency': frequency,
                 'Direction': 'A',
+                'Via': via[i],
                 'FromEnd': from_end_a,
                 'ToEnd': to_end_a,
                 'TravelTime': travel_times[i],
                 'InVehWait': 0,
+                'E_KOORD_O': from_xkoord,  # Origin coordinates
+                'N_KOORD_O': from_ykoord,
+                'E_KOORD_D': to_xkoord,     # Destination coordinates
+                'N_KOORD_D': to_ykoord,
                 'geometry': line_geom_a
             }
 
@@ -194,11 +218,16 @@ def create_railway_services_AK2035():
                 'Service': service_name,
                 'Frequency': frequency,
                 'Direction': 'B',
+                'Via': via_b,
                 'FromEnd': from_end_b,
                 'ToEnd': to_end_b,
                 'TravelTime': travel_times[i],
                 'InVehWait': 0,
-                'geometry': line_geom_b
+                'E_KOORD_O': to_xkoord,    # Swapped - Origin coordinates for direction B
+                'N_KOORD_O': to_ykoord,
+                'E_KOORD_D': from_xkoord,  # Swapped - Destination coordinates for direction B
+                'N_KOORD_D': from_ykoord,
+            'geometry': line_geom_b
             }
 
             # Append the new edges to the edges GeoDataFrame
@@ -228,7 +257,6 @@ def create_railway_services_AK2035():
 
     # Update FromEnd for the edge where Service is "S14" and FromNode is Wetzikon
     edges_ak2035.loc[(edges_ak2035['Service'] == 'S14') & (edges_ak2035['FromNode'] == wetzikon_id), 'FromEnd'] = True
-
     # Add new lines to the network which are introduced with AK2035
     edges_ak2035=add_new_line(
         stations=['Zürich HB', 'Zürich Oerlikon', 'Uster', 'Wetzikon', 'Hinwil'],
@@ -236,7 +264,8 @@ def create_railway_services_AK2035():
         service_name='G',
         travel_times=[5, 10, 6, 4],  # TT Oerlikon-Uster 1 min faster
         edges=edges_ak2035,
-        points=points)
+        points=points,
+        via = ['-99', '[2487,644,1977,1503]', '[6]', '-99'])
 
     edges_ak2035=add_new_line(
         stations=['Zürich HB', 'Zürich Stadelhofen', 'Stettbach', 'Dietlikon', 'Effretikon', 'Illnau', 'Fehraltorf', 'Pfäffikon ZH'],
@@ -245,6 +274,14 @@ def create_railway_services_AK2035():
         travel_times=[3, 5, 3, 6, 4, 5, 4],
         edges=edges_ak2035,
         points=points)
+    edges_ak2035=add_new_line(
+        stations=['Zürich HB', 'Zürich Oerlikon', 'Wallisellen', 'Dietlikon', 'Effretikon', 'Winterthur'],
+        frequency=4,
+        service_name='C+D',
+        travel_times=[5, 4, 2, 6, 7],
+        edges=edges_ak2035,
+        points=points,
+        via=['-99', '-99', '-99', '-99', '-99', '[1119]'])
     edges_ak2035 = edges_ak2035.fillna(0)
     edges_ak2035.loc[edges_ak2035['Via'] == 0, 'Via'] = '-99'
 

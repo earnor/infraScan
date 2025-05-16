@@ -11,7 +11,7 @@ import geopandas as gpd
 import math
 import pandas as pd
 from shapely.geometry import LineString, MultiLineString, Point, MultiPoint, shape, box
-from shapely.ops import split, snap, linemerge, cascaded_union
+from shapely.ops import split, snap, linemerge
 from rasterio import crs
 from rasterio.transform import from_origin
 from rasterio.features import shapes, rasterize
