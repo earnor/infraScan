@@ -281,7 +281,7 @@ def create_railway_services_AK2035():
         travel_times=[5, 4, 2, 6, 7],
         edges=edges_ak2035,
         points=points,
-        via=['-99', '-99', '-99', '-99', '-99', '[1119]'])
+        via=['-99', '-99', '-99', '-99', '[1119]'])
     edges_ak2035 = edges_ak2035.fillna(0)
     edges_ak2035.loc[edges_ak2035['Via'] == 0, 'Via'] = '-99'
 
