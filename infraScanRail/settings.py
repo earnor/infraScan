@@ -1,8 +1,15 @@
-rail_network = 'AK_2035' # either 'AK_2035' or 'current'
+rail_network = 'AK_2035' # either 'AK_2035','AK_2035_extended' or 'current'
 
 use_cache_pt_catchment = True
 use_cache_developments = True
 use_cache_catchmentOD = True
+use_cache_stationsOD = True
+
+OD_type = 'canton_ZH' #either 'canton_ZH' or 'pt_catchment_perimeter'
+#choose with infra generation
+#scenario type
+#choose which OD
+
 
 raster_size = (170,210)
 

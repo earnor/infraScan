@@ -771,7 +771,7 @@ def GetCommuneEmployment(y0):  # we find employment in each commune.
 def GetOevDemandPerCommune(tau = 0.13): # Data is in trips per OD combination per day. Now we assume the number of trips gone in peak hour
     # now we extract an od matrix for oev tripps from year 2019
     # we then modify the OD matrix to fit our needs of expressing peak hour travel demand
-    rawOD = pd.read_excel('data/_basic_data/KTZH_00001982_00003903.xlsx')
+    rawOD = pd.read_excel(paths.OD_KT_ZH_PATH)
     communalOD = rawOD.loc[
         (rawOD['jahr'] == 2018) & (rawOD['kategorie'] == 'Verkehrsaufkommen') & (rawOD['verkehrsmittel'] == 'oev')]
     # communalOD = data.drop(['jahr','quelle_name','quelle_gebietart','ziel_name','ziel_gebietart',"kategorie","verkehrsmittel","einheit","gebietsstand_jahr","zeit_dimension"],axis=1)
@@ -1553,3 +1553,28 @@ def create_cost_and_benefit_df(construction_and_maintenance_costs, dev_list, mon
     print(f"Saving flattened version to {costs_benefits_flat_csv_path}")
     # Apply discounting to the DataFrame
     return costs_and_benefits_dev
+
+
+def aggregate_commune_od_to_station_od(commune_od_df, commune_station_df):
+    # Rename for clarity
+    mapping_df = commune_station_df.rename(columns={'Commune_BFS_code': 'quelle_code'})
+
+    # Map origin communes to stations
+    merged_df = commune_od_df.merge(mapping_df, on='quelle_code', how='left')
+    merged_df = merged_df.rename(columns={'ID_point': 'from_station'})
+
+    # Map destination communes to stations
+    mapping_df = commune_station_df.rename(columns={'Commune_BFS_code': 'ziel_code'})
+    merged_df = merged_df.merge(mapping_df, on='ziel_code', how='left')
+    merged_df = merged_df.rename(columns={'ID_point': 'to_station'})
+
+    # Drop any rows with missing station mappings
+    merged_df = merged_df.dropna(subset=['from_station', 'to_station'])
+
+    # Group by station pairs and sum the demand
+    station_od_df = merged_df.groupby(['from_station', 'to_station'], as_index=False)['wert'].sum()
+
+    # Pivot to wide matrix format (optional)
+    station_od_matrix = station_od_df.pivot(index='from_station', columns='to_station', values='wert').fillna(0)
+
+    return station_od_matrix

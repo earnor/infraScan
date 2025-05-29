@@ -112,7 +112,7 @@ def reformat_rail_nodes():
     # Points in simplified network can be intersections ("intersection"==1) or access points ("intersection"==0)
     # Points are stored in "data\Network\processed\points.gpkg"
 
-    current_points = pd.read_csv(r"data\Network\Rail_Node.csv", sep=";", decimal=",", encoding="ISO-8859-1")
+    current_points = pd.read_csv(paths.RAIL_POINTS_PATH, sep=";", decimal=",", encoding="ISO-8859-1")
     current_points = gpd.GeoDataFrame(current_points,
                                       geometry=gpd.points_from_xy(current_points["XKOORD"], current_points["YKOORD"]),
                                       crs="epsg:21781")
@@ -121,122 +121,116 @@ def reformat_rail_nodes():
     current_points.to_file(r"data\Network\processed\points.gpkg")
 
 
-def create_railway_services_AK2035():
-    def add_new_line(stations, frequency, service_name, travel_times, edges, points, via=[]):
-        """
-        Add a new line to the network with bidirectional edges and travel times.
+def add_new_line(stations, frequency, service_name, travel_times, edges, points, via=[]):
+    """
+    Add a new line to the network with bidirectional edges and travel times.
 
-        Parameters:
-            stations (list): List of station names representing the new line.
-            frequency (int): Frequency of the new line.
-            service_name (str): Name of the service for the new line.
-            travel_times (list): List of travel times between consecutive stations.
-            edges (str): Path to the GeoPackage file containing the edges.
-            points (str): GeoPackage file containing the station points.
+    Parameters:
+        stations (list): List of station names representing the new line.
+        frequency (int): Frequency of the new line.
+        service_name (str): Name of the service for the new line.
+        travel_times (list): List of travel times between consecutive stations.
+        edges (str): Path to the GeoPackage file containing the edges.
+        points (str): GeoPackage file containing the station points.
 
-        Returns:
-            None
-        """
-        if not via:
-            via = ['-99'] * (len(stations) - 1)
-
-
-        # Iterate through consecutive station pairs
-        for i in range(len(stations) - 1):
-
-            # Get the IDs and geometries of the two stations
-            from_station = stations[i]
-            to_station = stations[i + 1]
+    Returns:
+        None
+    """
+    if not via:
+        via = ['-99'] * (len(stations) - 1)
 
 
-            from_id = points.loc[points['NAME'] == from_station, 'ID_point'].iloc[0]
-            to_id = points.loc[points['NAME'] == to_station, 'ID_point'].iloc[0]
-            from_geom = points.loc[points['ID_point'] == from_id, 'geometry'].iloc[0]
-            to_geom = points.loc[points['ID_point'] == to_id, 'geometry'].iloc[0]
+    # Iterate through consecutive station pairs
+    for i in range(len(stations) - 1):
 
-            # Get the coordinate values from the points dataframe
-            from_xkoord = points.loc[points['ID_point'] == from_id, 'XKOORD'].iloc[0]
-            from_ykoord = points.loc[points['ID_point'] == from_id, 'YKOORD'].iloc[0]
-            to_xkoord = points.loc[points['ID_point'] == to_id, 'XKOORD'].iloc[0]
-            to_ykoord = points.loc[points['ID_point'] == to_id, 'YKOORD'].iloc[0]
+        # Get the IDs and geometries of the two stations
+        from_station = stations[i]
+        to_station = stations[i + 1]
 
-            # Create LineString geometries
-            line_geom_a = LineString([from_geom, to_geom])
-            line_geom_b = LineString([to_geom, from_geom])
 
-            # Determine FromEnd and ToEnd for direction "A"
-            from_end_a = 1 if i == 0 else 0
-            to_end_a = 1 if i == len(stations) - 2 else 0
+        from_id = points.loc[points['NAME'] == from_station, 'ID_point'].iloc[0]
+        to_id = points.loc[points['NAME'] == to_station, 'ID_point'].iloc[0]
+        from_geom = points.loc[points['ID_point'] == from_id, 'geometry'].iloc[0]
+        to_geom = points.loc[points['ID_point'] == to_id, 'geometry'].iloc[0]
 
-            #in the points file, its 'Wetzikon' but in the Railway Services file, it is 'Wetzikon ZH'
-            if from_station == 'Wetzikon':
-                from_station = 'Wetzikon ZH'
-            if to_station == 'Wetzikon':
-                to_station = 'Wetzikon ZH'
+        # Get the coordinate values from the points dataframe
+        from_xkoord = points.loc[points['ID_point'] == from_id, 'XKOORD'].iloc[0]
+        from_ykoord = points.loc[points['ID_point'] == from_id, 'YKOORD'].iloc[0]
+        to_xkoord = points.loc[points['ID_point'] == to_id, 'XKOORD'].iloc[0]
+        to_ykoord = points.loc[points['ID_point'] == to_id, 'YKOORD'].iloc[0]
 
-            via_numeric = ast.literal_eval(via[i])
-            # Result: [2487, 644, 1977, 1503]
+        # Create LineString geometries
+        line_geom_a = LineString([from_geom, to_geom])
+        line_geom_b = LineString([to_geom, from_geom])
 
-            if isinstance(via_numeric, list):
-                via_b = list(reversed(via_numeric))
-            else:
-                via_b = via[i]
+        # Determine FromEnd and ToEnd for direction "A"
+        from_end_a = 1 if i == 0 else 0
+        to_end_a = 1 if i == len(stations) - 2 else 0
 
-            via_b = str(via_b)
 
-            # Create a new row for the edge in direction "A"
-            new_edge_a = {
-                'FromStation': from_station,
-                'ToStation': to_station,
-                'FromNode': from_id,
-                'ToNode': to_id,
-                'Service': service_name,
-                'Frequency': frequency,
-                'Direction': 'A',
-                'Via': via[i],
-                'FromEnd': from_end_a,
-                'ToEnd': to_end_a,
-                'TravelTime': travel_times[i],
-                'InVehWait': 0,
-                'E_KOORD_O': from_xkoord,  # Origin coordinates
-                'N_KOORD_O': from_ykoord,
-                'E_KOORD_D': to_xkoord,     # Destination coordinates
-                'N_KOORD_D': to_ykoord,
-                'geometry': line_geom_a
-            }
+        via_numeric = ast.literal_eval(via[i])
+        # Result: [2487, 644, 1977, 1503]
 
-            # Determine FromEnd and ToEnd for direction "B"
-            from_end_b = 1 if i == len(stations) - 2 else 0
-            to_end_b = 1 if i == 0 else 0
+        if isinstance(via_numeric, list):
+            via_b = list(reversed(via_numeric))
+        else:
+            via_b = via[i]
 
-            # Create a new row for the edge in direction "B"
-            new_edge_b = {
-                'FromStation': to_station, # to and from must be swapped
-                'ToStation': from_station,
-                'FromNode': to_id,
-                'ToNode': from_id,
-                'Service': service_name,
-                'Frequency': frequency,
-                'Direction': 'B',
-                'Via': via_b,
-                'FromEnd': from_end_b,
-                'ToEnd': to_end_b,
-                'TravelTime': travel_times[i],
-                'InVehWait': 0,
-                'E_KOORD_O': to_xkoord,    # Swapped - Origin coordinates for direction B
-                'N_KOORD_O': to_ykoord,
-                'E_KOORD_D': from_xkoord,  # Swapped - Destination coordinates for direction B
-                'N_KOORD_D': from_ykoord,
+        via_b = str(via_b)
+
+        # Create a new row for the edge in direction "A"
+        new_edge_a = {
+            'FromStation': from_station,
+            'ToStation': to_station,
+            'FromNode': from_id,
+            'ToNode': to_id,
+            'Service': service_name,
+            'Frequency': frequency,
+            'Direction': 'A',
+            'Via': via[i],
+            'FromEnd': from_end_a,
+            'ToEnd': to_end_a,
+            'TravelTime': travel_times[i],
+            'InVehWait': 0,
+            'E_KOORD_O': from_xkoord,  # Origin coordinates
+            'N_KOORD_O': from_ykoord,
+            'E_KOORD_D': to_xkoord,     # Destination coordinates
+            'N_KOORD_D': to_ykoord,
+            'geometry': line_geom_a
+        }
+
+        # Determine FromEnd and ToEnd for direction "B"
+        from_end_b = 1 if i == len(stations) - 2 else 0
+        to_end_b = 1 if i == 0 else 0
+
+        # Create a new row for the edge in direction "B"
+        new_edge_b = {
+            'FromStation': to_station, # to and from must be swapped
+            'ToStation': from_station,
+            'FromNode': to_id,
+            'ToNode': from_id,
+            'Service': service_name,
+            'Frequency': frequency,
+            'Direction': 'B',
+            'Via': via_b,
+            'FromEnd': from_end_b,
+            'ToEnd': to_end_b,
+            'TravelTime': travel_times[i],
+            'InVehWait': 0,
+            'E_KOORD_O': to_xkoord,    # Swapped - Origin coordinates for direction B
+            'N_KOORD_O': to_ykoord,
+            'E_KOORD_D': from_xkoord,  # Swapped - Destination coordinates for direction B
+            'N_KOORD_D': from_ykoord,
             'geometry': line_geom_b
-            }
+        }
 
-            # Append the new edges to the edges GeoDataFrame
-            new_line_gpd = gpd.GeoDataFrame([new_edge_a, new_edge_b])
-            edges = gpd.GeoDataFrame(pd.concat([edges, new_line_gpd], ignore_index=True))
-        # Save the updated edges GeoDataFrame
-        return edges
+        # Append the new edges to the edges GeoDataFrame
+        new_line_gpd = gpd.GeoDataFrame([new_edge_a, new_edge_b])
+        edges = gpd.GeoDataFrame(pd.concat([edges, new_line_gpd], ignore_index=True))
+    # Save the updated edges GeoDataFrame
+    return edges
 
-
+def create_railway_services_AK2035():
 
     edges_ak2035 = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
     points = gpd.read_file(r'data\Network\processed\points.gpkg')
@@ -250,7 +244,7 @@ def create_railway_services_AK2035():
     edges_ak2035 = edges_ak2035[~((edges_ak2035['Service'] == 'S14') &
                                   ((edges_ak2035['FromNode'] == hinwil_id) | (edges_ak2035['ToNode'] == hinwil_id)))]
 
-    wetzikon_id = get_station_id('Wetzikon', points)
+    wetzikon_id = get_station_id('Wetzikon ZH', points)
 
     # Update ToEnd for the edge where Service is "S14" and ToNode is Wetzikon
     edges_ak2035.loc[(edges_ak2035['Service'] == 'S14') & (edges_ak2035['ToNode'] == wetzikon_id), 'ToEnd'] = True
@@ -259,7 +253,7 @@ def create_railway_services_AK2035():
     edges_ak2035.loc[(edges_ak2035['Service'] == 'S14') & (edges_ak2035['FromNode'] == wetzikon_id), 'FromEnd'] = True
     # Add new lines to the network which are introduced with AK2035
     edges_ak2035=add_new_line(
-        stations=['Zürich HB', 'Zürich Oerlikon', 'Uster', 'Wetzikon', 'Hinwil'],
+        stations=['Zürich HB', 'Zürich Oerlikon', 'Uster', 'Wetzikon ZH', 'Hinwil'],
         frequency=2,
         service_name='G',
         travel_times=[5, 10, 6, 4],  # TT Oerlikon-Uster 1 min faster
@@ -286,7 +280,185 @@ def create_railway_services_AK2035():
     edges_ak2035.loc[edges_ak2035['Via'] == 0, 'Via'] = '-99'
 
     edges_ak2035.to_file(paths.RAIL_SERVICES_AK2035_PATH)
+    return edges_ak2035, points
 
+def create_railway_services_AK2035_extended(edges_ak2035_ext, points):
+    edges_ak2035_ext = add_new_line(
+        stations=[
+    'Zürich Stadelhofen',
+    'Zürich, Kreuzplatz',
+    'Zürich, Hegibachplatz',
+    'Zürich, Balgrist',
+    'Zürich, Rehalp',
+    'Waldburg',
+    'Spital Zollikerberg',
+    'Zollikerberg',
+    'Waltikon',
+    'Zumikon',
+    'Maiacher',
+    'Neue Forch',
+    'Forch',
+    'Scheuren',
+    'Neuhaus bei Hinteregg',
+    'Hinteregg',
+    'Egg',
+    'Langwies ZH',
+    'Emmat',
+    'Esslingen'
+    ],
+        frequency=4,
+        service_name='S18',
+        travel_times=[
+    1,  # Zürich Stadelhofen -> Zürich, Kreuzstrasse
+    2,  # Zürich, Kreuzstrasse -> Zürich, Hegibachplatz
+    3,  # Zürich, Hegibachplatz -> Zürich, Balgrist
+    3,  # Zürich, Balgrist -> Zürich, Rehalp
+    1,  # Zürich, Rehalp -> Waldburg
+    1,  # Waldburg -> Spital Zollikerberg
+    1,  # Spital Zollikerberg -> Zollikerberg
+    1,  # Zollikerberg -> Waltikon
+    2,  # Waltikon -> Zumikon
+    2,  # Zumikon -> Maiacher
+    1,  # Maiacher -> Neue Forch
+    1,  # Neue Forch -> Forch
+    3,  # Forch -> Scheuren
+    2,  # Scheuren -> Neuhaus bei Hinteregg
+    2,  # Neuhaus bei Hinteregg -> Hinteregg
+    3,  # Hinteregg -> Egg
+    2,  # Egg -> Langwies ZH
+    1,  # Langwies ZH -> Emmat
+    1,  # Emmat -> Esslingen
+    4   # Emmat -> Esslingen (korrigiert: 06:21 → 06:25)
+    ],
+        edges=edges_ak2035_ext,
+        points=points)
+
+    edges_ak2035_ext=add_new_line(
+        stations=[
+    'Winterthur',
+    'Winterthur Grüze',
+    'Winterthur Seen',
+    'Sennhof-Kyburg',
+    'Kollbrunn',
+    'Rikon',
+    'Rämismühle-Zell',
+    'Turbenthal',
+    'Wila',
+    'Saland',
+    'Bauma',
+    'Steg',
+    'Fischenthal',
+    'Gibswil',
+    'Wald ZH',
+    'Tann-Dürnten',
+    'Rüti ZH'
+    ],
+        frequency=2,
+        service_name='S26',
+        travel_times=[
+    5,   # Winterthur -> Winterthur Grüze (05:13 → 05:18)
+    3,   # Winterthur Grüze -> Winterthur Seen (05:18 → 05:21)
+    3,   # Winterthur Seen -> Sennhof-Kyburg (05:21 → 05:24)
+    3,   # Sennhof-Kyburg -> Kollbrunn (05:24 → 05:27)
+    3,   # Kollbrunn -> Rikon (05:27 → 05:30)
+    2,   # Rikon -> Rämismühle-Zell (05:30 → 05:32)
+    4,   # Rämismühle-Zell -> Turbenthal (05:32 → 05:36)
+    2,   # Turbenthal -> Wila (05:36 → 05:38)
+    6,   # Wila -> Saland (05:38 → 05:44)
+    6,   # Saland -> Bauma (05:44 → 05:50)
+    4,   # Bauma -> Steg (05:50 → 05:54)
+    5,   # Steg -> Fischenthal (05:54 → 05:59)
+    2,   # Fischenthal -> Gibswil (05:59 → 06:01)
+    7,   # Gibswil -> Wald ZH (06:01 → 06:08)
+    5,   # Wald ZH -> Tann-Dürnten (06:08 → 06:13)
+    3    # Tann-Dürnten -> Rüti ZH (06:13 → 06:16)
+    ],
+        edges=edges_ak2035_ext,
+        points=points)
+
+    edges_ak2035_ext=add_new_line(
+        stations=[
+    'Winterthur',
+    'Effretikon',
+    'Bassersdorf',
+    'Kloten',
+    'Kloten Balsberg',
+    'Opfikon',
+    'Zürich Oerlikon',
+    'Zürich Hardbrücke',
+    'Zürich HB',
+    'Zürich Stadelhofen',
+    'Meilen',
+    'Uetikon',
+    'Männedorf',
+    'Stäfa',
+    'Uerikon',
+    'Feldbach',
+    'Kempraten',
+    'Rapperswil SG'
+    ],
+        frequency=2,
+        service_name='S7',
+        travel_times=[
+    9,   # Winterthur -> Effretikon (05:05 → 05:14) [Kemptthal wird nur später bedient]
+    6,   # Effretikon -> Bassersdorf (05:14 → 05:20)
+    5,   # Bassersdorf -> Kloten (05:20 → 05:25)
+    2,   # Kloten -> Kloten Balsberg (05:25 → 05:27)
+    2,   # Kloten Balsberg -> Opfikon (05:27 → 05:29)
+    4,   # Opfikon -> Zürich Oerlikon (05:29 → 05:33)
+    4,   # Zürich Oerlikon -> Zürich Hardbrücke (05:33 → 05:37)
+    3,   # Zürich Hardbrücke -> Zürich HB (05:37 → 05:40)
+    4,   # Zürich HB -> Zürich Stadelhofen (05:40 → 05:44)
+    14,  # Zürich Stadelhofen -> Meilen (05:44 → 05:58)
+    3,   # Meilen -> Uetikon (05:58 → 06:01)
+    2,   # Uetikon -> Männedorf (06:01 → 06:03)
+    5,   # Männedorf -> Stäfa (06:03 → 06:08)
+    3,   # Stäfa -> Uerikon (06:08 → 06:11)
+    5,   # Uerikon -> Feldbach (06:11 → 06:16)
+    2,   # Feldbach -> Kempraten (06:16 → 06:18)
+    4    # Kempraten -> Rapperswil SG (06:18 → 06:22)
+    ],
+        edges=edges_ak2035_ext,
+        points=points,
+        via=[
+    '[1119]', '-99', '-99', '-99', '-99', '-99', '-99', '-99', '-99',
+    '[2551, 2534, 1122, 1174, 702, 2459, 999]', '-99', '-99', '-99', '-99', '-99', '-99', '-99'
+            ])
+
+    edges_ak2035_ext=add_new_line(
+        stations=[
+    'Zürich HB',
+    'Zürich Stadelhofen',
+    'Zürich Tiefenbrunnen',
+    'Zollikon',
+    'Küsnacht Goldbach',
+    'Küsnacht ZH',
+    'Erlenbach ZH',
+    'Winkel am Zürichsee',
+    'Herrliberg-Feldmeilen',
+    'Meilen'
+],
+        frequency=4,
+        service_name='I+J',
+        travel_times=[
+    3,  # Zürich HB → Zürich Stadelhofen (06:00 → 06:03)
+    3,  # Zürich Stadelhofen → Zürich Tiefenbrunnen (06:03 → 06:06)
+    2,  # Zürich Tiefenbrunnen → Zollikon (06:06 → 06:08)
+    2,  # Zollikon → Küsnacht Goldbach (06:08 → 06:10)
+    3,  # Küsnacht Goldbach → Küsnacht ZH (06:10 → 06:13)
+    2,  # Küsnacht ZH → Erlenbach ZH (06:13 → 06:15)
+    2,  # Erlenbach ZH → Winkel am Zürichsee (06:15 → 06:17)
+    3,  # Winkel am Zürichsee → Herrliberg-Feldmeilen (06:17 → 06:20)
+    3   # Herrliberg-Feldmeilen → Meilen (06:20 → 06:23)
+],
+        edges=edges_ak2035_ext,
+        points=points)
+
+
+    edges_ak2035_ext = edges_ak2035_ext.fillna(0)
+    edges_ak2035_ext.loc[edges_ak2035_ext['Via'] == 0, 'Via'] = '-99'
+
+    edges_ak2035_ext.to_file(paths.RAIL_SERVICES_AK2035_EXTENDED_PATH)
 
 
 def network_in_corridor(poly):

@@ -2,6 +2,8 @@
 import shutil
 import time
 
+import paths
+import scoring
 import settings
 from TT_Delay import *
 from catchment_pt import *
@@ -71,7 +73,8 @@ def infrascanrail():
     # 2) Process network
 
     reformat_rail_nodes()
-    create_railway_services_AK2035()
+    network_ak2035, points = create_railway_services_AK2035()
+    create_railway_services_AK2035_extended(network_ak2035, points)
     reformat_rail_edges()
 
     add_construction_info_to_network()
@@ -154,7 +157,12 @@ def infrascanrail():
     od_directory_stat_quo = r"data/traffic_flow/od/rail/stat_quo"
     od_directory_scenario = r"data/traffic_flow/od/rail"
 
-    GetCatchmentOD(settings.use_cache_catchmentOD)
+    if settings.OD_type == 'canton_ZH':
+        railway_station_OD = getStationOD(settings.use_cache_stationsOD)
+    elif settings.OD_type == 'pt_catchment_perimeter':
+        GetCatchmentOD(settings.use_cache_catchmentOD)
+    else:
+        raise ValueError("OD_type must be either 'canton_ZH' or 'pt_catchment_perimeter'")
     #combine_and_save_od_matrices(od_directory_scenario, od_directory_stat_quo)
 
     # Compute the OD matrix for the infrastructure developments under all scenarios
@@ -225,6 +233,18 @@ def infrascanrail():
     csv_file_path = "data/costs/total_costs_with_geometry.csv"
     # Call the function to create_scenario_analysis_viewerreate and display the GUI
     create_scenario_analysis_viewer(csv_file_path)
+
+
+def getStationOD(use_cache):
+    if use_cache:
+        railway_station_OD = pd.read_excel(paths.OD_STATIONS_KT_ZH_PATH)
+    else:
+        communalOD = scoring.GetOevDemandPerCommune(tau=1)
+        communes_to_stations = pd.read_excel(paths.COMMUNE_TO_STATION_PATH)
+        railway_station_OD = aggregate_commune_od_to_station_od(communalOD, communes_to_stations)
+        railway_station_OD.to_excel(paths.OD_STATIONS_KT_ZH_PATH, index=False)
+
+    return railway_station_OD
 
 
 def add_construction_info_to_network():
