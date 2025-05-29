@@ -27,6 +27,8 @@ def generate_rail_edges(n, radius):
         raw_edges = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
     elif settings.rail_network == 'AK_2035':
         raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
+    elif settings.rail_network == 'AK_2035_extended':
+        raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_EXTENDED_PATH)
     else:
         exit("No rail network specified.")
     # Identify endpoint nodes
@@ -104,17 +106,19 @@ def assign_services_to_generated_points(raw_edges, generated_points):
 
     return generated_points
 
-def filter_unnecessary_links():
+def filter_unnecessary_links(rail_network):
     """
     Filter out unnecessary links in the new_links GeoDataFrame.
     Saves the filtered links as a GeoPackage file.
     """
     try:
         # Load raw edges and new links
-        if settings.rail_network == 'current':
+        if rail_network == 'current':
             raw_edges = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
-        elif settings.rail_network == 'AK_2035':
+        elif rail_network == 'AK_2035':
             raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
+        elif rail_network == 'AK_2035_extended':
+            raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_EXTENDED_PATH)
         time.sleep(1)  # Ensure file access is sequential
         line_gdf = gpd.read_file(r"data\Network\processed\new_links.gpkg")
     except Exception as e:

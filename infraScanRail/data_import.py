@@ -49,17 +49,18 @@ def polygon_from_points(bounds=None, e_min=None, e_max=None, n_min=None, n_max=N
                  (e_min - margin, n_max + margin)])
 
 
-def reformat_rail_edges():
+def reformat_rail_edges(rail_network):
     """
     This function reformats the railway network to add the access points to the network. The railway network is
     imported from a geopackage and the access points are loaded from a csv file. The access points are projected to
     the closest railway segment. The railway segments are then split at the access points.
     """
-    if settings.rail_network == 'current':
+    if rail_network == 'current':
         edges_gdf = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
-    elif settings.rail_network == 'AK_2035':
-        print("Using AK2035 network")
+    elif rail_network == 'AK_2035':
         edges_gdf = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
+    elif rail_network == 'AK_2035_extended':
+        edges_gdf = gpd.read_file(paths.RAIL_SERVICES_AK2035_EXTENDED_PATH)
 
     for index, row in edges_gdf.iterrows():
         coords = [(coords) for coords in list(row['geometry'].coords)]
@@ -571,7 +572,7 @@ def only_links_to_corridor():
     filtered_new_links.to_file("data/Network/processed/filtered_new_links_in_corridor.gpkg", driver="GPKG")
 
 
-def save_focus_area_shapefile(e_min, e_max, n_min, n_max):
+def save_focus_area_shapefile(e_min, e_max, n_min, n_max, margin):
     # Function to create a polygon from given coordinates
     def polygon_from_points(e_min, e_max, n_min, n_max, margin=0):
         return Polygon([
@@ -586,7 +587,6 @@ def save_focus_area_shapefile(e_min, e_max, n_min, n_max):
 
     # Create polygons
     innerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max)
-    margin = 3000  # meters
     outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
 
     # Save innerboundary as a separate shapefile
@@ -598,6 +598,7 @@ def save_focus_area_shapefile(e_min, e_max, n_min, n_max):
     outerboundary_gdf.to_file("data/_basic_data/outerboundary.shp")
 
     print("Shapefiles 'innerboundary.shp' and 'outerboundary.shp' saved successfully in 'data_basic_data'!")
+    return innerboundary, outerboundary
 
 
 def get_station_id(station_name, points, name_column='NAME', id_column='ID_point'):

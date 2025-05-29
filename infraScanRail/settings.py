@@ -1,13 +1,14 @@
-rail_network = 'AK_2035' # either 'AK_2035','AK_2035_extended' or 'current'
+rail_network = 'AK_2035_extended' # either 'AK_2035','AK_2035_extended' or 'current'
 
 use_cache_pt_catchment = True
 use_cache_developments = True
 use_cache_catchmentOD = True
-use_cache_stationsOD = True
+use_cache_stationsOD = False
 
 OD_type = 'canton_ZH' #either 'canton_ZH' or 'pt_catchment_perimeter'
 #choose with infra generation
 #scenario type
+amount_of_scenarios = 10
 #choose which OD
 
 

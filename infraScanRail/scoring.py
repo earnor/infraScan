@@ -592,6 +592,8 @@ def filter_unnecessary_links():
         raw_edges = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)  # Use raw string
     elif settings.rail_network == 'AK_2035':
         raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
+    elif settings.rail_network == 'AK_2035_extended':
+        raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_EXTENDED_PATH)
     line_gdf = gpd.read_file(r"data/Network/processed/new_links.gpkg")      # Use raw string
 
     # Step 1: Build Sline routes
@@ -1578,3 +1580,41 @@ def aggregate_commune_od_to_station_od(commune_od_df, commune_station_df):
     station_od_matrix = station_od_df.pivot(index='from_station', columns='to_station', values='wert').fillna(0)
 
     return station_od_matrix
+
+
+def filter_od_matrix_by_stations(railway_station_OD, stations_in_perimeter):
+    """
+    Filtert die Einträge der OD-Matrix. Setzt Werte auf 0, wo weder die Zeilen-ID noch
+    die Spalten-ID in der Liste stations_in_perimeter enthalten ist.
+
+    Parameters:
+        railway_station_OD (pd.DataFrame): OD-Matrix mit Stationen als Indizes
+        stations_in_perimeter (list): Liste von Station-IDs, die im Perimeter liegen
+
+    Returns:
+        pd.DataFrame: OD-Matrix mit gefilterten Einträgen (auf 0 gesetzt)
+    """
+    # Kopie der Matrix erstellen, um die Originaldaten nicht zu verändern
+    filtered_od = railway_station_OD.copy()
+
+    # Extrahiere die IDs aus den Stationseinträgen (falls die Liste Tupel mit [ID, NAME] enthält)
+    station_ids = [station[0] if isinstance(station, list) else station for station in stations_in_perimeter]
+
+    # Erstelle einen Filter für Zeilen, die NICHT in station_ids sind
+    rows_not_in_filter = ~filtered_od.index.isin(station_ids)
+
+    # Erstelle einen Filter für Spalten, die NICHT in station_ids sind
+    cols_not_in_filter = ~filtered_od.columns.isin(station_ids)
+
+    # Erstelle eine Maske, wo weder Zeilen- noch Spalten-ID in station_ids ist
+    # (Verwendet Broadcasting für elementweise Logik)
+    mask = np.outer(rows_not_in_filter, cols_not_in_filter)
+
+    # Setze Werte auf 0, wo die Maske True ist
+    filtered_od.values[mask] = 0
+
+    print(f"Originale OD-Matrix-Summe: {railway_station_OD.values.sum()}")
+    print(f"Gefilterte OD-Matrix-Summe: {filtered_od.values.sum()}")
+    print(f"Anzahl der Stationen im Perimeter: {len(station_ids)}")
+
+    return filtered_od

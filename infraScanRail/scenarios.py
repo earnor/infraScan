@@ -1,4 +1,5 @@
 import pandas as pd
+import random
 
 import settings
 from data_import import *
@@ -425,3 +426,31 @@ def create_single_tif_with_bands(base_path, file_names, output_file):
         print("No bands were processed. Check input files.")
 
 
+def dummy_generate_scenarios(n_scenarios: int, seed: int = None):
+    if seed is not None:
+        random.seed(seed)
+
+    scenarios = []
+    for _ in range(n_scenarios):
+        pop_growth = random.uniform(0.10, 0.35)
+        empl_growth = random.uniform(0.15, 0.50)
+        oev_modal_split_growth = random.uniform(0.05, 0.50)
+        mobility_growth_rate = random.uniform(-0.15, 0.40)
+
+        # Convert to growth factors (1 + rate)
+        pop_factor = 1 + pop_growth
+        empl_factor = 1 + empl_growth
+        oev_factor = 1 + oev_modal_split_growth
+        mobility_factor = 1 + mobility_growth_rate
+
+        general_factor = pop_factor * empl_factor * oev_factor * mobility_factor
+
+        scenarios.append({
+            'pop_growth': pop_growth,
+            'empl_growth': empl_growth,
+            'oev_modal_split_growth': oev_modal_split_growth,
+            'mobility_growth_rate': mobility_growth_rate,
+            'general_factor': general_factor
+        })
+
+    return scenarios

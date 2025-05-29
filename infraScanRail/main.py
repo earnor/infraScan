@@ -28,7 +28,7 @@ def infrascanrail():
     print("\nINITIALIZE VARIABLES \n")
     st = time.time()
 
-    outerboundary = create_focus_area()
+    innerboundary, outerboundary = create_focus_area()
 
     runtimes["Initialize variables"] = time.time() - st
     st = time.time()
@@ -75,7 +75,7 @@ def infrascanrail():
     reformat_rail_nodes()
     network_ak2035, points = create_railway_services_AK2035()
     create_railway_services_AK2035_extended(network_ak2035, points)
-    reformat_rail_edges()
+    reformat_rail_edges(settings.rail_network)
 
     add_construction_info_to_network()
 
@@ -134,6 +134,7 @@ def infrascanrail():
     # Returns the graph (nx.DiGraph) and a DataFrame with OD travel data including adjusted travel times and geometries.
 
     # network of status quo
+
     od_times_dev, od_times_status_quo = create_travel_time_graphs(settings.rail_network)
 
     # osm_nw_to_raster(limits_variables)
@@ -154,12 +155,24 @@ def infrascanrail():
     # Travel time delay on rail
 
     # Compute the OD matrix for the current infrastructure under all scenarios
-    od_directory_stat_quo = r"data/traffic_flow/od/rail/stat_quo"
-    od_directory_scenario = r"data/traffic_flow/od/rail"
+
 
     if settings.OD_type == 'canton_ZH':
-        railway_station_OD = getStationOD(settings.use_cache_stationsOD)
+        od_directory_scenario = r"data/traffic_flow/od/rail/ktzh"
+        # Filtere Punkte innerhalb der innerboundary
+        points_in_inner_boundary = points[points.apply(lambda row: innerboundary.contains(row.geometry), axis=1)]
+
+        # Liste der Einträge erstellen (z.B. die ID_point und NAME)
+        inner_boundary_stations = points_in_inner_boundary[['ID_point', 'NAME']].values.tolist()
+        railway_station_OD = getStationOD(settings.use_cache_stationsOD, inner_boundary_stations, od_directory_scenario)
+
+
+
+
+
+
     elif settings.OD_type == 'pt_catchment_perimeter':
+        od_directory_scenario = r"data/traffic_flow/od/rail"
         GetCatchmentOD(settings.use_cache_catchmentOD)
     else:
         raise ValueError("OD_type must be either 'canton_ZH' or 'pt_catchment_perimeter'")
@@ -235,14 +248,27 @@ def infrascanrail():
     create_scenario_analysis_viewer(csv_file_path)
 
 
-def getStationOD(use_cache):
+def getStationOD(use_cache, stations_in_perimeter, od_directory_scenario):
     if use_cache:
-        railway_station_OD = pd.read_excel(paths.OD_STATIONS_KT_ZH_PATH)
+        railway_station_OD = pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
     else:
         communalOD = scoring.GetOevDemandPerCommune(tau=1)
         communes_to_stations = pd.read_excel(paths.COMMUNE_TO_STATION_PATH)
         railway_station_OD = aggregate_commune_od_to_station_od(communalOD, communes_to_stations)
-        railway_station_OD.to_excel(paths.OD_STATIONS_KT_ZH_PATH, index=False)
+        railway_station_OD = filter_od_matrix_by_stations(railway_station_OD, stations_in_perimeter)
+        railway_station_OD.to_csv(paths.OD_STATIONS_KT_ZH_PATH)
+
+        #create dummy scenarios
+        #TODO: remove this part, when the scenarios are defined
+        scenario_list_dummy = dummy_generate_scenarios(settings.amount_of_scenarios, 12)
+
+        # Für jedes Szenario eine neue OD-Matrix erstellen und speichern
+        for i, scenario in enumerate(scenario_list_dummy):
+            # Erstelle eine neue OD-Matrix basierend auf der Status-quo OD-Matrix
+            scenario_od = railway_station_OD.copy() * scenario['general_factor']
+
+            file_path = os.path.join(od_directory_scenario, f"od_matrix_stations_ktzh_future_{i + 1}.csv")
+            scenario_od.to_csv(file_path)
 
     return railway_station_OD
 
@@ -275,6 +301,8 @@ def create_travel_time_graphs(network_selection):
         network_status_quo = [paths.RAIL_SERVICES_2024_PATH]
     elif network_selection == 'AK_2035':
         network_status_quo = [paths.RAIL_SERVICES_AK2035_PATH]
+    elif network_selection == 'AK_2035_extended':
+        network_status_quo = [paths.RAIL_SERVICES_AK2035_EXTENDED_PATH]
     G_status_quo = create_graphs_from_directories(network_status_quo)
     od_times_status_quo = calculate_od_pairs_with_times_by_graph(G_status_quo)
     # Example usage Test1
@@ -427,7 +455,7 @@ def generate_infra_development(use_cache):
     generate_rail_edges(n=5, radius=20)
     # Filter out unnecessary links in the new_links GeoDataFrame by ensuring the connection is not redundant
     # by ensuring the connection is not redundant within the existing Sline routes
-    filter_unnecessary_links()
+    filter_unnecessary_links(settings.rail_network)
     # Import the generated points as dataframe
     # Filter the generated links that connect to one of the access point within the considered corridor
     # These access points are defined in the manually defined list of access points
@@ -459,11 +487,10 @@ def create_focus_area():
     n_min, n_max = 1237000, 1254000  # 1238000, 1252000 - 1237000, 1252000
     # For global operation a margin is added to the boundary
     margin = 3000  # meters
-    outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
     # Define the size of the resolution of the raster to 100 meter
     # save spatial limits as shp
-    save_focus_area_shapefile(e_min, e_max, n_min, n_max)
-    return outerboundary
+    innerboundary, outerboundary = save_focus_area_shapefile(e_min, e_max, n_min, n_max, margin)
+    return innerboundary, outerboundary
 
 
 # Press the green button in the gutter to run the script.
