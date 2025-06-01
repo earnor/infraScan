@@ -344,11 +344,11 @@ def aggregate_costs(cost_and_benefits):
         cost_and_benefits (pd.DataFrame): DataFrame with costs and benefits for each development,
                                           scenario, and year, with MultiIndex (development, scenario, year).
     """
-    total_costs_csv_path = "data/costs/total_costs_raw.csv"
 
     # Define scenarios for population and employment
-    pop_scenarios = settings.pop_scenarios
-    empl_scenarios = settings.empl_scenarios
+    #pop_scenarios = settings.pop_scenarios
+    #empl_scenarios = settings.empl_scenarios
+    scenarios = cost_and_benefits["scenario"].unique().tolist()
 
     # Group by development and scenario, summing costs and benefits across all years
     aggregated = cost_and_benefits.groupby(['development', 'scenario']).agg({
@@ -389,21 +389,21 @@ def aggregate_costs(cost_and_benefits):
             total_costs.loc[mask, 'monetized_savings'] = row['benefit']
 
     # Dynamically compute total costs for each scenario
-    for pop_scenario, empl_scenario in zip(pop_scenarios, empl_scenarios):
-        total_costs[f"total_{pop_scenario}"] = (
+    for scenario in scenarios:
+        total_costs[f"total_{scenario}"] = (
             total_costs["construction_cost"] +
             total_costs["maintenance"] +
-            total_costs.get(f"local_{pop_scenario}", 0) +
-            total_costs.get(f"tt_{pop_scenario}", 0) +
-            total_costs.get(f"externalities_{pop_scenario}", 0)
+            total_costs.get(f"local_{scenario}", 0) +
+            total_costs.get(f"tt_{scenario}", 0) +
+            total_costs.get(f"externalities_{scenario}", 0)
         )
 
     total_costs["TotalConstructionCost"] = total_costs["construction_cost"]
     total_costs["TotalMaintenanceCost"] = total_costs["maintenance"]
     # Save results to CSV
-    total_costs.to_csv(total_costs_csv_path, index=False)
+    total_costs.to_csv(paths.TOTAL_COST_RAW, index=False)
 
-    print(f"Total costs raw saved to {total_costs_csv_path}")
+    print(f"Total costs raw saved to {paths.TOTAL_COST_RAW}")
 
 def transform_and_reshape_cost_df():
     """
@@ -418,7 +418,7 @@ def transform_and_reshape_cost_df():
         gpd.GeoDataFrame: Transformed GeoDataFrame with geometry column.
     """
     # Load the dataframe
-    df = pd.read_csv("data/costs/total_costs_raw.csv")
+    df = pd.read_csv(paths.TOTAL_COST_RAW)
 
     # Drop the specified columns
     columns_to_drop = [
@@ -516,11 +516,11 @@ def transform_and_reshape_cost_df():
     gdf = gpd.GeoDataFrame(reshaped_df, geometry='geometry', crs=geometry_data.crs)
 
     # Save results to CSV and GeoPackage
-    reshaped_df.to_csv("data/costs/total_costs_with_geometry.csv", index=False)
+    reshaped_df.to_csv(paths.TOTAL_COST_WITH_GEOMETRY, index=False)
     gdf.to_file("data/costs/total_costs_with_geometry.gpkg", driver="GPKG")
 
     print("Transformed dataframe saved to:")
-    print("- CSV: 'data/costs/total_costs_with_geometry.csv'")
+    print(f"- CSV: '{paths.TOTAL_COST_WITH_GEOMETRY}'")
     print("- GeoPackage: 'data/costs/total_costs_with_geometry.gpkg'")
 
     return gdf

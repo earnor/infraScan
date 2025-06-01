@@ -11,3 +11,6 @@ COMMUNE_TO_STATION_PATH = r"data\Network\processed\Communes_to_railway_stations_
 POPULATION_RASTER = r"data\independent_variable\processed\replacement.pop20_ArcGisExport.tif"
 EMPLOYMENT_RASTER = r"data\independent_variable\processed\replacement.empl20_ArcGisExport.tif"
 
+
+TOTAL_COST_WITH_GEOMETRY = r"data/costs/total_costs_with_geometry.csv"
+TOTAL_COST_RAW = r"data/costs/total_costs_raw.csv"

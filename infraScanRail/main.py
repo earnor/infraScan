@@ -88,7 +88,7 @@ def infrascanrail():
     ##################################################################################
     # 3) Generate developments (new connections) 
 
-    generate_infra_development(use_cache=settings.use_cache_developments)
+    generate_infra_development(use_cache=settings.use_cache_developments, mod_type=settings.infra_generation_modification_type)
 
     ##here insert other network generations and save them also as a GPGK at: data/Network/processed/developments/
 
@@ -230,15 +230,12 @@ def infrascanrail():
     print("\nVISUALIZE THE RESULTS \n")
 
     visualize_results(clear_plot_directory=True)
-    plot_costs_benefits_example(
-    costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
+    plot_costs_benefits_example(costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
 
 
     # Run the display results function to launch the GUI
-    # Specify the path to your CSV file
-    csv_file_path = "data/costs/total_costs_with_geometry.csv"
     # Call the function to create_scenario_analysis_viewerreate and display the GUI
-    create_scenario_analysis_viewer(csv_file_path)
+    create_scenario_analysis_viewer(paths.TOTAL_COST_WITH_GEOMETRY)
 
 
 def getStationOD(use_cache, stations_in_perimeter, od_directory_scenario):
@@ -460,25 +457,27 @@ def visualize_results(clear_plot_directory=False):
     '''
 
 
-def generate_infra_development(use_cache):
+def generate_infra_development(use_cache, mod_type):
     if use_cache:
         print("use cache for developments")
         return
-    # Identifies railway service endpoints, creates a buffer around them, and selects nearby stations within a specified radius and count (n).
-    # It then generates new edges between these points and saves the resulting datasets for further use.
-    # Then it calculates Traveltime, using only the existing infrastructure
-    # Then it creates a new Network for each development and saves them as a GPGK
-    generate_rail_edges(n=5, radius=20)
-    # Filter out unnecessary links in the new_links GeoDataFrame by ensuring the connection is not redundant
-    # by ensuring the connection is not redundant within the existing Sline routes
-    filter_unnecessary_links(settings.rail_network)
-    # Import the generated points as dataframe
-    # Filter the generated links that connect to one of the access point within the considered corridor
-    # These access points are defined in the manually defined list of access points
-    # The links to corridor are stored in "data/Network/processed/developments_to_corridor_attribute.gpkg"
-    # The generated points with link to access point in the corridor are stored in "data/Network/processed/generated_nodes_connecting_corridor.gpkg"
-    # The end point [ID_new] of developments_to_corridor_attribute are equivalent to the points in generated_nodes_connecting_corridor
-    only_links_to_corridor()
+
+    if mod_type in ('ALL', 'EXTEND_LINES'):
+        # Identifies railway service endpoints, creates a buffer around them, and selects nearby stations within a specified radius and count (n).
+        # It then generates new edges between these points and saves the resulting datasets for further use.
+        # Then it calculates Traveltime, using only the existing infrastructure
+        # Then it creates a new Network for each development and saves them as a GPGK
+        generate_rail_edges(n=5, radius=20)
+        # Filter out unnecessary links in the new_links GeoDataFrame by ensuring the connection is not redundant
+        # by ensuring the connection is not redundant within the existing Sline routes
+        filter_unnecessary_links(settings.rail_network)
+        # Import the generated points as dataframe
+        # Filter the generated links that connect to one of the access point within the considered corridor
+        # These access points are defined in the manually defined list of access points
+        # The links to corridor are stored in "data/Network/processed/developments_to_corridor_attribute.gpkg"
+        # The generated points with link to access point in the corridor are stored in "data/Network/processed/generated_nodes_connecting_corridor.gpkg"
+        # The end point [ID_new] of developments_to_corridor_attribute are equivalent to the points in generated_nodes_connecting_corridor
+        only_links_to_corridor()
     calculate_new_service_time()
 
     new_links_updated_path = r"data\Network\processed\updated_new_links.gpkg"

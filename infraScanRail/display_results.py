@@ -27,7 +27,7 @@ def create_scenario_analysis_viewer(csv_file):
     # Function to display details for the selected scenario
     def display_scenario_details():
         selected_scenario = scenario_var.get()
-        
+
         if selected_scenario == "Select a scenario" or not selected_scenario:
             messagebox.showerror("Error", "Please select a valid scenario.")
             return
@@ -37,11 +37,11 @@ def create_scenario_analysis_viewer(csv_file):
         net_benefit_column = f"Net Benefit {selected_scenario} [in Mio. CHF]"
         construction_cost_column = "Construction Cost [in Mio. CHF]"
         maintenance_cost_column = "Maintenance Costs [in Mio. CHF]"
-        
+
         # Check if all required columns exist
         required_columns = [
-            "development", "Sline", 
-            construction_cost_column, maintenance_cost_column, 
+            "development", "Sline",
+            construction_cost_column, maintenance_cost_column,
             monetized_savings_column, net_benefit_column
         ]
         missing_columns = [col for col in required_columns if col not in df.columns]
@@ -52,6 +52,9 @@ def create_scenario_analysis_viewer(csv_file):
             return
 
         # Filter and reorder columns
+
+
+
         filtered_df = df[required_columns]
 
         # Round the numeric values in relevant columns
@@ -84,9 +87,14 @@ def create_scenario_analysis_viewer(csv_file):
         table.tag_configure("normal", background="white")
 
     # Extract scenario names from the column names
-    available_scenarios = list(set(
+    """available_scenarios = list(set(
         col.replace("Net Benefit ", "").split(" [")[0] 
         for col in df.columns if "Net Benefit" in col
+    ))"""
+    available_scenarios = sorted(set(
+        col.replace("monetized_savings_od_matrix_stations_ktzh_", "")
+        for col in df.columns
+        if col.startswith("monetized_savings_od_matrix_stations_ktzh_")
     ))
 
     # Create the GUI
