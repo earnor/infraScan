@@ -1,7 +1,9 @@
 from shapely.geometry import Polygon
+import paths
 
 rail_network = 'AK_2035_extended' # either 'AK_2035','AK_2035_extended' or 'current'
 
+#CACHE
 use_cache_pt_catchment = True
 use_cache_developments = True
 use_cache_catchmentOD = True
@@ -9,6 +11,8 @@ use_cache_stationsOD = False
 use_cache_traveltime_graph = True
 
 infra_generation_modification_type = 'ALL' #either 'EXTEND_LINES' or 'NEW_DIRECT_CONNECTIONS' or 'ALL'
+#infra_generation_rail_network: either 'RAIL_SERVICES_AK2035_PATH' or 'RAIL_SERVICES_AK2035_EXTENDED_PATH' or 'RAIL_SERVICES_2024_PATH'
+infra_generation_rail_network = paths.RAIL_SERVICES_AK2035_PATH
 
 OD_type = 'canton_ZH' #either 'canton_ZH' or 'pt_catchment_perimeter'
 
@@ -18,13 +22,12 @@ amount_of_scenarios = 10
 
 
 
-perimeter_infra_generation = Polygon([
-    (8.773087436666998, 47.26415114093595),
-    (8.873144517818531, 47.29843948280515),
-    (8.697799785861037, 47.44357168533651),
-    (8.596752440897717, 47.40452309860652),
-    (8.773087436666998, 47.26415114093595)  # closing the polygon
- ])
+perimeter_infra_generation = Polygon([  #No GeoJSON with this polygon type!
+    (2700989.862, 1235663.403),
+    (2708491.515, 1239608.529),
+    (2694972.602, 1255514.900),
+    (2687415.817, 1251056.404)  # closing the polygon
+])
 
 raster_size = (170,210)
 

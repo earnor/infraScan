@@ -14,3 +14,5 @@ EMPLOYMENT_RASTER = r"data\independent_variable\processed\replacement.empl20_Arc
 
 TOTAL_COST_WITH_GEOMETRY = r"data/costs/total_costs_with_geometry.csv"
 TOTAL_COST_RAW = r"data/costs/total_costs_raw.csv"
+
+PLOT_DIRECTORY = r"plots"

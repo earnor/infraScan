@@ -2,6 +2,9 @@
 import os
 import math
 import re
+
+import networkx
+import numpy
 import numpy as np
 import pandas as pd
 
@@ -2217,3 +2220,430 @@ def plot_costs_benefits_example(cost_benefit_df):
     plt.close()
     
     print(f"Plot saved for development {max_benefit_dev} as {filename}")
+
+
+def plot_lines_to_network(points_gdf,lines_gdf):
+    points_gdf.plot(marker='*', color='green', markersize=5)
+    base = lines_gdf.plot(edgecolor='black')
+    points_gdf.plot(ax=base, marker='o', color='red', markersize=5)
+    plt.savefig(r"plot\predict\230822_network-generation.png", dpi=300)
+    return None
+
+
+def plot_graph(graph, positions, highlight_centers=True, missing_links=None, directory='data/plots',polygon=None):
+    """
+    Plot the railway network graph with optional highlighting of center nodes and missing connections.
+
+    Args:
+        graph (networkx.Graph): The railway network graph
+        positions (dict): Dictionary mapping node IDs to (x,y) coordinates
+        highlight_centers (bool): Whether to highlight center nodes
+        missing_connections (list): List of missing connections to highlight
+    """
+    # Create the plot
+    plt.figure(figsize=(20, 16), dpi=300)
+
+    # Draw edges
+    nx.draw_networkx_edges(graph, positions, edge_color='gray', width=0.5, alpha=0.6)
+
+    # Draw nodes with different colors based on type
+    node_colors = []
+    node_sizes = []
+    for node in graph.nodes():
+        if graph.nodes[node].get('type') == 'center' and highlight_centers:
+            node_colors.append('red')
+            node_sizes.append(150)
+        elif graph.nodes[node].get('type') == 'border' and highlight_centers:
+            node_colors.append('orange')
+            node_sizes.append(100)
+        elif graph.nodes[node].get('end_station', False):
+            node_colors.append('green')
+            node_sizes.append(100)
+        else:
+            node_colors.append('lightblue')
+            node_sizes.append(50)
+
+    # Draw nodes
+    nx.draw_networkx_nodes(graph, positions, node_color=node_colors, node_size=node_sizes)
+
+    # Add labels with station names
+    labels = nx.get_node_attributes(graph, 'station_name')
+    nx.draw_networkx_labels(graph, positions, labels, font_size=8)
+
+    # Highlight missing connections if provided
+
+    if missing_links:
+        missing_connections = []
+        for center in missing_links:
+            missing_connections.extend(center['missing_connections'])
+        for conn in missing_connections:
+            node1, node2 = conn['nodes']
+            if node1 in positions and node2 in positions:
+                plt.plot([positions[node1][0], positions[node2][0]],
+                         [positions[node1][1], positions[node2][1]],
+                         'r--', linewidth=2, alpha=0.7)
+
+    if polygon:
+        x, y = polygon.exterior.xy
+        plt.plot(x, y, 'b-', linewidth=2, alpha=0.8)
+
+    # Add legend
+    if highlight_centers:
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=10, label='Center Node'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', markersize=10, label='Border Node'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=10, label='End Station'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='lightblue', markersize=10, label='Regular Node')
+        ]
+        if missing_links:
+            legend_elements.append(Line2D([0], [0], color='r', linestyle='--', label='Missing Connection'))
+        plt.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1))
+
+    plt.title("Railway Network Analysis")
+    plt.axis('on')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(directory, 'network_graph.png'),
+                dpi=300,
+                bbox_inches='tight',
+                pad_inches=0.2,
+                format='png')
+
+
+def print_new_railway_lines(new_lines):
+    """
+    Prints the generated railway lines in a readable format.
+    Includes information about end stations.
+    """
+    for line in new_lines:
+        print(f"\nNew Railway Line {line['name']}:")
+        print(f"Original missing connection: {line['original_missing_connection']['stations'][0]} - "
+              f"{line['original_missing_connection']['stations'][1]}")
+
+        # Print endpoints information
+        if 'endpoints' in line:
+            print(f"Terminal stations:")
+            print(f"  Start: {line['endpoints']['start']['station']} (ID: {line['endpoints']['start']['node']}) - Terminal Station")
+            print(f"  End: {line['endpoints']['end']['station']} (ID: {line['endpoints']['end']['node']}) - Terminal Station")
+
+        print("Route:")
+        for i, (node_id, station) in enumerate(zip(line['path'], line['stations'])):
+            station_type = ""
+            if i == 0:
+                prefix = "  Start:"
+                station_type = "Terminal Station"
+            elif i == len(line['path']) - 1:
+                prefix = "  End:"
+                station_type = "Terminal Station"
+            else:
+                prefix = "  Via:"
+
+            print(f"{prefix} {station} (ID: {node_id}) {station_type}")
+
+        print(f"Total stations: {len(line['path'])}")
+
+
+def plot_railway_lines_with_offset(G, pos, new_railway_lines, output_file='proposed_railway_lines.png'):
+    """
+    Creates a visualization of railway lines with offset paths to prevent overlapping.
+
+    Args:
+        G (networkx.Graph): Input graph
+        pos (dict): Node positions
+        new_railway_lines (list): List of new railway lines to visualize
+        output_file (str): Output file path for the visualization
+    """
+    plt.figure(figsize=(20, 16), dpi=300)
+
+    # Draw the existing network
+    nx.draw_networkx_edges(G, pos, edge_color='gray', width=0.5, alpha=0.4)
+    nx.draw_networkx_nodes(G, pos, node_color='lightblue', node_size=30, alpha=0.4)
+
+    # Create a dictionary to track how many lines pass between each pair of nodes
+    edge_count = {}
+
+    # First pass: count how many lines use each edge
+    for line in new_railway_lines:
+        path = line['path']
+        for j in range(len(path) - 1):
+            if path[j] in pos and path[j + 1] in pos:
+                edge = tuple(sorted([path[j], path[j + 1]]))
+                edge_count[edge] = edge_count.get(edge, 0) + 1
+
+    # Draw the new railway lines with different colors and offsets
+    colors = ['red', 'blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'yellow']
+    legend_handles = []
+
+    for i, line in enumerate(new_railway_lines):
+        path = line['path']
+        color = colors[i % len(colors)]
+        label = line['name']
+
+        # Draw the path segments with offsets
+        for j in range(len(path) - 1):
+            if path[j] in pos and path[j + 1] in pos:
+                start_pos = pos[path[j]]
+                end_pos = pos[path[j + 1]]
+
+                # Calculate perpendicular offset
+                dx = end_pos[0] - start_pos[0]
+                dy = end_pos[1] - start_pos[1]
+                length = np.sqrt(dx * dx + dy * dy)
+
+                if length > 0:
+                    # Calculate perpendicular vector
+                    perpx = -dy / length
+                    perpy = dx / length
+
+                    # Determine offset based on line index and total lines
+                    edge = tuple(sorted([path[j], path[j + 1]]))
+                    total_lines = edge_count[edge]
+                    line_index = i % total_lines
+
+                    # Calculate offset distance (adjust multiplier as needed)
+                    offset = (line_index - (total_lines - 1) / 2) * 100  # Adjust 100 to change spacing
+
+                    # Apply offset to coordinates
+                    start_offset = (
+                        start_pos[0] + perpx * offset,
+                        start_pos[1] + perpy * offset
+                    )
+                    end_offset = (
+                        end_pos[0] + perpx * offset,
+                        end_pos[1] + perpy * offset
+                    )
+
+                    # Draw the offset line segment
+                    line_handle, = plt.plot(
+                        [start_offset[0], end_offset[0]],
+                        [start_offset[1], end_offset[1]],
+                        color=color,
+                        linewidth=2,
+                        label=label if j == 0 else "_nolegend_"
+                    )
+
+                    if j == 0:
+                        legend_handles.append(line_handle)
+
+    # Add legend and title
+    plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.02, 1))
+    plt.title("Proposed New Railway Lines")
+    plt.grid(True)
+    plt.tight_layout()
+
+    # Save the figure
+    plt.savefig(output_file,
+                dpi=300,
+                bbox_inches='tight',
+                pad_inches=0.2,
+                format='png')
+    plt.close()
+
+
+def plot_missing_connection_lines(G, pos, new_railway_lines, connection_nodes, output_file):
+    """
+    Creates a visualization of railway lines for a specific missing connection.
+    Railway lines are drawn with offsets to prevent overlapping when they share the same path segments.
+
+    Args:
+        G (networkx.Graph): Input graph
+        pos (dict): Node positions
+        new_railway_lines (list): List of new railway lines to visualize
+        connection_nodes (tuple): The missing connection node pair (node1, node2)
+        output_file (str): Output file path for the visualization
+    """
+    # Filter lines that belong to this specific missing connection
+    connection_lines = [line for line in new_railway_lines
+                        if line['original_missing_connection']['nodes'] == connection_nodes]
+
+    if not connection_lines:
+        print(f"No railway lines found for connection {connection_nodes}")
+        return
+
+    node1, node2 = connection_nodes
+    station1 = G.nodes[node1].get('station_name', f"Node {node1}")
+    station2 = G.nodes[node2].get('station_name', f"Node {node2}")
+
+    plt.figure(figsize=(20, 16), dpi=300)
+
+    # Draw the existing network with reduced opacity
+    nx.draw_networkx_edges(G, pos, edge_color='gray', width=0.5, alpha=0.3)
+
+    # Draw nodes with different sizes and colors
+    node_colors = []
+    node_sizes = []
+    node_labels = {}
+
+    for node in G.nodes():
+        # Get station name for label if it's an important node
+        station_name = G.nodes[node].get('station_name', '')
+
+        # Assign colors and sizes based on node type
+        if node in connection_nodes:  # Highlight the missing connection nodes
+            node_colors.append('red')
+            node_sizes.append(150)
+            node_labels[node] = station_name
+        elif G.nodes[node].get('type') == 'center':
+            node_colors.append('orange')
+            node_sizes.append(80)
+            node_labels[node] = station_name
+        elif G.nodes[node].get('end_station', False):
+            node_colors.append('green')
+            node_sizes.append(100)
+            node_labels[node] = station_name
+        elif any(node in line['path'] for line in connection_lines):  # Nodes in the new lines
+            node_colors.append('blue')
+            node_sizes.append(80)
+            node_labels[node] = station_name
+        else:
+            node_colors.append('lightgray')
+            node_sizes.append(30)
+
+    # Draw nodes
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, alpha=0.7)
+
+    # Add labels for important nodes
+    nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=9)
+
+    # Create a dictionary to track how many lines pass between each pair of nodes
+    edge_count = {}
+
+    # First pass: count how many lines use each edge
+    for line in connection_lines:
+        path = line['path']
+        for j in range(len(path) - 1):
+            if path[j] in pos and path[j + 1] in pos:
+                edge = tuple(sorted([path[j], path[j + 1]]))
+                edge_count[edge] = edge_count.get(edge, 0) + 1
+
+    # Draw the new railway lines with different colors
+    colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'brown', 'pink']
+    legend_handles = []
+
+    # First, draw the missing connection as a dashed line
+    if node1 in pos and node2 in pos:
+        missing_handle, = plt.plot([pos[node1][0], pos[node2][0]],
+                                  [pos[node1][1], pos[node2][1]],
+                                  'r--', linewidth=2.5, alpha=0.8,
+                                  label=f"Missing Connection: {station1} - {station2}")
+        legend_handles.append(missing_handle)
+
+    # Then draw each proposed railway line with offset
+    for i, line in enumerate(connection_lines):
+        path = line['path']
+        color = colors[i % len(colors)]  # Use colors other than red
+        label = f"{line['name']}: {line['endpoints']['start']['station']} - {line['endpoints']['end']['station']}"
+        line_segments = []
+
+        # Draw the path segments with offsets to prevent overlapping
+        for j in range(len(path) - 1):
+            if path[j] in pos and path[j + 1] in pos:
+                start_pos = pos[path[j]]
+                end_pos = pos[path[j + 1]]
+
+                # Calculate perpendicular offset
+                dx = end_pos[0] - start_pos[0]
+                dy = end_pos[1] - start_pos[1]
+                length = np.sqrt(dx * dx + dy * dy)
+
+                if length > 0:
+                    # Calculate perpendicular vector
+                    perpx = -dy / length
+                    perpy = dx / length
+
+                    # Determine offset based on line index and total lines for this edge
+                    edge = tuple(sorted([path[j], path[j + 1]]))
+                    total_lines = edge_count[edge]
+
+                    # Determine this line's position among those using this edge
+                    # Find position of current line among all lines using this edge
+                    line_position = 0
+                    for k, other_line in enumerate(connection_lines):
+                        if k == i:  # Found our line
+                            break
+                        # Check if other line uses this edge
+                        other_path = other_line['path']
+                        for m in range(len(other_path) - 1):
+                            if tuple(sorted([other_path[m], other_path[m + 1]])) == edge:
+                                line_position += 1
+                                break
+
+                    # Calculate offset - distribute lines evenly
+                    if total_lines > 1:
+                        offset = (line_position - (total_lines - 1) / 2) * 150  # Increased spacing
+                    else:
+                        offset = 0
+
+                    # Apply offset to coordinates
+                    start_offset = (
+                        start_pos[0] + perpx * offset,
+                        start_pos[1] + perpy * offset
+                    )
+                    end_offset = (
+                        end_pos[0] + perpx * offset,
+                        end_pos[1] + perpy * offset
+                    )
+
+                    # Draw the offset line segment
+                    line_segment, = plt.plot(
+                        [start_offset[0], end_offset[0]],
+                        [start_offset[1], end_offset[1]],
+                        color=color,
+                        linewidth=3,
+                        label="_nolegend_"  # Don't add individual segments to legend
+                    )
+
+                    line_segments.append(line_segment)
+
+        # Add a legend entry for this line
+        if line_segments:
+            # Create a custom legend entry with the proper color
+            from matplotlib.lines import Line2D
+            legend_line = Line2D([0], [0], color=color, lw=3, label=label)
+            legend_handles.append(legend_line)
+
+    # Add legend and title with larger font size and better positioning
+    plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.02, 1),
+               fontsize=10, framealpha=0.8)
+    plt.title(f"Proposed Railway Lines for Missing Connection: {station1} - {station2}",
+              fontsize=14, pad=20)
+
+    # Add a grid and other formatting
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    # Add a scale bar or axis labels if appropriate for geographic data
+    if all(isinstance(pos[node], tuple) and len(pos[node]) == 2 for node in pos):
+        plt.xlabel('X Coordinate (m)', fontsize=10)
+        plt.ylabel('Y Coordinate (m)', fontsize=10)
+
+    # Save the figure
+    plt.savefig(output_file,
+                dpi=300,
+                bbox_inches='tight',
+                pad_inches=0.2,
+                format='png')
+    plt.close()
+
+
+def plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir):
+
+    os.makedirs(plots_dir, exist_ok=True)
+    # Create a set of all unique missing connections from the new railway lines
+    unique_connections = set()
+    for line in new_railway_lines:
+        conn = line['original_missing_connection']['nodes']
+        unique_connections.add(conn)
+    print(f"\nCreating individual plots for {len(unique_connections)} missing connections...")
+    # Create individual plots for each missing connection
+    for i, connection in enumerate(unique_connections):
+        node1, node2 = connection
+        station1 = G.nodes[node1].get('station_name', f"Node {node1}")
+        station2 = G.nodes[node2].get('station_name', f"Node {node2}")
+
+        # Create a filename based on the connection
+        filename = f"{plots_dir}/connection_{i + 1}_{station1.replace(' ', '_')}_to_{station2.replace(' ', '_')}.png"
+
+        print(f"  Creating plot for missing connection: {station1} - {station2}")
+        plot_missing_connection_lines(G, pos, new_railway_lines, connection, filename)
