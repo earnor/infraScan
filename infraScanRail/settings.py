@@ -4,6 +4,7 @@ use_cache_pt_catchment = True
 use_cache_developments = True
 use_cache_catchmentOD = True
 use_cache_stationsOD = False
+use_cache_traveltime_graph = True
 
 OD_type = 'canton_ZH' #either 'canton_ZH' or 'pt_catchment_perimeter'
 #choose with infra generation

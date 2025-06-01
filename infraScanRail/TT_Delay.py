@@ -148,8 +148,9 @@ def calculate_od_pairs_with_times_by_graph(graphs):
         list: A list of Pandas DataFrames, one for each graph_id.
     """
     graph_dataframes = []
-    
-    for graph_id, graph in enumerate(graphs):
+
+    for graph_id, graph in enumerate(tqdm(graphs, desc="Processing developments")):
+        print(f"→ Calculating OD pairs for development {graph_id}...")
         od_data = []
         # Extract main station nodes for the current graph
         main_nodes = [node for node, data in graph.nodes(data=True) if data.get("type") == "main_node"]

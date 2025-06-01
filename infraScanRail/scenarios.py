@@ -3,7 +3,7 @@ import random
 
 import settings
 from data_import import *
-from rasterio.features import geometry_mask
+from rasterio.features import geometry_mask, rasterize
 from rasterstats import zonal_stats
 
 import boto3 
@@ -454,3 +454,306 @@ def dummy_generate_scenarios(n_scenarios: int, seed: int = None):
         })
 
     return scenarios
+
+def scenario_inward_development():
+    # Load geodatabase
+    gdf = gpd.read_file(r"data\Scenario\potential\outputshape\zh_pot.dbf")
+    # set index as new column
+    gdf['ID_unique'] = gdf.index
+    # PARZSTRUK: 1 Teil Parzelle, 2 Einzelparzelle, 3 mehrere Parzellen
+    # MOEG_POT: bl Baulücke, ie Innenentwicklugnspotential, ar Aussenreserve
+    # POT_TYPE:
+
+    # Load current density data
+    gdf_density = gpd.read_file(r"data\Scenario\potential\development\Quartieranalyse_-OGD.gpkg")
+
+
+    ##################################################
+    # Get potential development per area of plot
+    gdf_density["pot_area"] = gdf_density["U_GFLR"] / gdf_density["geometry"].area
+
+    # Get development potential per plot
+    overlaps = gpd.overlay(gdf, gdf_density, how='intersection')
+    overlaps["po_pop_area"] = overlaps["pot_area"] * overlaps["geometry"].area
+    print(overlaps.head(10).to_string())
+    sums = overlaps.groupby('ID_unique').agg({'po_pop_area': 'sum', 'EINF': 'first'})
+    print(sums.head(10).to_string())
+
+    gdf = gdf.merge(sums, on='ID_unique', how='left')
+    gdf['po_pop_area'].fillna(0, inplace=True)
+    gdf = gpd.GeoDataFrame(gdf, geometry='geometry')
+
+
+    gdf["pop_potential"] = gdf["po_pop_area"] / 46.3
+
+    # Only keep columns of interest
+    gdf = gdf[["geometry", "pop_potential", "EINF"]]
+
+    # Load current pop tif file
+    with rasterio.open(r"data\independent_variable\processed\raw\pop20.tif") as src:
+        pop_raster = src.read(1)
+        pop_meta = src.meta
+
+    # Initialize arrays for population and employment potential
+    pop_potential_raster_plus = np.zeros(pop_raster.shape, dtype=rasterio.float32)
+
+    # Define a function to rasterize a single column (potential)
+    def rasterize_potential(column):
+        return rasterize(
+            ((geom, value) for geom, value in zip(gdf.geometry, gdf[column])),
+            out_shape=pop_raster.shape,
+            transform=pop_meta['transform'],
+            fill=0,  # Fill value for 'nodata'
+            all_touched=True,
+            dtype=rasterio.float32)
+
+    pop_potential_raster_plus += rasterize_potential("pop_potential")
+
+    # Prepare to write both bands
+    output_meta = pop_meta.copy()
+    output_meta.update({
+        'dtype': rasterio.float32,
+        'nodata': None,  # Adjust nodata as needed
+        'count': 2,  # Two bands
+    })
+
+    # Write both rasters to a new file with two bands
+    with rasterio.open(r'data\Scenario\potential\max_pot_plus.tif', 'w', **output_meta) as dest:
+        dest.write(pop_potential_raster_plus, 1)  # Band 1 for population potential
+
+
+    # 4) Randomly chose the degree of use of each cell to go for a certain development level
+    # Get sum of potential over all cells
+    pop_total_potential = pop_potential_raster_plus.sum()
+    print(pop_total_potential)
+
+    def generate_scenarios(initial_values, num_scenarios=50, target_ratio=0.5):
+        max_possible_sum = np.sum(initial_values)
+        target_sum = max_possible_sum * target_ratio
+        print(f"target_sum: {target_sum}")
+        scenarios = []
+        changes = []
+
+        for _ in range(num_scenarios):
+            # Generate a random scenario within the specified bounds
+            #print(np.random.rand(*initial_values.shape))
+            #scenario = np.random.rand(*initial_values.shape) * initial_values
+            scenario = np.random.normal(loc=target_ratio, scale=1-target_ratio, size=initial_values.shape)
+            current_sum = np.sum(scenario)
+
+            # Adjust the scenario to meet the target sum
+            while np.abs(current_sum - target_sum) > 1e-6:  # Allow a small margin of error
+                adjustment_factor = target_sum / current_sum
+                scenario *= adjustment_factor
+                scenario = np.clip(scenario, 0, initial_values)  # Ensure values are within bounds
+                current_sum = np.sum(scenario)
+
+            print(np.sum(scenario))
+            changes.append(scenario)
+            scenario = scenario + pop_raster
+            # replace nan by 0 and inf by 0
+            scenario = np.where(np.isnan(scenario), 0, scenario)
+            scenario = np.where(np.isinf(scenario), 0, scenario)
+            scenarios.append(scenario)
+
+        return scenarios, changes
+
+    pop_scenario, pop_change = generate_scenarios(pop_potential_raster_plus, num_scenarios=50, target_ratio=0.6)
+
+    # Update metadata to reflect the number of scenarios as bands
+    output_meta.update(count=len(pop_scenario), dtype=rasterio.float32)
+
+    # Create a new TIFF file to store the scenarios
+    with rasterio.open(r'data\Scenario\potential\pop_scen_plus.tif', 'w', **output_meta) as dst:
+        for i, scenario in enumerate(pop_scenario, start=1):
+            dst.write(scenario.astype(rasterio.float32), i)
+
+    # Create a new TIFF file to store the scenarios
+    with rasterio.open(r'data\Scenario\potential\pop_change_plus.tif', 'w', **output_meta) as dst:
+        for i, scenario in enumerate(pop_change, start=1):
+            dst.write(scenario.astype(rasterio.float32), i)
+    # Create a new TIFF file to store the scenarios
+
+
+
+
+    gdf.lalla
+
+    # Convert the extracted numbers to integers, missing values will become None
+    #gdf_density['extracted_use'] = gdf_density['U_ZONE_KT'].str.extract(r'W[A-Za-z]?(\d+)')
+    #gdf_density['extracted_use'] = pd.to_numeric(gdf_density['extracted_use'], errors='coerce').astype('Int64')
+
+    # Nbr levels * area of plot / use per capita (46.3 m3/person)
+    gdf_density['pop_potential'] = np.where(
+        gdf_density["U_EINW"] > gdf_density["U_BESCH"],
+        gdf_density["U_GFLR"] / 46.3,
+        0
+    )
+
+    gdf_density['empl_potential'] = np.where(
+        gdf_density["U_EINW"] <= gdf_density["U_BESCH"],
+        gdf_density["U_BESCH"] / gdf_density["U_GFL"] * gdf_density["U_GFLR"],
+        0
+    )
+    #gdf_density["pop_potential"] = gdf_density["U_GFLR"] / 46.3
+
+
+    # Else N_EINW_HA
+
+    # Multiply the extracted numbers by the area of the polygon (potential plots)
+
+
+
+
+    # Load current pop tif file
+    with rasterio.open(r"data\independent_variable\processed\raw\pop20.tif") as src:
+        pop_raster = src.read(1)
+        pop_meta = src.meta
+
+    # 1) identify number of additional population per plot
+    # Copy of gdf keeping only geometry and PRZ_AREA
+    """
+    pop_potential = gdf[["geometry", "PRZ_AREA", "GEB_AREA"]].copy()
+    pop_potential["potential"] = ((pop_potential["PRZ_AREA"] * 0.8) - pop_potential["GEB_AREA"]) / 30
+    print(pop_potential.head(10).to_string())
+    """
+    #todo overlay zonal plan with potential plots to get the development potential per plot
+
+
+    # 2) identify number of additional employment per plot
+
+
+    # 3) Rasterize the data according to the raw pop data (split pop/empl according to the ratio)
+    # Rasterize pop_potential according to the pop raster
+    # only keep geometry, pop_potential and empl_potential
+    gdf_density = gdf_density[["geometry", "pop_potential", "empl_potential"]].copy()
+    # replace nan by 0 and inf by 0
+    gdf_density = gdf_density.fillna(0)
+    gdf_density = gdf_density.replace([np.inf, -np.inf], 0)
+    gdf_density = gdf_density.to_crs(pop_meta['crs'])
+
+    """
+    # Initialize an empty array for output, matching the template raster's dimensions
+    potential_raster = np.zeros(pop_raster.shape, dtype=rasterio.float32)
+
+    # For each geometry, calculate the portion of the cell it covers and assign 'potential' accordingly
+    for index, row in gdf_density.iterrows():
+        # This mask will be True for cells outside the geometry, hence invert it for coverage
+        geom_mask = geometry_mask([row['geometry']], invert=True, transform=pop_meta['transform'],
+                                  out_shape=pop_raster.shape, all_touched=True)
+
+        # Calculate covered area ratio if needed or distribute 'potential' directly
+        # Simple version: equally distribute 'potential' to covered cells
+        potential_raster[geom_mask] += row["pop_potential"] / geom_mask.sum()
+
+    # Update the metadata for the output file
+    output_meta = pop_meta.copy()
+    output_meta.update({
+        'dtype': 'float32',
+        'nodata': None,  # Set to your preferred nodata value if any
+        'count': 1,  # Number of bands
+    })
+
+    # Write the output array to a new raster file
+    with rasterio.open(r'data\Scenario\potential\max_pot.tif', 'w', **output_meta) as dest:
+        dest.write(potential_raster, 1)
+    """
+
+    # Initialize arrays for population and employment potential
+    pop_potential_raster = np.zeros(pop_raster.shape, dtype=rasterio.float32)
+    empl_potential_raster = np.zeros(pop_raster.shape, dtype=rasterio.float32)
+
+    # Define a function to rasterize a single column (potential)
+    def rasterize_potential(column):
+        return rasterize(
+            ((geom, value) for geom, value in zip(gdf_density.geometry, gdf_density[column])),
+            out_shape=pop_raster.shape,
+            transform=pop_meta['transform'],
+            fill=0,  # Fill value for 'nodata'
+            all_touched=True,
+            dtype=rasterio.float32)
+
+    pop_potential_raster += rasterize_potential("pop_potential")
+    empl_potential_raster += rasterize_potential("empl_potential")
+
+    # Prepare to write both bands
+    output_meta = pop_meta.copy()
+    output_meta.update({
+        'dtype': rasterio.float32,
+        'nodata': None,  # Adjust nodata as needed
+        'count': 2,  # Two bands
+    })
+
+    # Write both rasters to a new file with two bands
+    with rasterio.open(r'data\Scenario\potential\max_pot.tif', 'w', **output_meta) as dest:
+        dest.write(pop_potential_raster, 1)  # Band 1 for population potential
+        dest.write(empl_potential_raster, 2)  # Band 2 for employment potential
+
+    # from the max_pot.tif, randomly chose a value between 0 and 1 for each cell in order that the sum = 0.6 total_potential
+    # the value will be the degree of use of the cell
+    # the degree of use will be multiplied by the potential to get the development level
+
+
+    # 4) Randomly chose the degree of use of each cell to go for a certain development level
+    # Get sum of potential over all cells
+    pop_total_potential = pop_potential_raster.sum()
+    print(pop_total_potential)
+    empl_total_potential = empl_potential_raster.sum()
+    print(empl_total_potential)
+
+    def generate_scenarios(initial_values, num_scenarios=50, target_ratio=0.5):
+        max_possible_sum = np.sum(initial_values)
+        target_sum = max_possible_sum * target_ratio
+        print(f"target_sum: {target_sum}")
+        scenarios = []
+        changes = []
+
+        for _ in range(num_scenarios):
+            # Generate a random scenario within the specified bounds
+            #print(np.random.rand(*initial_values.shape))
+            #scenario = np.random.rand(*initial_values.shape) * initial_values
+            scenario = np.random.normal(loc=target_ratio, scale=1-target_ratio, size=initial_values.shape)
+            current_sum = np.sum(scenario)
+
+            # Adjust the scenario to meet the target sum
+            while np.abs(current_sum - target_sum) > 1e-6:  # Allow a small margin of error
+                adjustment_factor = target_sum / current_sum
+                scenario *= adjustment_factor
+                scenario = np.clip(scenario, 0, initial_values)  # Ensure values are within bounds
+                current_sum = np.sum(scenario)
+
+            print(np.sum(scenario))
+            changes.append(scenario)
+            scenario = scenario + pop_raster
+            scenarios.append(scenario)
+
+        return scenarios, changes
+
+    pop_scenario, pop_change = generate_scenarios(pop_potential_raster, num_scenarios=50, target_ratio=0.25)
+    empl_scenario, empl_change = generate_scenarios(empl_potential_raster, num_scenarios=50, target_ratio=0.15)
+
+    # Update metadata to reflect the number of scenarios as bands
+    output_meta.update(count=len(pop_scenario), dtype=rasterio.float32)
+
+    # Create a new TIFF file to store the scenarios
+    with rasterio.open(r'data\Scenario\potential\pop_scen.tif', 'w', **output_meta) as dst:
+        for i, scenario in enumerate(pop_scenario, start=1):
+            dst.write(scenario.astype(rasterio.float32), i)
+    # Create a new TIFF file to store the scenarios
+    with rasterio.open(r'data\Scenario\potential\empl_scen.tif', 'w', **output_meta) as dst:
+        for i, scenario in enumerate(empl_scenario, start=1):
+            dst.write(scenario.astype(rasterio.float32), i)
+
+
+    # Create a new TIFF file to store the scenarios
+    with rasterio.open(r'data\Scenario\potential\pop_change.tif', 'w', **output_meta) as dst:
+        for i, scenario in enumerate(pop_change, start=1):
+            dst.write(scenario.astype(rasterio.float32), i)
+    # Create a new TIFF file to store the scenarios
+    with rasterio.open(r'data\Scenario\potential\empl_change.tif', 'w', **output_meta) as dst:
+        for i, scenario in enumerate(empl_change, start=1):
+            dst.write(scenario.astype(rasterio.float32), i)
+
+
+
+    # 5) Generate sceanrios by overlaying development with status quo

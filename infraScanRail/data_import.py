@@ -5,6 +5,7 @@ from shapely.geometry import Polygon
 import paths
 from plots import *
 import ast
+from tqdm import tqdm
 
 
 def import_cities():

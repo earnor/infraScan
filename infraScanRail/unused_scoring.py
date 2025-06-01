@@ -1938,3 +1938,46 @@ def land_tb_reallocated(links, buffer_distance):
     links = links.drop(columns="buffer")
 
     return links
+
+
+def filter_unnecessary_links():
+    """
+    Filter out unnecessary links in the new_links GeoDataFrame by ensuring the connection
+    is not redundant within the existing Sline routes. Saves the filtered links as a
+    GeoPackage file.
+    """
+    # Load data
+    if settings.rail_network == 'current':
+        raw_edges = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)  # Use raw string
+    elif settings.rail_network == 'AK_2035':
+        raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
+    elif settings.rail_network == 'AK_2035_extended':
+        raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_EXTENDED_PATH)
+    line_gdf = gpd.read_file(r"data/Network/processed/new_links.gpkg")  # Use raw string
+
+    # Step 1: Build Sline routes
+    sline_routes = (
+        raw_edges.groupby('Service')
+        .apply(lambda df: set(df['FromNode']).union(set(df['ToNode'])))
+        .to_dict()
+    )
+
+    # Step 2: Filter new_links
+    filtered_links = []
+    for _, row in line_gdf.iterrows():
+        sline = row['Sline']
+        to_id = row['to_ID']
+        from_id = row['from_ID_new']
+
+        # Check if the connection is redundant
+        if from_id in sline_routes.get(sline, set()) and to_id in sline_routes.get(sline, set()):
+            continue  # Skip redundant links
+        else:
+            filtered_links.append(row)
+
+    # Step 3: Create a GeoDataFrame for filtered links
+    filtered_gdf = gpd.GeoDataFrame(filtered_links, geometry='geometry', crs=line_gdf.crs)
+
+    # Save filtered links
+    filtered_gdf.to_file(r"data/Network/processed/filtered_new_links.gpkg", driver="GPKG")  # Use raw string
+    print("Filtered new links saved successfully!")

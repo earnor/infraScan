@@ -1,7 +1,7 @@
 # import packages
 import shutil
 import time
-
+import pickle
 import paths
 import scoring
 import settings
@@ -15,6 +15,7 @@ from scoring import create_cost_and_benefit_df
 from traveltime_delay import *
 import geopandas as gpd
 import networkx as nx
+import os
 
 def infrascanrail():
 
@@ -135,7 +136,7 @@ def infrascanrail():
 
     # network of status quo
 
-    od_times_dev, od_times_status_quo = create_travel_time_graphs(settings.rail_network)
+    od_times_dev, od_times_status_quo = create_travel_time_graphs(settings.rail_network, settings.use_cache_traveltime_graph)
 
     # osm_nw_to_raster(limits_variables)
     runtimes["Calculate Traveltimes for all OD_ for all developments"] = time.time() - st
@@ -164,22 +165,14 @@ def infrascanrail():
 
         # Liste der Einträge erstellen (z.B. die ID_point und NAME)
         inner_boundary_stations = points_in_inner_boundary[['ID_point', 'NAME']].values.tolist()
-        railway_station_OD = getStationOD(settings.use_cache_stationsOD, inner_boundary_stations, od_directory_scenario)
-
-
-
-
-
+        #stationOD also saved as a file
+        getStationOD(settings.use_cache_stationsOD, inner_boundary_stations, od_directory_scenario)
 
     elif settings.OD_type == 'pt_catchment_perimeter':
         od_directory_scenario = r"data/traffic_flow/od/rail"
         GetCatchmentOD(settings.use_cache_catchmentOD)
     else:
         raise ValueError("OD_type must be either 'canton_ZH' or 'pt_catchment_perimeter'")
-    #combine_and_save_od_matrices(od_directory_scenario, od_directory_stat_quo)
-
-    # Compute the OD matrix for the infrastructure developments under all scenarios
-    # GetVoronoiOD_multi()
 
     runtimes["Reallocate OD matrices to Catchement polygons"] = time.time() - st
     st = time.time()
@@ -270,7 +263,6 @@ def getStationOD(use_cache, stations_in_perimeter, od_directory_scenario):
             file_path = os.path.join(od_directory_scenario, f"od_matrix_stations_ktzh_future_{i + 1}.csv")
             scenario_od.to_csv(file_path)
 
-    return railway_station_OD
 
 
 def add_construction_info_to_network():
@@ -296,7 +288,21 @@ def add_construction_info_to_network():
     df_railway_network.to_file(paths.RAIL_SERVICES_AK2035_PATH)
 
 
-def create_travel_time_graphs(network_selection):
+def create_travel_time_graphs(network_selection, use_cache):
+    # Define cache file for pickle
+    cache_file = 'data/Network/travel_time/cache/od_times.pkl'
+
+    if use_cache:
+        if os.path.exists(cache_file):
+            print("Load OD-times from cache...")
+            with open(cache_file, 'rb') as f:
+                cache_data = pickle.load(f)
+                od_times_dev = cache_data['od_times_dev']
+                od_times_status_quo = cache_data['od_times_status_quo']
+            return od_times_dev, od_times_status_quo
+        else:
+            print("Cache not found. Calculate OD-times...")
+
     if network_selection == 'current':
         network_status_quo = [paths.RAIL_SERVICES_2024_PATH]
     elif network_selection == 'AK_2035':
@@ -345,10 +351,20 @@ def create_travel_time_graphs(network_selection):
         'main_Bubikon', 'main_Zürich HB', 'main_Kempten', 'main_Pfäffikon ZH',
         'main_Zürich Oerlikon', 'main_Zürich Stadelhofen', 'main_Hinwil', 'main_Aathal'
     ]
-    # Analyze the Delta TT
+    # Analyse der Delta-Reisezeiten
     analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes) #output of this is not used!
-    # Display the result
-    print("\nFinal Travel Times and Delta Times:")
+    # Ergebnis anzeigen
+    print("\nFinal travel times:")
+
+    # Cache-Ausgabe mit Pickle (kann Listen von DataFrames verarbeiten)
+    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+    with open(cache_file, 'wb') as f:
+        pickle.dump({
+            'od_times_dev': od_times_dev,
+            'od_times_status_quo': od_times_status_quo
+        }, f)
+    print("OD-times saved to cache.")
+
     return od_times_dev, od_times_status_quo
 
 
@@ -472,7 +488,7 @@ def generate_infra_development(use_cache):
     #                                        file_path_raw_edges=r"data/temp/network_railway-services.gpkg",
     #                                        output_path=r"data/Network/processed/updated_new_links_cleaned.gpkg")
 
-    combined_gdf = update_network_with_new_links(paths.RAIL_SERVICES_AK2035_PATH, new_links_updated_path)
+    combined_gdf = update_network_with_new_links(settings.rail_network, new_links_updated_path)
     update_stations(combined_gdf, output_path)
 
 
@@ -496,3 +512,4 @@ def create_focus_area():
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     infrascanrail()
+

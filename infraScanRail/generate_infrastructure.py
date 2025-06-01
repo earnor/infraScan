@@ -3,6 +3,7 @@ from shapely.ops import split
 import gc
 
 import paths
+import time
 from scoring import *
 from scoring import split_via_nodes, merge_lines
 
@@ -570,12 +571,19 @@ def get_via(new_connections):
     return result_df
 
 
-def update_network_with_new_links(network_railway_service_path, new_links_updated_path):
+def update_network_with_new_links(rail_network_selection, new_links_updated_path):
     """
     Add new links to the railway network, marking them as new and generating both directions.
     Ensure FromStation and ToStation are mapped correctly using Rail_Node data.
     """
     # Load data
+    if settings.rail_network == 'current':
+        network_railway_service_path = paths.RAIL_SERVICES_2024_PATH
+    elif settings.rail_network == 'AK_2035':
+        network_railway_service_path = paths.RAIL_SERVICES_AK2035_PATH
+    elif settings.rail_network == 'AK_2035_extended':
+        network_railway_service_path = paths.RAIL_SERVICES_AK2035_EXTENDED_PATH
+
     network_railway_service = gpd.read_file(network_railway_service_path)
     new_links_updated = gpd.read_file(new_links_updated_path)
     rail_node = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";", decimal=",", encoding="ISO-8859-1")
@@ -625,7 +633,7 @@ def update_network_with_new_links(network_railway_service_path, new_links_update
 
     # Ensure all Via values are strings or -99 for empty paths
     new_links_updated['Via'] = new_links_updated['Via'].apply(
-        lambda x: '-99' if not x or x == [-99] else ','.join(map(str, x))
+        lambda x: '-99' if pd.isna(x) or x == [-99] else ','.join(map(str, x))
     )
 
     # Identify and report missing node mappings
