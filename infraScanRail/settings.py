@@ -10,7 +10,7 @@ use_cache_catchmentOD = True
 use_cache_stationsOD = False
 use_cache_traveltime_graph = True
 
-infra_generation_modification_type = 'ALL' #either 'EXTEND_LINES' or 'NEW_DIRECT_CONNECTIONS' or 'ALL'
+infra_generation_modification_type = 'EXTEND_LINES' #either 'EXTEND_LINES' or 'NEW_DIRECT_CONNECTIONS' or 'ALL'
 #infra_generation_rail_network: either 'RAIL_SERVICES_AK2035_PATH' or 'RAIL_SERVICES_AK2035_EXTENDED_PATH' or 'RAIL_SERVICES_2024_PATH'
 infra_generation_rail_network = paths.RAIL_SERVICES_AK2035_PATH
 

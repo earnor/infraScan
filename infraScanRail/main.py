@@ -80,7 +80,7 @@ def infrascanrail():
 
     add_construction_info_to_network()
 
-    network_in_corridor(poly=outerboundary)
+    network_in_corridor(poly=settings.perimeter_infra_generation)
 
     runtimes["Preprocess the network"] = time.time() - st
     st = time.time()
@@ -478,17 +478,54 @@ def generate_infra_development(use_cache, mod_type):
         # The generated points with link to access point in the corridor are stored in "data/Network/processed/generated_nodes_connecting_corridor.gpkg"
         # The end point [ID_new] of developments_to_corridor_attribute are equivalent to the points in generated_nodes_connecting_corridor
         only_links_to_corridor()
-    calculate_new_service_time()
+        calculate_new_service_time()
 
-    new_links_updated_path = r"data\Network\processed\updated_new_links.gpkg"
-    output_path = r"data\Network\processed\combined_network_with_new_links.gpkg"
+        new_links_updated_path = r"data\Network\processed\updated_new_links.gpkg"
+        output_path = r"data\Network\processed\combined_network_with_new_links.gpkg"
 
-    # combined_gdf = delete_connections_back(file_path_updated=r"data\Network\processed\new_links.gpkg",
-    #                                        file_path_raw_edges=r"data/temp/network_railway-services.gpkg",
-    #                                        output_path=r"data/Network/processed/updated_new_links_cleaned.gpkg")
+        # combined_gdf = delete_connections_back(file_path_updated=r"data\Network\processed\new_links.gpkg",
+        #                                        file_path_raw_edges=r"data/temp/network_railway-services.gpkg",
+        #                                        output_path=r"data/Network/processed/updated_new_links_cleaned.gpkg")
 
-    combined_gdf = update_network_with_new_links(settings.rail_network, new_links_updated_path)
-    update_stations(combined_gdf, output_path)
+        combined_gdf = update_network_with_new_links(settings.rail_network, new_links_updated_path)
+        update_stations(combined_gdf, output_path)
+
+
+    if mod_type in ('ALL', 'NEW_DIRECT_CONNECTIONS'):
+        df_network = gpd.read_file(settings.infra_generation_rail_network)
+        df_points = gpd.read_file(r'data\Network\processed\points.gpkg')
+        G, pos = prepare_Graph(df_network, df_points)
+
+        # Analyze the railway network to find missing connections
+        print("\n=== New Direct connections ===")
+        print("Identifying missing connections...")
+        missing_connections = get_missing_connections(G, pos, print_results=True,
+                                                      polygon=settings.perimeter_infra_generation)
+        plot_graph(G, pos, highlight_centers=True, missing_links=missing_connections, directory=paths.PLOT_DIRECTORY,
+                   polygon=settings.perimeter_infra_generation)
+
+        # Generate potential new railway lines
+        print("\n=== GENERATING NEW RAILWAY LINES ===")
+        new_railway_lines = generate_new_railway_lines(G, missing_connections)
+
+        # Print detailed information about the new lines
+        print("\n=== NEW RAILWAY LINES DETAILS ===")
+        print_new_railway_lines(new_railway_lines)
+
+        # Export to GeoPackage for further analysis and visualization in GIS software
+        new_lines = export_new_railway_lines(new_railway_lines, pos, "data/Network/processed/new_railway_lines.gpkg")
+        print("\nNew railway lines exported to data/Network/processed/new_railway_lines.gpkg")
+
+        # Visualize the new railway lines on the network graph
+        print("\n=== VISUALIZATION ===")
+        print("Creating visualization of the network with highlighted missing connections...")
+
+        # Create a directory for individual connection plots if it doesn't exist
+
+        plots_dir = "plots/missing_connections"
+        plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir)
+
+
 
 
     create_network_foreach_dev()

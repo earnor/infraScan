@@ -575,10 +575,6 @@ def scenario_inward_development():
     # Create a new TIFF file to store the scenarios
 
 
-
-
-    gdf.lalla
-
     # Convert the extracted numbers to integers, missing values will become None
     #gdf_density['extracted_use'] = gdf_density['U_ZONE_KT'].str.extract(r'W[A-Za-z]?(\d+)')
     #gdf_density['extracted_use'] = pd.to_numeric(gdf_density['extracted_use'], errors='coerce').astype('Int64')
@@ -757,3 +753,6 @@ def scenario_inward_development():
 
 
     # 5) Generate sceanrios by overlaying development with status quo
+
+if __name__ == '__main__':
+    scenario_inward_development()

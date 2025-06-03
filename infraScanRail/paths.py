@@ -10,6 +10,9 @@ COMMUNE_TO_STATION_PATH = r"data\Network\processed\Communes_to_railway_stations_
 
 POPULATION_RASTER = r"data\independent_variable\processed\replacement.pop20_ArcGisExport.tif"
 EMPLOYMENT_RASTER = r"data\independent_variable\processed\replacement.empl20_ArcGisExport.tif"
+POPULATION_SCENARIO_CANTON_ZH_2050 = r"data\Scenario\KTZH_00000705_00001741.csv"
+POPULATION_SCENARIO_CH_BFS_2055 = r"data\Scenario\pop_scenario_switzerland_2055.csv"
+POPULATION_SCENARIO_CH_EUROSTAT_2100 = r"data\Scenario\Eurostat_population_CH_2100.xlsx"
 
 
 TOTAL_COST_WITH_GEOMETRY = r"data/costs/total_costs_with_geometry.csv"
