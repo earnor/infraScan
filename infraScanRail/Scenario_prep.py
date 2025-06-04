@@ -1,7 +1,7 @@
 import pandas as pd
 import paths
 import matplotlib.pyplot as plt
-from scipy.stats import qmc
+from scipy.stats import norm, qmc
 import numpy as np
 
 def get_bezirk_population_scenarios():
@@ -103,25 +103,98 @@ def get_bezirk_population_scenarios():
     return district_tables
 
 
+# def generate_population_scenarios(ref_df: pd.DataFrame,
+#                                   start_year: int,
+#                                   end_year: int,
+#                                   n_scenarios: int = 1000,
+#                                   start_std_dev: float = 0.01,
+#                                   end_std_dev: float = 0.03) -> pd.DataFrame:
+#     """
+#     Generate stochastic population scenarios using Latin Hypercube Sampling and a random walk process,
+#     with standard deviation increasing linearly from start_std_dev to end_std_dev.
+#
+#     Parameters:
+#     - ref_df: DataFrame with columns "jahr", "total_population", "growth_rate"
+#               - Only the "total_population" value at start_year is used as the initial population.
+#               - "growth_rate" should be in decimal (e.g., 0.01 for 1%)
+#     - start_year: year to begin scenario generation
+#     - end_year: year to end scenario generation
+#     - n_scenarios: number of scenarios to generate
+#     - start_std_dev: starting standard deviation for growth rate perturbation
+#     - end_std_dev: ending standard deviation for growth rate perturbation
+#
+#     Returns:
+#     - DataFrame with columns: "scenario", "year", "population", "growth_rate"
+#     """
+#     # Filter and sort reference data
+#     ref_df = ref_df.sort_values("jahr")
+#     ref_df = ref_df[(ref_df["jahr"] >= start_year) & (ref_df["jahr"] <= end_year)].reset_index(drop=True)
+#
+#     years = ref_df["jahr"].values
+#     ref_growth = ref_df["growth_rate"].values
+#     initial_population = ref_df[ref_df["jahr"] == start_year]["total_population"].values[0]
+#     n_years = len(years)
+#
+#     # Linearly interpolate std devs over years
+#     std_devs = np.linspace(start_std_dev, end_std_dev, n_years)
+#
+#     # Generate Latin Hypercube Samples in [0, 1]
+#     sampler = qmc.LatinHypercube(d=n_years)
+#     lhs_samples = sampler.random(n=n_scenarios)  # shape: (n_scenarios, n_years)
+#
+#     # Convert LHS samples into standard normal values
+#     normal_samples = stats.norm.ppf(lhs_samples)  # shape: (n_scenarios, n_years)
+#
+#     # Scale each year's sample by its std deviation
+#     growth_devs = normal_samples * std_devs  # shape: (n_scenarios, n_years)
+#
+#     # Apply additive noise
+#     scenarios_growth = ref_growth + growth_devs  # assuming ref_growth is shape (n_years,)
+#
+#     # Initialize population trajectories
+#     pop_scenarios = np.zeros((n_scenarios, n_years))
+#     pop_scenarios[:, 0] = initial_population
+#
+#     for i in range(n_scenarios):
+#         for t in range(1, n_years):
+#             pop_scenarios[i, t] = pop_scenarios[i, t - 1] * (1 + scenarios_growth[i, t - 1])
+#
+#     # Compile results into DataFrame
+#     scenario_data = []
+#     for i in range(n_scenarios):
+#         for t in range(n_years):
+#             scenario_data.append({
+#                 "scenario": i,
+#                 "year": years[t],
+#                 "population": pop_scenarios[i, t],
+#                 "growth_rate": scenarios_growth[i, t]
+#             })
+#
+#     return pd.DataFrame(scenario_data)
+
+
+
 def generate_population_scenarios(ref_df: pd.DataFrame,
                                   start_year: int,
                                   end_year: int,
                                   n_scenarios: int = 1000,
                                   start_std_dev: float = 0.01,
-                                  end_std_dev: float = 0.03) -> pd.DataFrame:
+                                  end_std_dev: float = 0.03,
+                                  std_dev_shocks: float = 0.02) -> pd.DataFrame:
     """
-    Generate stochastic population scenarios using Latin Hypercube Sampling and a random walk process,
-    with standard deviation increasing linearly from start_std_dev to end_std_dev.
+    Generate stochastic population scenarios using Latin Hypercube Sampling and a random walk process.
+    The main growth rates are perturbed using LHS and a time-varying std dev. Random shocks are added separately.
 
     Parameters:
     - ref_df: DataFrame with columns "jahr", "total_population", "growth_rate"
               - Only the "total_population" value at start_year is used as the initial population.
-              - "growth_rate" should be in decimal (e.g., 0.01 for 1%)
+              - "growth_rate" is used as the base deterministic growth.
     - start_year: year to begin scenario generation
     - end_year: year to end scenario generation
     - n_scenarios: number of scenarios to generate
-    - start_std_dev: starting standard deviation for growth rate perturbation
-    - end_std_dev: ending standard deviation for growth rate perturbation
+    - start_std_dev: starting std deviation applied to growth rate perturbation
+    - end_std_dev: ending std deviation applied to growth rate perturbation
+    - std_dev_shocks: std deviation of yearly additive shocks
 
     Returns:
     - DataFrame with columns: "scenario", "year", "population", "growth_rate"
@@ -131,30 +204,39 @@ def generate_population_scenarios(ref_df: pd.DataFrame,
     ref_df = ref_df[(ref_df["jahr"] >= start_year) & (ref_df["jahr"] <= end_year)].reset_index(drop=True)
 
     years = ref_df["jahr"].values
-    ref_growth = ref_df["growth_rate"].values
-    initial_population = ref_df[ref_df["jahr"] == start_year]["total_population"].values[0]
+    ref_growth = ref_df["growth_rate"].values  # deterministic base growth per year
     n_years = len(years)
+    initial_population = ref_df[ref_df["jahr"] == start_year]["total_population"].values[0]
 
-    # Linearly interpolate std devs over years
-    std_devs = np.linspace(start_std_dev, end_std_dev, n_years)
+    # Linearly interpolate std devs across years for growth rate variation
+    growth_std_devs = np.linspace(start_std_dev, end_std_dev, n_years)
 
-    # Generate Latin Hypercube Samples
+    # Latin Hypercube Sampling: growth rate perturbations
     sampler = qmc.LatinHypercube(d=n_years)
-    lhs_samples = sampler.random(n=n_scenarios)
+    lhs_samples = sampler.random(n=n_scenarios)  # shape: (n_scenarios, n_years)
+    growth_perturbations = norm.ppf(lhs_samples) * growth_std_devs  # shape: (n_scenarios, n_years)
 
-    # Apply individual standard deviations
-    growth_devs = (lhs_samples - 0.5) * 2 * std_devs  # Shape: (n_scenarios, n_years)
-    scenarios_growth = ref_growth * (1 + growth_devs)
+    # Perturbed growth rate: base + scenario-specific offset
+    scenario_growth = ref_growth + growth_perturbations  # shape: (n_scenarios, n_years)
 
-    # Initialize population trajectories
-    pop_scenarios = np.zeros((n_scenarios, n_years))
-    pop_scenarios[:, 0] = initial_population
+    # Random shocks: et ~ N(0, std_dev_shocks)
+    shock_sampler = qmc.LatinHypercube(d=n_years)
+    lhs_shocks = shock_sampler.random(n=n_scenarios)
+    et = norm.ppf(lhs_shocks) * std_dev_shocks
 
-    for i in range(n_scenarios):
-        for t in range(1, n_years):
-            pop_scenarios[i, t] = pop_scenarios[i, t - 1] * (1 + scenarios_growth[i, t - 1])
+    # Cumulative shocks per scenario
+    cumulative_shocks = np.cumsum(et, axis=1)  # shape: (n_scenarios, n_years)
 
-    # Compile results into DataFrame
+    # Deterministic growth: cumulative product of (1 + growth_rate)
+    deterministic_growth = np.cumprod(1 + scenario_growth, axis=1)  # shape: (n_scenarios, n_years)
+
+    # Population index = deterministic path × stochastic shocks
+    population_index = deterministic_growth * np.exp(cumulative_shocks)
+
+    # Scale by initial population
+    pop_scenarios = initial_population * population_index
+
+    # Assemble output DataFrame
     scenario_data = []
     for i in range(n_scenarios):
         for t in range(n_years):
@@ -162,7 +244,7 @@ def generate_population_scenarios(ref_df: pd.DataFrame,
                 "scenario": i,
                 "year": years[t],
                 "population": pop_scenarios[i, t],
-                "growth_rate": scenarios_growth[i, t]
+                "growth_rate": scenario_growth[i, t]
             })
 
     return pd.DataFrame(scenario_data)
@@ -195,5 +277,5 @@ def plot_population_scenarios(scenarios_df: pd.DataFrame, n_to_plot: int = 10):
 
 bezirk_pop_scen = get_bezirk_population_scenarios()
 affoltern_df = bezirk_pop_scen['Affoltern']
-scenarios_df = generate_population_scenarios(affoltern_df, 2022, 2100,n_scenarios=100, start_std_dev=1.5, end_std_dev=3.0)
+scenarios_df = generate_population_scenarios(affoltern_df, 2022, 2100,n_scenarios=100, start_std_dev=0.001, end_std_dev=0.003, std_dev_shocks=0.002)
 plot_population_scenarios(scenarios_df, n_to_plot=100)

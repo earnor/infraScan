@@ -348,6 +348,10 @@ def aggregate_costs(cost_and_benefits):
     # Define scenarios for population and employment
     #pop_scenarios = settings.pop_scenarios
     #empl_scenarios = settings.empl_scenarios
+    # Wenn cost_and_benefits einen MultiIndex hat, diesen zurücksetzen
+    if isinstance(cost_and_benefits.index, pd.MultiIndex):
+        cost_and_benefits = cost_and_benefits.reset_index()
+
     scenarios = cost_and_benefits["scenario"].unique().tolist()
 
     # Group by development and scenario, summing costs and benefits across all years

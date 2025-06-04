@@ -4,6 +4,11 @@ from shapely.ops import split
 import gc
 
 import time
+
+from sympy.polys.subresultants_qq_zz import final_touches
+
+import paths
+import settings
 from scoring import *
 from scoring import split_via_nodes, merge_lines
 
@@ -24,15 +29,9 @@ def generate_rail_edges(n, radius):
     # Step 1: Load data and filter
     current_points = gpd.read_file(r"data/Network/processed/points.gpkg")
     current_points = current_points[~current_points['ID_point'].isin([112, 113, 720, 2200])]
-    if settings.rail_network == 'current':
-        raw_edges = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
-    elif settings.rail_network == 'AK_2035':
-        raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
-    elif settings.rail_network == 'AK_2035_extended':
-        raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_EXTENDED_PATH)
-    else:
-        exit("No rail network specified.")
-    # Identify endpoint nodes
+
+    network_railway_service_path = paths.get_rail_services_path(settings.rail_network)
+    raw_edges = gpd.read_file(network_railway_service_path)
 
     #raw_edges['FromEnd'] = raw_edges['FromEnd'].astype(bool)
     #raw_edges['ToEnd'] = raw_edges['ToEnd'].astype(bool)
@@ -112,19 +111,10 @@ def filter_unnecessary_links(rail_network):
     Filter out unnecessary links in the new_links GeoDataFrame.
     Saves the filtered links as a GeoPackage file.
     """
-    try:
-        # Load raw edges and new links
-        if rail_network == 'current':
-            raw_edges = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
-        elif rail_network == 'AK_2035':
-            raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
-        elif rail_network == 'AK_2035_extended':
-            raw_edges = gpd.read_file(paths.RAIL_SERVICES_AK2035_EXTENDED_PATH)
-        time.sleep(1)  # Ensure file access is sequential
-        line_gdf = gpd.read_file(r"data\Network\processed\new_links.gpkg")
-    except Exception as e:
-        print(f"Error loading files: {e}")
-        return
+    network_railway_service_path = paths.get_rail_services_path(rail_network)
+    raw_edges = gpd.read_file(network_railway_service_path)
+    time.sleep(1)  # Ensure file access is sequential
+    line_gdf = gpd.read_file(r"data\Network\processed\new_links.gpkg")
 
     # Step 1: Build Sline routes
     sline_routes = (
@@ -224,7 +214,7 @@ def calculate_new_service_time():
     new_links['time'] = path_times
 
     # Save the updated new_links with the shortest path information
-    new_links.to_file("data/Network/processed/updated_new_links.gpkg", driver="GPKG")
+    new_links.to_file(paths.NEW_LINKS_UPDATED_PATH, driver="GPKG")
 
     return
 
@@ -353,13 +343,13 @@ def create_network_foreach_dev():
     """
 
     # Load the GPK file
-    input_gpkg = "data/Network/processed/combined_network_with_new_links.gpkg"
-    output_directory = "data/Network/processed/developments/"  # Directory to save output files
+    output_directory = paths.DEVELOPMENT_DIRECTORY
     os.makedirs(output_directory, exist_ok=True)  # Ensure the output directory exists
 
     # Read the GeoPackage
-    gdf = gpd.read_file(input_gpkg)
-
+    gdf = gpd.read_file(paths.NETWORK_WITH_ALL_MODIFICATIONS)
+    # Fill NaN with 0 for all columns except 'geometry'
+    gdf.loc[:, gdf.columns != 'geometry'] = gdf.loc[:, gdf.columns != 'geometry'].fillna(0)
     # Separate rows based on `new_dev`
     base_gdf = gdf[gdf['new_dev'] == "No"]  # Old network: Rows where `new_dev` is "No"
     new_dev_rows = gdf[gdf['new_dev'] == "Yes"]  # Rows where `new_dev` is "Yes"
@@ -568,12 +558,7 @@ def update_network_with_new_links(rail_network_selection, new_links_updated_path
     Ensure FromStation and ToStation are mapped correctly using Rail_Node data.
     """
     # Load data
-    if settings.rail_network == 'current':
-        network_railway_service_path = paths.RAIL_SERVICES_2024_PATH
-    elif settings.rail_network == 'AK_2035':
-        network_railway_service_path = paths.RAIL_SERVICES_AK2035_PATH
-    elif settings.rail_network == 'AK_2035_extended':
-        network_railway_service_path = paths.RAIL_SERVICES_AK2035_EXTENDED_PATH
+    network_railway_service_path = paths.get_rail_services_path(rail_network_selection)
 
     network_railway_service = gpd.read_file(network_railway_service_path)
     new_links_updated = gpd.read_file(new_links_updated_path)
@@ -607,8 +592,9 @@ def update_network_with_new_links(rail_network_selection, new_links_updated_path
     new_links_updated["TotalPeakCapacity"] = 690
     new_links_updated["Capacity"] = 345
 
-    # Calculate the Via nodes for all the new connections
-    via_df = get_via(new_links_updated)
+    # Calculate the Via nodes for the new connections (extended lines)
+    new_links_extended_lines = new_links_updated[new_links_updated['dev_id'] < settings.dev_id_start_new_direct_connections]
+    via_df = get_via(new_links_extended_lines)
 
     # Merge the 'via_nodes' from 'via_df' into 'new_links_updated' based on 'from_ID_new' and 'to_ID'
     new_links_updated = pd.merge(
@@ -655,8 +641,6 @@ def update_network_with_new_links(rail_network_selection, new_links_updated_path
         "Wetzikon": "Wetzikon ZH",
         # Add more mappings here if needed
     }
-    new_links_updated["FromStation"] = new_links_updated["FromStation"].replace(standardize_station_names)
-    new_links_updated["ToStation"] = new_links_updated["ToStation"].replace(standardize_station_names)
 
     combined_new_links["FromStation"] = combined_new_links["FromStation"].replace(standardize_station_names)
     combined_new_links["ToStation"] = combined_new_links["ToStation"].replace(standardize_station_names)
@@ -1124,6 +1108,7 @@ def export_new_railway_lines(new_lines, pos, file_path="new_railway_lines.gpkg")
                 'missing_connection': f"{line['original_missing_connection']['stations'][0]} - {line['original_missing_connection']['stations'][1]}",
                 'station_count': len(line['stations']),
                 'stations': ','.join(line['stations']),
+                'path': ','.join(str(p) for p in line['path']),
                 'geometry': line_geom
             }
             rows.append(row)
@@ -1178,4 +1163,67 @@ def prepare_Graph(df_network, df_points):
     # First plot the regular network
     return G, pos
 
+def add_railway_lines_to_new_links(new_railway_lines_path, mod_type, new_links_path, rail_network_path):
+    # Load data
+    new_railway_lines = gpd.read_file(new_railway_lines_path)
+    rail_network = gpd.read_file(paths.get_rail_services_path(rail_network_path))
 
+    # Initialize container for new links
+    new_links_list = []
+    dev_id = 101000
+
+    for _, row in new_railway_lines.iterrows():
+        try:
+            path_nodes = list(map(int, row["path"].split(",")))
+        except Exception as e:
+            print(f"Skipping row due to path parsing error: {e}")
+            continue
+
+        full_geom = row["geometry"]
+        line_name = row["name"]
+
+        for i in range(len(path_nodes) - 1):
+            from_node = path_nodes[i]
+            to_node = path_nodes[i + 1]
+
+            # Estimate geometry using interpolation
+            segment_geom = LineString([
+                full_geom.interpolate(i / (len(path_nodes) - 1), normalized=True),
+                full_geom.interpolate((i + 1) / (len(path_nodes) - 1), normalized=True)
+            ])
+
+            # Try to find a matching travel time in the existing network
+            match = rail_network[
+                ((rail_network["FromNode"] == from_node) & (rail_network["ToNode"] == to_node)) |
+                ((rail_network["FromNode"] == to_node) & (rail_network["ToNode"] == from_node))
+            ]
+
+            if not match.empty and not match["TravelTime"].isna().all():
+                travel_time = match["TravelTime"].dropna().astype(float).iloc[0]
+            else:
+                length_m = segment_geom.length
+                travel_time = length_m / 1000 #/60 *60  # speed = 60 km/h, 60 min/h
+
+            new_links_list.append({
+                "from_ID_new": from_node,
+                "to_ID": to_node,
+                "Sline": line_name,
+                "dev_id": dev_id,
+                "shortest_path_length": segment_geom.length,
+                "time": travel_time,
+                "geometry": segment_geom
+            })
+
+        dev_id += 1
+
+    # Convert to GeoDataFrame
+    updated_new_links = gpd.read_file(new_links_path)
+    new_links_gdf = gpd.GeoDataFrame(new_links_list, geometry="geometry", crs=updated_new_links.crs)
+
+    # Append and save
+    if mod_type == 'ALL':
+        #join new railway lines with existing new links
+        final_links = pd.concat([updated_new_links, new_links_gdf], ignore_index=True)
+    else:
+        final_links = new_links_gdf
+    final_links.to_file(new_links_path, driver="GPKG")

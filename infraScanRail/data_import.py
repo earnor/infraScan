@@ -56,12 +56,8 @@ def reformat_rail_edges(rail_network):
     imported from a geopackage and the access points are loaded from a csv file. The access points are projected to
     the closest railway segment. The railway segments are then split at the access points.
     """
-    if rail_network == 'current':
-        edges_gdf = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
-    elif rail_network == 'AK_2035':
-        edges_gdf = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
-    elif rail_network == 'AK_2035_extended':
-        edges_gdf = gpd.read_file(paths.RAIL_SERVICES_AK2035_EXTENDED_PATH)
+    rail_service_path = paths.get_rail_services_path(rail_network)
+    edges_gdf = gpd.read_file(rail_service_path)
 
     for index, row in edges_gdf.iterrows():
         coords = [(coords) for coords in list(row['geometry'].coords)]

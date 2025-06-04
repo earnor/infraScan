@@ -1,7 +1,12 @@
+
 MAIN = r"D:\ETH_Msc\MA\infraScan\infraScanRail"
 RAIL_SERVICES_AK2035_PATH= r'data\temp\railway_services_ak2035.gpkg'
 RAIL_SERVICES_AK2035_EXTENDED_PATH = r'data\temp\railway_services_ak2035_extended.gpkg'
 RAIL_SERVICES_2024_PATH= r'data/temp/network_railway-services.gpkg'
+NEW_LINKS_UPDATED_PATH = r"data\Network\processed\updated_new_links.gpkg"
+NEW_RAILWAY_LINES_PATH = r"data\Network\processed\new_railway_lines.gpkg"
+NETWORK_WITH_ALL_MODIFICATIONS = r"data\Network\processed\combined_network_with_all_modifications.gpkg"
+DEVELOPMENT_DIRECTORY = r"data\Network\processed\developments"
 
 RAIL_POINTS_PATH = r"data\Network\Rail_Node.csv"
 OD_KT_ZH_PATH = r'data/_basic_data/KTZH_00001982_00003903.xlsx'
@@ -19,3 +24,16 @@ TOTAL_COST_WITH_GEOMETRY = r"data/costs/total_costs_with_geometry.csv"
 TOTAL_COST_RAW = r"data/costs/total_costs_raw.csv"
 
 PLOT_DIRECTORY = r"plots"
+
+def get_rail_services_path(rail_network_settings):
+    """
+    Returns the path to the rail services file based on the rail network settings.
+    """
+    if rail_network_settings == 'AK_2035':
+        return RAIL_SERVICES_AK2035_PATH
+    elif rail_network_settings == 'AK_2035_extended':
+        return RAIL_SERVICES_AK2035_EXTENDED_PATH
+    elif rail_network_settings == 'current':
+        return RAIL_SERVICES_2024_PATH
+    else:
+        raise ValueError("Invalid rail network settings provided.")

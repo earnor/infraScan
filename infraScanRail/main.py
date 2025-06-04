@@ -9,6 +9,7 @@ from TT_Delay import *
 from catchment_pt import *
 from display_results import *
 from generate_infrastructure import *
+from paths import get_rail_services_path
 from scenarios import *
 from scoring import *
 from scoring import create_cost_and_benefit_df
@@ -16,12 +17,12 @@ from traveltime_delay import *
 import geopandas as gpd
 import networkx as nx
 import os
+import warnings
+
 
 def infrascanrail():
-
-
-
     os.chdir(paths.MAIN)
+    warnings.filterwarnings("ignore") #TODO:No warnings should be ignored, but this is necessary for the current code to have a clean output
     runtimes = {}
 
     ##################################################################################
@@ -57,36 +58,23 @@ def infrascanrail():
     runtimes["Import land use and land cover data"] = time.time() - st
     st = time.time()
 
+    print("\nINFRASTRUCTURE NETWORK \n")
+
+    ##################################################################################
+    # 2) Process network
     ##################################################################################
     ##################################################################################
     # INFRASTRUCTURE NETWORK
     # 1) Import&Process network
 
     # Import the railway network and preprocess it
-    # Data are stored as "data/temp/???.gpkg" ## To DO
-    #load_nw()
 
-    # 2) Generate developments (new access points) and connection to existing infrastructure
-
-    print("\nINFRASTRUCTURE NETWORK \n")
-
-    ##################################################################################
-    # 2) Process network
-
-    reformat_rail_nodes()
-    network_ak2035, points = create_railway_services_AK2035()
-    create_railway_services_AK2035_extended(network_ak2035, points)
-    reformat_rail_edges(settings.rail_network)
-
-    add_construction_info_to_network()
-
-    network_in_corridor(poly=settings.perimeter_infra_generation)
+    points = import_process_network(settings.use_cache_network)
 
     runtimes["Preprocess the network"] = time.time() - st
     st = time.time()
-
     ##################################################################################
-    # 3) Generate developments (new connections) 
+    # 2) Generate developments (new connections)
 
     generate_infra_development(use_cache=settings.use_cache_developments, mod_type=settings.infra_generation_modification_type)
 
@@ -96,7 +84,8 @@ def infrascanrail():
     st = time.time()
 
     # Compute the catchement area for the status quo and for all developments based on access time to train station
-    get_catchment(use_cache=settings.use_cache_pt_catchment)
+    if settings.OD_type == 'pt_catchment_perimeter':
+        get_catchment(use_cache=settings.use_cache_pt_catchment)
 
     runtimes["Generate The Catchement based on the Bus network"] = time.time() - st
     st = time.time()
@@ -238,6 +227,18 @@ def infrascanrail():
     create_scenario_analysis_viewer(paths.TOTAL_COST_WITH_GEOMETRY)
 
 
+def import_process_network(use_cache):
+    if use_cache:
+        return gpd.read_file(r'data\Network\processed\points.gpkg')
+    reformat_rail_nodes()
+    network_ak2035, points = create_railway_services_AK2035()
+    create_railway_services_AK2035_extended(network_ak2035, points)
+    reformat_rail_edges(settings.rail_network)
+    add_construction_info_to_network()
+    network_in_corridor(poly=settings.perimeter_infra_generation)
+    return points
+
+
 def getStationOD(use_cache, stations_in_perimeter, od_directory_scenario):
     if use_cache:
         railway_station_OD = pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
@@ -300,12 +301,7 @@ def create_travel_time_graphs(network_selection, use_cache):
         else:
             print("Cache not found. Calculate OD-times...")
 
-    if network_selection == 'current':
-        network_status_quo = [paths.RAIL_SERVICES_2024_PATH]
-    elif network_selection == 'AK_2035':
-        network_status_quo = [paths.RAIL_SERVICES_AK2035_PATH]
-    elif network_selection == 'AK_2035_extended':
-        network_status_quo = [paths.RAIL_SERVICES_AK2035_EXTENDED_PATH]
+    network_status_quo = [get_rail_services_path(network_selection)]
     G_status_quo = create_graphs_from_directories(network_status_quo)
     od_times_status_quo = calculate_od_pairs_with_times_by_graph(G_status_quo)
     # Example usage Test1
@@ -480,15 +476,7 @@ def generate_infra_development(use_cache, mod_type):
         only_links_to_corridor()
         calculate_new_service_time()
 
-        new_links_updated_path = r"data\Network\processed\updated_new_links.gpkg"
-        output_path = r"data\Network\processed\combined_network_with_new_links.gpkg"
 
-        # combined_gdf = delete_connections_back(file_path_updated=r"data\Network\processed\new_links.gpkg",
-        #                                        file_path_raw_edges=r"data/temp/network_railway-services.gpkg",
-        #                                        output_path=r"data/Network/processed/updated_new_links_cleaned.gpkg")
-
-        combined_gdf = update_network_with_new_links(settings.rail_network, new_links_updated_path)
-        update_stations(combined_gdf, output_path)
 
 
     if mod_type in ('ALL', 'NEW_DIRECT_CONNECTIONS'):
@@ -513,8 +501,8 @@ def generate_infra_development(use_cache, mod_type):
         print_new_railway_lines(new_railway_lines)
 
         # Export to GeoPackage for further analysis and visualization in GIS software
-        new_lines = export_new_railway_lines(new_railway_lines, pos, "data/Network/processed/new_railway_lines.gpkg")
-        print("\nNew railway lines exported to data/Network/processed/new_railway_lines.gpkg")
+        new_lines = export_new_railway_lines(new_railway_lines, pos, paths.NEW_RAILWAY_LINES_PATH)
+        print("\nNew railway lines exported to paths.NEW_RAILWAY_LINES_PATH")
 
         # Visualize the new railway lines on the network graph
         print("\n=== VISUALIZATION ===")
@@ -524,10 +512,10 @@ def generate_infra_development(use_cache, mod_type):
 
         plots_dir = "plots/missing_connections"
         plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir)
+        add_railway_lines_to_new_links(paths.NEW_RAILWAY_LINES_PATH, mod_type, paths.NEW_LINKS_UPDATED_PATH, settings.rail_network)
 
-
-
-
+    combined_gdf = update_network_with_new_links(settings.rail_network, paths.NEW_LINKS_UPDATED_PATH)
+    update_stations(combined_gdf, paths.NETWORK_WITH_ALL_MODIFICATIONS)
     create_network_foreach_dev()
 
 
