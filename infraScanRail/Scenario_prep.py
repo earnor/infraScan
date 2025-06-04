@@ -231,7 +231,7 @@ def generate_population_scenarios(ref_df: pd.DataFrame,
     deterministic_growth = np.cumprod(1 + scenario_growth, axis=1)  # shape: (n_scenarios, n_years)
 
     # Population index = deterministic path × stochastic shocks
-    population_index = deterministic_growth * np.exp(cumulative_shocks)
+    population_index = deterministic_growth + cumulative_shocks
 
     # Scale by initial population
     pop_scenarios = initial_population * population_index
@@ -277,5 +277,5 @@ def plot_population_scenarios(scenarios_df: pd.DataFrame, n_to_plot: int = 10):
 
 bezirk_pop_scen = get_bezirk_population_scenarios()
 affoltern_df = bezirk_pop_scen['Affoltern']
-scenarios_df = generate_population_scenarios(affoltern_df, 2022, 2100,n_scenarios=100, start_std_dev=0.001, end_std_dev=0.003, std_dev_shocks=0.002)
+scenarios_df = generate_population_scenarios(affoltern_df, 2022, 2100,n_scenarios=100, start_std_dev=0.005, end_std_dev=0.01, std_dev_shocks=0.02)
 plot_population_scenarios(scenarios_df, n_to_plot=100)

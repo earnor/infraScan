@@ -634,7 +634,7 @@ def update_network_with_new_links(rail_network_selection, new_links_updated_path
     combined_new_links = pd.concat([new_links_updated, direction_A], ignore_index=True)
 
     # Ensure GeoDataFrame compatibility
-    combined_new_links_gdf = gpd.GeoDataFrame(combined_new_links, geometry=new_links_updated.geometry)
+    combined_new_links_gdf = gpd.GeoDataFrame(combined_new_links, geometry=combined_new_links.geometry)
 
     # Standardize station names in FromStation and ToStation
     standardize_station_names = {
