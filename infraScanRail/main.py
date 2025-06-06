@@ -125,7 +125,8 @@ def infrascanrail():
 
     # network of status quo
 
-    od_times_dev, od_times_status_quo = create_travel_time_graphs(settings.rail_network, settings.use_cache_traveltime_graph)
+    dev_id_lookup = create_dev_id_lookup_table()
+    od_times_dev, od_times_status_quo = create_travel_time_graphs(settings.rail_network, settings.use_cache_traveltime_graph, dev_id_lookup)
 
     # osm_nw_to_raster(limits_variables)
     runtimes["Calculate Traveltimes for all OD_ for all developments"] = time.time() - st
@@ -166,18 +167,8 @@ def infrascanrail():
     runtimes["Reallocate OD matrices to Catchement polygons"] = time.time() - st
     st = time.time()
     # compute_TT()
-    df_access = pd.read_csv(r"data/Network/Rail_Node.csv", sep=";", decimal=",", encoding="ISO-8859-1")
-    TTT_status_quo = calculate_total_travel_times(od_times_status_quo, od_directory_scenario, df_access)
-
-    # TTT for developments (trips in Peak hour * OD-Times) [in hour]
-    TTT_developments = calculate_total_travel_times(od_times_dev, od_directory_scenario, df_access)
-    print(TTT_status_quo)
-    print(TTT_developments)
-    # Monetize travel time savings ()
-    output_path = "data/costs/traveltime_savings.csv"
-    monetized_tt, scenario_list, dev_list = calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, cp.VTTS, cp.tts_valuation_period,
-                                                  output_path)
-    
+    dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup, od_directory_scenario, od_times_dev,
+                                                        od_times_status_quo, use_cache = settings.use_cache_tts_calc)
 
     file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
     construction_and_maintenance_costs = construction_costs(file_path=file_path,
@@ -227,8 +218,85 @@ def infrascanrail():
     create_scenario_analysis_viewer(paths.TOTAL_COST_WITH_GEOMETRY)
 
 
+def compute_tts(dev_id_lookup,
+                od_directory_scenario,
+                od_times_dev,
+                od_times_status_quo,
+                use_cache = False):
+    """
+    Computes total travel times (TTT) for status quo and developments,
+    monetizes travel-time savings, and either saves to or loads from cache.
+
+    Args:
+        dev_id_lookup:            (whatever your code expects)
+        od_directory_scenario:    directory or mapping for OD files
+        od_times_dev:             OD times for developments
+        od_times_status_quo:      OD times for status quo
+        use_cache (bool):         if True, load result from cache file;
+                                  if False, do full computation and then write cache.
+    Returns:
+        dev_list, monetized_tt, scenario_list
+    """
+    # 1) Decide on a single cache filename (you can change path if desired)
+    cache_file = "data/Network/travel_time/cache/compute_tts_cache.pkl"
+
+    if use_cache:
+        # 2) If use_cache=True, try to load from disk
+        if not os.path.exists(cache_file):
+            raise FileNotFoundError(f"Cache file not found: {cache_file!r}")
+        with open(cache_file, "rb") as f_in:
+            dev_list, monetized_tt, scenario_list = pickle.load(f_in)
+        print(f"[compute_tts] Loaded results from cache: {cache_file}")
+        return dev_list, monetized_tt, scenario_list
+
+    # 3) If we reach here, use_cache=False ⇒ do the “full” computation
+    df_access = pd.read_csv(
+        r"data/Network/Rail_Node.csv",
+        sep=";",
+        decimal=",",
+        encoding="ISO-8859-1"
+    )
+
+    # Compute TTT for status quo
+    TTT_status_quo = calculate_total_travel_times(
+        od_times_status_quo,
+        od_directory_scenario,
+        df_access
+    )
+
+    # Compute TTT for developments
+    TTT_developments = calculate_total_travel_times(
+        od_times_dev,
+        od_directory_scenario,
+        df_access
+    )
+
+    print("TTT_status_quo:", TTT_status_quo)
+    print("TTT_developments:", TTT_developments)
+
+    # Monetize travel‐time savings
+    output_path = "data/costs/traveltime_savings.csv"
+    monetized_tt, scenario_list, dev_list = calculate_monetized_tt_savings(
+        TTT_status_quo,
+        TTT_developments,
+        cp.VTTS,
+        cp.tts_valuation_period,
+        output_path,
+        dev_id_lookup
+    )
+
+    # 4) Once computed, ensure the cache directory exists and write out the tuple
+    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+    with open(cache_file, "wb") as f_out:
+        pickle.dump((dev_list, monetized_tt, scenario_list), f_out)
+
+    print(f"[compute_tts] Computation complete; results written to cache: {cache_file}")
+    return dev_list, monetized_tt, scenario_list
+
+
 def import_process_network(use_cache):
     if use_cache:
+        print("Using cached rail network data...")
         return gpd.read_file(r'data\Network\processed\points.gpkg')
     reformat_rail_nodes()
     network_ak2035, points = create_railway_services_AK2035()
@@ -286,7 +354,7 @@ def add_construction_info_to_network():
     df_railway_network.to_file(paths.RAIL_SERVICES_AK2035_PATH)
 
 
-def create_travel_time_graphs(network_selection, use_cache):
+def create_travel_time_graphs(network_selection, use_cache, dev_id_lookup_table):
     # Define cache file for pickle
     cache_file = 'data/Network/travel_time/cache/od_times.pkl'
 
@@ -314,9 +382,8 @@ def create_travel_time_graphs(network_selection, use_cache):
     find_fastest_path(G_status_quo[0], origin_station, destination_station)
     # networks with all developments
     # get the paths of all developments
-    directory_path = r"data/Network/processed/developments"  # Define the target directory
-    directories_dev = [os.path.join(directory_path, filename)
-                       for filename in os.listdir(directory_path) if filename.endswith(".gpkg")]
+    directories_dev = [os.path.join(paths.DEVELOPMENT_DIRECTORY, filename)
+                       for filename in os.listdir(paths.DEVELOPMENT_DIRECTORY) if filename.endswith(".gpkg")]
     directories_dev = [path.replace("\\", "/") for path in directories_dev]
     G_developments = create_graphs_from_directories(directories_dev)
     od_times_dev = calculate_od_pairs_with_times_by_graph(G_developments)  # OD-time for each development
@@ -345,7 +412,7 @@ def create_travel_time_graphs(network_selection, use_cache):
         'main_Zürich Oerlikon', 'main_Zürich Stadelhofen', 'main_Hinwil', 'main_Aathal'
     ]
     # Analyse der Delta-Reisezeiten
-    analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes) #output of this is not used!
+    analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes, dev_id_lookup_table) #output of this is not used!
     # Ergebnis anzeigen
     print("\nFinal travel times:")
 
@@ -402,17 +469,16 @@ def visualize_results(clear_plot_directory=False):
     # Define the plot directory
     plot_dir = "plots"
 
-    # Clear the plot directory if requested
+    # Clear only files in the main plot directory if requested
     if clear_plot_directory:
-        print(f"Clearing plot directory: {plot_dir}")
+        print(f"Clearing files in plot directory: {plot_dir}")
         for filename in os.listdir(plot_dir):
             file_path = os.path.join(plot_dir, filename)
             try:
+                # Nur Dateien löschen, keine Verzeichnisse
                 if os.path.isfile(file_path) or os.path.islink(file_path):
                     os.unlink(file_path)
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-                print(f"Removed: {file_path}")
+                    print(f"Removed file: {file_path}")
             except Exception as e:
                 print(f"Error while clearing {file_path}: {e}")
 
@@ -422,7 +488,7 @@ def visualize_results(clear_plot_directory=False):
              output_file="data/costs/processed_costs.gpkg",
              node_file="data/Network/Rail_Node.xlsx")
     # make a plot of the developments
-    plot_develompments_rail()
+    plot_developments_rail()
     # plot the scenarios
     plot_scenarios()
     # make a plot of the catchement with id and times
@@ -532,6 +598,28 @@ def create_focus_area():
     innerboundary, outerboundary = save_focus_area_shapefile(e_min, e_max, n_min, n_max, margin)
     return innerboundary, outerboundary
 
+def create_dev_id_lookup_table():
+    """
+    Creates a lookup table (DataFrame) of development filenames from the directory
+    specified by paths.DEVELOPMENT_DIRECTORY. The DataFrame index starts at 1
+    and the filenames are listed without their file extensions.
+    """
+    # Get the directory path
+    dev_dir = paths.DEVELOPMENT_DIRECTORY
+
+    # List all files in the directory and filter out subdirectories
+    all_files = [
+        f for f in os.listdir(dev_dir)
+        if os.path.isfile(os.path.join(dev_dir, f))
+    ]
+
+    # Strip file extensions and sort the filenames
+    dev_ids = sorted(os.path.splitext(f)[0] for f in all_files)
+
+    # Create DataFrame with index starting at 1
+    df = pd.DataFrame({'dev_id': dev_ids}, index=range(1, len(dev_ids) + 1))
+
+    return df
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':

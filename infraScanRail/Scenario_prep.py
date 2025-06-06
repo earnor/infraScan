@@ -103,76 +103,6 @@ def get_bezirk_population_scenarios():
     return district_tables
 
 
-# def generate_population_scenarios(ref_df: pd.DataFrame,
-#                                   start_year: int,
-#                                   end_year: int,
-#                                   n_scenarios: int = 1000,
-#                                   start_std_dev: float = 0.01,
-#                                   end_std_dev: float = 0.03) -> pd.DataFrame:
-#     """
-#     Generate stochastic population scenarios using Latin Hypercube Sampling and a random walk process,
-#     with standard deviation increasing linearly from start_std_dev to end_std_dev.
-#
-#     Parameters:
-#     - ref_df: DataFrame with columns "jahr", "total_population", "growth_rate"
-#               - Only the "total_population" value at start_year is used as the initial population.
-#               - "growth_rate" should be in decimal (e.g., 0.01 for 1%)
-#     - start_year: year to begin scenario generation
-#     - end_year: year to end scenario generation
-#     - n_scenarios: number of scenarios to generate
-#     - start_std_dev: starting standard deviation for growth rate perturbation
-#     - end_std_dev: ending standard deviation for growth rate perturbation
-#
-#     Returns:
-#     - DataFrame with columns: "scenario", "year", "population", "growth_rate"
-#     """
-#     # Filter and sort reference data
-#     ref_df = ref_df.sort_values("jahr")
-#     ref_df = ref_df[(ref_df["jahr"] >= start_year) & (ref_df["jahr"] <= end_year)].reset_index(drop=True)
-#
-#     years = ref_df["jahr"].values
-#     ref_growth = ref_df["growth_rate"].values
-#     initial_population = ref_df[ref_df["jahr"] == start_year]["total_population"].values[0]
-#     n_years = len(years)
-#
-#     # Linearly interpolate std devs over years
-#     std_devs = np.linspace(start_std_dev, end_std_dev, n_years)
-#
-#     # Generate Latin Hypercube Samples in [0, 1]
-#     sampler = qmc.LatinHypercube(d=n_years)
-#     lhs_samples = sampler.random(n=n_scenarios)  # shape: (n_scenarios, n_years)
-#
-#     # Convert LHS samples into standard normal values
-#     normal_samples = stats.norm.ppf(lhs_samples)  # shape: (n_scenarios, n_years)
-#
-#     # Scale each year's sample by its std deviation
-#     growth_devs = normal_samples * std_devs  # shape: (n_scenarios, n_years)
-#
-#     # Apply additive noise
-#     scenarios_growth = ref_growth + growth_devs  # assuming ref_growth is shape (n_years,)
-#
-#     # Initialize population trajectories
-#     pop_scenarios = np.zeros((n_scenarios, n_years))
-#     pop_scenarios[:, 0] = initial_population
-#
-#     for i in range(n_scenarios):
-#         for t in range(1, n_years):
-#             pop_scenarios[i, t] = pop_scenarios[i, t - 1] * (1 + scenarios_growth[i, t - 1])
-#
-#     # Compile results into DataFrame
-#     scenario_data = []
-#     for i in range(n_scenarios):
-#         for t in range(n_years):
-#             scenario_data.append({
-#                 "scenario": i,
-#                 "year": years[t],
-#                 "population": pop_scenarios[i, t],
-#                 "growth_rate": scenarios_growth[i, t]
-#             })
-#
-#     return pd.DataFrame(scenario_data)
-
-
 
 def generate_population_scenarios(ref_df: pd.DataFrame,
                                   start_year: int,
@@ -240,14 +170,82 @@ def generate_population_scenarios(ref_df: pd.DataFrame,
     scenario_data = []
     for i in range(n_scenarios):
         for t in range(n_years):
+            # Berechne growth_index: 100 am Anfang und dann entsprechend der relativen Bevölkerungsentwicklung
+            growth_index = 100 * (pop_scenarios[i, t] / initial_population)
+
             scenario_data.append({
                 "scenario": i,
                 "year": years[t],
                 "population": pop_scenarios[i, t],
-                "growth_rate": scenario_growth[i, t]
+                "growth_rate": scenario_growth[i, t],
+                "growth_index": growth_index
             })
 
     return pd.DataFrame(scenario_data)
+
+
+def generate_modal_split_scenarios(avg_growth_rate: float,
+                                   start_value: float,
+                                   start_year: int,
+                                   end_year: int,
+                                   n_scenarios: int = 1000,
+                                   start_std_dev: float = 0.01,
+                                   end_std_dev: float = 0.03,
+                                   std_dev_shocks: float = 0.02) -> pd.DataFrame:
+    """
+    Generate stochastic modal split scenarios using Latin Hypercube Sampling and a random walk process.
+
+    Parameters:
+    - avg_growth_rate: average annual growth rate to apply (can be positive or negative)
+    - start_value: initial modal split value at start_year
+    - start_year: year to begin scenario generation
+    - end_year: year to end scenario generation
+    - n_scenarios: number of scenarios to generate
+    - start_std_dev: starting std deviation applied to growth rate perturbation
+    - end_std_dev: ending std deviation applied to growth rate perturbation
+    - std_dev_shocks: std deviation of yearly additive shocks
+
+    Returns:
+    - DataFrame with columns: "scenario", "year", "modal_split", "growth_rate", "growth_index"
+    """
+    # Erstelle temporären Referenzdatensatz mit konstanter Wachstumsrate
+    years = np.arange(start_year, end_year + 1)
+    n_years = len(years)
+
+    # Berechne die Werte mit konstanter Wachstumsrate
+    growth_factors = np.ones(n_years) * (1 + avg_growth_rate)
+    growth_factors[0] = 1  # Erster Faktor ist 1, da es der Startwert ist
+
+    # Kumulatives Wachstum berechnen
+    cumulative_growth = np.cumprod(growth_factors)
+    modal_split_values = start_value * cumulative_growth
+
+    # Erstelle Array von Wachstumsraten (erster Wert ist 0, danach konstant)
+    growth_rates = np.zeros(n_years)
+    growth_rates[1:] = avg_growth_rate  # Konstante Wachstumsrate für alle Jahre außer dem ersten
+
+    # Erstelle temporären DataFrame
+    ref_df = pd.DataFrame({
+        "jahr": years,
+        "total_population": modal_split_values,
+        "growth_rate": growth_rates
+    })
+
+    # Verwende die bestehende Funktion
+    modal_split_scenarios_df = generate_population_scenarios(
+        ref_df=ref_df,
+        start_year=start_year,
+        end_year=end_year,
+        n_scenarios=n_scenarios,
+        start_std_dev=start_std_dev,
+        end_std_dev=end_std_dev,
+        std_dev_shocks=std_dev_shocks
+    )
+
+    # Umbenennen der Spalte "population" in "modal_split"
+    modal_split_scenarios_df = modal_split_scenarios_df.rename(columns={"population": "modal_split"})
+
+    return modal_split_scenarios_df
 
 
 def plot_population_scenarios(scenarios_df: pd.DataFrame, n_to_plot: int = 10):
@@ -277,5 +275,7 @@ def plot_population_scenarios(scenarios_df: pd.DataFrame, n_to_plot: int = 10):
 
 bezirk_pop_scen = get_bezirk_population_scenarios()
 affoltern_df = bezirk_pop_scen['Affoltern']
-scenarios_df = generate_population_scenarios(affoltern_df, 2022, 2100,n_scenarios=100, start_std_dev=0.005, end_std_dev=0.01, std_dev_shocks=0.02)
-plot_population_scenarios(scenarios_df, n_to_plot=100)
+pop_scenarios_df = generate_population_scenarios(affoltern_df, 2022, 2100,n_scenarios=100, start_std_dev=0.005, end_std_dev=0.01, std_dev_shocks=0.02)
+
+plot_population_scenarios(pop_scenarios_df, n_to_plot=100)
+ms_scenario_df = generate_modal_split_scenarios(0.0045, 0.209, 2022, 2100, n_scenarios=100, start_std_dev=0.002, end_std_dev=0.005, std_dev_shocks=0.01)#growth rate assumption from verkehrsperspektiven 2017 til 2060

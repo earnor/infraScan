@@ -136,14 +136,15 @@ def find_fastest_path(graph, origin, destination):
     """
     calculate_fastest_travel_time(graph, origin, destination)
 
+
 def calculate_od_pairs_with_times_by_graph(graphs):
     """
-    Create all OD pairs for main stations across multiple graphs and calculate travel times.
+    Create all OD pairs for main stations across multiple graphs and calculate travel times using optimized methods.
     Returns a list of DataFrames, one for each graph_id.
-    
+
     Parameters:
         graphs (list): List of NetworkX directed graphs representing railway networks.
-    
+
     Returns:
         list: A list of Pandas DataFrames, one for each graph_id.
     """
@@ -152,34 +153,29 @@ def calculate_od_pairs_with_times_by_graph(graphs):
     for graph_id, graph in enumerate(tqdm(graphs, desc="Processing developments")):
         print(f"→ Calculating OD pairs for development {graph_id}...")
         od_data = []
+
         # Extract main station nodes for the current graph
         main_nodes = [node for node, data in graph.nodes(data=True) if data.get("type") == "main_node"]
-        
-        # Calculate travel times for each OD pair within the graph
+
+        # Use all_pairs_dijkstra_path_length for optimized distance calculation
+        all_lengths = dict(nx.all_pairs_dijkstra_path_length(graph, weight="weight"))
+
         for origin in main_nodes:
+            origin_lengths = all_lengths.get(origin, {})
             for destination in main_nodes:
-                if origin != destination:  # Exclude self-loops
-                    if nx.has_path(graph, origin, destination):
-                        # Calculate shortest path travel time
-                        travel_time = nx.shortest_path_length(graph, source=origin, target=destination, weight="weight")
-                        od_data.append({
-                            "from_id": origin,
-                            "to_id": destination,
-                            "time": travel_time
-                        })
-                    else:
-                        # No path exists; assign None
-                        od_data.append({
-                            "from_id": origin,
-                            "to_id": destination,
-                            "time": None
-                        })
-        
+                if origin != destination:
+                    travel_time = origin_lengths.get(destination, None)
+                    od_data.append({
+                        "from_id": origin,
+                        "to_id": destination,
+                        "time": travel_time
+                    })
+
         # Convert the OD data for this graph to a DataFrame
         od_df = pd.DataFrame(od_data)
         od_df["graph_id"] = graph_id  # Add graph_id as a column
         graph_dataframes.append(od_df)  # Append the DataFrame to the list
-    
+
     return graph_dataframes
 
 def calculate_total_travel_times(od_times_list, traffic_flow_dir, df_access):
@@ -250,7 +246,7 @@ def calculate_total_travel_times(od_times_list, traffic_flow_dir, df_access):
 
     return total_travel_times
 
-def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, duration, output_path):
+def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, duration, output_path, dev_id_lookup_table):
     """
     Calculate and monetize travel time savings for each development scenario compared to the status quo,
     scaling peak hour data to daily trips using a fixed tau value.
@@ -287,10 +283,10 @@ def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, durat
             tt_savings_yearly = tt_savings_daily * 365 * VTTS
             # Monetize the travel time savings
             monetized_savings = tt_savings_daily * mon_factor
-
+            dev_id_lookup = dev_id_lookup_table.loc[int(dev_id.removeprefix("Development_")), "dev_id"]
             # Append the results
             results.append({
-                "development": dev_id,
+                "development": dev_id_lookup,
                 "scenario": scenario_name,
                 "status_quo_tt": status_quo_tt,
                 "development_tt": dev_tt,
@@ -311,7 +307,7 @@ def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, durat
     return results_df, scenario_list, dev_list
 
 
-def analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes):
+def analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes, dev_id_lookup_table):
     """
     Analyze travel times for the status quo and selected developments.
 
@@ -336,7 +332,7 @@ def analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes):
 
     # Extract the status quo DataFrame
     status_quo_df = od_times_status_quo[0]
-    selected_indices = [i for i in range(len(od_times_dev))]  # Exclude the first element (status quo)
+    selected_indices = [dev_id_lookup_table.loc[i+1, "dev_id"] for i in range(len(od_times_dev))]  # Exclude the first element (status quo)
     # Filter the required developments
     selected_developments = [od_times_dev[i] for i in selected_indices]
 

@@ -982,7 +982,7 @@ def generate_new_railway_lines(G, center_analysis):
         return paths
 
     new_lines = []
-    service_counter = 1
+    service_counter = 0
 
     # Iterate through each center and its missing connections
     for center_info in center_analysis:

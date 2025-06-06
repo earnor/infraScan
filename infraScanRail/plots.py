@@ -61,7 +61,7 @@ def plotting(input_file, output_file, node_file):
     gdf['dev_numeric'] = gdf['dev_numeric'].fillna(-1).astype(int)
 
     # Step 2: Normalize `dev_id` in mapping_file
-    mapping_file['dev_numeric'] = (mapping_file['dev_id'] - 100000 + 1).astype(int)
+    mapping_file['dev_numeric'] = mapping_file['dev_id'].astype(int)
 
     # Debug: Print unique numeric values before merging
     print("Numeric values in gdf['dev_numeric']:", gdf['dev_numeric'].unique())
@@ -1785,7 +1785,7 @@ def create_catchement_plot_time():
     print(f"Plot saved at {output_path}")
 
 
-def plot_develompments_rail():
+def plot_developments_rail():
     # File paths
     trainstations_path = "data/Network/processed/points.gpkg"
     lakes_path = "data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
@@ -1826,7 +1826,7 @@ def plot_develompments_rail():
         "trainstations": gpd.clip(trainstations, boundary),
         "lakes": gpd.clip(lakes, boundary),
         "s_bahn_lines": gpd.clip(s_bahn_lines, boundary),
-        "developments": gpd.clip(developments, boundary),
+        "developments": developments,#gpd.clip(developments, boundary),
         "endnodes": gpd.clip(endnodes, boundary)
     }
 

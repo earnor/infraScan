@@ -11,7 +11,8 @@ import pandas as pd
 os.environ['USE_PYGEOS'] = '0'
 import geopandas as gpd
 from rasterio.features import geometry_mask, rasterize
-from shapely.ops import unary_union
+from shapely.ops import unary_union, linemerge
+from shapely import wkt
 from tqdm import tqdm
 from rasterio.warp import reproject
 import glob
@@ -318,7 +319,7 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
         total_construction_cost = insufficient_capacity['construction_cost'].sum()
         total_maintenance_cost = insufficient_capacity['maintenance_cost'].sum()
         development_costs.append({
-            "Development": f"Development_{i+1}",
+            "Development": dev_df["dev_id"].iloc[0],
             "TotalConstructionCost": total_construction_cost,
             "TotalMaintenanceCost": total_maintenance_cost,
             "YearlyMaintenanceCost": total_maintenance_cost / duration
@@ -480,11 +481,38 @@ def transform_and_reshape_cost_df():
             reshaped_df = reshaped_df.rename(columns={col: f"{col} [in Mio. CHF]"})
 
     # Temporarily transform 'development' to integer for merging
-    reshaped_df['dev_id'] = reshaped_df['development'].str.replace('Development_', '').astype(int)
+    reshaped_df['dev_id'] = reshaped_df['development'].astype(int)
 
     # Load the geometry and additional data
     geometry_data = gpd.read_file("data/Network/processed/updated_new_links.gpkg")[['dev_id', 'geometry','Sline']]
-    geometry_data['dev_id'] = geometry_data['dev_id'] - 100000 + 1  # Adjust dev_id by subtracting 100000 and starting with ID 1
+    geometry_data['dev_id'] = geometry_data['dev_id'] #- 100000 + 1  # Adjust dev_id by subtracting 100000 and starting with ID 1
+
+
+    # 2. Group by dev_id, merge all the line‐geometries,
+    #    and carry along Sline (they’re all the same anyway)
+
+    def merge_grouped_lines(geoms):
+        u = unary_union(geoms)
+        # If unary_union returned exactly one LineString, just return it
+        if isinstance(u, LineString):
+            return u
+        # Otherwise (MultiLineString, etc.), stitch them into one or more continuous lines
+        return linemerge(u)
+
+    merged = (
+        geometry_data
+        .groupby('dev_id')
+        .agg({
+            # Merge all line segments into one (Multi)LineString
+            'geometry': merge_grouped_lines,
+            # Just take the first Sline in each dev_id—since they’re guaranteed identical
+            'Sline': 'first'
+        })
+        .reset_index()
+    )
+
+    # 3. Re‐wrap as a GeoDataFrame (retaining the original CRS)
+    geometry_data = gpd.GeoDataFrame(merged, geometry='geometry', crs=geometry_data.crs)
 
     # Merge geometry and additional information into reshaped_df
     reshaped_df = reshaped_df.merge(geometry_data, on='dev_id', how='left')
