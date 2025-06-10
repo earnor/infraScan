@@ -25,6 +25,7 @@ TOTAL_COST_WITH_GEOMETRY = r"data/costs/total_costs_with_geometry.csv"
 TOTAL_COST_RAW = r"data/costs/total_costs_raw.csv"
 
 PLOT_DIRECTORY = r"plots"
+PLOT_SCENARIOS = r"plots/scenarios"
 
 def get_rail_services_path(rail_network_settings):
     """

@@ -6,6 +6,9 @@ from tqdm import tqdm
 from scipy.stats import norm, qmc
 import numpy as np
 from typing import Dict, List
+from joblib import Parallel, delayed
+import pickle
+import os
 
 def get_bezirk_population_scenarios():
     # Read the Swiss population scenario CSV with "," separator
@@ -332,7 +335,9 @@ def plot_population_scenarios(scenarios_df: pd.DataFrame, n_to_plot: int = 10):
 
 def plot_scenarios_with_range(
     scenarios_df: pd.DataFrame,
+    save_path,
     value_col: str = "population"
+    
 ):
     """
     Plot the range of all scenarios for a given value column as a shaded area
@@ -390,154 +395,185 @@ def plot_scenarios_with_range(
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
-    plt.show()
-
+    # Save the plot, overwriting any existing file
+    plt.savefig(save_path, overwrite=True)
+    plt.close(fig)
 
 
 def build_station_to_communes_mapping(
-    communes_to_stations: pd.DataFrame
+        communes_to_stations: pd.DataFrame
 ) -> Dict[str, List[int]]:
     """
     Baut ein Mapping: station_id -> List[Commune_BFS_code].
     """
     return communes_to_stations.groupby('ID_point')['Commune_BFS_code'] \
-                               .apply(list) \
-                               .to_dict()
+        .apply(list) \
+        .to_dict()
 
 
-def compute_growth_od_matrix(
-    initial_od: pd.DataFrame,
-    station_communes: Dict[str, List[int]],
-    communes_population: pd.DataFrame,
-    population_scenarios: Dict[str, pd.DataFrame],
-    scenario: int,
-    year: int,
-    start_year: int
+def compute_growth_od_matrix_optimized(
+        initial_od: pd.DataFrame,
+        station_communes: Dict[str, List[int]],
+        communes_population: pd.DataFrame,
+        population_scenarios: Dict[str, pd.DataFrame],
+        scenario: int,
+        year: int,
+        start_year: int,
+        station_commune_lookup: Dict[str, pd.DataFrame] = None
 ) -> pd.DataFrame:
     """
-    Berechnet den Wachstumsindex jeder Station basierend auf dem
-    Bevölkerungswachstum der zugehörigen Gemeinden und liefert
-    eine OD-Matrix mit den kombinierten Faktoren.
-
-    Erwartet, dass initial_od eine Spalte 'from_station' enthält,
-    gefolgt von einer Spalte pro Ziel-Station. Wir verwenden
-    'from_station' als Index, und die übrigen Spalten als Spalten-Labels.
+    Optimierte Version von compute_growth_od_matrix
     """
-    # --- 1) Rolle 'from_station' als Index festlegen und Ziel‐Spalten extrahieren
-    od = initial_od.set_index('from_station')
-    stations = od.columns.tolist()  # to‐stations
-    from_stations = od.index.tolist()
+    # --- 1) Struktur aufsetzen
+    stations = initial_od.columns.tolist()
+    from_stations = initial_od.index.tolist()
 
-    # --- 2) Für jede Station den kombinierten growth_index berechnen
-    station_growth: Dict[str, float] = {}
+    # --- 2) Wachstumsindex für alle Stationen berechnen
+    station_growth = {}
+
+    # Wenn lookup nicht existiert, erstellen wir einen
+    if station_commune_lookup is None:
+        station_commune_lookup = {}
+
     for station in stations:
-        communes = station_communes.get(int(station), [])
-        sum_start = 0.0
-        sum_curr  = 0.0
-
-        for commune in communes:
-            # Kommune → Population & Bezirk
-            row = communes_population[
-                communes_population['gemeinde_bfs_nr'] == commune
-            ]
-            if row.empty:
+        # Lookup für diese Station verwenden wenn vorhanden
+        if station not in station_commune_lookup:
+            communes = station_communes.get(int(station), [])
+            if not communes:
+                station_growth[station] = 1.0
                 continue
 
-            district = row['bezirk'].iat[0]
-            pop_start_commune = row['anzahl'].iat[0]
+            # Vorfiltern der relevanten Gemeinden für diese Station
+            station_data = []
+            for commune in communes:
+                row = communes_population[communes_population['gemeinde_bfs_nr'] == commune]
+                if not row.empty:
+                    district = row['bezirk'].iat[0]
+                    pop_start_commune = row['anzahl'].iat[0]
+                    station_data.append((commune, district, pop_start_commune))
 
+            station_commune_lookup[station] = station_data
+
+        sum_start = 0.0
+        sum_curr = 0.0
+
+        for commune, district, pop_start_commune in station_commune_lookup[station]:
             # Population im Szenario für Start- und Ziel-Jahr
             scen = population_scenarios[district]
-            pop_d_start = scen.loc[
-                (scen['scenario'] == scenario) & (scen['year'] == start_year),
-                'population'
-            ].iat[0]
-            pop_d_curr  = scen.loc[
-                (scen['scenario'] == scenario) & (scen['year'] == year),
-                'population'
-            ].iat[0]
+
+            # Effizienterer Zugriff mit vorgefilterten Daten
+            scenario_data = scen[(scen['scenario'] == scenario)]
+            pop_d_start = scenario_data[scenario_data['year'] == start_year]['population'].iloc[0]
+            pop_d_curr = scenario_data[scenario_data['year'] == year]['population'].iloc[0]
 
             # Bezirksfaktor
             factor_d = (pop_d_curr / pop_d_start) if pop_d_start > 0 else 1.0
 
             sum_start += pop_start_commune
-            sum_curr  += pop_start_commune * factor_d
+            sum_curr += pop_start_commune * factor_d
 
         station_growth[station] = (sum_curr / sum_start) if sum_start > 0 else 1.0
 
-    # --- 3) Wachstumsmatrix aufsetzen und sqrt(growth_index) auf Zeilen & Spalten anwenden
-    growth_od = pd.DataFrame(
-        1.0,
-        index=from_stations,
-        columns=stations
-    )
+    # --- 3) OD-Matrix mit Wachstumsfaktoren erzeugen
+    growth_od = pd.DataFrame(1.0, index=from_stations, columns=stations)
 
-    for station, f in station_growth.items():
-        sf = np.sqrt(f)
-        # Zeile für 'from=station'
-        if station in growth_od.index:
-            growth_od.loc[station, :] *= sf
-        # Spalte für 'to=station'
-        if station in growth_od.columns:
-            growth_od.loc[:, station] *= sf
+    # Vektorisierte Anwendung der Faktoren
+    sqrt_factors = {station: np.sqrt(factor) for station, factor in station_growth.items()}
+
+    # Zeilenweise Multiplikation
+    for station in set(list(map(str, from_stations))).intersection(sqrt_factors.keys()):
+        growth_od.loc[int(station), :] *= sqrt_factors[station]
+
+    # Spaltenweise Multiplikation
+    for station in set(stations).intersection(sqrt_factors.keys()):
+        growth_od.loc[:, station] *= sqrt_factors[station]
 
     return growth_od
 
 
-def apply_modal_trips(
-    initial_od: pd.DataFrame,
-    growth_od: pd.DataFrame,
-    modal_df: pd.DataFrame,
-    distance_df: pd.DataFrame,
-    scenario: int,
-    start_year: int,
-    year: int
+def apply_modal_trips_optimized(
+        initial_od: pd.DataFrame,
+        growth_od: pd.DataFrame,
+        modal_factors: Dict[tuple, float],
+        distance_factors: Dict[tuple, float],
+        scenario: int,
+        start_year: int,
+        year: int
 ) -> pd.DataFrame:
     """
-    Wendet Modal-Split- und Distance-per-Person-Faktoren auf die
-    OD-Matrix an.
+    Optimierte Version von apply_modal_trips mit Lookup-Table
     """
-    # Modal split
-    m_start = modal_df.loc[
-        (modal_df['scenario'] == scenario) &
-        (modal_df['year']     == start_year),
-        'modal_split'
-    ].iat[0]
-    m_curr  = modal_df.loc[
-        (modal_df['scenario'] == scenario) &
-        (modal_df['year']     == year),
-        'modal_split'
-    ].iat[0]
-    m_factor = (m_curr / m_start) if m_start > 0 else 1.0
+    # Faktoren aus Lookup-Tabelle holen
+    scenario_year_key = (scenario, year)
+    m_factor = modal_factors.get(scenario_year_key, 1.0)
+    d_factor = distance_factors.get(scenario_year_key, 1.0)
 
-    # Distance per person (formerly trips_per_person)
-    d_start = distance_df.loc[
-        (distance_df['scenario'] == scenario) &
-        (distance_df['year']     == start_year),
-        'distance_per_person'
-    ].iat[0]
-    d_curr  = distance_df.loc[
-        (distance_df['scenario'] == scenario) &
-        (distance_df['year']     == year),
-        'distance_per_person'
-    ].iat[0]
-    d_factor = (d_curr / d_start) if d_start > 0 else 1.0
-
+    # Einen Schritt berechnen
     return initial_od * growth_od * m_factor * d_factor
 
 
+def precompute_modal_distance_factors(
+        modal_df: pd.DataFrame,
+        distance_df: pd.DataFrame,
+        start_year: int
+) -> tuple:
+    """
+    Vorausberechnung der Modal- und Distance-Faktoren
+    """
+    modal_factors = {}
+    distance_factors = {}
+
+    scenarios = modal_df['scenario'].unique()
+    years = modal_df['year'].unique()
+
+    # Modal split factors
+    for s in scenarios:
+        m_start = modal_df.loc[(modal_df['scenario'] == s) &
+                               (modal_df['year'] == start_year), 'modal_split'].iat[0]
+
+        for y in years:
+            if y == start_year:
+                modal_factors[(s, y)] = 1.0
+                continue
+
+            m_curr = modal_df.loc[(modal_df['scenario'] == s) &
+                                  (modal_df['year'] == y), 'modal_split'].iat[0]
+            m_factor = (m_curr / m_start) if m_start > 0 else 1.0
+            modal_factors[(s, y)] = m_factor
+
+    # Distance per person factors
+    for s in scenarios:
+        d_start = distance_df.loc[(distance_df['scenario'] == s) &
+                                  (distance_df['year'] == start_year), 'distance_per_person'].iat[0]
+
+        for y in years:
+            if y == start_year:
+                distance_factors[(s, y)] = 1.0
+                continue
+
+            d_curr = distance_df.loc[(distance_df['scenario'] == s) &
+                                     (distance_df['year'] == y), 'distance_per_person'].iat[0]
+            d_factor = (d_curr / d_start) if d_start > 0 else 1.0
+            distance_factors[(s, y)] = d_factor
+
+    return modal_factors, distance_factors
+
+
 def generate_od_growth_scenarios(
-    initial_od_matrix: pd.DataFrame,
-    communes_to_stations: pd.DataFrame,
-    communes_population: pd.DataFrame,
-    start_year: int,
-    end_year: int,
-    num_of_scenarios: int
+        initial_od_matrix: pd.DataFrame,
+        communes_to_stations: pd.DataFrame,
+        communes_population: pd.DataFrame,
+        start_year: int,
+        end_year: int,
+        num_of_scenarios: int,
+        do_plot: bool = False,
+        n_jobs: int = -1
 ) -> Dict[str, Dict[int, pd.DataFrame]]:
     """
-    Generiert OD-Wachstumsszenarien mit dynamischen Station-Wachstumsindizes
-    und Distance-per-Person-Anpassung.
+    Optimierte Version von generate_od_growth_scenarios mit Multiprocessing
     """
+
+    initial_od_matrix = initial_od_matrix.set_index('from_station')
     # 1) Bezirkspopulationsszenarien
     bezirk_pop_scenarios = get_bezirk_population_scenarios()
     population_scenarios = {
@@ -553,7 +589,7 @@ def generate_od_growth_scenarios(
         end_year=end_year,
         n_scenarios=num_of_scenarios,
         start_std_dev=0.002,
-        end_std_dev=0.005,
+        end_std_dev=0.01,
         std_dev_shocks=0.01
     )
     distance_per_person_scenarios = generate_distance_per_person_scenarios(
@@ -566,32 +602,60 @@ def generate_od_growth_scenarios(
         end_std_dev=0.005,
         std_dev_shocks=0.01
     )
+    first_three_bezirk = list(population_scenarios.keys())[:3]
+    first_three_scenarios = {bezirk: population_scenarios[bezirk] for bezirk in first_three_bezirk}
+    for pop_scenario in first_three_scenarios.values():
+        plot_scenarios_with_range(pop_scenario, paths.PLOT_SCENARIOS, 'population')
+    plot_scenarios_with_range(modal_split_scenarios, paths.PLOT_SCENARIOS,'modal_split')
+    plot_scenarios_with_range(distance_per_person_scenarios, paths.PLOT_SCENARIOS,'distance_per_person')
 
-    # 3) Station→Commune-Mapping
+
+    # Vorauswertung aller Modal/Distance Faktoren
+    print("Berechne Modal und Distance Faktoren...")
+    modal_factors, distance_factors = precompute_modal_distance_factors(
+        modal_split_scenarios, distance_per_person_scenarios, start_year
+    )
+
+    # 3) Station→Commune-Mapping (einmalig)
+    print("Erstelle Station-Commune Mapping...")
     station_communes = build_station_to_communes_mapping(communes_to_stations)
+    station_commune_lookup = {}  # Cache für station-commune Beziehungen
 
-    # 4) Szenarien durchrechnen
-    results: Dict[str, Dict[int, pd.DataFrame]] = {}
-    for s in tqdm(range(num_of_scenarios), desc="Szenarien durchlaufen"):
+    # 4) Funktion für parallele Verarbeitung
+    def process_scenario(s):
         key = f"scenario_{s + 1}"
-        results[key] = {}
-        for y in tqdm(range(start_year, end_year + 1), desc=f"Szenario {s + 1} - Jahre"):
-            pop_growth_od = compute_growth_od_matrix(
+        results_s = {}
+
+        for y in range(start_year, end_year + 1):
+            pop_growth_od = compute_growth_od_matrix_optimized(
                 initial_od_matrix,
                 station_communes,
                 communes_population,
                 population_scenarios,
-                s, y, start_year
+                s, y, start_year,
+                station_commune_lookup
             )
-            final_od = apply_modal_trips(
+
+            final_od = apply_modal_trips_optimized(
                 initial_od_matrix,
                 pop_growth_od,
-                modal_split_scenarios,
-                distance_per_person_scenarios,
+                modal_factors,
+                distance_factors,
                 s, start_year, y
             )
-            results[key][y] = final_od
+            results_s[y] = final_od
 
+        return key, results_s
+
+    # 5) Parallele Verarbeitung mit Fortschrittsbalken
+    print(f"Berechne {num_of_scenarios} Szenarien mit {n_jobs} Prozessen...")
+    scenario_results = Parallel(n_jobs=n_jobs, verbose = 100 )( #backend="loky", max_nbytes=None
+        delayed(process_scenario)(s) for s in range(num_of_scenarios)
+    )
+    #scenario_results = [process_scenario(s) for s in range(num_of_scenarios)]
+    print("fertig")
+    # 6) Ergebnisse zusammenführen
+    results = dict(scenario_results)
     return results
 
 
@@ -607,8 +671,48 @@ def generate_od_growth_scenarios(
 # plot_scenarios_with_range(ms_scenario_df, 'modal_split')
 # plot_scenarios_with_range(trips_per_person_scenario_df, 'distance_per_person')
 
-railway_station_OD = pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
-heiliger_grahl = generate_od_growth_scenarios(railway_station_OD,
-                             pd.read_excel(paths.COMMUNE_TO_STATION_PATH),
-                             pd.read_csv(paths.POPULATION_PER_COMMUNE_ZH_2018),
-                             start_year=2022, end_year=2100, num_of_scenarios=10)
+
+
+def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, use_cache=False, do_plot=False):
+    """
+    Retrieve or generate random OD growth scenarios.
+
+    Parameters:
+    - start_year: The starting year for the scenarios.
+    - end_year: The ending year for the scenarios.
+    - num_of_scenarios: The number of scenarios to generate.
+    - use_cache: If True, load scenarios from cache instead of regenerating.
+    - do_plot: If True, plot the scenarios after generation.
+
+    Returns:
+    - scenarios: The scenario DataFrame.
+    """
+    file_path = r"data\Scenario\cache\scenarios.pkl"
+
+    if use_cache and os.path.exists(file_path):
+        # Load cached scenarios
+        with open(file_path, 'rb') as f:
+            scenarios = pickle.load(f)
+        print(f"Loaded cached scenarios from {file_path}")
+    else:
+        # Generate new scenarios
+        scenarios = generate_od_growth_scenarios(
+            pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH),
+            pd.read_excel(paths.COMMUNE_TO_STATION_PATH),
+            pd.read_csv(paths.POPULATION_PER_COMMUNE_ZH_2018),
+            start_year=start_year,
+            end_year=end_year,
+            num_of_scenarios=num_of_scenarios,
+            do_plot=do_plot
+        )
+
+        # Save to cache
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)  # Ensure directory exists
+        with open(file_path, 'wb') as f:
+            pickle.dump(scenarios, f)
+        print(f"Data saved to {file_path}")
+
+    return scenarios
+
+if __name__ == '__main__':
+    scenarios = get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, use_cache=False, do_plot=True)
