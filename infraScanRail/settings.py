@@ -9,7 +9,7 @@ use_cache_pt_catchment = True
 use_cache_developments = True
 use_cache_catchmentOD = True
 use_cache_stationsOD = True
-use_cache_traveltime_graph = False
+use_cache_traveltime_graph = True
 use_cache_tts_calc = False
 
 infra_generation_modification_type = 'ALL' #either 'EXTEND_LINES' or 'NEW_DIRECT_CONNECTIONS' or 'ALL'

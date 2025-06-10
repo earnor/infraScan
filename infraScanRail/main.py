@@ -412,7 +412,7 @@ def create_travel_time_graphs(network_selection, use_cache, dev_id_lookup_table)
         'main_Zürich Oerlikon', 'main_Zürich Stadelhofen', 'main_Hinwil', 'main_Aathal'
     ]
     # Analyse der Delta-Reisezeiten
-    analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes, dev_id_lookup_table) #output of this is not used!
+
     # Ergebnis anzeigen
     print("\nFinal travel times:")
 
@@ -424,6 +424,9 @@ def create_travel_time_graphs(network_selection, use_cache, dev_id_lookup_table)
             'od_times_status_quo': od_times_status_quo
         }, f)
     print("OD-times saved to cache.")
+
+    analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes,
+                         dev_id_lookup_table)  # output of this is not used!
 
     return od_times_dev, od_times_status_quo
 

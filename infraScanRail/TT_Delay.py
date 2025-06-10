@@ -334,7 +334,7 @@ def analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes, dev_id_loo
     status_quo_df = od_times_status_quo[0]
     selected_indices = [dev_id_lookup_table.loc[i+1, "dev_id"] for i in range(len(od_times_dev))]  # Exclude the first element (status quo)
     # Filter the required developments
-    selected_developments = [od_times_dev[i] for i in selected_indices]
+    selected_developments = [od_times_dev[i] for i in range(len(od_times_dev))]
 
     # Generate OD pairs using the provided nodes
     od_pairs = [(origin, destination) for origin in od_nodes for destination in od_nodes if origin != destination]
@@ -373,14 +373,14 @@ def analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes, dev_id_loo
         merged_sorted = merged.sort_values(by="delta_time", ascending=True)
 
         # Save the full CSV for this development
-        dev_file = os.path.join(savings_path, f"TravelTime_Savings_Dev_{selected_indices[i] + 1}.csv")
+        dev_file = os.path.join(savings_path, f"TravelTime_Savings_Dev_{int(selected_indices[i]) + 1}.csv")
         merged_sorted.to_csv(dev_file, index=False)
 
         # Extract top 20 OD pairs by delta time
         top_20 = merged_sorted.head(20)
 
         # Save the top 20 OD pairs to a separate file
-        top_20_file = os.path.join(report_path, f"TravelTime_Savings_Dev_{selected_indices[i] + 1}_Top20.csv")
+        top_20_file = os.path.join(report_path, f"TravelTime_Savings_Dev_{int(selected_indices[i]) + 1}_Top20.csv")
         top_20.to_csv(top_20_file, index=False)
 
     return "Analysis completed and files saved."
