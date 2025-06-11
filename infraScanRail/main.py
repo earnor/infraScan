@@ -14,6 +14,7 @@ from scenarios import *
 from scoring import *
 from scoring import create_cost_and_benefit_df
 from traveltime_delay import *
+from random_scenarios import get_random_scenarios
 import geopandas as gpd
 import networkx as nx
 import os
@@ -103,7 +104,7 @@ def infrascanrail():
     ##################################################################################
     # 1) Define scenario based on cantonal predictions
 
-    generate_scenarios()
+    #generate_scenarios() #TODO
     runtimes["Generate the scenarios"] = time.time() - st
     st = time.time()
 
@@ -149,14 +150,15 @@ def infrascanrail():
 
 
     if settings.OD_type == 'canton_ZH':
-        od_directory_scenario = r"data/traffic_flow/od/rail/ktzh"
         # Filtere Punkte innerhalb der innerboundary
         points_in_inner_boundary = points[points.apply(lambda row: innerboundary.contains(row.geometry), axis=1)]
 
         # Liste der Einträge erstellen (z.B. die ID_point und NAME)
         inner_boundary_stations = points_in_inner_boundary[['ID_point', 'NAME']].values.tolist()
         #stationOD also saved as a file
-        getStationOD(settings.use_cache_stationsOD, inner_boundary_stations, od_directory_scenario)
+        getStationOD(settings.use_cache_stationsOD, inner_boundary_stations)
+        #getScenarios(od_directory_scenario, pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH))
+        get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, use_cache=settings.use_cache_scenarios, do_plot=True)
 
     elif settings.OD_type == 'pt_catchment_perimeter':
         od_directory_scenario = r"data/traffic_flow/od/rail"
@@ -167,7 +169,7 @@ def infrascanrail():
     runtimes["Reallocate OD matrices to Catchement polygons"] = time.time() - st
     st = time.time()
     # compute_TT()
-    dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup, od_directory_scenario, od_times_dev,
+    dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup, paths.RANDOM_SCENARIO_CACHE_PATH, od_times_dev,
                                                         od_times_status_quo, use_cache = settings.use_cache_tts_calc)
 
     file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
@@ -237,7 +239,6 @@ def compute_tts(dev_id_lookup,
     Returns:
         dev_list, monetized_tt, scenario_list
     """
-    # 1) Decide on a single cache filename (you can change path if desired)
     cache_file = "data/Network/travel_time/cache/compute_tts_cache.pkl"
 
     if use_cache:
@@ -307,9 +308,9 @@ def import_process_network(use_cache):
     return points
 
 
-def getStationOD(use_cache, stations_in_perimeter, od_directory_scenario):
+def getStationOD(use_cache, stations_in_perimeter):
     if use_cache:
-        railway_station_OD = pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
+        return
     else:
         communalOD = scoring.GetOevDemandPerCommune(tau=1)
         communes_to_stations = pd.read_excel(paths.COMMUNE_TO_STATION_PATH)
@@ -317,18 +318,20 @@ def getStationOD(use_cache, stations_in_perimeter, od_directory_scenario):
         railway_station_OD = filter_od_matrix_by_stations(railway_station_OD, stations_in_perimeter)
         railway_station_OD.to_csv(paths.OD_STATIONS_KT_ZH_PATH)
 
-        #create dummy scenarios
-        #TODO: remove this part, when the scenarios are defined
-        scenario_list_dummy = dummy_generate_scenarios(settings.amount_of_scenarios, 12)
 
-        # Für jedes Szenario eine neue OD-Matrix erstellen und speichern
-        for i, scenario in enumerate(scenario_list_dummy):
-            # Erstelle eine neue OD-Matrix basierend auf der Status-quo OD-Matrix
-            scenario_od = railway_station_OD.copy() * scenario['general_factor']
 
-            file_path = os.path.join(od_directory_scenario, f"od_matrix_stations_ktzh_future_{i + 1}.csv")
-            scenario_od.to_csv(file_path)
 
+def getScenarios(od_directory_scenario, railway_station_OD):
+    # create dummy scenarios
+    # TODO: remove this part, when the scenarios are defined
+    scenario_list_dummy = dummy_generate_scenarios(settings.amount_of_scenarios, 12)
+    # Für jedes Szenario eine neue OD-Matrix erstellen und speichern
+    for i, scenario in enumerate(scenario_list_dummy):
+        # Erstelle eine neue OD-Matrix basierend auf der Status-quo OD-Matrix
+        scenario_od = railway_station_OD.copy() * scenario['general_factor']
+
+        file_path = os.path.join(od_directory_scenario, f"od_matrix_stations_ktzh_future_{i + 1}.csv")
+        scenario_od.to_csv(file_path)
 
 
 def add_construction_info_to_network():
@@ -358,6 +361,14 @@ def create_travel_time_graphs(network_selection, use_cache, dev_id_lookup_table)
     # Define cache file for pickle
     cache_file = 'data/Network/travel_time/cache/od_times.pkl'
 
+    od_nodes = [
+        'main_Rüti ZH', 'main_Nänikon-Greifensee', 'main_Uster', 'main_Wetzikon ZH',
+        'main_Zürich Altstetten', 'main_Schwerzenbach ZH', 'main_Fehraltorf',
+        'main_Bubikon', 'main_Zürich HB', 'main_Kempten', 'main_Pfäffikon ZH',
+        'main_Zürich Oerlikon', 'main_Zürich Stadelhofen', 'main_Hinwil', 'main_Aathal',
+        'main_Winterthur','main_Effretikon','main_Dübendorf','main_Rapperswil','main_Zürich HB'
+    ]
+
     if use_cache:
         if os.path.exists(cache_file):
             print("Load OD-times from cache...")
@@ -365,6 +376,8 @@ def create_travel_time_graphs(network_selection, use_cache, dev_id_lookup_table)
                 cache_data = pickle.load(f)
                 od_times_dev = cache_data['od_times_dev']
                 od_times_status_quo = cache_data['od_times_status_quo']
+            analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes,
+                                 dev_id_lookup_table)  # output of this is not used!
             return od_times_dev, od_times_status_quo
         else:
             print("Cache not found. Calculate OD-times...")
@@ -405,12 +418,7 @@ def create_travel_time_graphs(network_selection, use_cache, dev_id_lookup_table)
     find_fastest_path(G_developments[7], origin_station, destination_station)
     #selected_indices = [0, 1, 2, 3, 4, 5, 6, 7]  # Indices of selected developments
 
-    od_nodes = [
-        'main_Rüti ZH', 'main_Nänikon-Greifensee', 'main_Uster', 'main_Wetzikon ZH',
-        'main_Zürich Altstetten', 'main_Schwerzenbach ZH', 'main_Fehraltorf',
-        'main_Bubikon', 'main_Zürich HB', 'main_Kempten', 'main_Pfäffikon ZH',
-        'main_Zürich Oerlikon', 'main_Zürich Stadelhofen', 'main_Hinwil', 'main_Aathal'
-    ]
+
     # Analyse der Delta-Reisezeiten
 
     # Ergebnis anzeigen
@@ -424,9 +432,9 @@ def create_travel_time_graphs(network_selection, use_cache, dev_id_lookup_table)
             'od_times_status_quo': od_times_status_quo
         }, f)
     print("OD-times saved to cache.")
-
     analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes,
                          dev_id_lookup_table)  # output of this is not used!
+
 
     return od_times_dev, od_times_status_quo
 
@@ -491,7 +499,7 @@ def visualize_results(clear_plot_directory=False):
              output_file="data/costs/processed_costs.gpkg",
              node_file="data/Network/Rail_Node.xlsx")
     # make a plot of the developments
-    plot_developments_rail()
+    plot_developments_expand_by_one_station()
     # plot the scenarios
     plot_scenarios()
     # make a plot of the catchement with id and times

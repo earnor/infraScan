@@ -45,6 +45,8 @@ import matplotlib.colors as mcolors
 # Pyrosm for OpenStreetMap Data
 from pyrosm import get_data, OSM
 
+import settings
+
 
 def plotting(input_file, output_file, node_file):
 
@@ -1785,7 +1787,7 @@ def create_catchement_plot_time():
     print(f"Plot saved at {output_path}")
 
 
-def plot_developments_rail():
+def plot_developments_expand_by_one_station():
     # File paths
     trainstations_path = "data/Network/processed/points.gpkg"
     lakes_path = "data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
@@ -1806,6 +1808,8 @@ def plot_developments_rail():
     s_bahn_lines["geometry"] = s_bahn_lines["geometry"].apply(make_valid)
 
     developments = gpd.read_file(developments_path)
+    developments["development"] = developments["development"].str.replace("Development_", "", regex=True)
+    developments = developments[developments["development"].astype(int) < settings.dev_id_start_new_direct_connections]
     developments["geometry"] = developments["geometry"].apply(make_valid)
 
     endnodes = gpd.read_file(endnodes_path)
@@ -1977,10 +1981,13 @@ def create_and_save_plots(df, plot_directory="plots"):
 
     df['Color'] = df['scenario'].apply(assign_color_by_type)
 
-    # Create and save the enhanced boxplot
+    # First create plots for developments < 101000
+    small_dev_data = df[df['development'] < settings.dev_id_start_new_direct_connections]
+
+    # Boxplot for small developments
     plt.figure(figsize=(14, 8))
     sns.boxplot(
-        data=df,
+        data=small_dev_data,
         x='development',
         y='monetized_savings',
         palette="Set2",
@@ -1993,7 +2000,7 @@ def create_and_save_plots(df, plot_directory="plots"):
         },
     )
     sns.stripplot(
-        data=df,
+        data=small_dev_data,
         x='development',
         y='monetized_savings',
         color='black',
@@ -2003,22 +2010,22 @@ def create_and_save_plots(df, plot_directory="plots"):
     )
     plt.xlabel('Development', fontsize=12)
     plt.ylabel('Monetized Savings in CHF', fontsize=12)
-    plt.xticks(rotation=45)
+    plt.xticks(rotation=90)
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=8)]
     plt.legend(handles=handles, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    plt.savefig(os.path.join(plot_directory, "enhanced_boxplot.png"))
+    plt.savefig(os.path.join(plot_directory, "enhanced_boxplot_small_developments.png"))
     plt.close()
 
-    # Create and save the strip plot
+    # Strip plot for small developments
     plt.figure(figsize=(14, 8))
     sns.stripplot(
-        data=df,
+        data=small_dev_data,
         x='development',
         y='monetized_savings',
         hue='scenario',
-        palette=dict(zip(df['scenario'], df['Color'])),
+        palette=dict(zip(small_dev_data['scenario'], small_dev_data['Color'])),
         jitter=True,
         dodge=True,
         size=8,
@@ -2026,11 +2033,76 @@ def create_and_save_plots(df, plot_directory="plots"):
     plt.xlabel('Development', fontsize=12)
     plt.ylabel('Monetized Savings in CHF', fontsize=12)
     plt.legend(title='scenario', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.xticks(rotation=45)
+    plt.xticks(rotation=90)
     plt.tight_layout()
-    plt.savefig(os.path.join(plot_directory, "strip_plot_with_scenarios.png"))
+    plt.savefig(os.path.join(plot_directory, "strip_plot_with_scenarios_small_developments.png"))
     plt.close()
 
+    # Create separate plots for every 15 developments (only for developments >= 101000)
+    large_dev_data = df[df['development'] >= settings.dev_id_start_new_direct_connections]
+    developments = sorted(large_dev_data['development'].unique())
+    num_plots = len(developments) // 15 + (1 if len(developments) % 15 > 0 else 0)
+
+    for i in range(num_plots):
+        start_idx = i * 15
+        end_idx = min((i + 1) * 15, len(developments))
+        plot_developments = developments[start_idx:end_idx]
+
+        plot_data = large_dev_data[large_dev_data['development'].isin(plot_developments)]
+
+        # Boxplot for each group
+        plt.figure(figsize=(14, 8))
+        sns.boxplot(
+            data=plot_data,
+            x='development',
+            y='monetized_savings',
+            palette="Set2",
+            showmeans=True,
+            meanprops={
+                "marker": "o",
+                "markerfacecolor": "black",
+                "markeredgecolor": "black",
+                "markersize": 8,
+            },
+        )
+        sns.stripplot(
+            data=plot_data,
+            x='development',
+            y='monetized_savings',
+            color='black',
+            size=5,
+            jitter=True,
+            alpha=0.7,
+        )
+        plt.xlabel('Development', fontsize=12)
+        plt.ylabel('Monetized Savings in CHF', fontsize=12)
+        plt.xticks(rotation=90)
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=8)]
+        plt.legend(handles=handles, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_directory, f"enhanced_boxplot_group_{i + 1}.png"))
+        plt.close()
+
+        # Strip plot for each group
+        plt.figure(figsize=(14, 8))
+        sns.stripplot(
+            data=plot_data,
+            x='development',
+            y='monetized_savings',
+            hue='scenario',
+            palette=dict(zip(plot_data['scenario'], plot_data['Color'])),
+            jitter=True,
+            dodge=True,
+            size=8,
+        )
+        plt.xlabel('Development', fontsize=12)
+        plt.ylabel('Monetized Savings in CHF', fontsize=12)
+        plt.legend(title='scenario', bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.xticks(rotation=90)
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_directory, f"strip_plot_with_scenarios_group_{i + 1}.png"))
+        plt.close()
 
 
 def plot_catchment_and_distributions(

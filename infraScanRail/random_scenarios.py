@@ -396,7 +396,7 @@ def plot_scenarios_with_range(
     ax.legend()
     fig.tight_layout()
     # Save the plot, overwriting any existing file
-    plt.savefig(save_path, overwrite=True)
+    plt.savefig(save_path)
     plt.close(fig)
 
 
@@ -509,7 +509,7 @@ def apply_modal_trips_optimized(
     d_factor = distance_factors.get(scenario_year_key, 1.0)
 
     # Einen Schritt berechnen
-    return initial_od * growth_od * m_factor * d_factor
+    return (initial_od * growth_od * m_factor * d_factor).astype('float32')
 
 
 def precompute_modal_distance_factors(
@@ -673,6 +673,26 @@ def generate_od_growth_scenarios(
 
 
 
+def load_scenarios_from_cache(cache_dir):
+    """
+    Load scenarios from individual .pkl files in the cache directory.
+    
+    Parameters:
+    - cache_dir: Directory containing scenario .pkl files
+    
+    Returns:
+    - Dictionary of loaded scenarios
+    """
+    scenarios = {}
+    if os.path.exists(cache_dir):
+        for file in os.listdir(cache_dir):
+            if file.endswith('.pkl'):
+                scenario_name = file.replace('.pkl', '')
+                with open(os.path.join(cache_dir, file), 'rb') as f:
+                    scenarios[scenario_name] = pickle.load(f)
+        print(f"Loaded {len(scenarios)} scenarios from {cache_dir}")
+    return scenarios
+
 def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, use_cache=False, do_plot=False):
     """
     Retrieve or generate random OD growth scenarios.
@@ -687,32 +707,37 @@ def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, u
     Returns:
     - scenarios: The scenario DataFrame.
     """
-    file_path = r"data\Scenario\cache\scenarios.pkl"
+    cache_dir = paths.RANDOM_SCENARIO_CACHE_PATH
 
-    if use_cache and os.path.exists(file_path):
-        # Load cached scenarios
-        with open(file_path, 'rb') as f:
-            scenarios = pickle.load(f)
-        print(f"Loaded cached scenarios from {file_path}")
-    else:
-        # Generate new scenarios
-        scenarios = generate_od_growth_scenarios(
-            pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH),
-            pd.read_excel(paths.COMMUNE_TO_STATION_PATH),
-            pd.read_csv(paths.POPULATION_PER_COMMUNE_ZH_2018),
-            start_year=start_year,
-            end_year=end_year,
-            num_of_scenarios=num_of_scenarios,
-            do_plot=do_plot
-        )
+    if use_cache:
+        # Load cached scenarios from individual .pkl files
+        scenarios = load_scenarios_from_cache(cache_dir)
+        if scenarios:
+            return scenarios
+        else:
+            print("No cached scenarios found. Generating new scenarios.")
 
-        # Save to cache
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)  # Ensure directory exists
-        with open(file_path, 'wb') as f:
-            pickle.dump(scenarios, f)
-        print(f"Data saved to {file_path}")
+    # Generate new scenarios
+    scenarios = generate_od_growth_scenarios(
+        pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH),
+        pd.read_excel(paths.COMMUNE_TO_STATION_PATH),
+        pd.read_csv(paths.POPULATION_PER_COMMUNE_ZH_2018),
+        start_year=start_year,
+        end_year=end_year,
+        num_of_scenarios=num_of_scenarios,
+        do_plot=do_plot
+    )
 
+    # Save to cache
+    os.makedirs(cache_dir, exist_ok=True)  # Ensure directory exists
+    for scenario_name, scenario_data in scenarios.items():
+        scen_path = os.path.join(cache_dir, f"{scenario_name}.pkl")
+        with open(scen_path, 'wb') as f:
+            pickle.dump(scenario_data, f)
+    print(f"Saved {len(scenarios)} scenarios to {cache_dir}")
+    
     return scenarios
 
+
 if __name__ == '__main__':
-    scenarios = get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, use_cache=False, do_plot=True)
+    get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, use_cache=False, do_plot=True)
