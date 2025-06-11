@@ -1,9 +1,10 @@
 import pandas as pd
-
+from tqdm import tqdm  # Stellen Sie sicher, dass tqdm importiert wird
+from joblib import Parallel, delayed
 # from scipy.spatial import cKDTree
 # Additional imports for grid creation
 from data_import import *
-
+from random_scenarios import load_scenarios_from_cache
 
 def create_directed_graph(df):
     G = nx.DiGraph()
@@ -178,71 +179,64 @@ def calculate_od_pairs_with_times_by_graph(graphs):
 
     return graph_dataframes
 
-def calculate_total_travel_times(od_times_list, traffic_flow_dir, df_access):
-    """
-    Calculate total travel times for each development and scenario.
 
-    Parameters:
-        od_times_list (list): List of DataFrames with OD travel times for each scenario.
-        traffic_flow_dir (str): Directory containing CSV files with traffic flow data for each development.
-        df_access (pd.DataFrame): Rail node DataFrame for mapping IDs to station names.
+def process_scenario_year(OD, od_times_list, id_to_name, scenario_name, year):
+    dev_total_times = {}
 
-    Returns:
-        dict: A dictionary where keys are development names and values are dictionaries
-              with scenario names as keys and total travel times as values.
-              The result (Total Travel Time) is the cumulative amount of time all travelers spend in transit 
-              across the entire OD matrix, weighted by the number of trips (in peak hour)
-    """
-    # Mapping of IDs to station names
+    # Ensure OD matrix is aligned and mapped
+    OD.index = OD.index.astype(int)
+    OD.columns = OD.columns.astype(float).astype(int)
+    OD = OD.rename(index=id_to_name, columns=id_to_name)
+
+    for development_idx, od_times_dev in enumerate(od_times_list):
+        dev_name = f"Development_{development_idx + 1}"
+
+        # Copy only once per development
+        df = od_times_dev.copy()
+        df["from_name"] = df["from_id"].str.replace("main_", "")
+        df["to_name"] = df["to_id"].str.replace("main_", "")
+
+        # Use numpy vectorized approach
+        from_names = df["from_name"].values
+        to_names = df["to_name"].values
+
+        # Pre-fill with zeros
+        trip_vals = np.zeros(len(df))
+
+        for i, (f, t) in enumerate(zip(from_names, to_names)):
+            try:
+                trip_vals[i] = OD.at[f, t]
+            except KeyError:
+                continue  # already 0
+
+        df["trips"] = trip_vals
+        df["weighted_time"] = df["trips"] * (df["time"] / 60)
+        total_time = df["weighted_time"].sum()
+        dev_total_times[dev_name] = total_time
+
+    return (scenario_name, year, dev_total_times)
+
+
+def calculate_total_travel_times(od_times_list, scenario_ODs_dir, df_access):
+    scenario_ods = load_scenarios_from_cache(scenario_ODs_dir)
     id_to_name = df_access.set_index("NR")["NAME"].to_dict()
 
-    # Filter traffic flow files and prepare for processing
-    traffic_flow_files = [file for file in os.listdir(traffic_flow_dir) if file.endswith('.csv')]
-    total_travel_times = {}  # This will store the results for all developments
+    tasks = []
+    for scenario_name, OD_dict in scenario_ods.items():
+        for year, OD in OD_dict.items():
+            tasks.append((OD, od_times_list, id_to_name, scenario_name, year))
 
-    for dev_file in traffic_flow_files:
-        dev_name = dev_file.replace(".csv", "")  # Use file name without extension as development name
-        dev_total_times = {}  # Store results for this development
+    results = Parallel(n_jobs=-1, verbose=1)(
+        delayed(process_scenario_year)(OD, od_times_list, id_to_name, scenario_name, year)
+        for OD, od_times_list, id_to_name, scenario_name, year in tqdm(tasks, desc="Parallel Processing")
+    )
 
-        # Load traffic flow matrix
-        traffic_flow_df = pd.read_csv(os.path.join(traffic_flow_dir, dev_file), index_col=0)
-        traffic_flow_df.index = traffic_flow_df.index.astype(int)
-        traffic_flow_df.columns = traffic_flow_df.columns.astype(float).astype(int)
-
-        # Map station names to IDs in traffic flow matrix
-        traffic_flow_df = traffic_flow_df.rename(index=id_to_name, columns=id_to_name)
-
-        # Remove rows and columns with -1.0 (outside catchment area)
-        if -1 in traffic_flow_df.index:
-            traffic_flow_df = traffic_flow_df.drop(index=-1, errors='ignore')
-        if -1 in traffic_flow_df.columns:
-            traffic_flow_df = traffic_flow_df.drop(columns=-1, errors='ignore')
-
-        # Process each scenario in od_times_list
-        for scenario_idx, scenario_od_df in enumerate(od_times_list):
-            scenario_name = f"Development_{scenario_idx + 1}"  # Generate Development names
-
-            # Merge OD times with traffic flows
-            scenario_od_df["from_name"] = scenario_od_df["from_id"].str.replace("main_", "")
-            scenario_od_df["to_name"] = scenario_od_df["to_id"].str.replace("main_", "")
-
-            # Merge trips from traffic flow matrix (amount of trips in peak hour)
-            scenario_od_df["trips"] = scenario_od_df.apply(
-                lambda row: traffic_flow_df.at[row["from_name"], row["to_name"]]
-                if row["from_name"] in traffic_flow_df.index and row["to_name"] in traffic_flow_df.columns
-                else 0,
-                axis=1
-            )
-
-            # Convert time from minutes to hours and calculate weighted travel times (trips * time in hours)
-            scenario_od_df["weighted_time"] = scenario_od_df["trips"] * (scenario_od_df["time"] / 60)
-
-
-            # Sum total weighted time for this scenario
-            total_time = scenario_od_df["weighted_time"].sum()
-            dev_total_times[scenario_name] = total_time
-
-        total_travel_times[dev_name] = dev_total_times
+    # Organize results
+    total_travel_times = {}
+    for scenario_name, year, dev_total_times in results:
+        if scenario_name not in total_travel_times:
+            total_travel_times[scenario_name] = {}
+        total_travel_times[scenario_name][year] = dev_total_times
 
     return total_travel_times
 
@@ -373,17 +367,14 @@ def analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes, dev_id_loo
         merged_sorted = merged.sort_values(by="delta_time", ascending=True)
 
         # Save the full CSV for this development
-        dev_file = os.path.join(savings_path, f"TravelTime_Savings_Dev_{int(selected_indices[i]) + 1}.csv")
+        dev_file = os.path.join(savings_path, f"TravelTime_Savings_Dev_{int(float(selected_indices[i]))}.csv")
         merged_sorted.to_csv(dev_file, index=False)
 
         # Extract top 20 OD pairs by delta time
         top_20 = merged_sorted.head(20)
 
         # Save the top 20 OD pairs to a separate file
-        top_20_file = os.path.join(report_path, f"TravelTime_Savings_Dev_{int(selected_indices[i]) + 1}_Top20.csv")
+        top_20_file = os.path.join(report_path, f"TravelTime_Savings_Dev_{int(float(selected_indices[i]))}_Top20.csv")
         top_20.to_csv(top_20_file, index=False)
 
     return "Analysis completed and files saved."
-
-
-

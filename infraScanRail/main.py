@@ -169,8 +169,8 @@ def infrascanrail():
     runtimes["Reallocate OD matrices to Catchement polygons"] = time.time() - st
     st = time.time()
     # compute_TT()
-    dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup, paths.RANDOM_SCENARIO_CACHE_PATH, od_times_dev,
-                                                        od_times_status_quo, use_cache = settings.use_cache_tts_calc)
+    dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup=dev_id_lookup, od_directory_scenario=paths.RANDOM_SCENARIO_CACHE_PATH, od_times_dev= od_times_dev,
+                                                        od_times_status_quo=od_times_status_quo, use_cache = settings.use_cache_tts_calc)
 
     file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
     construction_and_maintenance_costs = construction_costs(file_path=file_path,
@@ -261,14 +261,14 @@ def compute_tts(dev_id_lookup,
     # Compute TTT for status quo
     TTT_status_quo = calculate_total_travel_times(
         od_times_status_quo,
-        od_directory_scenario,
+        paths.RANDOM_SCENARIO_CACHE_PATH,
         df_access
     )
 
     # Compute TTT for developments
     TTT_developments = calculate_total_travel_times(
         od_times_dev,
-        od_directory_scenario,
+        paths.RANDOM_SCENARIO_CACHE_PATH,
         df_access
     )
 
