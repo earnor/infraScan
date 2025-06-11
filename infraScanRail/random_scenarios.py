@@ -730,6 +730,12 @@ def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, u
 
     # Save to cache
     os.makedirs(cache_dir, exist_ok=True)  # Ensure directory exists
+
+    # Empty the directory first (only .pkl files)
+    for filename in os.listdir(cache_dir):
+        if filename.endswith(".pkl"):
+            os.remove(os.path.join(cache_dir, filename))
+    # Save each scenario to a separate .pkl file
     for scenario_name, scenario_data in scenarios.items():
         scen_path = os.path.join(cache_dir, f"{scenario_name}.pkl")
         with open(scen_path, 'wb') as f:

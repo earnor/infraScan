@@ -335,7 +335,7 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
     return development_costs_df
 
 
-def aggregate_costs(cost_and_benefits):
+def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100)):
     """
     Aggregate and calculate total costs for each development and scenario.
     Uses the cost_and_benefits DataFrame to sum up construction costs,
@@ -346,9 +346,6 @@ def aggregate_costs(cost_and_benefits):
                                           scenario, and year, with MultiIndex (development, scenario, year).
     """
 
-    # Define scenarios for population and employment
-    #pop_scenarios = settings.pop_scenarios
-    #empl_scenarios = settings.empl_scenarios
     # Wenn cost_and_benefits einen MultiIndex hat, diesen zurücksetzen
     if isinstance(cost_and_benefits.index, pd.MultiIndex):
         cost_and_benefits = cost_and_benefits.reset_index()
@@ -373,6 +370,7 @@ def aggregate_costs(cost_and_benefits):
     # Initialize columns with zeros
     total_costs["construction_cost"] = 0
     total_costs["maintenance"] = 0
+    total_costs["monetized_savings"] = 0
     total_costs["climate_cost"] = 0
     total_costs["land_realloc"] = 0
     total_costs["nature"] = 0
@@ -384,7 +382,7 @@ def aggregate_costs(cost_and_benefits):
     for _, row in aggregated.iterrows():
         dev = row['development']
         scenario = row['scenario']
-        mask = (total_costs['development'] == dev) & (total_costs['scenario'] == scenario)
+        mask = (total_costs['development'] == float(dev)) & (total_costs['scenario'] == scenario)
         
         if any(mask):
             total_costs.loc[mask, 'construction_cost'] = row['const_cost']
@@ -426,19 +424,16 @@ def transform_and_reshape_cost_df():
     df = pd.read_csv(paths.TOTAL_COST_RAW)
 
     # Drop the specified columns
-    columns_to_drop = [
-        'status_quo_tt', 'development_tt',
-        'total_pop_urban_', 'total_pop_equal_', 'total_pop_rural_',
-        'total_pop_urba_1', 'total_pop_equa_1', 'total_pop_rura_1',
-        'total_pop_urba_2', 'total_pop_equa_2', 'total_pop_rura_2'
-    ]
+    columns_to_drop = ['status_quo_tt', 'development_tt']
+    columns_to_drop += [col for col in df.columns if 'total_scenario_' in col]
     df = df.drop(columns=columns_to_drop, errors='ignore')
+    df = df.rename(columns={"maintenance": "maintenance_cost"})
 
     # Reshaping the dataframe
     reshaped_df = df.pivot_table(
         index='development',
         columns='scenario',
-        values=['monetized_savings', 'construction_cost','maintenance' ],
+        values=['monetized_savings', 'construction_cost','maintenance_cost' ],
         aggfunc='first'
     )
 
@@ -455,13 +450,13 @@ def transform_and_reshape_cost_df():
     for savings_col in savings_columns:
         scenario_name = savings_col.replace("monetized_savings_", "")
         construction_cost_col = f"construction_cost_{scenario_name}"
-        maintenance_cost_col = f"maintenance_{scenario_name}"
+        maintenance_cost_col = f"maintenance_cost_{scenario_name}"
         if construction_cost_col in reshaped_df.columns:
             reshaped_df[f"total_cost_{scenario_name}"] = reshaped_df[savings_col] + reshaped_df[construction_cost_col] + reshaped_df[maintenance_cost_col]
 
     # Identify columns to keep
-    construction_cost_col = [col for col in reshaped_df.columns if col.startswith('construction_cost_od_matrix_')][0]
-    maintenance_cost_col = [col for col in reshaped_df.columns if col.startswith('maintenance_od_matrix_')][0]
+    construction_cost_col = [col for col in reshaped_df.columns if col.startswith('construction_cost_scenario')][0]
+    maintenance_cost_col = [col for col in reshaped_df.columns if col.startswith('maintenance_cost_scenario')][0]
 
     # Create new columns with scaled values
     reshaped_df['Construction Cost [in Mio. CHF]'] = reshaped_df[construction_cost_col] / 1_000_000
@@ -470,9 +465,6 @@ def transform_and_reshape_cost_df():
     # Drop all original construction and maintenance columns
     columns_to_drop = [col for col in reshaped_df.columns if col.startswith('construction_cost_od_matrix_') or col.startswith('maintenance_od_matrix_combined_')]
     reshaped_df = reshaped_df.drop(columns=columns_to_drop, errors='ignore')
-
-    # Apply renaming function to all columns
-    reshaped_df.columns = [rename_total_cost_columns(col) for col in reshaped_df.columns]
 
     # Adjust Net Benefit columns
     for col in reshaped_df.columns:
@@ -523,9 +515,6 @@ def transform_and_reshape_cost_df():
     # Drop the temporary 'dev_id' column
     reshaped_df = reshaped_df.drop(columns=['dev_id'])
 
-    # Rename columns
-    reshaped_df.columns = [rename_monetized_savings_columns(col) for col in reshaped_df.columns]
-
     # Round monetized savings columns to the nearest CHF
     monetized_savings_columns = [col for col in reshaped_df.columns if col.startswith("Monetized Savings")]
     reshaped_df[monetized_savings_columns] = reshaped_df[monetized_savings_columns].round(0)
@@ -556,63 +545,6 @@ def transform_and_reshape_cost_df():
     print("- GeoPackage: 'data/costs/total_costs_with_geometry.gpkg'")
 
     return gdf
-
-# Rename the columns
-def rename_total_cost_columns(col):
-    if col.startswith("total_cost_od_matrix_combined_pop_"):
-        # Extract scenario type and number
-        scenario_name = col.replace("total_cost_od_matrix_combined_pop_", "")
-        scenario_type = ""
-        level = ""
-
-        # Map scenario type abbreviations to full names
-        if "urb" in scenario_name:
-            scenario_type = "Urban"
-        elif "equ" in scenario_name:
-            scenario_type = "Equal"
-        elif "rur" in scenario_name:
-            scenario_type = "Rural"
-
-        # Determine benefit level based on the ending
-        if scenario_name.endswith("_"):
-            level = "Low"
-        elif scenario_name.endswith("1"):
-            level = "Medium"
-        elif scenario_name.endswith("2"):
-            level = "High"
-
-        # Construct the new column name
-        return f"Net Benefit {scenario_type} {level}"
-    return col  # Leave other columns unchanged
-
-def rename_monetized_savings_columns(col):
-    if col.startswith("monetized_savings_od_matrix_combined_pop_"):
-        # Extract scenario type and number
-        scenario_name = col.replace("monetized_savings_od_matrix_combined_pop_", "")
-        scenario_type = ""
-        level = ""
-
-        # Map scenario type abbreviations to full names
-        if "urba" in scenario_name:
-            scenario_type = "Urban"
-        elif "equa" in scenario_name:
-            scenario_type = "Equal"
-        elif "rura" in scenario_name:
-            scenario_type = "Rural"
-
-        # Determine savings level based on the ending
-        if scenario_name.endswith("_"):
-            level = "Low"
-        elif scenario_name.endswith("1"):
-            level = "Medium"
-        elif scenario_name.endswith("2"):
-            level = "High"
-
-        # Construct the new column name
-        return f"Monetized Savings {scenario_type} {level} [in CHF]"
-    return col  # Leave other columns unchanged
-
-
 
 
 
@@ -1456,7 +1388,7 @@ def monetize_tts(VTTS, duration):
     tt_total = tt_total.drop(columns=["low", "medium", "high"])
     tt_total.to_csv(r"data/costs/traveltime_savings.csv")
 
-def discounting(df, discount_rate):
+def discounting(df, discount_rate, base_year=2018):
     """
     Apply discounting to costs and benefits
 
@@ -1472,7 +1404,7 @@ def discounting(df, discount_rate):
 
     # Calculate discount factors for each year
     years = df.index.get_level_values('year').unique()
-    discount_factors = {year: 1 / ((1 + discount_rate) ** (year - 1)) for year in years}
+    discount_factors = {year: 1 / ((1 + discount_rate) ** (year - base_year - 1)) for year in years}
 
     # Apply discounting to each column
     columns_to_discount = ['maint_cost', 'const_cost', 'benefit']
@@ -1484,15 +1416,16 @@ def discounting(df, discount_rate):
     return df_discounted
 
 
-def create_cost_and_benefit_df(construction_and_maintenance_costs, dev_list, monetized_tt, scenario_list):
+def create_cost_and_benefit_df(construction_and_maintenance_costs, dev_list, monetized_tt, scenario_list, start_year, end_year):
     # Create full index for the complete DataFrame
     full_index = pd.MultiIndex.from_product(
-        [dev_list, scenario_list, list(range(1, cp.duration + 1))],
+        [dev_list, scenario_list, list(range(start_year, end_year + 1))],
         names=["development", "scenario", "year"]
     )
+
     # Create an index for costs (which only vary by development and year)
     cost_index = pd.MultiIndex.from_product(
-        [dev_list, list(range(1, cp.duration + 1))],
+        [dev_list, list(range(start_year, end_year + 1))],
         names=["development", "year"]
     )
     # Create an empty DataFrame for costs with the development-year index
@@ -1516,16 +1449,18 @@ def create_cost_and_benefit_df(construction_and_maintenance_costs, dev_list, mon
     # Create the full DataFrame with all columns
     costs_and_benefits_dev = pd.DataFrame(index=full_index, columns=["const_cost", "maint_cost",
                                                                      "benefit"])  # contains benefits and costs for each year for every scenario and development
-    # Convert monetized benefits directly to a dictionary for safer lookup
-    monetized_benefits_dict = monetized_tt.set_index(["development", "scenario"])["monetized_savings_yearly"].to_dict()
-    # Safely assign benefits using loop to avoid index mismatches
+    # Convert monetized benefits directly to a dictionary using (development, scenario, year) as the key
+    monetized_benefits_dict = monetized_tt.set_index(["development", "scenario", "year"])[
+        "monetized_savings_yearly"].to_dict()
+
+    # Safely assign benefits using the full 3-part key
     for idx in costs_and_benefits_dev.index:
         dev, scenario, year = idx
-        key = (dev, scenario)
+        key = (dev, scenario, year)
         if key in monetized_benefits_dict:
             costs_and_benefits_dev.loc[idx, "benefit"] = monetized_benefits_dict[key]
+
     # Manual filling of costs for each scenario-development-year combination
-    # This approach ensures no index mismatches
     print("Filling in costs for each development and year...")
     for idx in costs_and_benefits_dev.index:
         dev, scenario, year = idx
@@ -1534,17 +1469,19 @@ def create_cost_and_benefit_df(construction_and_maintenance_costs, dev_list, mon
         if dev_year_key in cost_df.index:
             # Assign construction cost for this development-year
             costs_and_benefits_dev.loc[idx, "const_cost"] = cost_df.loc[dev_year_key, "const_cost"]
-
             # Assign maintenance cost for this development-year
             costs_and_benefits_dev.loc[idx, "maint_cost"] = cost_df.loc[dev_year_key, "maint_cost"]
+
     # Save the costs and benefits DataFrame to CSV
     costs_benefits_csv_path = "data/costs/costs_and_benefits_dev.csv"
     print(f"Saving costs and benefits to {costs_benefits_csv_path}")
     costs_and_benefits_dev.to_csv(costs_benefits_csv_path)
+
     # Save a reset_index version for easier analysis if needed
     costs_benefits_flat_csv_path = "data/costs/costs_and_benefits_flat.csv"
     costs_and_benefits_dev.reset_index().to_csv(costs_benefits_flat_csv_path, index=False)
     print(f"Saving flattened version to {costs_benefits_flat_csv_path}")
+
     # Apply discounting to the DataFrame
     return costs_and_benefits_dev
 

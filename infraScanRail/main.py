@@ -19,6 +19,7 @@ import geopandas as gpd
 import networkx as nx
 import os
 import warnings
+import cost_parameters as cp
 
 
 def infrascanrail():
@@ -158,7 +159,7 @@ def infrascanrail():
         #stationOD also saved as a file
         getStationOD(settings.use_cache_stationsOD, inner_boundary_stations)
         #getScenarios(od_directory_scenario, pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH))
-        get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, use_cache=settings.use_cache_scenarios, do_plot=True)
+        get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=settings.amount_of_scenarios, use_cache=settings.use_cache_scenarios, do_plot=True)
 
     elif settings.OD_type == 'pt_catchment_perimeter':
         od_directory_scenario = r"data/traffic_flow/od/rail"
@@ -169,7 +170,7 @@ def infrascanrail():
     runtimes["Reallocate OD matrices to Catchement polygons"] = time.time() - st
     st = time.time()
     # compute_TT()
-    dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup=dev_id_lookup, od_directory_scenario=paths.RANDOM_SCENARIO_CACHE_PATH, od_times_dev= od_times_dev,
+    dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup=dev_id_lookup, od_times_dev= od_times_dev,
                                                         od_times_status_quo=od_times_status_quo, use_cache = settings.use_cache_tts_calc)
 
     file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
@@ -181,12 +182,10 @@ def infrascanrail():
                                                             tunnel_maintenance_cost=cp.tunnel_maintenance_cost,
                                                             bridge_maintenance_cost=cp.bridge_maintenance_cost,
                                                             duration=cp.duration)
-    
-    # check if flow are possible
-    #scenario_list = [item.replace("od_matrix_combined_", "") for item in scenario_list]
 
-    cost_and_benefits_dev = create_cost_and_benefit_df(construction_and_maintenance_costs, dev_list, monetized_tt, scenario_list)
-    costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=0.03)
+
+    cost_and_benefits_dev = create_cost_and_benefit_df(construction_and_maintenance_costs, dev_list, monetized_tt, scenario_list, 2018, 2100)
+    costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=cp.discount_rate, base_year=2018)
     discounted_costs_benefits_csv_path = "data/costs/costs_and_benefits_dev_discounted.csv"
     costs_and_benefits_dev_discounted.to_csv(discounted_costs_benefits_csv_path)
 
@@ -211,7 +210,7 @@ def infrascanrail():
 
     print("\nVISUALIZE THE RESULTS \n")
 
-    visualize_results(clear_plot_directory=True)
+    visualize_results(clear_plot_directory=False)
     plot_costs_benefits_example(costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
 
 
@@ -221,7 +220,6 @@ def infrascanrail():
 
 
 def compute_tts(dev_id_lookup,
-                od_directory_scenario,
                 od_times_dev,
                 od_times_status_quo,
                 use_cache = False):
@@ -281,7 +279,6 @@ def compute_tts(dev_id_lookup,
         TTT_status_quo,
         TTT_developments,
         cp.VTTS,
-        cp.tts_valuation_period,
         output_path,
         dev_id_lookup
     )
@@ -446,7 +443,7 @@ def rearange_costs(cost_and_benefits):
     # New dataframe also stored in "data/costs/total_costs.csv"
     # Convert all costs in million CHF
     print(" -> Aggregate costs")
-    aggregate_costs(cost_and_benefits)
+    aggregate_costs(cost_and_benefits, cp.tts_valuation_period)
     transform_and_reshape_cost_df()
 
 

@@ -5,6 +5,7 @@ from joblib import Parallel, delayed
 # Additional imports for grid creation
 from data_import import *
 from random_scenarios import load_scenarios_from_cache
+import numba
 
 def create_directed_graph(df):
     G = nx.DiGraph()
@@ -180,40 +181,41 @@ def calculate_od_pairs_with_times_by_graph(graphs):
     return graph_dataframes
 
 
-def process_scenario_year(OD, od_times_list, id_to_name, scenario_name, year):
-    dev_total_times = {}
+@numba.njit
+def compute_weighted_times(from_idx, to_idx, times, OD_matrix):
+    weighted_sum = 0.0
+    for i in range(len(from_idx)):
+        f = from_idx[i]
+        t = to_idx[i]
+        if f >= 0 and t >= 0:
+            trips = OD_matrix[f, t]
+            weighted_sum += trips * times[i] / 60.0
+    return weighted_sum
 
-    # Ensure OD matrix is aligned and mapped
+
+def preprocess_OD_matrix(OD, id_to_name):
+    # Convert index and columns from ID to station names
     OD.index = OD.index.astype(int)
     OD.columns = OD.columns.astype(float).astype(int)
     OD = OD.rename(index=id_to_name, columns=id_to_name)
 
-    for development_idx, od_times_dev in enumerate(od_times_list):
-        dev_name = f"Development_{development_idx + 1}"
+    # Keep only stations that are in both index and columns
+    common_stations = list(set(OD.index) & set(OD.columns))
+    OD = OD.loc[common_stations, common_stations]
 
-        # Copy only once per development
-        df = od_times_dev.copy()
-        df["from_name"] = df["from_id"].str.replace("main_", "")
-        df["to_name"] = df["to_id"].str.replace("main_", "")
+    # Convert to NumPy array and build index mapping
+    OD_matrix = OD.values
+    station_to_index = {name: idx for idx, name in enumerate(OD.index)}
+    return OD_matrix, station_to_index
 
-        # Use numpy vectorized approach
-        from_names = df["from_name"].values
-        to_names = df["to_name"].values
 
-        # Pre-fill with zeros
-        trip_vals = np.zeros(len(df))
-
-        for i, (f, t) in enumerate(zip(from_names, to_names)):
-            try:
-                trip_vals[i] = OD.at[f, t]
-            except KeyError:
-                continue  # already 0
-
-        df["trips"] = trip_vals
-        df["weighted_time"] = df["trips"] * (df["time"] / 60)
-        total_time = df["weighted_time"].sum()
+def process_scenario_year_numba(OD_matrix, station_to_index, preprocessed_od_times_list, scenario_name, year):
+    dev_total_times = {}
+    for dev_name, from_names, to_names, times in preprocessed_od_times_list:
+        from_idx = np.array([station_to_index.get(name, -1) for name in from_names])
+        to_idx = np.array([station_to_index.get(name, -1) for name in to_names])
+        total_time = compute_weighted_times(from_idx, to_idx, times, OD_matrix)
         dev_total_times[dev_name] = total_time
-
     return (scenario_name, year, dev_total_times)
 
 
@@ -221,17 +223,32 @@ def calculate_total_travel_times(od_times_list, scenario_ODs_dir, df_access):
     scenario_ods = load_scenarios_from_cache(scenario_ODs_dir)
     id_to_name = df_access.set_index("NR")["NAME"].to_dict()
 
+    # Preprocess OD time data once
+    preprocessed_od_times_list = []
+    for idx, od_df in enumerate(od_times_list):
+        dev_name = f"Development_{idx + 1}"
+        df = od_df.copy()
+        df["from_name"] = df["from_id"].str.replace("main_", "")
+        df["to_name"] = df["to_id"].str.replace("main_", "")
+        from_names = df["from_name"].values
+        to_names = df["to_name"].values
+        times = df["time"].values.astype(np.float64)
+        preprocessed_od_times_list.append((dev_name, from_names, to_names, times))
+
+    # Prepare parallel tasks: preprocess OD matrix and pass it
     tasks = []
     for scenario_name, OD_dict in scenario_ods.items():
         for year, OD in OD_dict.items():
-            tasks.append((OD, od_times_list, id_to_name, scenario_name, year))
+            OD_matrix, station_to_index = preprocess_OD_matrix(OD, id_to_name)
+            tasks.append((OD_matrix, station_to_index, preprocessed_od_times_list, scenario_name, year))
 
-    results = Parallel(n_jobs=-1, verbose=1)(
-        delayed(process_scenario_year)(OD, od_times_list, id_to_name, scenario_name, year)
-        for OD, od_times_list, id_to_name, scenario_name, year in tqdm(tasks, desc="Parallel Processing")
+    # Parallel execution
+    results = Parallel(n_jobs=-1)(
+        delayed(process_scenario_year_numba)(OD_matrix, station_to_index, preprocessed_od_times_list, scenario_name, year)
+        for OD_matrix, station_to_index, preprocessed_od_times_list, scenario_name, year in tqdm(tasks, desc="Parallel Processing")
     )
 
-    # Organize results
+    # Organize results into final dictionary
     total_travel_times = {}
     for scenario_name, year, dev_total_times in results:
         if scenario_name not in total_travel_times:
@@ -240,7 +257,7 @@ def calculate_total_travel_times(od_times_list, scenario_ODs_dir, df_access):
 
     return total_travel_times
 
-def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, duration, output_path, dev_id_lookup_table):
+def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, output_path, dev_id_lookup_table):
     """
     Calculate and monetize travel time savings for each development scenario compared to the status quo,
     scaling peak hour data to daily trips using a fixed tau value.
@@ -261,33 +278,33 @@ def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, durat
     tau = 0.13  # Assumes 13% of daily trips occur in the peak hour
 
     # Monetization factor of travel time (CHF/h * 365 d/a * duration)
-    mon_factor = VTTS * 365 * duration
+    mon_factor = VTTS * 365
 
     # Prepare a list to store the results
     results = []
 
     # Iterate over each development
-    for scenario_name, development in TTT_developments.items():
-        for dev_id, dev_tt in development.items():
-            # Get the corresponding status quo travel time
-            status_quo_tt = TTT_status_quo.get(scenario_name, {}).get('Development_1', 0)
+    for scenario_name, development in tqdm(TTT_developments.items(), desc="Saving scenarios"):
+        for year, year_tt in development.items():
+            for dev_id, dev_tt in year_tt.items():
+                # Get the corresponding status quo travel time
+                status_quo_tt = TTT_status_quo.get(scenario_name, {}).get(year, {}).get('Development_1', 0)
 
-            # Calculate travel time savings (negative if no savings), scaled to daily trips
-            tt_savings_daily = (status_quo_tt - dev_tt) #again scaling with tau?
-            tt_savings_yearly = tt_savings_daily * 365 * VTTS
-            # Monetize the travel time savings
-            monetized_savings = tt_savings_daily * mon_factor
-            dev_id_lookup = dev_id_lookup_table.loc[int(dev_id.removeprefix("Development_")), "dev_id"]
-            # Append the results
-            results.append({
-                "development": dev_id_lookup,
-                "scenario": scenario_name,
-                "status_quo_tt": status_quo_tt,
-                "development_tt": dev_tt,
-                "tt_savings_daily": tt_savings_daily,
-                "monetized_savings": monetized_savings,
-                "monetized_savings_yearly": tt_savings_yearly
-            })
+                # Calculate travel time savings (negative if no savings), scaled to daily trips
+                tt_savings_daily = (status_quo_tt - dev_tt) #again scaling with tau?
+                monetized_savings_yearly = tt_savings_daily * 365 * VTTS
+                # Monetize the travel time savings
+                dev_id_lookup = dev_id_lookup_table.loc[int(dev_id.removeprefix("Development_")), "dev_id"]
+                # Append the results
+                results.append({
+                    "development": dev_id_lookup,
+                    "scenario": scenario_name,
+                    "year": year,
+                    "status_quo_tt": status_quo_tt,
+                    "development_tt": dev_tt,
+                    "tt_savings_daily": tt_savings_daily,
+                    "monetized_savings_yearly": monetized_savings_yearly
+                })
 
     # Convert results to a DataFrame
     results_df = pd.DataFrame(results)
