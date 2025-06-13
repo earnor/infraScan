@@ -228,6 +228,210 @@ def add_new_line(stations, frequency, service_name, travel_times, edges, points,
     # Save the updated edges GeoDataFrame
     return edges
 
+def create_railway_services_2024_extended():
+    edges_ak2024_ext = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
+    points = gpd.read_file(r'data\Network\processed\points.gpkg')
+
+    edges_ak2024_ext = add_new_line(
+        stations=[
+            'Zürich Stadelhofen',
+            'Zürich, Kreuzplatz',
+            'Zürich, Hegibachplatz',
+            'Zürich, Balgrist',
+            'Zürich, Rehalp',
+            'Waldburg',
+            'Spital Zollikerberg',
+            'Zollikerberg',
+            'Waltikon',
+            'Zumikon',
+            'Maiacher',
+            'Neue Forch',
+            'Forch',
+            'Scheuren',
+            'Neuhaus bei Hinteregg',
+            'Hinteregg',
+            'Egg',
+            'Langwies ZH',
+            'Emmat',
+            'Esslingen'
+        ],
+        frequency=4,
+        service_name='S18',
+        travel_times=[
+            1,  # Zürich Stadelhofen -> Zürich, Kreuzstrasse
+            2,  # Zürich, Kreuzstrasse -> Zürich, Hegibachplatz
+            3,  # Zürich, Hegibachplatz -> Zürich, Balgrist
+            3,  # Zürich, Balgrist -> Zürich, Rehalp
+            1,  # Zürich, Rehalp -> Waldburg
+            1,  # Waldburg -> Spital Zollikerberg
+            1,  # Spital Zollikerberg -> Zollikerberg
+            1,  # Zollikerberg -> Waltikon
+            2,  # Waltikon -> Zumikon
+            2,  # Zumikon -> Maiacher
+            1,  # Maiacher -> Neue Forch
+            1,  # Neue Forch -> Forch
+            3,  # Forch -> Scheuren
+            2,  # Scheuren -> Neuhaus bei Hinteregg
+            2,  # Neuhaus bei Hinteregg -> Hinteregg
+            3,  # Hinteregg -> Egg
+            2,  # Egg -> Langwies ZH
+            1,  # Langwies ZH -> Emmat
+            1,  # Emmat -> Esslingen
+            4  # Emmat -> Esslingen (korrigiert: 06:21 → 06:25)
+        ],
+        edges=edges_ak2024_ext,
+        points=points)
+
+    edges_ak2024_ext = add_new_line(
+        stations=[
+            'Winterthur',
+            'Winterthur Grüze',
+            'Winterthur Seen',
+            'Sennhof-Kyburg',
+            'Kollbrunn',
+            'Rikon',
+            'Rämismühle-Zell',
+            'Turbenthal',
+            'Wila',
+            'Saland',
+            'Bauma',
+            'Steg',
+            'Fischenthal',
+            'Gibswil',
+            'Wald ZH',
+            'Tann-Dürnten',
+            'Rüti ZH'
+        ],
+        frequency=2,
+        service_name='S26',
+        travel_times=[
+            5,  # Winterthur -> Winterthur Grüze (05:13 → 05:18)
+            3,  # Winterthur Grüze -> Winterthur Seen (05:18 → 05:21)
+            3,  # Winterthur Seen -> Sennhof-Kyburg (05:21 → 05:24)
+            3,  # Sennhof-Kyburg -> Kollbrunn (05:24 → 05:27)
+            3,  # Kollbrunn -> Rikon (05:27 → 05:30)
+            2,  # Rikon -> Rämismühle-Zell (05:30 → 05:32)
+            4,  # Rämismühle-Zell -> Turbenthal (05:32 → 05:36)
+            2,  # Turbenthal -> Wila (05:36 → 05:38)
+            6,  # Wila -> Saland (05:38 → 05:44)
+            6,  # Saland -> Bauma (05:44 → 05:50)
+            4,  # Bauma -> Steg (05:50 → 05:54)
+            5,  # Steg -> Fischenthal (05:54 → 05:59)
+            2,  # Fischenthal -> Gibswil (05:59 → 06:01)
+            7,  # Gibswil -> Wald ZH (06:01 → 06:08)
+            5,  # Wald ZH -> Tann-Dürnten (06:08 → 06:13)
+            3  # Tann-Dürnten -> Rüti ZH (06:13 → 06:16)
+        ],
+        edges=edges_ak2024_ext,
+        points=points)
+
+    edges_ak2024_ext = add_new_line(
+        stations=[
+            'Winterthur',
+            'Effretikon',
+            'Bassersdorf',
+            'Kloten',
+            'Kloten Balsberg',
+            'Opfikon',
+            'Zürich Oerlikon',
+            'Zürich Hardbrücke',
+            'Zürich HB',
+            'Zürich Stadelhofen',
+            'Meilen',
+            'Uetikon',
+            'Männedorf',
+            'Stäfa',
+            'Uerikon',
+            'Feldbach',
+            'Kempraten',
+            'Rapperswil SG'
+        ],
+        frequency=2,
+        service_name='S7',
+        travel_times=[
+            9,  # Winterthur -> Effretikon (05:05 → 05:14) [Kemptthal wird nur später bedient]
+            6,  # Effretikon -> Bassersdorf (05:14 → 05:20)
+            5,  # Bassersdorf -> Kloten (05:20 → 05:25)
+            2,  # Kloten -> Kloten Balsberg (05:25 → 05:27)
+            2,  # Kloten Balsberg -> Opfikon (05:27 → 05:29)
+            4,  # Opfikon -> Zürich Oerlikon (05:29 → 05:33)
+            4,  # Zürich Oerlikon -> Zürich Hardbrücke (05:33 → 05:37)
+            3,  # Zürich Hardbrücke -> Zürich HB (05:37 → 05:40)
+            4,  # Zürich HB -> Zürich Stadelhofen (05:40 → 05:44)
+            14,  # Zürich Stadelhofen -> Meilen (05:44 → 05:58)
+            3,  # Meilen -> Uetikon (05:58 → 06:01)
+            2,  # Uetikon -> Männedorf (06:01 → 06:03)
+            5,  # Männedorf -> Stäfa (06:03 → 06:08)
+            3,  # Stäfa -> Uerikon (06:08 → 06:11)
+            5,  # Uerikon -> Feldbach (06:11 → 06:16)
+            2,  # Feldbach -> Kempraten (06:16 → 06:18)
+            4  # Kempraten -> Rapperswil SG (06:18 → 06:22)
+        ],
+        edges=edges_ak2024_ext,
+        points=points,
+        via=[
+            '[1119]', '-99', '-99', '-99', '-99', '-99', '-99', '-99', '-99',
+            '[2551, 2534, 1122, 1174, 702, 2459, 999]', '-99', '-99', '-99', '-99', '-99', '-99', '-99'
+        ])
+
+    edges_ak2024_ext = add_new_line(
+        stations=[
+            'Zürich HB',
+            'Zürich Stadelhofen',
+            'Zürich Tiefenbrunnen',
+            'Zollikon',
+            'Küsnacht Goldbach',
+            'Küsnacht ZH',
+            'Erlenbach ZH',
+            'Winkel am Zürichsee',
+            'Herrliberg-Feldmeilen',
+            'Meilen'
+        ],
+        frequency=4,
+        service_name='pseudo S6',
+        travel_times=[
+            3,  # Zürich HB → Zürich Stadelhofen (06:00 → 06:03)
+            3,  # Zürich Stadelhofen → Zürich Tiefenbrunnen (06:03 → 06:06)
+            2,  # Zürich Tiefenbrunnen → Zollikon (06:06 → 06:08)
+            2,  # Zollikon → Küsnacht Goldbach (06:08 → 06:10)
+            3,  # Küsnacht Goldbach → Küsnacht ZH (06:10 → 06:13)
+            2,  # Küsnacht ZH → Erlenbach ZH (06:13 → 06:15)
+            2,  # Erlenbach ZH → Winkel am Zürichsee (06:15 → 06:17)
+            3,  # Winkel am Zürichsee → Herrliberg-Feldmeilen (06:17 → 06:20)
+            3  # Herrliberg-Feldmeilen → Meilen (06:20 → 06:23)
+        ],
+        edges=edges_ak2024_ext,
+        points=points)
+    edges_ak2024_ext = add_new_line(
+        stations=['Zürich HB', 'Zürich Oerlikon', 'Wallisellen', 'Dietlikon', 'Effretikon', 'Winterthur'],
+        frequency=2,
+        service_name='S8',
+        travel_times=[5, 4, 2, 6, 7],
+        edges=edges_ak2024_ext,
+        points=points,
+        via=['-99', '-99', '-99', '-99', '[1119]'])
+
+    edges_ak2024_ext = add_new_line(
+        stations=['Zürich HB', 'Zürich Stadelhofen', 'Stettbach', 'Winterthur'],
+        frequency=4,
+        service_name='S11+S12',
+        travel_times=[4, 6, 12],
+        edges=edges_ak2024_ext,
+        points=points,
+        via=['-99', '-99', '[638, 666, 1119]'])
+
+    edges_ak2024_ext = add_new_line(
+        stations=['Zürich HB', 'Pfäffikon SZ'],
+        frequency=2,
+        service_name='fast_ZH_PF',
+        travel_times=[26],
+        edges=edges_ak2024_ext,
+        points=points,
+        via=['-99'])
+
+    edges_ak2024_ext.to_file(paths.RAIL_SERVICES_AK2024_EXTENDED_PATH)
+    return edges_ak2024_ext, points
+
 def create_railway_services_AK2035():
 
     edges_ak2035 = gpd.read_file(paths.RAIL_SERVICES_2024_PATH)
@@ -451,7 +655,23 @@ def create_railway_services_AK2035_extended(edges_ak2035_ext, points):
 ],
         edges=edges_ak2035_ext,
         points=points)
+    edges_ak2035_ext = add_new_line(
+        stations=['Zürich HB', 'Zürich Stadelhofen', 'Stettbach', 'Winterthur'],
+        frequency=4,
+        service_name='S11+S12',
+        travel_times=[4, 6, 12],
+        edges=edges_ak2035_ext,
+        points=points,
+        via=['-99', '-99', '[638, 666, 1119]'])
 
+    edges_ak2035_ext = add_new_line(
+        stations=['Zürich HB', 'Pfäffikon SZ'],
+        frequency=2,
+        service_name='fast_ZH_PF',
+        travel_times=[26],
+        edges=edges_ak2035_ext,
+        points=points,
+        via=['-99'])
 
     edges_ak2035_ext = edges_ak2035_ext.fillna(0)
     edges_ak2035_ext.loc[edges_ak2035_ext['Via'] == 0, 'Via'] = '-99'

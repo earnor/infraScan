@@ -18,6 +18,7 @@ from rasterio.warp import reproject
 import glob
 import settings
 import ast  # For safely evaluating string representations of lists
+import pickle
 
 def split_via_nodes(df):
     """
@@ -403,6 +404,11 @@ def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100)):
 
     total_costs["TotalConstructionCost"] = total_costs["construction_cost"]
     total_costs["TotalMaintenanceCost"] = total_costs["maintenance"]
+
+    columns_to_drop = ['status_quo_tt', 'development_tt']
+    columns_to_drop += [col for col in total_costs.columns if 'total_scenario_' in col]
+    total_costs = total_costs.drop(columns=columns_to_drop, errors='ignore')
+
     # Save results to CSV
     total_costs.to_csv(paths.TOTAL_COST_RAW, index=False)
 
@@ -424,9 +430,7 @@ def transform_and_reshape_cost_df():
     df = pd.read_csv(paths.TOTAL_COST_RAW)
 
     # Drop the specified columns
-    columns_to_drop = ['status_quo_tt', 'development_tt']
-    columns_to_drop += [col for col in df.columns if 'total_scenario_' in col]
-    df = df.drop(columns=columns_to_drop, errors='ignore')
+
     df = df.rename(columns={"maintenance": "maintenance_cost"})
 
     # Reshaping the dataframe
@@ -1416,73 +1420,59 @@ def discounting(df, discount_rate, base_year=2018):
     return df_discounted
 
 
-def create_cost_and_benefit_df(construction_and_maintenance_costs, dev_list, monetized_tt, scenario_list, start_year, end_year):
-    # Create full index for the complete DataFrame
+def create_cost_and_benefit_df(start_year, end_year):
+    with open(paths.TTS_CACHE, "rb") as f_in:
+        unused_1, monetized_tt, unused_2 = pickle.load(f_in)
+
+    dev_list = monetized_tt['development'].unique()
+    scenario_list = monetized_tt['scenario'].unique()
+    construction_and_maintenance_costs = pd.read_csv(paths.CONSTRUCTION_COSTS)
+
+    # Erstelle den vollständigen Index
     full_index = pd.MultiIndex.from_product(
         [dev_list, scenario_list, list(range(start_year, end_year + 1))],
         names=["development", "scenario", "year"]
     )
 
-    # Create an index for costs (which only vary by development and year)
-    cost_index = pd.MultiIndex.from_product(
-        [dev_list, list(range(start_year, end_year + 1))],
-        names=["development", "year"]
-    )
-    # Create an empty DataFrame for costs with the development-year index
-    cost_df = pd.DataFrame(index=cost_index, columns=["const_cost", "maint_cost"])
-    # Fill the cost_df DataFrame with construction and maintenance costs
+    # Erstelle DataFrame für alle Kosten und Benefits
+    costs_and_benefits_dev = pd.DataFrame(index=full_index, columns=["const_cost", "maint_cost", "benefit"])
+
+    # Füge Benefits hinzu - vektorisierte Operation
+    costs_and_benefits_dev["benefit"] = monetized_tt.set_index(["development", "scenario", "year"])[
+        "monetized_savings_yearly"]
+
+    # Erstelle eine effiziente Mapping-Struktur für die Kosten
+    cost_map = {}
     for _, row in construction_and_maintenance_costs.iterrows():
         dev_name = row["Development"]
-        total_construction_cost = row["TotalConstructionCost"]
-        yearly_maintenance_cost = row["YearlyMaintenanceCost"]
+        const_cost = row["TotalConstructionCost"]
+        maint_cost = row["YearlyMaintenanceCost"]
 
-        # Add construction cost only in year 1
-        cost_df.loc[(dev_name, 1), "const_cost"] = total_construction_cost
+        for year in range(start_year, end_year + 1):
+            cost_map[(dev_name, year)] = {
+                "const_cost": const_cost if year == 1 else 0,
+                "maint_cost": 0 if year == 1 else maint_cost
+            }
 
-        # Set maintenance cost to 0 for year 1
-        cost_df.loc[(dev_name, 1), "maint_cost"] = 0
+    # Wende die Kostenzuordnung auf den kompletten DataFrame an
+    for dev in dev_list:
+        for year in range(start_year, end_year + 1):
+            if (dev, year) in cost_map:
+                cost_data = cost_map[(dev, year)]
+                # Wende auf alle passenden Szenarien gleichzeitig an
+                costs_and_benefits_dev.loc[(dev, slice(None), year), "const_cost"] = cost_data["const_cost"]
+                costs_and_benefits_dev.loc[(dev, slice(None), year), "maint_cost"] = cost_data["maint_cost"]
 
-        # Add yearly maintenance costs for years 2 through duration
-        for year in range(2, cp.duration + 1):
-            cost_df.loc[(dev_name, year), "const_cost"] = 0  # No construction costs after year 1
-            cost_df.loc[(dev_name, year), "maint_cost"] = yearly_maintenance_cost
-    # Create the full DataFrame with all columns
-    costs_and_benefits_dev = pd.DataFrame(index=full_index, columns=["const_cost", "maint_cost",
-                                                                     "benefit"])  # contains benefits and costs for each year for every scenario and development
-    # Convert monetized benefits directly to a dictionary using (development, scenario, year) as the key
-    monetized_benefits_dict = monetized_tt.set_index(["development", "scenario", "year"])[
-        "monetized_savings_yearly"].to_dict()
-
-    # Safely assign benefits using the full 3-part key
-    for idx in costs_and_benefits_dev.index:
-        dev, scenario, year = idx
-        key = (dev, scenario, year)
-        if key in monetized_benefits_dict:
-            costs_and_benefits_dev.loc[idx, "benefit"] = monetized_benefits_dict[key]
-
-    # Manual filling of costs for each scenario-development-year combination
-    print("Filling in costs for each development and year...")
-    for idx in costs_and_benefits_dev.index:
-        dev, scenario, year = idx
-        dev_year_key = (dev, year)
-
-        if dev_year_key in cost_df.index:
-            # Assign construction cost for this development-year
-            costs_and_benefits_dev.loc[idx, "const_cost"] = cost_df.loc[dev_year_key, "const_cost"]
-            # Assign maintenance cost for this development-year
-            costs_and_benefits_dev.loc[idx, "maint_cost"] = cost_df.loc[dev_year_key, "maint_cost"]
-
-    # Save the costs and benefits DataFrame to CSV
+    # Speichere die Ergebnisse
     costs_benefits_csv_path = "data/costs/costs_and_benefits_dev.csv"
     print(f"Saving costs and benefits to {costs_benefits_csv_path}")
     costs_and_benefits_dev.to_csv(costs_benefits_csv_path)
 
-    # Save a reset_index version for easier analysis if needed
+    # Flache Version für einfachere Analyse
     costs_benefits_flat_csv_path = "data/costs/costs_and_benefits_flat.csv"
     costs_and_benefits_dev.reset_index().to_csv(costs_benefits_flat_csv_path, index=False)
     print(f"Saving flattened version to {costs_benefits_flat_csv_path}")
 
-    # Apply discounting to the DataFrame
     return costs_and_benefits_dev
 
 

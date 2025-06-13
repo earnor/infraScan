@@ -15,6 +15,7 @@ from scoring import *
 from scoring import create_cost_and_benefit_df
 from traveltime_delay import *
 from random_scenarios import get_random_scenarios
+from plots import plot_cumulative_cost_distribution
 import geopandas as gpd
 import networkx as nx
 import os
@@ -184,14 +185,10 @@ def infrascanrail():
                                                             duration=cp.duration)
 
 
-    cost_and_benefits_dev = create_cost_and_benefit_df(construction_and_maintenance_costs, dev_list, monetized_tt, scenario_list, 2018, 2100)
-    costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=cp.discount_rate, base_year=2018)
-    discounted_costs_benefits_csv_path = "data/costs/costs_and_benefits_dev_discounted.csv"
-    costs_and_benefits_dev_discounted.to_csv(discounted_costs_benefits_csv_path)
+    cost_and_benefits_dev = create_cost_and_benefit_df(settings.start_year_scenario, settings.end_year_scenario)
+    costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=cp.discount_rate, base_year=settings.start_year_scenario)
+    costs_and_benefits_dev_discounted.to_csv(paths.COST_AND_BENEFITS_DISCOUNTED)
 
-
-
-    link_traffic_to_map() #only makes a nice graph, not necessary for functioning of tool
 
     runtimes["Calculate the TTT Savings"] = time.time() - st
     st = time.time()
@@ -237,7 +234,7 @@ def compute_tts(dev_id_lookup,
     Returns:
         dev_list, monetized_tt, scenario_list
     """
-    cache_file = "data/Network/travel_time/cache/compute_tts_cache.pkl"
+    cache_file = paths.TTS_CACHE
 
     if use_cache:
         # 2) If use_cache=True, try to load from disk
@@ -299,6 +296,7 @@ def import_process_network(use_cache):
     reformat_rail_nodes()
     network_ak2035, points = create_railway_services_AK2035()
     create_railway_services_AK2035_extended(network_ak2035, points)
+    create_railway_services_2024_extended()
     reformat_rail_edges(settings.rail_network)
     add_construction_info_to_network()
     network_in_corridor(poly=settings.perimeter_infra_generation)
@@ -518,7 +516,8 @@ def visualize_results(clear_plot_directory=False):
     # Plots are saved in the 'plots' directory.
     results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
     create_and_save_plots(results_raw)
-
+    # Mit dem vorhandenen DataFrame
+    plot_cumulative_cost_distribution(results_raw, "plots/cumulative_cost_distribution.png")
     '''
     plot_developments_and_table_for_scenarios(
     osm_file="data/osm_map.gpkg",  # Use the converted GeoPackage file

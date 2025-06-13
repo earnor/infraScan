@@ -147,7 +147,7 @@ def generate_population_scenarios(ref_df: pd.DataFrame,
     growth_std_devs = np.linspace(start_std_dev, end_std_dev, n_years)
 
     # Latin Hypercube Sampling: growth rate perturbations
-    sampler = qmc.LatinHypercube(d=n_years)
+    sampler = qmc.LatinHypercube(d=n_years, seed = 42)
     lhs_samples = sampler.random(n=n_scenarios)  # shape: (n_scenarios, n_years)
     growth_perturbations = norm.ppf(lhs_samples) * growth_std_devs  # shape: (n_scenarios, n_years)
 
@@ -157,7 +157,7 @@ def generate_population_scenarios(ref_df: pd.DataFrame,
     scenario_growth[:, 0] = 0
 
     # Random shocks: et ~ N(0, std_dev_shocks)
-    shock_sampler = qmc.LatinHypercube(d=n_years)
+    shock_sampler = qmc.LatinHypercube(d=n_years, seed = 43)
     lhs_shocks = shock_sampler.random(n=n_scenarios)
     et = norm.ppf(lhs_shocks) * std_dev_shocks
     # Setze Schocks für das erste Jahr auf 0
@@ -334,26 +334,31 @@ def plot_population_scenarios(scenarios_df: pd.DataFrame, n_to_plot: int = 10):
 
 
 def plot_scenarios_with_range(
-    scenarios_df: pd.DataFrame,
-    save_path,
-    value_col: str = "population"
-    
+        scenarios_df: pd.DataFrame,
+        save_path,
+        value_col: str = "population"
 ):
     """
     Plot the range of all scenarios for a given value column as a shaded area
     and a single example scenario, with automatically scaled SI-prefix axis.
+    Also plots lines for +/- 1.65 standard deviations from the mean (contains 90% of all values).
 
     Parameters:
     - scenarios_df: DataFrame with columns "scenario", "year", and the specified value column
+    - save_path: path where the plot will be saved
     - value_col: name of the column in scenarios_df containing the values to plot
     """
     # compute per-year stats
     year_stats = (
         scenarios_df
         .groupby("year")[value_col]
-        .agg(min="min", max="max", mean="mean")
+        .agg(min="min", max="max", mean="mean", std="std")
         .reset_index()
     )
+
+    # Berechne +/- 1.65 Standardabweichungen (90% Konfidenzintervall)
+    year_stats["mean_plus_1_65std"] = year_stats["mean"] + 1.65 * year_stats["std"]
+    year_stats["mean_minus_1_65std"] = year_stats["mean"] - 1.65 * year_stats["std"]
 
     fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
 
@@ -363,7 +368,22 @@ def plot_scenarios_with_range(
         year_stats["min"],
         year_stats["max"],
         color='grey', alpha=0.3,
-        label="Possible range"
+        label="Gesamter Bereich"
+    )
+
+    # +/- 1.65 Std. Abw. Linien (90% Konfidenzintervall)
+    ax.plot(
+        year_stats["year"],
+        year_stats["mean_plus_1_65std"],
+        color='red', linestyle='-', alpha=0.7,
+        label="+1,65σ (95%)"
+    )
+
+    ax.plot(
+        year_stats["year"],
+        year_stats["mean_minus_1_65std"],
+        color='red', linestyle='-', alpha=0.7,
+        label="-1,65σ (5%)"
     )
 
     # mean line
@@ -371,7 +391,7 @@ def plot_scenarios_with_range(
         year_stats["year"],
         year_stats["mean"],
         color='grey', linestyle='--', alpha=0.8,
-        label="Mean"
+        label="Mittelwert"
     )
 
     # pick a random scenario to highlight
@@ -381,7 +401,7 @@ def plot_scenarios_with_range(
         sample_df["year"],
         sample_df[value_col],
         color='blue', linewidth=2,
-        label=f"Example scenario {sample_id}"
+        label=f"Beispielszenario {sample_id}"
     )
 
     # apply automatic SI‐prefix scaling on the Y axis
@@ -389,14 +409,18 @@ def plot_scenarios_with_range(
 
     # labels & styling
     col_title = value_col.replace('_', ' ').title()
-    ax.set_xlabel("Year")
+    ax.set_xlabel("Jahr")
     ax.set_ylabel(col_title)
-    ax.set_title(f"{col_title} scenarios: range and example")
+    ax.set_title(f"{col_title}-Szenarien: Bereich, Mittelwert und 90% Konfidenzintervall")
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
-    # Save the plot, overwriting any existing file
-    plt.savefig(save_path)
+
+    # Save the plot, creating a filename based on the value column
+    filename = f"{value_col.lower().replace(' ', '_')}_scenarios.png"
+    full_path = os.path.join(save_path, filename)
+    plt.savefig(full_path)
+    plt.show()
     plt.close(fig)
 
 
@@ -588,9 +612,9 @@ def generate_od_growth_scenarios(
         start_year=start_year,
         end_year=end_year,
         n_scenarios=num_of_scenarios,
-        start_std_dev=0.002,
-        end_std_dev=0.01,
-        std_dev_shocks=0.01
+        start_std_dev=0.015,
+        end_std_dev=0.045,
+        std_dev_shocks=0.02
     )
     distance_per_person_scenarios = generate_distance_per_person_scenarios(
         avg_growth_rate=-0.0027,
@@ -598,20 +622,32 @@ def generate_od_growth_scenarios(
         start_year=start_year,
         end_year=end_year,
         n_scenarios=num_of_scenarios,
-        start_std_dev=0.002,
-        end_std_dev=0.005,
-        std_dev_shocks=0.01
+        start_std_dev=0.005,
+        end_std_dev=0.015,
+        std_dev_shocks=0.015
     )
-    first_three_bezirk = list(population_scenarios.keys())[:3]
-    first_three_scenarios = {bezirk: population_scenarios[bezirk] for bezirk in first_three_bezirk}
-    for pop_scenario in first_three_scenarios.values():
-        plot_scenarios_with_range(pop_scenario, paths.PLOT_SCENARIOS, 'population')
-    plot_scenarios_with_range(modal_split_scenarios, paths.PLOT_SCENARIOS,'modal_split')
-    plot_scenarios_with_range(distance_per_person_scenarios, paths.PLOT_SCENARIOS,'distance_per_person')
+    if do_plot:
+        os.chdir(paths.MAIN)
+        first_three_bezirk = list(population_scenarios.keys())[:3]
+        first_three_scenarios = {bezirk: population_scenarios[bezirk] for bezirk in first_three_bezirk}
+        for pop_scenario in first_three_scenarios.values():
+            plot_scenarios_with_range(pop_scenario, paths.PLOT_SCENARIOS, 'population')
+        plot_scenarios_with_range(modal_split_scenarios, paths.PLOT_SCENARIOS,'modal_split')
+        plot_scenarios_with_range(distance_per_person_scenarios, paths.PLOT_SCENARIOS,'distance_per_person')
+
+    # components = {
+    #     "population_scenarios": population_scenarios,
+    #     "modal_split_scenarios": modal_split_scenarios,
+    #     "distance_per_person_scenarios": distance_per_person_scenarios
+    # }
 
 
+    # Speichere alle Komponenten in einer Datei
+    #with open("scenario_data_for_plots.pkl", 'wb') as f:
+    #    pickle.dump(components, f)
     # Vorauswertung aller Modal/Distance Faktoren
     print("Berechne Modal und Distance Faktoren...")
+
     modal_factors, distance_factors = precompute_modal_distance_factors(
         modal_split_scenarios, distance_per_person_scenarios, start_year
     )

@@ -284,7 +284,7 @@ def calculate_monetized_tt_savings(TTT_status_quo, TTT_developments, VTTS, outpu
     results = []
 
     # Iterate over each development
-    for scenario_name, development in tqdm(TTT_developments.items(), desc="Saving scenarios"):
+    for scenario_name, development in tqdm(TTT_developments.items(), desc="Saving travel time savings"):
         for year, year_tt in development.items():
             for dev_id, dev_tt in year_tt.items():
                 # Get the corresponding status quo travel time

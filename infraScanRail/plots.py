@@ -1984,7 +1984,7 @@ def create_and_save_plots(df, plot_directory="plots"):
     # First create plots for developments < 101000
     small_dev_data = df[df['development'] < settings.dev_id_start_new_direct_connections]
 
-    # Boxplot for small developments
+    # Boxplot for small developments - showing only outliers, not individual points
     plt.figure(figsize=(14, 8))
     sns.boxplot(
         data=small_dev_data,
@@ -1996,29 +1996,22 @@ def create_and_save_plots(df, plot_directory="plots"):
             "marker": "o",
             "markerfacecolor": "black",
             "markeredgecolor": "black",
-            "markersize": 8,
+            "markersize": 6,
         },
-    )
-    sns.stripplot(
-        data=small_dev_data,
-        x='development',
-        y='monetized_savings',
-        color='black',
-        size=5,
-        jitter=True,
-        alpha=0.7,
+        fliersize=3,  # Smaller outlier points
+        showfliers=True  # Show outliers
     )
     plt.xlabel('Development', fontsize=12)
     plt.ylabel('Monetized Savings in CHF', fontsize=12)
     plt.xticks(rotation=90)
     plt.grid(axis='y', linestyle='--', alpha=0.7)
-    handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=8)]
+    handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=6)]
     plt.legend(handles=handles, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
     plt.savefig(os.path.join(plot_directory, "enhanced_boxplot_small_developments.png"))
     plt.close()
 
-    # Strip plot for small developments
+    # Strip plot for small developments with smaller point size
     plt.figure(figsize=(14, 8))
     sns.stripplot(
         data=small_dev_data,
@@ -2028,7 +2021,8 @@ def create_and_save_plots(df, plot_directory="plots"):
         palette=dict(zip(small_dev_data['scenario'], small_dev_data['Color'])),
         jitter=True,
         dodge=True,
-        size=8,
+        size=3,  # Much smaller point size
+        alpha=0.7
     )
     plt.xlabel('Development', fontsize=12)
     plt.ylabel('Monetized Savings in CHF', fontsize=12)
@@ -2050,7 +2044,7 @@ def create_and_save_plots(df, plot_directory="plots"):
 
         plot_data = large_dev_data[large_dev_data['development'].isin(plot_developments)]
 
-        # Boxplot for each group
+        # Boxplot for each group - showing only outliers
         plt.figure(figsize=(14, 8))
         sns.boxplot(
             data=plot_data,
@@ -2062,29 +2056,22 @@ def create_and_save_plots(df, plot_directory="plots"):
                 "marker": "o",
                 "markerfacecolor": "black",
                 "markeredgecolor": "black",
-                "markersize": 8,
+                "markersize": 6,
             },
-        )
-        sns.stripplot(
-            data=plot_data,
-            x='development',
-            y='monetized_savings',
-            color='black',
-            size=5,
-            jitter=True,
-            alpha=0.7,
+            fliersize=3,  # Smaller outlier points
+            showfliers=True  # Show outliers
         )
         plt.xlabel('Development', fontsize=12)
         plt.ylabel('Monetized Savings in CHF', fontsize=12)
         plt.xticks(rotation=90)
         plt.grid(axis='y', linestyle='--', alpha=0.7)
-        handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=8)]
+        handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=6)]
         plt.legend(handles=handles, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.tight_layout()
         plt.savefig(os.path.join(plot_directory, f"enhanced_boxplot_group_{i + 1}.png"))
         plt.close()
 
-        # Strip plot for each group
+        # Strip plot for each group with smaller point size
         plt.figure(figsize=(14, 8))
         sns.stripplot(
             data=plot_data,
@@ -2094,7 +2081,8 @@ def create_and_save_plots(df, plot_directory="plots"):
             palette=dict(zip(plot_data['scenario'], plot_data['Color'])),
             jitter=True,
             dodge=True,
-            size=8,
+            size=3,  # Much smaller point size
+            alpha=0.7
         )
         plt.xlabel('Development', fontsize=12)
         plt.ylabel('Monetized Savings in CHF', fontsize=12)
@@ -2103,7 +2091,6 @@ def create_and_save_plots(df, plot_directory="plots"):
         plt.tight_layout()
         plt.savefig(os.path.join(plot_directory, f"strip_plot_with_scenarios_group_{i + 1}.png"))
         plt.close()
-
 
 def plot_catchment_and_distributions(
     s_bahn_lines_path,
@@ -2219,8 +2206,10 @@ def plot_costs_benefits_example(cost_benefit_df):
     Args:
         cost_benefit_df: DataFrame with discounted costs and benefits
     """
-    # Find development with highest benefit in year 1
-    year1_benefits = cost_benefit_df.xs(1, level='year')
+    # Finde das niedrigste Jahr im DataFrame
+    min_year = cost_benefit_df.index.get_level_values('year').min()
+    # Extrahiere Daten für das niedrigste Jahr
+    year1_benefits = cost_benefit_df.xs(min_year, level='year')
     max_benefit_dev = year1_benefits.groupby('development')['benefit'].mean().idxmax()
 
     # Get data for the selected development
@@ -2719,3 +2708,92 @@ def plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir)
 
         print(f"  Creating plot for missing connection: {station1} - {station2}")
         plot_missing_connection_lines(G, pos, new_railway_lines, connection, filename)
+
+
+def plot_cumulative_cost_distribution(df, output_path="plot/cumulative_cost_distribution.png"):
+    """
+    Erstellt eine kumulative Wahrscheinlichkeitsverteilung der Kosten für die 5 Entwicklungen
+    mit dem höchsten Nutzen.
+
+    Args:
+        df: DataFrame mit den Kostendaten (monetized_savings)
+        output_path: Pfad zum Speichern der Abbildung
+
+    """
+    # Berechnung des Mittelwerts für jede Entwicklung
+    mean_by_dev = df.groupby('development')['monetized_savings'].mean().reset_index()
+
+    # Sortieren nach Mittelwert und Auswahl der 5 Entwicklungen mit dem höchsten Nutzen
+    top_5_devs = mean_by_dev.sort_values(by=['monetized_savings'], ascending=False).head(5)
+
+    # Extrahieren der relevanten Entwicklungs-IDs
+    top_dev_ids = top_5_devs['development'].unique()
+
+    # Datensatz auf die Top-5-Entwicklungen filtern
+    df_top = df[df['development'].isin(top_dev_ids)]
+
+    # Erstellen einer Figur
+    plt.figure(figsize=(10, 6))
+
+    # Farbpalette für die Entwicklungen
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+    # Für jede Entwicklung eine kumulative Verteilung plotten
+    for i, dev_id in enumerate(top_dev_ids):
+        dev_data = df_top[df_top['development'] == dev_id]
+
+        # Sammeln aller Nutzenwerte für diese Entwicklung und Umrechnung in Millionen CHF
+        values = dev_data['monetized_savings'].dropna().values / 1_000_000
+
+        # Sortieren der Werte für die kumulative Verteilung
+        values = np.sort(values)
+
+        # Berechnung der kumulativen Wahrscheinlichkeiten
+        y_values = np.arange(1, len(values) + 1) / len(values)
+
+        # Label für die Legende erstellen
+        dev_name = f"Entwicklung {dev_id}"
+        mean_value = dev_data['monetized_savings'].mean() / 1_000_000
+        label = f"{dev_name}: {mean_value:.1f} Mio. CHF"
+
+        # Kumulative Verteilung plotten
+        plt.plot(values, y_values, '-', color=colors[i], linewidth=2, label=label)
+
+    # Nulllinie hinzufügen
+    plt.axvline(x=0, color='lightgray', linestyle='-', linewidth=1)
+
+    # Beschriftungen und Formatierung
+    plt.xlabel('Nettonutzen [Mio. CHF]', fontsize=12)
+    plt.ylabel('Kumulative Wahrscheinlichkeit', fontsize=12)
+    plt.title('Kumulative Wahrscheinlichkeitsverteilung des Nettonutzens\nfür die 5 besten Entwicklungen', fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(title='Entwicklungen mit mittlerem Nettonutzen', fontsize=10, title_fontsize=11)
+
+    # Y-Achse von 0 bis 1
+    plt.ylim(0, 1.05)
+
+    # X-Achsen-Grenzen definieren
+    x_min = df_top['monetized_savings'].min() / 1_000_000
+    x_max = df_top['monetized_savings'].max() / 1_000_000
+    plt.xlim(x_min - 5, x_max + 5)
+
+    # Füge Markierungen bei 25%, 50% und 75% hinzu
+    plt.axhline(y=0.25, color='darkgray', linestyle=':', alpha=0.7)
+    plt.axhline(y=0.5, color='darkgray', linestyle=':', alpha=0.7)
+    plt.axhline(y=0.75, color='darkgray', linestyle=':', alpha=0.7)
+
+    # Beschriftung der horizontalen Linien
+    plt.text(x_max + 3, 0.25, '25%', va='center', fontsize=9, color='darkgray')
+    plt.text(x_max + 3, 0.5, '50%', va='center', fontsize=9, color='darkgray')
+    plt.text(x_max + 3, 0.75, '75%', va='center', fontsize=9, color='darkgray')
+
+    plt.tight_layout()
+
+    # Verzeichnis erstellen, falls nicht vorhanden
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    # Speichern und Anzeigen
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+
+    print(f"Kumulative Kostenverteilung gespeichert unter: {output_path}")
