@@ -2,7 +2,8 @@ import networkx
 from shapely.geometry import MultiLineString
 from shapely.ops import split
 import gc
-
+from joblib import Parallel, delayed
+import os
 import time
 
 from sympy.polys.subresultants_qq_zz import final_touches
@@ -340,8 +341,8 @@ def create_network_foreach_dev():
     """
     Creates individual GeoPackages for each unique development (identified by dev_id),
     combining the entire old network with the corresponding development in both directions.
+    Uses parallel processing to speed up file creation.
     """
-
     # Load the GPK file
     output_directory = paths.DEVELOPMENT_DIRECTORY
     os.makedirs(output_directory, exist_ok=True)  # Ensure the output directory exists
@@ -357,11 +358,12 @@ def create_network_foreach_dev():
     # Group new development rows by dev_id
     grouped_new_dev_rows = new_dev_rows.groupby("dev_id")
 
-    # Iterate through unique dev_id groups
-    for dev_id, group in grouped_new_dev_rows:
+    # Define a worker function to process each dev_id group
+    def process_group(dev_id_group):
+        dev_id, group = dev_id_group
         if pd.isna(dev_id):
             print("Skipping group with NULL dev_id")
-            continue  # Skip groups where dev_id is NULL (unlikely for "Yes")
+            return  # Skip groups where dev_id is NULL (unlikely for "Yes")
 
         # Combine both directions for the current dev_id
         new_dev_gdf = gpd.GeoDataFrame(group, crs=gdf.crs)
@@ -373,6 +375,9 @@ def create_network_foreach_dev():
         output_gpkg = os.path.join(output_directory, f"{dev_id}.gpkg")
         combined_gdf_new.to_file(output_gpkg, driver="GPKG")
         print(f"Saved: {output_gpkg}")
+
+    # Process all groups in parallel
+    Parallel(n_jobs=-1)(delayed(process_group)(dev_id_group) for dev_id_group in grouped_new_dev_rows)
 
     print("Processing complete.")
 
@@ -1145,10 +1150,15 @@ def prepare_Graph(df_network, df_points):
         unique_edges[['FromNode', 'FromStation']].rename(columns={'FromNode': 'Node', 'FromStation': 'Station'}),
         unique_edges[['ToNode', 'ToStation']].rename(columns={'ToNode': 'Node', 'ToStation': 'Station'})
     ]).drop_duplicates()
+
     # Add nodes with station names as attributes
     for _, row in nodes_with_names.iterrows():
         G.add_node(row['Node'], station_name=row['Station'])
     # Initialize node_coords dictionary
+    # Explizit den Namen "Kemptthal" für Knoten 1119 hinzufügen/überschreiben
+    if 1119 in G.nodes:
+        G.nodes[1119]['station_name'] = 'Kemptthal'
+        print(f"Node 1119 named as 'Kemptthal'")
     node_coords = {}
     # Add edges
     for _, row in unique_edges.iterrows():

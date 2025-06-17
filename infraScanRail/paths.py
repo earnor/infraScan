@@ -26,6 +26,7 @@ CONSTRUCTION_COSTS =  r"data/costs/construction_cost.csv"
 TOTAL_COST_WITH_GEOMETRY = r"data/costs/total_costs_with_geometry.csv"
 TOTAL_COST_RAW = r"data/costs/total_costs_raw.csv"
 COST_AND_BENEFITS_DISCOUNTED = r"data/costs/costs_and_benefits_dev_discounted.csv"
+COSTS_CONNECTION_CURVES = r"data/costs/costs_connection_curves.xlsx"
 
 TTS_CACHE = r"data/Network/travel_time/cache/compute_tts_cache.pkl"
 

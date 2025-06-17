@@ -176,7 +176,7 @@ def infrascanrail():
 
     file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
     construction_and_maintenance_costs = construction_costs(file_path=file_path,
-                                                            cost_per_meter=cp.cost_per_meter,
+                                                            cost_per_meter=cp.track_cost_per_meter,
                                                             tunnel_cost_per_meter=cp.tunnel_cost_per_meter,
                                                             bridge_cost_per_meter=cp.bridge_cost_per_meter,
                                                             track_maintenance_cost=cp.track_maintenance_cost,
@@ -574,7 +574,7 @@ def generate_infra_development(use_cache, mod_type):
         print_new_railway_lines(new_railway_lines)
 
         # Export to GeoPackage for further analysis and visualization in GIS software
-        new_lines = export_new_railway_lines(new_railway_lines, pos, paths.NEW_RAILWAY_LINES_PATH)
+        export_new_railway_lines(new_railway_lines, pos, paths.NEW_RAILWAY_LINES_PATH)
         print("\nNew railway lines exported to paths.NEW_RAILWAY_LINES_PATH")
 
         # Visualize the new railway lines on the network graph

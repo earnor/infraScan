@@ -62,40 +62,49 @@ def create_directed_graph(df):
     return G
 
 
-
-def create_graphs_from_directories(directories):
+def create_graphs_from_directories(directories, n_jobs=-1):
     """
-    Create a list of directed graphs from a list of file directories.
-    
+    Create a list of directed graphs from a list of file directories using parallel processing.
+
     Parameters:
         directories (list): List of file paths to GeoPackage or CSV files.
-        
+        n_jobs (int): Number of parallel jobs. Default -1 uses all available cores.
+
     Returns:
         list: A list of NetworkX directed graphs.
     """
-    graphs = []
-    for i, directory in enumerate(directories):
+
+    def process_file(directory):
         try:
-            print(f"Reading file {i+1}/{len(directories)}: {directory}...")
-            # Read the file into a GeoDataFrame
+            print(f"Processing: {directory}...")
+            # Read the file into a DataFrame
             if directory.endswith('.gpkg'):
                 df = gpd.read_file(directory)
             elif directory.endswith('.csv'):
                 df = pd.read_csv(directory)
             else:
                 print(f"Unsupported file format: {directory}")
-                continue
+                return None
 
             # Convert TravelTime to integers for consistent weight usage
             if "TravelTime" in df.columns:
                 df["TravelTime"] = df["TravelTime"].round().astype(int)
-            
+
             # Create the graph
             graph = create_directed_graph(df)
-            graphs.append(graph)
-            print(f"Graph {i+1} created: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges.")
+            print(f"Graph created for {directory}: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges.")
+            return graph
         except Exception as e:
             print(f"Error processing file {directory}: {e}")
+            return None
+
+    print(f"Processing {len(directories)} files in parallel with {n_jobs} jobs...")
+    results = Parallel(n_jobs=n_jobs)(delayed(process_file)(directory) for directory in directories)
+
+    # Filter out None values (failed processing)
+    graphs = [graph for graph in results if graph is not None]
+    print(f"Successfully created {len(graphs)} graphs out of {len(directories)} files.")
+
     return graphs
 
 

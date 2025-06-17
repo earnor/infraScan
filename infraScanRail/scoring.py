@@ -1,3 +1,4 @@
+
 import pandas
 
 import cost_parameters as cp
@@ -19,7 +20,6 @@ import glob
 import settings
 import ast  # For safely evaluating string representations of lists
 import pickle
-
 def split_via_nodes(df):
     """
     Split rows where the 'Via' column contains intermediate nodes.
@@ -245,85 +245,125 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
     developments = [process_via_column(df) for df in developments]
 
     for i, dev_df in enumerate(developments):
-        # Add the development lines to the construction cost data
-        combined_df = pd.concat([df_construction_cost, dev_df], ignore_index=True)
 
-        # Split the lines with a Via column
-        df_split = split_via_nodes(combined_df)
-        df_split = merge_lines(df_split)
-        df_split = df_split.dropna(subset=['NumOfTracks'])
+        if dev_df["dev_id"].iloc[0] < settings.dev_id_start_new_direct_connections:
 
-        # Calculate MinTrack as the smallest digit from the NumOfTracks column
-        df_split['NumOfTracks'] = df_split['NumOfTracks'].astype(int)
-        df_split['MinTrack'] = df_split['NumOfTracks'].apply(lambda x: int(min(str(x))))
+            # Add the development lines to the construction cost data
+            combined_df = pd.concat([df_construction_cost, dev_df], ignore_index=True)
 
-        # Calculate ServicesPerTrack
-        df_split['ServicesPerTrack'] = df_split['TotalFrequency'] / df_split['MinTrack']
+            # Split the lines with a Via column
+            df_split = split_via_nodes(combined_df)
+            df_split = merge_lines(df_split)
+            df_split = df_split.dropna(subset=['NumOfTracks'])
 
-        # Add a new column 'enoughCap' based on ServicesPerTrack < 8
-        df_split['enoughCap'] = df_split['ServicesPerTrack'].apply(lambda x: 'Yes' if x < 8 else 'No')
+            # Calculate MinTrack as the smallest digit from the NumOfTracks column
+            df_split['NumOfTracks'] = df_split['NumOfTracks'].astype(int)
+            df_split['MinTrack'] = df_split['NumOfTracks'].apply(lambda x: int(min(str(x))))
 
-        # Calculate costs for connections with insufficient capacity
-        insufficient_capacity = df_split[df_split['enoughCap'] == 'No'].copy()
+            # Calculate ServicesPerTrack
+            df_split['ServicesPerTrack'] = df_split['TotalFrequency'] / df_split['MinTrack']
 
-        # Generate line segments from development DataFrame
-        def get_development_segments(dev_df):
-            segments = []
-            for _, row in dev_df.iterrows():
-                from_node = row['FromNode']
-                to_node = row['ToNode']
-                via_nodes = row['Via'] if isinstance(row['Via'], list) else []
-                
-                # Create segments from FromNode -> Via -> ToNode
-                prev_node = from_node
-                for via_node in via_nodes:
-                    segments.append((prev_node, via_node))
-                    prev_node = via_node
-                segments.append((prev_node, to_node))
-            return segments
+            # Add a new column 'enoughCap' based on ServicesPerTrack < 8
+            df_split['enoughCap'] = df_split['ServicesPerTrack'].apply(lambda x: 'Yes' if x < 8 else 'No')
 
-        # Generate segments for the current development
-        development_segments = get_development_segments(dev_df)
+            # Calculate costs for connections with insufficient capacity
+            insufficient_capacity = df_split[df_split['enoughCap'] == 'No'].copy()
 
-        # Filter insufficient_capacity to include only lines in the current development
-        def is_in_development(row, segments):
-            return (row['FromNode'], row['ToNode']) in segments
+            # Generate line segments from development DataFrame
+            def get_development_segments(dev_df):
+                segments = []
+                for _, row in dev_df.iterrows():
+                    from_node = row['FromNode']
+                    to_node = row['ToNode']
+                    via_nodes = row['Via'] if isinstance(row['Via'], list) else []
 
-        insufficient_capacity = insufficient_capacity[
-            insufficient_capacity.apply(lambda row: is_in_development(row, development_segments), axis=1)
-        ]
+                    # Create segments from FromNode -> Via -> ToNode
+                    prev_node = from_node
+                    for via_node in via_nodes:
+                        segments.append((prev_node, via_node))
+                        prev_node = via_node
+                    segments.append((prev_node, to_node))
+                return segments
 
-        # Initialize cost columns
-        insufficient_capacity['NewTrackCost'] = insufficient_capacity['length of 1'] * cost_per_meter
-        insufficient_capacity['NewTunnelCost'] = (
-            insufficient_capacity['Tunnel m'] * (tunnel_cost_per_meter)
-        )
-        insufficient_capacity['NewBridgeCost'] = (
-            insufficient_capacity['Bridges m'] * (bridge_cost_per_meter)
-        )
+            # Generate segments for the current development
+            development_segments = get_development_segments(dev_df)
 
-        # Calculate total construction cost
-        insufficient_capacity['construction_cost'] = (
-            insufficient_capacity['NewTrackCost'] +
-            insufficient_capacity['NewTunnelCost'] +
-            insufficient_capacity['NewBridgeCost']
-        )
+            # Filter insufficient_capacity to include only lines in the current development
+            def is_in_development(row, segments):
+                return (row['FromNode'], row['ToNode']) in segments
 
-        # Calculate maintenance cost for each segment
-        insufficient_capacity['maintenance_cost'] = duration * (
-            insufficient_capacity['length of 1'] * track_maintenance_cost +
-            insufficient_capacity['Tunnel m'] * tunnel_maintenance_cost +
-            insufficient_capacity['Bridges m'] * bridge_maintenance_cost
-        )
+            insufficient_capacity = insufficient_capacity[
+                insufficient_capacity.apply(lambda row: is_in_development(row, development_segments), axis=1)
+            ]
 
-        # Summarize total construction and maintenance costs for the current development
-        total_construction_cost = insufficient_capacity['construction_cost'].sum()
-        total_maintenance_cost = insufficient_capacity['maintenance_cost'].sum()
+            # Initialize cost columns
+            insufficient_capacity['NewTrackCost'] = insufficient_capacity['length of 1'] * cost_per_meter
+            insufficient_capacity['NewTunnelCost'] = (
+                insufficient_capacity['Tunnel m'] * (tunnel_cost_per_meter)
+            )
+            insufficient_capacity['NewBridgeCost'] = (
+                insufficient_capacity['Bridges m'] * (bridge_cost_per_meter)
+            )
+
+            # Calculate total construction cost
+            insufficient_capacity['construction_cost'] = (
+                insufficient_capacity['NewTrackCost'] +
+                insufficient_capacity['NewTunnelCost'] +
+                insufficient_capacity['NewBridgeCost']
+            )
+
+            # Calculate maintenance cost for each segment
+            insufficient_capacity['maintenance_cost'] = duration * (
+                insufficient_capacity['length of 1'] * track_maintenance_cost +
+                insufficient_capacity['Tunnel m'] * tunnel_maintenance_cost +
+                insufficient_capacity['Bridges m'] * bridge_maintenance_cost
+            )
+
+            # Summarize total construction and maintenance costs for the current development
+            total_construction_cost = insufficient_capacity['construction_cost'].sum()
+            total_maintenance_cost = insufficient_capacity['maintenance_cost'].sum() * 0.65  # 65% of the total maintenance cost is considered as the annualized cost, the rest is covered in operating cost of Abgeltungen
+            uncovered_operating_cost = dev_df['geometry'].length.sum() / 2 * cp.operating_cost_s_bahn_per_meter*(1-cp.general_KDG)  # Assuming the geometry length is in meters and divided by 2 for both directions
+        elif dev_df["dev_id"].iloc[0] >= settings.dev_id_start_new_direct_connections:
+            connection_curve_lookup = pd.read_excel(paths.COSTS_CONNECTION_CURVES, sheet_name="Input_for_code")
+            railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
+            service_id = dev_df["Sline"].iloc[0]
+            railway_line = railway_lines[railway_lines["name"] == service_id]
+
+            # Get connection details from lookup table
+            connection_id = railway_line["missing_connection"].iloc[0]
+            connection_data = connection_curve_lookup[connection_curve_lookup["name"] == connection_id]
+
+            # Extract infrastructure data
+            track_length = connection_data["length_free_track"].iloc[0]
+            tunnel_length = connection_data["length_tunnel"].iloc[0]
+            bridge_length = connection_data["length_bridge"].iloc[0]
+
+            # Calculate costs
+            track_cost = track_length * cost_per_meter
+            tunnel_cost = tunnel_length * tunnel_cost_per_meter
+            bridge_cost = bridge_length * bridge_cost_per_meter
+
+            # Total construction cost
+            total_construction_cost = track_cost + tunnel_cost + bridge_cost
+
+            # Calculate maintenance costs
+            yearly_maintenance = (
+                                         track_length * track_maintenance_cost +
+                                         tunnel_length * tunnel_maintenance_cost +
+                                         bridge_length * bridge_maintenance_cost
+                                 ) * 0.65  # 65% of the total maintenance cost is considered as the annualized cost, the rest is covered in operating cost of Abgeltungen
+
+            total_maintenance_cost = yearly_maintenance * duration
+
+
+            uncovered_operating_cost = dev_df['geometry'].length.sum() / 2 * cp.detour_factor_tracks * cp.operating_cost_s_bahn_per_meter * (
+                        1 - cp.general_KDG)  # Assuming the geometry length is in meters and divided by 2 for both directions
         development_costs.append({
             "Development": dev_df["dev_id"].iloc[0],
             "TotalConstructionCost": total_construction_cost,
             "TotalMaintenanceCost": total_maintenance_cost,
-            "YearlyMaintenanceCost": total_maintenance_cost / duration
+            "YearlyMaintenanceCost": total_maintenance_cost / duration,
+            "uncoveredOperatingCost": uncovered_operating_cost
         })
 
         # Update the base construction cost data for the next iteration
@@ -1411,7 +1451,7 @@ def discounting(df, discount_rate, base_year=2018):
     discount_factors = {year: 1 / ((1 + discount_rate) ** (year - base_year - 1)) for year in years}
 
     # Apply discounting to each column
-    columns_to_discount = ['maint_cost', 'const_cost', 'benefit']
+    columns_to_discount = ['maint_cost', 'const_cost', 'benefit','uncovered_op_cost']
     for col in columns_to_discount:
         for year in years:
             mask = df_discounted.index.get_level_values('year') == year
@@ -1420,55 +1460,52 @@ def discounting(df, discount_rate, base_year=2018):
     return df_discounted
 
 
-def create_cost_and_benefit_df(start_year, end_year):
+def create_cost_and_benefit_df(start_year=2018, end_year=2100):
+    # Load cached data
     with open(paths.TTS_CACHE, "rb") as f_in:
-        unused_1, monetized_tt, unused_2 = pickle.load(f_in)
+        _, monetized_tt, _ = pickle.load(f_in)
 
     dev_list = monetized_tt['development'].unique()
     scenario_list = monetized_tt['scenario'].unique()
     construction_and_maintenance_costs = pd.read_csv(paths.CONSTRUCTION_COSTS)
 
-    # Erstelle den vollständigen Index
-    full_index = pd.MultiIndex.from_product(
-        [dev_list, scenario_list, list(range(start_year, end_year + 1))],
-        names=["development", "scenario", "year"]
-    )
+    # Build full index
+    years = list(range(start_year, end_year + 1))
+    full_index = pd.MultiIndex.from_product([dev_list, scenario_list, years],
+                                            names=["development", "scenario", "year"])
 
-    # Erstelle DataFrame für alle Kosten und Benefits
-    costs_and_benefits_dev = pd.DataFrame(index=full_index, columns=["const_cost", "maint_cost", "benefit"])
+    # Initialize dataframe with zeros
+    costs_and_benefits_dev = pd.DataFrame(0, index=full_index,
+                                          columns=["const_cost", "maint_cost", "uncovered_op_cost", "benefit"])
 
-    # Füge Benefits hinzu - vektorisierte Operation
-    costs_and_benefits_dev["benefit"] = monetized_tt.set_index(["development", "scenario", "year"])[
-        "monetized_savings_yearly"]
+    # Add benefits directly
+    benefit_data = monetized_tt.set_index(["development", "scenario", "year"])["monetized_savings_yearly"]
+    costs_and_benefits_dev.loc[benefit_data.index, "benefit"] = benefit_data
 
-    # Erstelle eine effiziente Mapping-Struktur für die Kosten
-    cost_map = {}
+    # Broadcast cost values
     for _, row in construction_and_maintenance_costs.iterrows():
-        dev_name = row["Development"]
+        dev_name = str(row["Development"])  # Ensure consistent typing
         const_cost = row["TotalConstructionCost"]
         maint_cost = row["YearlyMaintenanceCost"]
+        uncovered_op_cost = row["uncoveredOperatingCost"]
 
-        for year in range(start_year, end_year + 1):
-            cost_map[(dev_name, year)] = {
-                "const_cost": const_cost if year == 1 else 0,
-                "maint_cost": 0 if year == 1 else maint_cost
-            }
+        # Construction costs: only in start year
+        const_idx = pd.MultiIndex.from_product([[dev_name], scenario_list, [start_year]],
+                                               names=["development", "scenario", "year"])
+        costs_and_benefits_dev.loc[const_idx, "const_cost"] = const_cost
 
-    # Wende die Kostenzuordnung auf den kompletten DataFrame an
-    for dev in dev_list:
-        for year in range(start_year, end_year + 1):
-            if (dev, year) in cost_map:
-                cost_data = cost_map[(dev, year)]
-                # Wende auf alle passenden Szenarien gleichzeitig an
-                costs_and_benefits_dev.loc[(dev, slice(None), year), "const_cost"] = cost_data["const_cost"]
-                costs_and_benefits_dev.loc[(dev, slice(None), year), "maint_cost"] = cost_data["maint_cost"]
+        # Maintenance and uncovered op costs: from start_year + 1 to end_year
+        maint_years = list(range(start_year + 1, end_year + 1))
+        maint_idx = pd.MultiIndex.from_product([[dev_name], scenario_list, maint_years],
+                                               names=["development", "scenario", "year"])
+        costs_and_benefits_dev.loc[maint_idx, "maint_cost"] = maint_cost
+        costs_and_benefits_dev.loc[maint_idx, "uncovered_op_cost"] = uncovered_op_cost
 
-    # Speichere die Ergebnisse
+    # Save results
     costs_benefits_csv_path = "data/costs/costs_and_benefits_dev.csv"
     print(f"Saving costs and benefits to {costs_benefits_csv_path}")
     costs_and_benefits_dev.to_csv(costs_benefits_csv_path)
 
-    # Flache Version für einfachere Analyse
     costs_benefits_flat_csv_path = "data/costs/costs_and_benefits_flat.csv"
     costs_and_benefits_dev.reset_index().to_csv(costs_benefits_flat_csv_path, index=False)
     print(f"Saving flattened version to {costs_benefits_flat_csv_path}")

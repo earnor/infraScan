@@ -327,52 +327,54 @@ def create_railway_services_2024_extended():
 
     edges_ak2024_ext = add_new_line(
         stations=[
-            'Winterthur',
-            'Effretikon',
-            'Bassersdorf',
-            'Kloten',
-            'Kloten Balsberg',
-            'Opfikon',
-            'Zürich Oerlikon',
-            'Zürich Hardbrücke',
-            'Zürich HB',
-            'Zürich Stadelhofen',
-            'Meilen',
-            'Uetikon',
-            'Männedorf',
-            'Stäfa',
-            'Uerikon',
-            'Feldbach',
-            'Kempraten',
-            'Rapperswil SG'
-        ],
+    'Winterthur',
+    'Kemptthal',
+    'Effretikon',
+    'Bassersdorf',
+    'Kloten',
+    'Kloten Balsberg',
+    'Opfikon',
+    'Zürich Oerlikon',
+    'Zürich Hardbrücke',
+    'Zürich HB',
+    'Zürich Stadelhofen',
+    'Meilen',
+    'Uetikon',
+    'Männedorf',
+    'Stäfa',
+    'Uerikon',
+    'Feldbach',
+    'Kempraten',
+    'Rapperswil SG'
+    ],
         frequency=2,
         service_name='S7',
         travel_times=[
-            9,  # Winterthur -> Effretikon (05:05 → 05:14) [Kemptthal wird nur später bedient]
-            6,  # Effretikon -> Bassersdorf (05:14 → 05:20)
-            5,  # Bassersdorf -> Kloten (05:20 → 05:25)
-            2,  # Kloten -> Kloten Balsberg (05:25 → 05:27)
-            2,  # Kloten Balsberg -> Opfikon (05:27 → 05:29)
-            4,  # Opfikon -> Zürich Oerlikon (05:29 → 05:33)
-            4,  # Zürich Oerlikon -> Zürich Hardbrücke (05:33 → 05:37)
-            3,  # Zürich Hardbrücke -> Zürich HB (05:37 → 05:40)
-            4,  # Zürich HB -> Zürich Stadelhofen (05:40 → 05:44)
-            14,  # Zürich Stadelhofen -> Meilen (05:44 → 05:58)
-            3,  # Meilen -> Uetikon (05:58 → 06:01)
-            2,  # Uetikon -> Männedorf (06:01 → 06:03)
-            5,  # Männedorf -> Stäfa (06:03 → 06:08)
-            3,  # Stäfa -> Uerikon (06:08 → 06:11)
-            5,  # Uerikon -> Feldbach (06:11 → 06:16)
-            2,  # Feldbach -> Kempraten (06:16 → 06:18)
-            4  # Kempraten -> Rapperswil SG (06:18 → 06:22)
-        ],
+    4,   # Winterthur -> kemptthal (05:05 → 05:09)
+    4,   # Kemptthal -> Effretikon (05:09 → 05:13)
+    6,   # Effretikon -> Bassersdorf (05:14 → 05:20)
+    5,   # Bassersdorf -> Kloten (05:20 → 05:25)
+    2,   # Kloten -> Kloten Balsberg (05:25 → 05:27)
+    2,   # Kloten Balsberg -> Opfikon (05:27 → 05:29)
+    4,   # Opfikon -> Zürich Oerlikon (05:29 → 05:33)
+    4,   # Zürich Oerlikon -> Zürich Hardbrücke (05:33 → 05:37)
+    3,   # Zürich Hardbrücke -> Zürich HB (05:37 → 05:40)
+    4,   # Zürich HB -> Zürich Stadelhofen (05:40 → 05:44)
+    14,  # Zürich Stadelhofen -> Meilen (05:44 → 05:58)
+    3,   # Meilen -> Uetikon (05:58 → 06:01)
+    2,   # Uetikon -> Männedorf (06:01 → 06:03)
+    5,   # Männedorf -> Stäfa (06:03 → 06:08)
+    3,   # Stäfa -> Uerikon (06:08 → 06:11)
+    5,   # Uerikon -> Feldbach (06:11 → 06:16)
+    2,   # Feldbach -> Kempraten (06:16 → 06:18)
+    4    # Kempraten -> Rapperswil SG (06:18 → 06:22)
+    ],
         edges=edges_ak2024_ext,
         points=points,
         via=[
-            '[1119]', '-99', '-99', '-99', '-99', '-99', '-99', '-99', '-99',
-            '[2551, 2534, 1122, 1174, 702, 2459, 999]', '-99', '-99', '-99', '-99', '-99', '-99', '-99'
-        ])
+    '-99','-99', '-99', '-99', '-99', '-99', '-99', '-99', '-99', '-99',
+    '[2551, 2534, 1122, 1174, 702, 2459, 999]', '-99', '-99', '-99', '-99', '-99', '-99', '-99'
+            ])
 
     edges_ak2024_ext = add_new_line(
         stations=[
@@ -581,6 +583,7 @@ def create_railway_services_AK2035_extended(edges_ak2035_ext, points):
     edges_ak2035_ext=add_new_line(
         stations=[
     'Winterthur',
+    'Kemptthal',
     'Effretikon',
     'Bassersdorf',
     'Kloten',
@@ -602,7 +605,8 @@ def create_railway_services_AK2035_extended(edges_ak2035_ext, points):
         frequency=2,
         service_name='S7',
         travel_times=[
-    9,   # Winterthur -> Effretikon (05:05 → 05:14) [Kemptthal wird nur später bedient]
+    4,   # Winterthur -> kemptthal (05:05 → 05:09)
+    4,   # Kemptthal -> Effretikon (05:09 → 05:13)
     6,   # Effretikon -> Bassersdorf (05:14 → 05:20)
     5,   # Bassersdorf -> Kloten (05:20 → 05:25)
     2,   # Kloten -> Kloten Balsberg (05:25 → 05:27)
@@ -623,7 +627,7 @@ def create_railway_services_AK2035_extended(edges_ak2035_ext, points):
         edges=edges_ak2035_ext,
         points=points,
         via=[
-    '[1119]', '-99', '-99', '-99', '-99', '-99', '-99', '-99', '-99',
+    '-99','-99', '-99', '-99', '-99', '-99', '-99', '-99', '-99', '-99',
     '[2551, 2534, 1122, 1174, 702, 2459, 999]', '-99', '-99', '-99', '-99', '-99', '-99', '-99'
             ])
 
