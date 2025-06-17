@@ -397,6 +397,7 @@ def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100)):
     aggregated = cost_and_benefits.groupby(['development', 'scenario']).agg({
         'const_cost': 'sum',
         'maint_cost': 'sum',
+        'uncovered_op_cost': 'sum',
         'benefit': 'sum'
     }).reset_index()
 
@@ -410,43 +411,52 @@ def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100)):
     
     # Initialize columns with zeros
     total_costs["construction_cost"] = 0
-    total_costs["maintenance"] = 0
-    total_costs["monetized_savings"] = 0
-    total_costs["climate_cost"] = 0
-    total_costs["land_realloc"] = 0
-    total_costs["nature"] = 0
-    total_costs["noise_s1"] = 0
-    total_costs["noise_s2"] = 0
-    total_costs["noise_s3"] = 0
-    
-    # Update the construction and maintenance costs from the aggregated data
-    for _, row in aggregated.iterrows():
-        dev = row['development']
-        scenario = row['scenario']
-        mask = (total_costs['development'] == float(dev)) & (total_costs['scenario'] == scenario)
-        
-        if any(mask):
-            total_costs.loc[mask, 'construction_cost'] = row['const_cost']
-            total_costs.loc[mask, 'maintenance'] = row['maint_cost']
-            # Use negative of the benefit as monetized_savings
-            # Assuming benefits are positive when they save money, so costs should be negative
-            total_costs.loc[mask, 'monetized_savings'] = row['benefit']
+    total_costs["maintenance_cost"] = 0
+    total_costs["uncovered_op_cost"] = 0
+    total_costs["monetized_savings_total"] = 0
+    # total_costs["climate_cost"] = 0
+    # total_costs["land_realloc"] = 0
+    # total_costs["nature"] = 0
+    # total_costs["noise_s1"] = 0
+    # total_costs["noise_s2"] = 0
+    # total_costs["noise_s3"] = 0
 
-    # Dynamically compute total costs for each scenario
-    for scenario in scenarios:
-        total_costs[f"total_{scenario}"] = (
-            total_costs["construction_cost"] +
-            total_costs["maintenance"] +
-            total_costs.get(f"local_{scenario}", 0) +
-            total_costs.get(f"tt_{scenario}", 0) +
-            total_costs.get(f"externalities_{scenario}", 0)
-        )
+    # Ensure 'development' columns have the same type (float is mentioned)
+    aggregated['development'] = aggregated['development'].astype(float)
+    total_costs['development'] = total_costs['development'].astype(float)
 
+    # Set index on both DataFrames for fast aligned updates
+    aggregated_indexed = aggregated.set_index(['development', 'scenario'])
+    total_costs_indexed = total_costs.set_index(['development', 'scenario'])
+
+    # Perform updates (only where indices match)
+    total_costs_indexed.update(aggregated_indexed.rename(columns={
+        'const_cost': 'construction_cost',
+        'maint_cost': 'maintenance_cost',
+        'uncovered_op_cost': 'uncovered_op_cost',
+        'benefit': 'monetized_savings_total'
+    })[['construction_cost', 'maintenance_cost', 'uncovered_op_cost', 'monetized_savings_total']])
+
+    # Reset index if you want to keep the original structure
+    total_costs = total_costs_indexed.reset_index()
+
+    # # Dynamically compute total costs for each scenario
+    # for scenario in scenarios:
+    #     total_costs[f"total_{scenario}"] = (
+    #         total_costs["construction_cost"] +
+    #         total_costs["maintenance"] +
+    #         total_costs.get(f"local_{scenario}", 0) +
+    #         total_costs.get(f"tt_{scenario}", 0) +
+    #         total_costs.get(f"externalities_{scenario}", 0)
+    #     )
+
+    # Neue Spalten erstellen, anstatt bestehende umzubenennen
     total_costs["TotalConstructionCost"] = total_costs["construction_cost"]
-    total_costs["TotalMaintenanceCost"] = total_costs["maintenance"]
+    total_costs["TotalMaintenanceCost"] = total_costs["maintenance_cost"]
+    total_costs["TotalUncoveredOperatingCost"] = total_costs["uncovered_op_cost"]
 
     columns_to_drop = ['status_quo_tt', 'development_tt']
-    columns_to_drop += [col for col in total_costs.columns if 'total_scenario_' in col]
+    #columns_to_drop += [col for col in total_costs.columns if 'total_scenario_' in col]
     total_costs = total_costs.drop(columns=columns_to_drop, errors='ignore')
 
     # Save results to CSV
@@ -471,13 +481,13 @@ def transform_and_reshape_cost_df():
 
     # Drop the specified columns
 
-    df = df.rename(columns={"maintenance": "maintenance_cost"})
+    #df = df.rename(columns={"maintenance": "maintenance_cost"})
 
     # Reshaping the dataframe
     reshaped_df = df.pivot_table(
         index='development',
         columns='scenario',
-        values=['monetized_savings', 'construction_cost','maintenance_cost' ],
+        values=['monetized_savings_total', 'construction_cost','maintenance_cost' ],
         aggfunc='first'
     )
 
@@ -489,10 +499,10 @@ def transform_and_reshape_cost_df():
 
     # Calculate total costs for each scenario
     construction_cost_columns = [col for col in reshaped_df.columns if col.startswith("construction_cost_")]
-    savings_columns = [col for col in reshaped_df.columns if col.startswith("monetized_savings_")]
+    savings_columns = [col for col in reshaped_df.columns if col.startswith("monetized_savings_total")]
     
     for savings_col in savings_columns:
-        scenario_name = savings_col.replace("monetized_savings_", "")
+        scenario_name = savings_col.replace("monetized_savings_total", "")
         construction_cost_col = f"construction_cost_{scenario_name}"
         maintenance_cost_col = f"maintenance_cost_{scenario_name}"
         if construction_cost_col in reshaped_df.columns:
@@ -1483,7 +1493,7 @@ def create_cost_and_benefit_df(start_year=2018, end_year=2100):
     costs_and_benefits_dev.loc[benefit_data.index, "benefit"] = benefit_data
 
     # Broadcast cost values
-    for _, row in construction_and_maintenance_costs.iterrows():
+    for _, row in tqdm(construction_and_maintenance_costs.iterrows(), desc="Processing costs and benefits"):
         dev_name = str(row["Development"])  # Ensure consistent typing
         const_cost = row["TotalConstructionCost"]
         maint_cost = row["YearlyMaintenanceCost"]
