@@ -464,6 +464,7 @@ def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100)):
 
     print(f"Total costs raw saved to {paths.TOTAL_COST_RAW}")
 
+
 def transform_and_reshape_cost_df():
     """
     Transform, reshape, and enhance the dataframe:
@@ -479,15 +480,11 @@ def transform_and_reshape_cost_df():
     # Load the dataframe
     df = pd.read_csv(paths.TOTAL_COST_RAW)
 
-    # Drop the specified columns
-
-    #df = df.rename(columns={"maintenance": "maintenance_cost"})
-
     # Reshaping the dataframe
     reshaped_df = df.pivot_table(
         index='development',
         columns='scenario',
-        values=['monetized_savings_total', 'construction_cost','maintenance_cost' ],
+        values=['monetized_savings_total'],
         aggfunc='first'
     )
 
@@ -497,100 +494,123 @@ def transform_and_reshape_cost_df():
     # Reset index to have 'development' as a column
     reshaped_df = reshaped_df.reset_index()
 
-    # Calculate total costs for each scenario
-    construction_cost_columns = [col for col in reshaped_df.columns if col.startswith("construction_cost_")]
+    # Füge die Kosten hinzu (nur einmal pro Entwicklung)
+    costs_df = df.groupby('development').agg({
+        'construction_cost': 'first',
+        'maintenance_cost': 'first',
+        'uncovered_op_cost': 'first'
+    }).reset_index()
+
+    # Merge die Kosten in den reshaped DataFrame
+    reshaped_df = reshaped_df.merge(costs_df, on='development')
+
+    # Berechne die Summe der Kosten für jede Entwicklung
+    reshaped_df['total_costs'] = reshaped_df['construction_cost'] + reshaped_df['maintenance_cost'] + reshaped_df[
+        'uncovered_op_cost']
+
+    # Berechne den Nettonutzen für jedes Szenario
+    # und das Kosten-Nutzen-Verhältnis (CBA Ratio)
     savings_columns = [col for col in reshaped_df.columns if col.startswith("monetized_savings_total")]
-    
+
     for savings_col in savings_columns:
-        scenario_name = savings_col.replace("monetized_savings_total", "")
-        construction_cost_col = f"construction_cost_{scenario_name}"
-        maintenance_cost_col = f"maintenance_cost_{scenario_name}"
-        if construction_cost_col in reshaped_df.columns:
-            reshaped_df[f"total_cost_{scenario_name}"] = reshaped_df[savings_col] + reshaped_df[construction_cost_col] + reshaped_df[maintenance_cost_col]
+        scenario_name = savings_col.split("_")[-1]
+        # Berechne Nettonutzen: Einsparungen minus alle Kosten
+        reshaped_df[f"Net_Benefit_scenario_{scenario_name}"] = reshaped_df[savings_col] - reshaped_df['total_costs']
+        # Berechne CBA Ratio: Einsparungen geteilt durch Summe der Kosten
+        reshaped_df[f"cba_ratio_scenario_{scenario_name}"] = reshaped_df[savings_col] / reshaped_df['total_costs']
 
-    # Identify columns to keep
-    construction_cost_col = [col for col in reshaped_df.columns if col.startswith('construction_cost_scenario')][0]
-    maintenance_cost_col = [col for col in reshaped_df.columns if col.startswith('maintenance_cost_scenario')][0]
+    # Identifiziere die Konstruktions- und Wartungskosten-Spalten
+    construction_cost_col = 'construction_cost'
+    maintenance_cost_col = 'maintenance_cost'
+    uncovered_op_cost_col = 'uncovered_op_cost'
 
-    # Create new columns with scaled values
+    # Erstelle neue Spalten mit skalierten Werten
     reshaped_df['Construction Cost [in Mio. CHF]'] = reshaped_df[construction_cost_col] / 1_000_000
     reshaped_df['Maintenance Costs [in Mio. CHF]'] = reshaped_df[maintenance_cost_col] / 1_000_000
+    reshaped_df['Uncovered Operating Costs [in Mio. CHF]'] = reshaped_df[uncovered_op_cost_col] / 1_000_000
 
-    # Drop all original construction and maintenance columns
-    columns_to_drop = [col for col in reshaped_df.columns if col.startswith('construction_cost_od_matrix_') or col.startswith('maintenance_od_matrix_combined_')]
-    reshaped_df = reshaped_df.drop(columns=columns_to_drop, errors='ignore')
+    # Formatiere die monetarisierten Einsparungen für jedes Szenario
+    for savings_col in savings_columns:
+        scenario_name = savings_col.split("_")[-1]
+        reshaped_df[f"Monetized Savings Scenario {scenario_name} [in Mio. CHF]"] = reshaped_df[savings_col] / 1_000_000
 
-    # Adjust Net Benefit columns
-    for col in reshaped_df.columns:
-        if col.startswith("Net Benefit "):
-            reshaped_df[col] = -reshaped_df[col] / 1_000_000
-            reshaped_df = reshaped_df.rename(columns={col: f"{col} [in Mio. CHF]"})
+    # Formatiere die Nettonutzen für jedes Szenario
+    for col in [c for c in reshaped_df.columns if c.startswith("Net_Benefit")]:
+        scenario_name = col.split("_")[-1]
+        reshaped_df[f"Net Benefit Scenario {scenario_name} [in Mio. CHF]"] = reshaped_df[col] / 1_000_000
 
-    # Temporarily transform 'development' to integer for merging
+    # Temporär die 'development' zu Integer umwandeln für das Merging
     reshaped_df['dev_id'] = reshaped_df['development'].astype(int)
 
-    # Load the geometry and additional data
-    geometry_data = gpd.read_file("data/Network/processed/updated_new_links.gpkg")[['dev_id', 'geometry','Sline']]
-    geometry_data['dev_id'] = geometry_data['dev_id'] #- 100000 + 1  # Adjust dev_id by subtracting 100000 and starting with ID 1
+    # Lade die Geometrie und zusätzliche Daten
+    geometry_data = gpd.read_file("data/Network/processed/updated_new_links.gpkg")[['dev_id', 'geometry', 'Sline']]
+    geometry_data['dev_id'] = geometry_data['dev_id']
 
-
-    # 2. Group by dev_id, merge all the line‐geometries,
-    #    and carry along Sline (they’re all the same anyway)
-
+    # 2. Gruppiere nach dev_id, fasse alle Liniengeometrien zusammen,
+    # und übertrage Sline (sie sind ohnehin alle gleich)
     def merge_grouped_lines(geoms):
         u = unary_union(geoms)
-        # If unary_union returned exactly one LineString, just return it
+        # Falls unary_union genau eine LineString zurückgab, gib sie einfach zurück
         if isinstance(u, LineString):
             return u
-        # Otherwise (MultiLineString, etc.), stitch them into one or more continuous lines
+        # Andernfalls (MultiLineString usw.) verbinde sie zu einer oder mehreren durchgehenden Linien
         return linemerge(u)
 
     merged = (
         geometry_data
         .groupby('dev_id')
         .agg({
-            # Merge all line segments into one (Multi)LineString
+            # Fasse alle Liniensegmente zu einer (Multi)LineString zusammen
             'geometry': merge_grouped_lines,
-            # Just take the first Sline in each dev_id—since they’re guaranteed identical
+            # Nimm einfach die erste Sline in jeder dev_id - sie sind garantiert identisch
             'Sline': 'first'
         })
         .reset_index()
     )
 
-    # 3. Re‐wrap as a GeoDataFrame (retaining the original CRS)
+    # 3. Verpacke als GeoDataFrame (unter Beibehaltung des ursprünglichen CRS)
     geometry_data = gpd.GeoDataFrame(merged, geometry='geometry', crs=geometry_data.crs)
 
-    # Merge geometry and additional information into reshaped_df
+    # Füge Geometrie und zusätzliche Informationen in reshaped_df ein
     reshaped_df = reshaped_df.merge(geometry_data, on='dev_id', how='left')
 
-    # Restore 'Development_' prefix in the development column for CSV
+    # Stelle das 'Development_' Präfix im Entwicklungsspalte für CSV wieder her
     reshaped_df['development'] = 'Development_' + reshaped_df['dev_id'].astype(str)
 
-    # Drop the temporary 'dev_id' column
+    # Entferne die temporäre 'dev_id' Spalte
     reshaped_df = reshaped_df.drop(columns=['dev_id'])
 
-    # Round monetized savings columns to the nearest CHF
-    monetized_savings_columns = [col for col in reshaped_df.columns if col.startswith("Monetized Savings")]
-    reshaped_df[monetized_savings_columns] = reshaped_df[monetized_savings_columns].round(0)
+    # Runde die monetarisierten Einsparungsspalten auf die nächste CHF
+    monetized_savings_columns = [col for col in reshaped_df.columns if "Monetized Savings" in col]
+    reshaped_df[monetized_savings_columns] = reshaped_df[monetized_savings_columns].round(2)
 
-    # Reorder columns
+    # Runde auch die Nettonutzen- und CBA-Verhältnisspalten
+    net_benefit_columns = [col for col in reshaped_df.columns if "Net Benefit" in col]
+    reshaped_df[net_benefit_columns] = reshaped_df[net_benefit_columns].round(2)
+
+    cba_ratio_columns = [col for col in reshaped_df.columns if "cba_ratio" in col]
+    reshaped_df[cba_ratio_columns] = reshaped_df[cba_ratio_columns].round(2)
+
+    # Ordne Spalten neu
     columns_order = (
-        ['development', 'Sline', 'Construction Cost [in Mio. CHF]', 'Maintenance Costs [in Mio. CHF]'] +
-        [col for col in reshaped_df.columns if col.startswith("Monetized Savings")] +
-        [col for col in reshaped_df.columns if col.startswith("Net Benefit")]
+            ['development', 'Sline', 'Construction Cost [in Mio. CHF]', 'Maintenance Costs [in Mio. CHF]',
+             'Uncovered Operating Costs [in Mio. CHF]'] +
+            [col for col in reshaped_df.columns if "Monetized Savings" in col] +
+            [col for col in reshaped_df.columns if "Net Benefit" in col] +
+            [col for col in reshaped_df.columns if "cba_ratio" in col]
     )
 
-    # Ensure 'geometry' is placed at the very end
+    # Stelle sicher, dass 'geometry' ganz am Ende steht
     columns_order += [col for col in reshaped_df.columns if col not in columns_order and col != 'geometry']
     columns_order.append('geometry')
 
-    # Reorder the dataframe
+    # Ordne den DataFrame neu
     reshaped_df = reshaped_df[columns_order]
 
-    # Convert to GeoDataFrame
+    # Konvertiere zu GeoDataFrame
     gdf = gpd.GeoDataFrame(reshaped_df, geometry='geometry', crs=geometry_data.crs)
 
-    # Save results to CSV and GeoPackage
+    # Speichere Ergebnisse als CSV und GeoPackage
     reshaped_df.to_csv(paths.TOTAL_COST_WITH_GEOMETRY, index=False)
     gdf.to_file("data/costs/total_costs_with_geometry.gpkg", driver="GPKG")
 

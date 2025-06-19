@@ -496,21 +496,21 @@ def visualize_results(clear_plot_directory=False):
     # make a plot of the developments
     plot_developments_expand_by_one_station()
     # plot the scenarios
-    plot_scenarios()
+    #plot_scenarios()
     # make a plot of the catchement with id and times
-    create_plot_catchement()
-    create_catchement_plot_time()
+    #create_plot_catchement()
+    #create_catchement_plot_time()
     # plot the empl and pop with the comunal boarders and the catchment
     # to visualize the OD-Transformation 
-    plot_catchment_and_distributions(
-        s_bahn_lines_path="data/Network/processed/split_s_bahn_lines.gpkg",
-        water_bodies_path="data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp",
-        catchment_raster_path="data/catchment_pt/catchement.tif",
-        communal_borders_path="data/_basic_data/Gemeindegrenzen/UP_GEMEINDEN_F.shp",
-        population_raster_path="data/independent_variable/processed/raw/pop20.tif",
-        employment_raster_path="data/independent_variable/processed/raw/empl20.tif",
-        extent_path="data/_basic_data/innerboundary.shp"
-    )
+    # plot_catchment_and_distributions(
+    #     s_bahn_lines_path="data/Network/processed/split_s_bahn_lines.gpkg",
+    #     water_bodies_path="data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp",
+    #     catchment_raster_path="data/catchment_pt/catchement.tif",
+    #     communal_borders_path="data/_basic_data/Gemeindegrenzen/UP_GEMEINDEN_F.shp",
+    #     population_raster_path="data/independent_variable/processed/raw/pop20.tif",
+    #     employment_raster_path="data/independent_variable/processed/raw/empl20.tif",
+    #     extent_path="data/_basic_data/innerboundary.shp"
+    # )
     # Load the dataset and generate plots:
     # - Enhanced boxplot and strip plot for monetized savings by development.
     # Plots are saved in the 'plots' directory.

@@ -218,7 +218,7 @@ def plot_scenarios():
                     # Für Modal Split und Distance: absolute Werte
                     lower_bound, upper_bound = federal_2050_range
                     if value_col == "modal_split":
-                        marker_description = f"Bundes-Szenario 2050 ({lower_bound:.1f}-{upper_bound:.1f}%)"
+                        marker_description = f"Bundes-Szenario 2050 ({lower_bound*100:.1f}-{upper_bound*100:.1f}%)"
                     else:
                         marker_description = f"Bundes-Szenario 2050 ({lower_bound:.2f}-{upper_bound:.2f} km)"
             else:
@@ -252,8 +252,8 @@ def plot_scenarios():
             if bezirk:
                 title_prefix += f" - Bezirk {bezirk}"
         elif value_col == "modal_split":
-            # Modal Split in Prozent
-            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}%"))
+            # Modal Split in Prozent (Werte kommen als Dezimalzahlen und müssen für die Anzeige mit 100 multipliziert werden)
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x * 100:.0f}%"))
             ax.set_ylabel("Modal-Split (%)")
             title_prefix = "Modal-Split"
         else:
@@ -294,5 +294,5 @@ def plot_scenarios():
     plot_scenarios_with_range(distance_per_person_scenarios, directory, 'distance_per_person',
                                   federal_2050_range=(34.77, 39.47))
 fig_dir = r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\network_performance_Ak2035 plot"
-plot_tt_development_over_time(save_fig=True, output_dir=fig_dir, show_std_dev=False)
-#plot_scenarios()
+#plot_tt_development_over_time(save_fig=True, output_dir=fig_dir, show_std_dev=False)
+plot_scenarios()
