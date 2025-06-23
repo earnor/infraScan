@@ -9,7 +9,8 @@ NEW_RAILWAY_LINES_PATH = r"data\Network\processed\new_railway_lines.gpkg"
 NETWORK_WITH_ALL_MODIFICATIONS = r"data\Network\processed\combined_network_with_all_modifications.gpkg"
 DEVELOPMENT_DIRECTORY = r"data\Network\processed\developments"
 
-RAIL_POINTS_PATH = r"data\Network\Rail_Node.csv"
+RAIL_NODES_PATH = r"data\Network\Rail_Node.csv"
+RAIL_POINTS_PATH = r"data\Network\processed\points.gpkg"
 OD_KT_ZH_PATH = r'data/_basic_data/KTZH_00001982_00003903.xlsx'
 OD_STATIONS_KT_ZH_PATH = r'data/traffic_flow/od/rail/ktzh/od_matrix_stations_ktzh_20.csv'
 COMMUNE_TO_STATION_PATH = r"data\Network\processed\Communes_to_railway_stations_ZH.xlsx"

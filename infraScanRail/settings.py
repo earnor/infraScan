@@ -18,12 +18,17 @@ infra_generation_modification_type = 'ALL' #either 'EXTEND_LINES' or 'NEW_DIRECT
 infra_generation_rail_network = paths.RAIL_SERVICES_AK2035_PATH
 
 OD_type = 'canton_ZH' #either 'canton_ZH' or 'pt_catchment_perimeter'
+only_demand_from_to_perimeter = True
 
 scenario_type = 'GENERATED' #either 'GENERATED' or 'STATIC_9' or 'dummy'
 amount_of_scenarios = 100
 start_year_scenario = 2018
 end_year_scenario = 2100
 #choose which OD
+
+plot_passenger_flow = True
+plot_railway_line_load = True
+
 
 
 
@@ -33,6 +38,9 @@ perimeter_infra_generation = Polygon([  #No GeoJSON with this polygon type!
     (2694972.602, 1255514.900),
     (2687415.817, 1251056.404)  # closing the polygon
 ])
+perimeter_demand = perimeter_infra_generation
+
+
 
 raster_size = (170,210)
 

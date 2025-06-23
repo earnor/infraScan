@@ -110,7 +110,7 @@ def reformat_rail_nodes():
     # Points in simplified network can be intersections ("intersection"==1) or access points ("intersection"==0)
     # Points are stored in "data\Network\processed\points.gpkg"
 
-    current_points = pd.read_csv(paths.RAIL_POINTS_PATH, sep=";", decimal=",", encoding="ISO-8859-1")
+    current_points = pd.read_csv(paths.RAIL_NODES_PATH, sep=";", decimal=",", encoding="ISO-8859-1")
     current_points = gpd.GeoDataFrame(current_points,
                                       geometry=gpd.points_from_xy(current_points["XKOORD"], current_points["YKOORD"]),
                                       crs="epsg:21781")

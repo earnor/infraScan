@@ -3003,3 +3003,123 @@ def plot_cumulative_cost_distribution(df, output_path="plot/cumulative_cost_dist
     plt.close()
 
     print(f"Kumulative Kostenverteilung gespeichert unter: {output_path}")
+
+
+def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bahnnetz",
+                    node_size=100, node_color='skyblue', edge_scale=0.001, figsize=(20, 16)):
+    """
+    Visualisiert einen Graph mit Passagierflüssen, wobei die Liniendicke proportional zum Fluss ist.
+    Flüsse in beide Richtungen werden zusammengefasst und als ungerichtete Kanten dargestellt.
+
+    Parameters:
+        flow_graph (nx.DiGraph): Der Graph mit Flussattributen an den Kanten
+        output_path (str, optional): Pfad zum Speichern der Grafik, wenn None wird die Grafik angezeigt
+        title (str): Titel der Grafik
+        node_size (int): Größe der Knoten
+        node_color (str): Farbe der Knoten
+        edge_scale (float): Skalierungsfaktor für die Kantendicke
+        figsize (tuple): Größe der Abbildung (Breite, Höhe)
+
+    Returns:
+        matplotlib.figure.Figure: Die erstellte Abbildung
+    """
+
+    # Erstelle eine neue Figur
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Extrahiere Positionen aus dem Graphen
+    pos = nx.get_node_attributes(flow_graph, 'position')
+
+    # Überprüfe, ob für jeden Knoten eine Position vorhanden ist
+    if len(pos) != flow_graph.number_of_nodes():
+        raise ValueError(f"Es fehlen Positionen für einige Knoten: {len(pos)} von {flow_graph.number_of_nodes()}")
+
+    # Erstelle ein Dictionary, um bidirektionale Flüsse zusammenzufassen
+    combined_flows = {}
+
+    # Sammle alle Flüsse und kombiniere sie für bidirektionale Kanten
+    for source, target, data in flow_graph.edges(data=True):
+        # Erstelle einen einheitlichen Kantenschlüssel (immer kleinerer Index zuerst)
+        edge_key = tuple(sorted([source, target]))
+        flow = data.get('flow', 0)
+
+        if edge_key in combined_flows:
+            combined_flows[edge_key] += flow
+        else:
+            combined_flows[edge_key] = flow
+
+    # Sammle die kombinierten Flüsse für Farbskala
+    flows = list(combined_flows.values())
+    if not flows:
+        raise ValueError("Keine Flüsse im Graphen gefunden")
+
+    min_flow = min(flows)
+    max_flow = max(flows)
+
+    # Erstelle eine Farbskala
+    cmap = plt.cm.viridis_r
+    norm = Normalize(vmin=min_flow, vmax=max_flow)
+
+    # Zeichne die Knoten
+    nx.draw_networkx_nodes(flow_graph, pos,
+                           node_size=node_size,
+                           node_color=node_color,
+                           edgecolors='black',
+                           alpha=0.7,
+                           ax=ax)
+
+    # Zeichne Kanten mit Dicke proportional zum kombinierten Fluss
+    for edge_key, total_flow in combined_flows.items():
+        source, target = edge_key
+
+        # Berechne die Liniendicke basierend auf dem Fluss
+        width = total_flow * edge_scale
+        # Minimal- und Maximalwerte für die Linienstärke
+        width = max(0.5, min(10, width))
+
+        # Wähle die Farbe basierend auf dem Fluss
+        edge_color = cmap(norm(total_flow))
+
+        # Zeichne die Kante (ungerichtet)
+        nx.draw_networkx_edges(flow_graph, pos,
+                               edgelist=[(source, target)],
+                               width=width,
+                               edge_color=[edge_color],
+                               alpha=0.7,
+                               arrows=False,  # Keine Pfeile für ungerichtete Kanten
+                               ax=ax)
+
+    # Beschrifte die Knoten direkt mit Knotennamen
+    nx.draw_networkx_labels(flow_graph, pos, font_size=8, ax=ax)
+
+    # Erstelle eine Farbskala-Legende
+    sm = ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, shrink=0.8)
+    cbar.set_label('Kombinierter Passagierfluss', fontsize=12)
+
+    # Füge Statistiken hinzu
+    total_flow = sum(flows)
+    text_info = (f"Gesamtfluss: {total_flow:.0f} Passagiere\n"
+                 f"Max. Fluss: {max_flow:.0f}\n"
+                 f"Min. Fluss: {min_flow:.0f}\n"
+                 f"Anzahl Kanten: {len(combined_flows)}")
+
+    plt.figtext(0.01, 0.01, text_info, fontsize=10,
+                bbox=dict(facecolor='white', alpha=0.7, boxstyle='round'))
+
+    # Setze Titel und entferne Achsen
+    ax.set_title(title, fontsize=16)
+    ax.axis('off')
+
+    # Passe die Figur an und erhöhe die Auflösung
+    plt.tight_layout()
+
+    # Speichere oder zeige die Figur
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Grafik wurde gespeichert unter: {output_path}")
+    else:
+        plt.show()
+
+    return fig

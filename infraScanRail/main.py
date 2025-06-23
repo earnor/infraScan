@@ -1,10 +1,5 @@
 # import packages
-import shutil
-import time
-import pickle
-import paths
 import scoring
-import settings
 from TT_Delay import *
 from catchment_pt import *
 from display_results import *
@@ -15,9 +10,8 @@ from scoring import *
 from scoring import create_cost_and_benefit_df
 from traveltime_delay import *
 from random_scenarios import get_random_scenarios
-from plots import plot_cumulative_cost_distribution
+from plots import plot_cumulative_cost_distribution, plot_flow_graph
 import geopandas as gpd
-import networkx as nx
 import os
 import warnings
 import cost_parameters as cp
@@ -132,12 +126,10 @@ def infrascanrail():
     ##################################################################################
     ##################################################################################
     # IMPLEMENT THE SCORING
-    # 1) Compute construction and maintenancecosts
+    # 1) Compute construction and maintenance costs
     # 2) Compute Traveltime Savings
 
     print("\nIMPLEMENT SCORING \n")
-
-
 
     ##################################################################################
     # 1) Calculate Traveltimes for all OD_ for all developments
@@ -152,24 +144,18 @@ def infrascanrail():
     dev_id_lookup = create_dev_id_lookup_table()
     od_times_dev, od_times_status_quo, G_status_quo, G_development = create_travel_time_graphs(settings.rail_network, settings.use_cache_traveltime_graph, dev_id_lookup)
 
-    print("STOOOOOOOOOOOOOOOOOOOOOOOP")
     #Compute Passenger flow on network
     OD_matrix_flow = pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
-    flows_on_edges = calculate_flow_on_edges(G_status_quo[0], OD_matrix_flow)
+    points = gpd.read_file(paths.RAIL_POINTS_PATH)
+    flows_on_edges = calculate_flow_on_edges(G_status_quo[0], OD_matrix_flow, points)
+    plot_flow_graph(flows_on_edges, output_path="plots/passenger_flows/passenger_flow_map.png", edge_scale=0.0007)
 
     runtimes["Calculate Traveltimes for all developments"] = time.time() - st
     st = time.time()
 
-    ##################################################################################
-
-
     #################################################################################
-    # Travel time delay on rail
 
     # Compute the OD matrix for the current infrastructure under all scenarios
-
-
-
     if settings.OD_type == 'canton_ZH':
         get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=settings.amount_of_scenarios,
                              use_cache=settings.use_cache_scenarios, do_plot=True)
@@ -182,11 +168,7 @@ def infrascanrail():
     # 2) Compute construction costs
 
     ##here a check for capacity could be added
-
     # Compute the construction costs for each development
-
-
-
     file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
     construction_and_maintenance_costs = construction_costs(file_path=file_path,
                                                             cost_per_meter=cp.track_cost_per_meter,
@@ -316,14 +298,15 @@ def import_process_network(use_cache):
     return points
 
 
-def getStationOD(use_cache, stations_in_perimeter):
+def getStationOD(use_cache, stations_in_perimeter, only_demand_from_to_corridor=False):
     if use_cache:
         return
     else:
         communalOD = scoring.GetOevDemandPerCommune(tau=1)
         communes_to_stations = pd.read_excel(paths.COMMUNE_TO_STATION_PATH)
         railway_station_OD = aggregate_commune_od_to_station_od(communalOD, communes_to_stations)
-        railway_station_OD = filter_od_matrix_by_stations(railway_station_OD, stations_in_perimeter)
+        if only_demand_from_to_corridor:
+            railway_station_OD = filter_od_matrix_by_stations(railway_station_OD, stations_in_perimeter)
         railway_station_OD.to_csv(paths.OD_STATIONS_KT_ZH_PATH)
 
 
@@ -644,6 +627,7 @@ def create_dev_id_lookup_table():
     df = pd.DataFrame({'dev_id': dev_ids}, index=range(1, len(dev_ids) + 1))
 
     return df
+
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
