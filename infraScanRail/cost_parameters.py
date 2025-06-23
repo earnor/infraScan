@@ -1,3 +1,5 @@
+import numpy as np
+
 VTTS = 14.8 # CHF/h
 # Construction costs
 yearly_maintenance_to_construction_cost_factor = 0.03
@@ -18,3 +20,7 @@ construction_start_year = 2050
 
 tau = 0.13
 discount_rate = 0.03  # 3% discount rate
+
+average_train_change_time = 7.1 #Axhausen, 2014
+change_time_comfort_factor = 1.7
+comfort_weighted_change_time = int(np.round(average_train_change_time * change_time_comfort_factor))  # Comfort weighted change time in minutes

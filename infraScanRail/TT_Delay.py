@@ -6,59 +6,61 @@ from joblib import Parallel, delayed
 from data_import import *
 from random_scenarios import load_scenarios_from_cache
 import numba
+import cost_parameters as cp
 
-def create_directed_graph(df):
+
+def create_directed_graph(df, change_time):
     G = nx.DiGraph()
-    
-    # Add main nodes for each station
-    for station in set(df['FromStation']).union(set(df['ToStation'])):
-        G.add_node(f"main_{station}", type="main_node", station=station)
-    
-    # Add sub-nodes and connections between them
+
+    stations = set(df['FromStation']).union(set(df['ToStation']))
+
+    # Add entry and exit nodes for each station with node_id
+    for station in stations:
+        # Finde die node_id für diese Station
+        node_id = None
+        station_rows_from = df[df['FromStation'] == station]
+        station_rows_to = df[df['ToStation'] == station]
+        node_id = station_rows_from.iloc[0]['FromNode']
+
+        G.add_node(f"entry_{station}", type="entry_node", station=station, node_id=node_id)
+        G.add_node(f"exit_{station}", type="exit_node", station=station, node_id=node_id)
+
+    # Add sub-nodes and S-Bahn edges
     for idx, row in df.iterrows():
-        from_sub_node = f"sub_{row['FromStation']}_{row['Service']}_{row['Direction']}"
-        to_sub_node = f"sub_{row['ToStation']}_{row['Service']}_{row['Direction']}"
-        
-        # Add sub-nodes
-        G.add_node(from_sub_node, type="sub_node", station=row['FromStation'], Service=row['Service'], direction=row['Direction'])
-        G.add_node(to_sub_node, type="sub_node", station=row['ToStation'], Service=row['Service'], direction=row['Direction'])
-        
-        # Add direct edge with TravelTime weight
+        from_sub = f"sub_{row['FromStation']}_{row['Service']}_{row['Direction']}"
+        to_sub = f"sub_{row['ToStation']}_{row['Service']}_{row['Direction']}"
+
+        # Add sub-nodes with attributes
+        G.add_node(from_sub, type="sub_node", station=row['FromStation'], service=row['Service'],
+                   direction=row['Direction'])
+        G.add_node(to_sub, type="sub_node", station=row['ToStation'], service=row['Service'],
+                   direction=row['Direction'])
+
+        # S-Bahn connection
         if pd.notna(row['TravelTime']):
-            weight = int(round(row['TravelTime']))  # Ensure integer weights
-            G.add_edge(from_sub_node, to_sub_node, weight=weight)
-    
-    # Add sub-to-main and main-to-sub switching with penalties
-    for node in G.nodes:
-        if G.nodes[node]["type"] == "sub_node":
-            station = G.nodes[node]["station"]
-            main_node = f"main_{station}"
-            if main_node in G.nodes:
-                G.add_edge(node, main_node, weight=3)  # Sub-to-Main
-                G.add_edge(main_node, node, weight=3)  # Main-to-Sub
-    
-    # Ensure sub-to-sub direct edges within the same line and direction
-    sub_nodes = [node for node, data in G.nodes(data=True) if data["type"] == "sub_node"]
-    for sub1 in sub_nodes:
-        for sub2 in sub_nodes:
-            if sub1 != sub2:
-                data1 = G.nodes[sub1]
-                data2 = G.nodes[sub2]
-                # Add edge only if the same service, direction, and station
-                if (data1["Service"] == data2["Service"] and 
-                    data1["direction"] == data2["direction"] and 
-                    data1["station"] != data2["station"]):
-                    # Get travel time from DataFrame for this connection
-                    row = df[
-                        (df['FromStation'] == data1["station"]) &
-                        (df['ToStation'] == data2["station"]) &
-                        (df['Service'] == data1["Service"]) &
-                        (df['Direction'] == data1["direction"])
-                    ]
-                    if not row.empty:
-                        travel_time = int(row.iloc[0]['TravelTime'])
-                        G.add_edge(sub1, sub2, weight=travel_time)
-    
+            weight = int(round(row['TravelTime']))
+            G.add_edge(from_sub, to_sub, weight=weight)
+
+    # Add boarding and alighting edges
+    for node, data in G.nodes(data=True):
+        if data['type'] == 'sub_node':
+            station = data['station']
+            entry_node = f"entry_{station}"
+            exit_node = f"exit_{station}"
+
+            # Boarding: entry → sub_node
+            G.add_edge(entry_node, node, weight=3)
+            # Alighting: sub_node → exit
+            G.add_edge(node, exit_node, weight=3)
+
+    # Add intra-station change edges between sub-nodes
+    for station in stations:
+        station_sub_nodes = [n for n, d in G.nodes(data=True) if d['type'] == 'sub_node' and d['station'] == station]
+        for i, sub1 in enumerate(station_sub_nodes):
+            for j, sub2 in enumerate(station_sub_nodes):
+                if i != j:
+                    G.add_edge(sub1, sub2, weight=change_time)
+
     return G
 
 
@@ -91,7 +93,7 @@ def create_graphs_from_directories(directories, n_jobs=-1):
                 df["TravelTime"] = df["TravelTime"].round().astype(int)
 
             # Create the graph
-            graph = create_directed_graph(df)
+            graph = create_directed_graph(df, cp.comfort_weighted_change_time)
             print(f"Graph created for {directory}: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges.")
             return graph
         except Exception as e:
@@ -111,19 +113,19 @@ def create_graphs_from_directories(directories, n_jobs=-1):
 # Function to calculate the fastest travel time between two main nodes
 def calculate_fastest_travel_time(graph, origin, destination):
     """
-    Calculate the fastest travel time between two main nodes.
-    
+    Calculate the fastest travel time between two stations using entry and exit nodes.
+
     Parameters:
         graph (networkx.DiGraph): The graph representing the railway network.
         origin (str): The name of the origin station.
         destination (str): The name of the destination station.
-        
+
     Returns:
         tuple: Shortest path and total travel time.
     """
-    source_node = f"main_{origin}"
-    target_node = f"main_{destination}"
-    
+    source_node = f"entry_{origin}"
+    target_node = f"exit_{destination}"
+
     # Check if the path exists and calculate shortest path
     if nx.has_path(graph, source_node, target_node):
         shortest_path = nx.shortest_path(graph, source=source_node, target=target_node, weight='weight')
@@ -150,7 +152,7 @@ def find_fastest_path(graph, origin, destination):
 
 def calculate_od_pairs_with_times_by_graph(graphs):
     """
-    Create all OD pairs for main stations across multiple graphs and calculate travel times using optimized methods.
+    Create all OD pairs for stations across multiple graphs and calculate travel times using optimized methods.
     Returns a list of DataFrames, one for each graph_id.
 
     Parameters:
@@ -165,27 +167,49 @@ def calculate_od_pairs_with_times_by_graph(graphs):
         print(f"→ Calculating OD pairs for development {graph_id}...")
         od_data = []
 
-        # Extract main station nodes for the current graph
-        main_nodes = [node for node, data in graph.nodes(data=True) if data.get("type") == "main_node"]
+        # Extrahiere die Stationen aus den entry/exit Nodes
+        entry_nodes = [node for node, data in graph.nodes(data=True) if data.get("type") == "entry_node"]
+        exit_nodes = [node for node, data in graph.nodes(data=True) if data.get("type") == "exit_node"]
 
-        # Use all_pairs_dijkstra_path_length for optimized distance calculation
+        # Erstelle Zuordnung von Stationsnamen zu entry/exit nodes
+        station_to_entry = {}
+        station_to_exit = {}
+
+        for node in entry_nodes:
+            station = graph.nodes[node]["station"]
+            station_to_entry[station] = node
+
+        for node in exit_nodes:
+            station = graph.nodes[node]["station"]
+            station_to_exit[station] = node
+
+        # Liste aller Stationen erstellen
+        stations = list(station_to_entry.keys())
+
+        # Use all_pairs_dijkstra_path_length für optimierte Distanzberechnung
         all_lengths = dict(nx.all_pairs_dijkstra_path_length(graph, weight="weight"))
 
-        for origin in main_nodes:
-            origin_lengths = all_lengths.get(origin, {})
-            for destination in main_nodes:
-                if origin != destination:
-                    travel_time = origin_lengths.get(destination, None)
+        for origin_station in stations:
+            origin_entry = station_to_entry[origin_station]
+            origin_lengths = all_lengths.get(origin_entry, {})
+
+            for destination_station in stations:
+                if origin_station != destination_station:
+                    destination_exit = station_to_exit[destination_station]
+                    travel_time = origin_lengths.get(destination_exit, None)
+
                     od_data.append({
-                        "from_id": origin,
-                        "to_id": destination,
-                        "time": travel_time
+                        "from_id": origin_entry,
+                        "to_id": destination_exit,
+                        "time": travel_time,
+                        "from_station": origin_station,
+                        "to_station": destination_station
                     })
 
-        # Convert the OD data for this graph to a DataFrame
+        # Konvertiere die OD-Daten für diesen Graphen in ein DataFrame
         od_df = pd.DataFrame(od_data)
-        od_df["graph_id"] = graph_id  # Add graph_id as a column
-        graph_dataframes.append(od_df)  # Append the DataFrame to the list
+        od_df["graph_id"] = graph_id  # Graph-ID als Spalte hinzufügen
+        graph_dataframes.append(od_df)  # DataFrame zur Liste hinzufügen
 
     return graph_dataframes
 
@@ -360,16 +384,19 @@ def analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes, dev_id_loo
     od_pairs = [(origin, destination) for origin in od_nodes for destination in od_nodes if origin != destination]
 
     # Function to extract travel times for specified OD pairs
+    # Function to extract travel times for specified OD pairs
     def extract_travel_times(od_matrix, od_pairs):
         extracted_data = []
         for origin, destination in od_pairs:
-            filtered_data = od_matrix[(od_matrix['from_id'] == origin) & 
-                                      (od_matrix['to_id'] == destination)]
+            filtered_data = od_matrix[(od_matrix['from_station'] == origin) &
+                                      (od_matrix['to_station'] == destination)]
             if not filtered_data.empty:
                 extracted_data.append({
                     "origin": origin,
                     "destination": destination,
-                    "time": filtered_data.iloc[0]['time']
+                    "time": filtered_data.iloc[0]['time'],
+                    "from_id": filtered_data.iloc[0]['from_id'],
+                    "to_id": filtered_data.iloc[0]['to_id']
                 })
         return pd.DataFrame(extracted_data)
 
@@ -404,3 +431,102 @@ def analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes, dev_id_loo
         top_20.to_csv(top_20_file, index=False)
 
     return "Analysis completed and files saved."
+
+
+def calculate_flow_on_edges(graph, OD_matrix):
+    """
+    Berechnet die Anzahl der Personen auf jeder Kante eines Bahn-Graphen basierend auf einer OD-Matrix.
+
+    Parameters:
+        graph (nx.DiGraph): NetworkX-Graph des Bahn-Netzwerks
+        OD_matrix (pd.DataFrame): OD-Matrix mit Personen zwischen Stationspaaren
+
+    Returns:
+        nx.DiGraph: Ein neuer Graph, der nur S-Bahn-Kanten mit Personenflüssen enthält
+    """
+    # Erstelle einen neuen Graph für die Flüsse
+    flow_graph = nx.DiGraph()
+
+    # Extrahiere die Stationen aus den entry/exit Nodes
+    entry_nodes = [node for node, data in graph.nodes(data=True) if data.get("type") == "entry_node"]
+    exit_nodes = [node for node, data in graph.nodes(data=True) if data.get("type") == "exit_node"]
+
+    # Erstelle Zuordnungen
+    station_to_entry = {}
+    station_to_exit = {}
+    node_id_to_entry = {}
+    node_id_to_exit = {}
+
+    for node in entry_nodes:
+        station = graph.nodes[node]["station"]
+        node_id = graph.nodes[node]["node_id"]
+        station_to_entry[station] = node
+        node_id_to_entry[node_id] = node
+
+    for node in exit_nodes:
+        station = graph.nodes[node]["station"]
+        node_id = graph.nodes[node]["node_id"]
+        station_to_exit[station] = node
+        node_id_to_exit[node_id] = node
+
+    # Liste aller Knoten-IDs erstellen
+    node_ids = list(node_id_to_entry.keys())
+
+    # Dictionary zur Speicherung der Kanten-Flüsse
+    edge_flows = {}
+
+    # Iteration über alle OD-Paare in der OD-Matrix
+    for origin_id in tqdm(node_ids, desc="Verarbeite Stationen"):
+        for dest_id in node_ids:
+            if origin_id != dest_id:
+                try:
+                    # Werte aus der OD-Matrix holen
+                    flow = OD_matrix.loc[origin_id, dest_id]
+
+                    if flow > 0:
+                        # Ermittle den kürzesten Pfad für dieses OD-Paar
+                        path = nx.shortest_path(graph,
+                                              source=node_id_to_entry[origin_id],
+                                              target=node_id_to_exit[dest_id],
+                                              weight='weight')
+
+                        # Erhöhe den Fluss für jede Kante entlang des Pfades
+                        for i in range(len(path) - 1):
+                            edge = (path[i], path[i + 1])
+
+                            # Filtere nur die S-Bahn-Kanten (sub_node zu sub_node)
+                            if path[i].startswith('sub_') and path[i + 1].startswith('sub_'):
+                                if edge in edge_flows:
+                                    edge_flows[edge] += flow
+                                else:
+                                    edge_flows[edge] = flow
+                except:
+                    # Alle Fehler ignorieren (KeyError, NetworkXNoPath, etc.)
+                    pass
+
+    # Füge die Kanten mit Flüssen zum neuen Graphen hinzu
+    for (source, target), flow in edge_flows.items():
+        # Extrahiere Service und Direction von den Knoten
+        source_data = graph.nodes[source]
+        service = source_data.get('service', '')
+        direction = source_data.get('direction', '')
+
+        # Füge die Knoten hinzu
+        if not flow_graph.has_node(source):
+            flow_graph.add_node(source,
+                              station=source_data.get('station', ''),
+                              service=service,
+                              direction=direction)
+
+        if not flow_graph.has_node(target):
+            target_data = graph.nodes[target]
+            flow_graph.add_node(target,
+                              station=target_data.get('station', ''),
+                              service=target_data.get('service', ''),
+                              direction=target_data.get('direction', ''))
+
+        # Füge die Kante mit Fluss und Originalgewicht hinzu
+        weight = graph[source][target]['weight']
+        flow_graph.add_edge(source, target, flow=flow, weight=weight, service=service, direction=direction)
+
+    return flow_graph

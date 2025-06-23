@@ -746,12 +746,7 @@ def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, u
     cache_dir = paths.RANDOM_SCENARIO_CACHE_PATH
 
     if use_cache:
-        # Load cached scenarios from individual .pkl files
-        scenarios = load_scenarios_from_cache(cache_dir)
-        if scenarios:
-            return scenarios
-        else:
-            print("No cached scenarios found. Generating new scenarios.")
+        return
 
     # Generate new scenarios
     scenarios = generate_od_growth_scenarios(
@@ -778,7 +773,7 @@ def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, u
             pickle.dump(scenario_data, f)
     print(f"Saved {len(scenarios)} scenarios to {cache_dir}")
     
-    return scenarios
+    return
 
 
 if __name__ == '__main__':
