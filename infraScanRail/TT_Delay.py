@@ -433,7 +433,9 @@ def analyze_travel_times(od_times_status_quo, od_times_dev, od_nodes, dev_id_loo
 def calculate_flow_on_edges(graph, OD_matrix, points):
     """
     Berechnet die Anzahl der Personen auf jeder Kante eines Bahn-Graphen basierend auf einer OD-Matrix.
-    Verwendet node_id anstatt Stationsnamen und erstellt pro Station nur einen allgemeinen Knoten.
+    Verwendet node_id anstatt Stationsnamen und erstellt zwei Graphen:
+    1. Pro Station nur einen allgemeinen Knoten (stationsbasiert)
+    2. Pro Bahnlinie separate Kanten (linienbasiert)
 
     Parameters:
         graph (nx.DiGraph): NetworkX-Graph des Bahn-Netzwerks
@@ -441,10 +443,13 @@ def calculate_flow_on_edges(graph, OD_matrix, points):
         points (pd.DataFrame): DataFrame mit Geometriedaten der Stationen
 
     Returns:
-        nx.DiGraph: Ein neuer Graph, der nur S-Bahn-Kanten mit Personenflüssen enthält
+        tuple: (station_flow_graph, line_flow_graph) - Zwei NetworkX-DiGraph-Objekte:
+               1. Graph mit Stationsknoten und aggregierten Flüssen
+               2. Graph mit linienspezifischen Kanten und Flüssen
     """
-    # Erstelle einen neuen Graph für die Flüsse
-    flow_graph = nx.DiGraph()
+    # Erstelle zwei neue Graphen für die Flüsse
+    station_flow_graph = nx.DiGraph()
+    line_flow_graph = nx.DiGraph()
     OD_matrix = OD_matrix.set_index('from_station')
 
     # Extrahiere die Stationen aus den entry/exit Nodes
@@ -475,8 +480,9 @@ def calculate_flow_on_edges(graph, OD_matrix, points):
     # Liste aller Knoten-IDs erstellen
     node_ids = list(node_id_to_entry.keys())
 
-    # Dictionary zur Speicherung der Kanten-Flüsse
-    edge_flows = {}
+    # Dictionaries zur Speicherung der Kanten-Flüsse
+    station_edge_flows = {}  # Für stationsbasierte Flüsse
+    line_edge_flows = {}  # Für linienbasierte Flüsse
 
     # Iteration über alle OD-Paare in der OD-Matrix
     for origin_id in tqdm(node_ids, desc="Verarbeite Stationen"):
@@ -492,24 +498,37 @@ def calculate_flow_on_edges(graph, OD_matrix, points):
                                                 target=node_id_to_exit[dest_id],
                                                 weight='weight')
 
-                        # Extrahiere nur die S-Bahn-Kanten und verwende dabei den Stationsnamen
+                        # Extrahiere nur die S-Bahn-Kanten
                         for i in range(len(path) - 1):
                             if path[i].startswith('sub_') and path[i + 1].startswith('sub_'):
                                 # Extrahiere Stationsnamen aus den sub_nodes
                                 # Format: "sub_StationName_Service_Direction"
-                                source_station = path[i].split('_')[1]
-                                target_station = path[i + 1].split('_')[1]
+                                source_parts = path[i].split('_')
+                                target_parts = path[i + 1].split('_')
 
-                                # Vereinfachte Kante zwischen Stationen
-                                simple_edge = (source_station, target_station)
+                                source_station = source_parts[1]
+                                target_station = target_parts[1]
 
-                                if simple_edge in edge_flows:
-                                    edge_flows[simple_edge] += flow
+                                # Für linienbasierten Graphen: Extrahiere Service (z.B. S5) und Richtung
+                                service = source_parts[2]  # z.B. "S5"
+                                direction = source_parts[3]  # Richtung
+
+                                # Aktualisiere stationsbasierte Flüsse
+                                station_edge = (source_station, target_station)
+                                if station_edge in station_edge_flows:
+                                    station_edge_flows[station_edge] += flow
                                 else:
-                                    edge_flows[simple_edge] = flow
+                                    station_edge_flows[station_edge] = flow
 
-    # Füge die Kanten mit Flüssen zum neuen Graphen hinzu
-    for (source_station, target_station), flow in edge_flows.items():
+                                # Aktualisiere linienbasierte Flüsse mit Service und Richtung
+                                line_edge = (source_station, target_station, service, direction)
+                                if line_edge in line_edge_flows:
+                                    line_edge_flows[line_edge] += flow
+                                else:
+                                    line_edge_flows[line_edge] = flow
+
+    # Füge die Kanten mit Flüssen zum stationsbasierten Graphen hinzu
+    for (source_station, target_station), flow in station_edge_flows.items():
         # Finde node_ids für Quell- und Zielstation
         source_node_id = None
         target_node_id = None
@@ -524,27 +543,62 @@ def calculate_flow_on_edges(graph, OD_matrix, points):
                 break
 
         # Füge die Knoten hinzu, wenn node_ids gefunden wurden
-        if source_node_id and not flow_graph.has_node(source_station):
-            # Finde passende Zeile im points DataFrame basierend auf node_id
+        if source_node_id and not station_flow_graph.has_node(source_station):
+            # Füge Knoten zum stationsbasierten Graphen hinzu
             point_row = points[points['ID_point'] == source_node_id]
             if not point_row.empty:
-                # Geometrie extrahieren und Position hinzufügen
                 geometry = point_row.iloc[0]['geometry']
                 position = (geometry.x, geometry.y)
-                flow_graph.add_node(source_station, position=position)
+                station_flow_graph.add_node(source_station, position=position)
 
-        if target_node_id and not flow_graph.has_node(target_station):
-            # Finde passende Zeile im points DataFrame basierend auf node_id
+        if target_node_id and not station_flow_graph.has_node(target_station):
+            # Füge Knoten zum stationsbasierten Graphen hinzu
             point_row = points[points['ID_point'] == target_node_id]
             if not point_row.empty:
-                # Geometrie extrahieren und Position hinzufügen
                 geometry = point_row.iloc[0]['geometry']
                 position = (geometry.x, geometry.y)
-                flow_graph.add_node(target_station, position=position)
+                station_flow_graph.add_node(target_station, position=position)
 
-        # Füge die Kante mit Fluss hinzu
-        if flow_graph.has_node(source_station) and flow_graph.has_node(target_station):
-            flow_graph.add_edge(source_station, target_station, flow=flow)
+        # Füge die Kante mit Fluss zum stationsbasierten Graphen hinzu
+        if station_flow_graph.has_node(source_station) and station_flow_graph.has_node(target_station):
+            station_flow_graph.add_edge(source_station, target_station, flow=flow)
 
-    return flow_graph
+    # Füge die Knoten und Kanten zum linienbasierten Graphen hinzu
+    for (source_station, target_station, service, direction), flow in line_edge_flows.items():
+        # Finde node_ids für Quell- und Zielstation
+        source_node_id = None
+        target_node_id = None
+
+        for node_id, station in node_id_to_station.items():
+            if station == source_station:
+                source_node_id = node_id
+            if station == target_station:
+                target_node_id = node_id
+
+            if source_node_id and target_node_id:
+                break
+
+        # Knoten im linienbasierten Graphen anlegen
+        for station, node_id in [(source_station, source_node_id), (target_station, target_node_id)]:
+            if node_id and not line_flow_graph.has_node(station):
+                point_row = points[points['ID_point'] == node_id]
+                if not point_row.empty:
+                    geometry = point_row.iloc[0]['geometry']
+                    position = (geometry.x, geometry.y)
+                    line_flow_graph.add_node(station, position=position)
+
+        # Füge die Kante zum linienbasierten Graphen hinzu
+        if (line_flow_graph.has_node(source_station) and
+                line_flow_graph.has_node(target_station)):
+            # Erstelle eine eindeutige Kanten-ID für die Linie
+            edge_key = f"{service}_{direction}"
+
+            # Füge die Kante mit Fluss und Liniendaten hinzu
+            line_flow_graph.add_edge(source_station, target_station,
+                                     key=edge_key,
+                                     flow=flow,
+                                     service=service,
+                                     direction=direction)
+
+    return station_flow_graph, line_flow_graph
 

@@ -1,4 +1,5 @@
 # import packages
+import paths
 import scoring
 from TT_Delay import *
 from catchment_pt import *
@@ -147,9 +148,10 @@ def infrascanrail():
     #Compute Passenger flow on network
     OD_matrix_flow = pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
     points = gpd.read_file(paths.RAIL_POINTS_PATH)
-    flows_on_edges = calculate_flow_on_edges(G_status_quo[0], OD_matrix_flow, points)
+    flows_on_edges, flows_on_railway_lines = calculate_flow_on_edges(G_status_quo[0], OD_matrix_flow, points)
     plot_flow_graph(flows_on_edges, output_path="plots/passenger_flows/passenger_flow_map.png", edge_scale=0.0007)
-
+    plot_flow_graph(flows_on_railway_lines, output_path="plots/passenger_flows/passenger_flow_map2.png", edge_scale=0.0007)
+    plot_line_flows(flows_on_railway_lines, paths.RAIL_SERVICES_AK2035_EXTENDED_PATH, output_path="plots/passenger_flows/railway_line_load.png")
     runtimes["Calculate Traveltimes for all developments"] = time.time() - st
     st = time.time()
 

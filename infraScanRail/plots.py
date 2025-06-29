@@ -3123,3 +3123,155 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
         plt.show()
 
     return fig
+
+
+def plot_line_flows(line_flow_graph, s_bahn_geopackage_path, output_path):
+    """
+    Erstellt für jede S-Bahn-Linie einen separaten Barplot, der den Fluss zwischen
+    aufeinanderfolgenden Stationspaaren in der richtigen Reihenfolge anzeigt.
+
+    Parameters:
+        line_flow_graph (nx.DiGraph): Der linienbasierte Graph mit Flussattributen
+        s_bahn_geopackage_path (str): Pfad zum GeoPackage mit den S-Bahn-Linien
+        output_path (str): Pfad zum Speichern der Ausgabedatei
+    """
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+    import os
+
+    # Lade das GeoPackage mit den S-Bahn-Linien
+    s_bahn_lines = gpd.read_file(s_bahn_geopackage_path)
+
+    # Dictionary zur Sammlung der kombinierten Flüsse pro Linie und Stationspaar
+    flows = {}
+
+    # Sammle alle gerichteten Flüsse aus dem Graph
+    for source, target, data in line_flow_graph.edges(data=True):
+        if 'service' in data and 'flow' in data:
+            service = data['service']
+            flow = data['flow']
+
+            # Erstelle einen eindeutigen Schlüssel für dieses Stationspaar
+            key = (service, source, target)
+
+            # Speichere den Fluss
+            if key not in flows:
+                flows[key] = flow
+            else:
+                flows[key] += flow
+
+    # Dictionary für die Linien und ihre geordneten Stationen
+    lines_data = {}
+
+    # Verarbeite die S-Bahn-Linien aus dem GeoPackage
+    for service in s_bahn_lines['Service'].unique():
+        # Filtere nur Einträge für diese Linie mit Direction "A"
+        line_segments = s_bahn_lines[(s_bahn_lines['Service'] == service) &
+                                     (s_bahn_lines['Direction'] == 'A')]
+
+        if len(line_segments) == 0:
+            continue
+
+        # Finde den Startpunkt (FromEnd = '1')
+        start_segment = line_segments[line_segments['FromEnd'] == '1']
+
+        if len(start_segment) == 0:
+            # Falls kein expliziter Startpunkt, nimm einfach den ersten Eintrag
+            ordered_segments = [line_segments.iloc[0]]
+        else:
+            ordered_segments = [start_segment.iloc[0]]
+
+        # Baue die Sequenz der Segmente auf
+        current_station = ordered_segments[0]['ToStation']
+        remaining_segments = line_segments[~line_segments.index.isin([ordered_segments[0].name])]
+
+        while len(remaining_segments) > 0:
+            # Finde das nächste Segment, das mit der aktuellen Station beginnt
+            next_segment = remaining_segments[remaining_segments['FromStation'] == current_station]
+
+            if len(next_segment) == 0:
+                # Kein weiteres Segment gefunden
+                break
+
+            # Füge das nächste Segment hinzu
+            ordered_segments.append(next_segment.iloc[0])
+
+            # Aktualisiere die aktuelle Station und entferne das verarbeitete Segment
+            current_station = ordered_segments[-1]['ToStation']
+            remaining_segments = remaining_segments[~remaining_segments.index.isin([ordered_segments[-1].name])]
+
+        # Erstelle eine Liste von Kanten für diese Linie in der richtigen Reihenfolge
+        edges = []
+        for segment in ordered_segments:
+            source = segment['FromStation']
+            target = segment['ToStation']
+
+            # Kombiniere die Flüsse in beide Richtungen
+            flow_forward = flows.get((service, source, target), 0)
+            flow_backward = flows.get((service, target, source), 0)
+            total_flow = flow_forward + flow_backward
+
+            edges.append({
+                'source': source,
+                'target': target,
+                'flow': total_flow
+            })
+
+        lines_data[service] = edges
+
+    # Anzahl der S-Bahn-Linien bestimmen
+    n_lines = len(lines_data)
+    if n_lines == 0:
+        print("Keine S-Bahn-Linien im Graph gefunden.")
+        return
+
+    # Figurgröße basierend auf Anzahl der Linien anpassen
+    fig, axes = plt.subplots(n_lines, 1, figsize=(12, 4 * n_lines))
+    if n_lines == 1:
+        axes = [axes]  # Für konsistente Indexierung bei nur einer Linie
+
+    # Sortierte Liste der Linien (S1, S2, S3, ...)
+    sorted_lines = sorted(lines_data.keys())
+
+    # Für jede Linie einen Barplot erstellen
+    for i, service in enumerate(sorted_lines):
+        edges = lines_data[service]
+
+        # Edge-Labels und Flows extrahieren
+        edge_labels = [f"{edge['source']} → {edge['target']}" for edge in edges]
+        flows = [edge['flow'] / 1000 for edge in edges]  # Werte in Tausend
+
+        # Plot für diese Linie erstellen
+        ax = axes[i]
+        bars = ax.bar(edge_labels, flows, color='steelblue')
+
+        # Achsenbeschriftung
+        ax.set_xlabel('Stationsverbindung', fontsize=10)
+        ax.set_ylabel('Auslastung (in Tausend)', fontsize=10)
+        ax.set_title(f'Auslastung der Linie {service}', fontsize=12)
+
+        # Werte über den Balken anzeigen
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f'{height:.1f}k',
+                        xy=(bar.get_x() + bar.get_width() / 2, height),
+                        xytext=(0, 3),
+                        textcoords="offset points",
+                        ha='center', va='bottom', fontsize=8)
+
+        # X-Achsenbeschriftungen rotieren für bessere Lesbarkeit
+        plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=8)
+
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Layout optimieren
+    plt.tight_layout()
+
+    # Sicherstellen, dass das Verzeichnis existiert
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    # Plot speichern
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Linienauslastungs-Plots gespeichert unter: {output_path}")
+
+    return fig
