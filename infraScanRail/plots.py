@@ -39,6 +39,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from scipy.interpolate import griddata
 import matplotlib.lines as mlines
 import matplotlib.colors as mcolors
+from matplotlib.ticker import FuncFormatter
 
 
 
@@ -1932,363 +1933,201 @@ def plot_developments_expand_by_one_station():
 
     print(f"Plot saved at {output_path}")
 
-def create_and_save_plots(df, plot_directory="plots", railway_lines=None):
-    """
-    Creates and saves enhanced boxplots and strip plots of monetized savings,
-    total net benefits, and CBA ratio by development.
-    """
-    # Ensure the plot directory exists
+def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     os.makedirs(plot_directory, exist_ok=True)
-
-    # Rename the column 'ID_new' to 'Scenario'
     df.rename(columns={'ID_new': 'Scenario'}, inplace=True)
-
-    # Ensure all monetized savincreate_and_save_plotsgs are positive
     df['monetized_savings_total'] = df['monetized_savings_total'].abs()
-
-    # Calculate total net benefits and CBA ratio
     df['total_costs'] = df['TotalConstructionCost'] + df['TotalMaintenanceCost'] + df['TotalUncoveredOperatingCost']
     df['total_net_benefit'] = df['monetized_savings_total'] - df['total_costs']
     df['cba_ratio'] = df['monetized_savings_total'] / df['total_costs']
+    df['Color'] = 'gray'
 
-    # Map consistent colors based on scenario type
-    def assign_color_by_type(scenario):
-        if "Urban" in scenario:
-            return 'orange'
-        elif "Equal" in scenario:
-            return 'blue'
-        elif "Rural" in scenario:
-            return 'green'
-        else:
-            return 'gray'
+    # Mapping: df['development'] (float) → railway_lines['name'] (string)
+    dev_to_conn = railway_lines.set_index('name')['missing_connection'].to_dict()
+    df['missing_connection'] = df['development'].map(lambda x: dev_to_conn.get(f"X{int(x) - 101000}", "unbekannt"))
 
-    df['Color'] = df['scenario'].apply(assign_color_by_type)
+    df['line_name'] = df['development'].map(lambda x: f"X{int(x) - 101000}")
 
-    # First create plots for developments < 101000
+    # Kleine Entwicklungen
     small_dev_data = df[df['development'] < settings.dev_id_start_new_direct_connections]
 
-    # MONETIZED SAVINGS PLOTS
+    def plot_basic_charts(data, filename_prefix):
+        order = data.groupby('line_name')['total_net_benefit'].mean().sort_values(ascending=False).index.tolist()
+        n_lines = len(order)
 
-    # Boxplot for small developments - showing only outliers, not individual points
-    plt.figure(figsize=(14, 8))
-    sns.boxplot(
-        data=small_dev_data,
-        x='development',
-        y='monetized_savings_total',
-        palette="Set2",
-        showmeans=True,
-        meanprops={
-            "marker": "o",
-            "markerfacecolor": "black",
-            "markeredgecolor": "black",
-            "markersize": 6,
-        },
-        fliersize=3,  # Smaller outlier points
-        showfliers=True  # Show outliers
-    )
-    plt.xlabel('Development', fontsize=12)
-    plt.ylabel('Monetized Savings in CHF', fontsize=12)
-    plt.xticks(rotation=90)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=6)]
-    plt.legend(handles=handles, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.savefig(os.path.join(plot_directory, "enhanced_boxplot_small_developments.png"))
-    plt.close()
+        # Farben
+        farben = {
+            'TotalConstructionCost': '#a6bddb',
+            'TotalMaintenanceCost': '#3690c0',
+            'TotalUncoveredOperatingCost': '#034e7b',
+            'monetized_savings_total': '#31a354'
+        }
 
-    # Strip plot for small developments with smaller point size
-    plt.figure(figsize=(14, 8))
-    sns.stripplot(
-        data=small_dev_data,
-        x='development',
-        y='monetized_savings_total',
-        hue='scenario',
-        palette=dict(zip(small_dev_data['scenario'], small_dev_data['Color'])),
-        jitter=True,
-        dodge=True,
-        size=3,  # Much smaller point size
-        alpha=0.7
-    )
-    plt.xlabel('Development', fontsize=12)
-    plt.ylabel('Monetized Savings in CHF', fontsize=12)
-    plt.legend(title='Scenario', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.xticks(rotation=90)
-    plt.tight_layout()
-    plt.savefig(os.path.join(plot_directory, "strip_plot_with_scenarios_small_developments.png"))
-    plt.close()
-
-    # NET BENEFIT BOXPLOT FOR SMALL DEVELOPMENTS
-    plt.figure(figsize=(14, 8))
-    sns.boxplot(
-        data=small_dev_data,
-        x='development',
-        y='total_net_benefit',
-        palette="Set2",
-        showmeans=True,
-        meanprops={
-            "marker": "o",
-            "markerfacecolor": "black",
-            "markeredgecolor": "black",
-            "markersize": 6,
-        },
-        fliersize=3,
-        showfliers=True
-    )
-    plt.xlabel('Development', fontsize=12)
-    plt.ylabel('Total Net Benefit in CHF', fontsize=12)
-    plt.xticks(rotation=90)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    # Add horizontal line at y=0 to highlight positive vs negative net benefits
-    plt.axhline(y=0, color='red', linestyle='-', alpha=0.5)
-    handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=6)]
-    plt.legend(handles=handles, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.savefig(os.path.join(plot_directory, "net_benefit_boxplot_small_developments.png"))
-    plt.close()
-
-    # CBA RATIO BOXPLOT FOR SMALL DEVELOPMENTS
-    plt.figure(figsize=(14, 8))
-    sns.boxplot(
-        data=small_dev_data,
-        x='development',
-        y='cba_ratio',
-        palette="Set2",
-        showmeans=True,
-        meanprops={
-            "marker": "o",
-            "markerfacecolor": "black",
-            "markeredgecolor": "black",
-            "markersize": 6,
-        },
-        fliersize=3,
-        showfliers=True
-    )
-    plt.xlabel('Development', fontsize=12)
-    plt.ylabel('CBA Ratio (Benefits/Costs)', fontsize=12)
-    plt.xticks(rotation=90)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    # Add horizontal line at y=1 to highlight beneficial vs non-beneficial ratio
-    plt.axhline(y=1, color='red', linestyle='-', alpha=0.5)
-    handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=6)]
-    plt.legend(handles=handles, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.savefig(os.path.join(plot_directory, "cba_ratio_boxplot_small_developments.png"))
-    plt.close()
-
-    # Create separate plots for every 15 developments (only for developments >= 101000)
-    large_dev_data = df[df['development'] >= settings.dev_id_start_new_direct_connections]
-    developments = sorted(large_dev_data['development'].unique())
-    num_plots = len(developments) // 15 + (1 if len(developments) % 15 > 0 else 0)
-
-    for i in range(num_plots):
-        start_idx = i * 15
-        end_idx = min((i + 1) * 15, len(developments))
-        plot_developments = developments[start_idx:end_idx]
-
-        plot_data = large_dev_data[large_dev_data['development'].isin(plot_developments)]
-
-        # MONETIZED SAVINGS PLOTS
-
-        # Boxplot for each group - showing only outliers
-        plt.figure(figsize=(14, 8))
-        sns.boxplot(
-            data=plot_data,
-            x='development',
-            y='monetized_savings_total',
-            palette="Set2",
+        # --- Boxplot Einsparungen ---
+        plt.figure(figsize=(7, 5))
+        ax = sns.boxplot(
+            data=data,
+            x='line_name',
+            y=data['monetized_savings_total'] / 1e6,
+            order=order,
+            palette="Blues",
+            width=0.4,
+            linewidth=0.8,
             showmeans=True,
-            meanprops={
-                "marker": "o",
-                "markerfacecolor": "black",
-                "markeredgecolor": "black",
-                "markersize": 6,
-            },
-            fliersize=3,  # Smaller outlier points
-            showfliers=True  # Show outliers
+            meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+            fliersize=3,
+            showfliers=True
         )
-        plt.xlabel('Development', fontsize=12)
-        plt.ylabel('Monetized Savings in CHF', fontsize=12)
+        ax.set_xlim(-0.5, n_lines - 0.5)
+        plt.xlabel('Linie', fontsize=12)
+        plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
         plt.xticks(rotation=90)
         plt.grid(axis='y', linestyle='--', alpha=0.7)
-        handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=6)]
-        plt.legend(handles=handles, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_directory, f"enhanced_boxplot_group_{i + 1}.png"))
+        plt.legend(
+            handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
+            loc='upper left', bbox_to_anchor=(1.01, 1)
+        )
+        plt.tight_layout(rect=[0, 0, 0.95, 1])
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_einsparungen.png"))
         plt.close()
 
-        # Strip plot for each group with smaller point size
-        plt.figure(figsize=(14, 8))
-        sns.stripplot(
-            data=plot_data,
-            x='development',
-            y='monetized_savings_total',
+        # --- Stripplot Einsparungen ---
+        plt.figure(figsize=(7, 5))
+        ax = sns.stripplot(
+            data=data,
+            x='line_name',
+            y=data['monetized_savings_total'] / 1e6,
+            order=order,
             hue='scenario',
-            palette=dict(zip(plot_data['scenario'], plot_data['Color'])),
+            palette=dict(zip(data['scenario'], data['Color'])),
             jitter=True,
-            dodge=True,
-            size=3,  # Much smaller point size
+            dodge=False,
+            size=3,
             alpha=0.7
         )
-        plt.xlabel('Development', fontsize=12)
-        plt.ylabel('Monetized Savings in CHF', fontsize=12)
-        plt.legend(title='Scenario', bbox_to_anchor=(1.05, 1), loc='upper left')
+        ax.set_xlim(-0.5, n_lines - 0.5)
+        plt.xlabel('Linie', fontsize=12)
+        plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
         plt.xticks(rotation=90)
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_directory, f"strip_plot_with_scenarios_group_{i + 1}.png"))
+        plt.legend(loc='upper left', bbox_to_anchor=(1.01, 1))
+        plt.tight_layout(rect=[0, 0, 0.95, 1])
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_stripplot_einsparungen.png"))
         plt.close()
 
-        # NET BENEFIT BOXPLOT FOR GROUP
-        plt.figure(figsize=(14, 8))
-        sns.boxplot(
-            data=plot_data,
-            x='development',
-            y='total_net_benefit',
-            palette="Set2",
+        # --- Boxplot Nettonutzen ---
+        plt.figure(figsize=(7, 5))
+        ax = sns.boxplot(
+            data=data,
+            x='line_name',
+            y=data['total_net_benefit'] / 1e6,
+            order=order,
+            palette="Blues",
+            width=0.4,
+            linewidth=0.8,
             showmeans=True,
-            meanprops={
-                "marker": "o",
-                "markerfacecolor": "black",
-                "markeredgecolor": "black",
-                "markersize": 6,
-            },
+            meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
             fliersize=3,
             showfliers=True
         )
-        plt.xlabel('Development', fontsize=12)
-        plt.ylabel('Total Net Benefit in CHF', fontsize=12)
-        plt.xticks(rotation=90)
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        ax.set_xlim(-0.5, n_lines - 0.5)
+        plt.xlabel('Linie', fontsize=12)
+        plt.ylabel('Nettonutzen in Mio. CHF', fontsize=12)
         plt.axhline(y=0, color='red', linestyle='-', alpha=0.5)
-        handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=6)]
-        plt.legend(handles=handles, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_directory, f"net_benefit_boxplot_group_{i + 1}.png"))
+        plt.xticks(rotation=90)
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.legend(
+            handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
+            loc='upper left', bbox_to_anchor=(1.01, 1)
+        )
+        plt.tight_layout(rect=[0, 0, 0.95, 1])
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_nettonutzen.png"))
         plt.close()
 
-        # CBA RATIO BOXPLOT FOR GROUP
-        plt.figure(figsize=(14, 8))
-        sns.boxplot(
-            data=plot_data,
-            x='development',
+        # --- Boxplot CBA ---
+        plt.figure(figsize=(7, 5))
+        ax = sns.boxplot(
+            data=data,
+            x='line_name',
             y='cba_ratio',
-            palette="Set2",
+            order=order,
+            palette="Blues",
+            width=0.4,
+            linewidth=0.8,
             showmeans=True,
-            meanprops={
-                "marker": "o",
-                "markerfacecolor": "black",
-                "markeredgecolor": "black",
-                "markersize": 6,
-            },
+            meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
             fliersize=3,
             showfliers=True
         )
-        plt.xlabel('Development', fontsize=12)
-        plt.ylabel('CBA Ratio (Benefits/Costs)', fontsize=12)
+        ax.set_xlim(-0.5, n_lines - 0.5)
+        plt.xlabel('Linie', fontsize=12)
+        plt.ylabel('Kosten-Nutzen-Faktor', fontsize=12)
+        plt.axhline(y=1, color='red', linestyle='-', alpha=0.5)
         plt.xticks(rotation=90)
         plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.axhline(y=1, color='red', linestyle='-', alpha=0.5)
-        handles = [plt.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=6)]
-        plt.legend(handles=handles, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_directory, f"cba_ratio_boxplot_group_{i + 1}.png"))
+        plt.legend(
+            handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
+            loc='upper left', bbox_to_anchor=(1.01, 1)
+        )
+        plt.tight_layout(rect=[0, 0, 0.95, 1])
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_cba.png"))
         plt.close()
 
-    # Add stacked bar plots with costs below and savings above the middle axis
-    # For small developments first
-    plt.figure(figsize=(14, 8))
-
-    # Prepare data for small developments
-    small_dev_summary = small_dev_data.groupby('development').agg({
-        'TotalConstructionCost': 'mean',
-        'TotalMaintenanceCost': 'mean',
-        'TotalUncoveredOperatingCost': 'mean',
-        'monetized_savings_total': 'mean'
-    }).reset_index()
-
-    # Calculate total width for all bars
-    dev_count = len(small_dev_summary)
-    bar_width = 0.8
-    x_positions = np.arange(dev_count)
-
-    # Plot costs as negative values (below axis)
-    plt.bar(x_positions, -small_dev_summary['TotalConstructionCost'],
-            width=bar_width, color='#ff9999', label='Baukosten')
-    plt.bar(x_positions, -small_dev_summary['TotalMaintenanceCost'],
-            width=bar_width, bottom=-small_dev_summary['TotalConstructionCost'],
-            color='#ffcc99', label='Wartungskosten')
-    plt.bar(x_positions, -small_dev_summary['TotalUncoveredOperatingCost'],
-            width=bar_width,
-            bottom=-(small_dev_summary['TotalConstructionCost'] + small_dev_summary['TotalMaintenanceCost']),
-            color='#ffff99', label='Betriebskosten')
-
-    # Plot savings as positive values (above axis)
-    plt.bar(x_positions, small_dev_summary['monetized_savings_total'],
-            width=bar_width, color='#99ccff', label='Monetarisierte Einsparungen')
-
-    # Add horizontal line at y=0
-    plt.axhline(y=0, color='black', linestyle='-')
-
-    # Set x-axis labels to development IDs
-    plt.xticks(x_positions, small_dev_summary['development'], rotation=90)
-    plt.xlabel('Entwicklung', fontsize=12)
-    plt.ylabel('CHF', fontsize=12)
-    plt.title('Kosten und Einsparungen für kleine Entwicklungen', fontsize=14)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.legend(title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    plt.savefig(os.path.join(plot_directory, "costs_savings_comparison_small_developments.png"))
-    plt.close()
-
-    # Now create similar plots for groups of larger developments
-    for i in range(num_plots):
-        start_idx = i * 15
-        end_idx = min((i + 1) * 15, len(developments))
-        plot_developments = developments[start_idx:end_idx]
-
-        plot_data = large_dev_data[large_dev_data['development'].isin(plot_developments)]
-
-        # Prepare data summary
-        plot_summary = plot_data.groupby('development').agg({
+        # --- Gestapeltes Balkendiagramm ---
+        summary = data.groupby(['development', 'line_name']).agg({
             'TotalConstructionCost': 'mean',
             'TotalMaintenanceCost': 'mean',
             'TotalUncoveredOperatingCost': 'mean',
             'monetized_savings_total': 'mean'
-        }).reset_index()
+        }).loc[(slice(None), order), :].reset_index().set_index('line_name').loc[order].reset_index()
 
-        plt.figure(figsize=(14, 8))
-
-        # Calculate positions
-        dev_count = len(plot_summary)
-        x_positions = np.arange(dev_count)
-
-        # Plot costs as negative values (below axis)
-        plt.bar(x_positions, -plot_summary['TotalConstructionCost'],
-                width=bar_width, color='#ff9999', label='Baukosten')
-        plt.bar(x_positions, -plot_summary['TotalMaintenanceCost'],
-                width=bar_width, bottom=-plot_summary['TotalConstructionCost'],
-                color='#ffcc99', label='Wartungskosten')
-        plt.bar(x_positions, -plot_summary['TotalUncoveredOperatingCost'],
-                width=bar_width,
-                bottom=-(plot_summary['TotalConstructionCost'] + plot_summary['TotalMaintenanceCost']),
-                color='#ffff99', label='Betriebskosten')
-
-        # Plot savings as positive values (above axis)
-        plt.bar(x_positions, plot_summary['monetized_savings_total'],
-                width=bar_width, color='#99ccff', label='Monetarisierte Einsparungen')
-
-        # Add horizontal line at y=0
+        x_pos = np.arange(n_lines)
+        bar_width = 0.6
+        plt.figure(figsize=(7, 5))
+        plt.bar(x_pos, -summary['TotalConstructionCost'] / 1e6, width=bar_width, color=farben['TotalConstructionCost'],
+                label='Baukosten')
+        plt.bar(x_pos, -summary['TotalMaintenanceCost'] / 1e6, width=bar_width,
+                bottom=-summary['TotalConstructionCost'] / 1e6, color=farben['TotalMaintenanceCost'],
+                label='ungedeckte Unterhaltskosten')
+        plt.bar(x_pos, -summary['TotalUncoveredOperatingCost'] / 1e6, width=bar_width,
+                bottom=-(summary['TotalConstructionCost'] + summary['TotalMaintenanceCost']) / 1e6,
+                color=farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten')
+        plt.bar(x_pos, summary['monetized_savings_total'] / 1e6, width=bar_width,
+                color=farben['monetized_savings_total'], label='Monetarisierte Reisezeitersparnisse')
         plt.axhline(y=0, color='black', linestyle='-')
-
-        # Set x-axis labels to development IDs
-        plt.xticks(x_positions, plot_summary['development'], rotation=90)
-        plt.xlabel('Entwicklung', fontsize=12)
-        plt.ylabel('CHF', fontsize=12)
-        plt.title(f'Kosten und Einsparungen für Entwicklungsgruppe {i + 1}', fontsize=14)
+        plt.xticks(x_pos, summary['line_name'], rotation=90)
+        plt.xlabel('Linie', fontsize=12)
+        plt.ylabel('Wert in Mio. CHF', fontsize=12)
+        plt.title('Kosten und Nutzen je Modifikation', fontsize=14)
         plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.legend(title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_directory, f"costs_savings_comparison_group_{i + 1}.png"))
+        plt.legend(bbox_to_anchor=(1.01, 1))
+        plt.tight_layout(rect=[0, 0, 0.95, 1])
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_kosten_einsparungen.png"))
         plt.close()
+
+    # Kleine Entwicklungen plotten
+    if not small_dev_data.empty:
+        plot_basic_charts(small_dev_data, "Expand_1_Stop")
+
+    # Große Entwicklungen gruppieren und plotten
+    df['plot_nr'] = None
+    large_dev_data = df[df['development'] >= settings.dev_id_start_new_direct_connections]
+
+    for conn in large_dev_data['missing_connection'].dropna().unique():
+        sub_df = large_dev_data[large_dev_data['missing_connection'] == conn].copy()
+
+        # Mittelwert des Nettonutzens je Entwicklung
+        mean_benefit = sub_df.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
+        unique_devs = mean_benefit.index.tolist()  # Sortierte Liste der Developments
+
+        num_plots = len(unique_devs) // 8 + int(len(unique_devs) % 8 > 0)
+
+        for i in range(num_plots):
+            devs_in_plot = unique_devs[i * 8: (i + 1) * 8]
+            selected = sub_df[sub_df['development'].isin(devs_in_plot)]
+            df.loc[selected.index, 'plot_nr'] = f"{conn}_{i + 1}"
+            plot_basic_charts(selected, f"{conn}_gruppe_{i + 1}")
+
+    return df, railway_lines
 
 
 
