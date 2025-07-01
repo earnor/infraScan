@@ -1,14 +1,14 @@
 from shapely.geometry import Polygon
 import paths
 
-rail_network = 'AK_2035_extended' # either 'AK_2035','AK_2035_extended' or 'current' or '2024_extended'
+rail_network = '2024_extended' # either 'AK_2035','AK_2035_extended' or 'current' or '2024_extended'
 
 #CACHE
 use_cache_network = True
 use_cache_pt_catchment = True
 use_cache_developments = True
 use_cache_catchmentOD = True
-use_cache_stationsOD = True
+use_cache_stationsOD = False
 use_cache_traveltime_graph = True
 use_cache_scenarios = True
 use_cache_tts_calc = False

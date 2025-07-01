@@ -1,6 +1,7 @@
 # import packages
 import paths
 import scoring
+import settings
 from TT_Delay import *
 from catchment_pt import *
 from display_results import *
@@ -16,6 +17,7 @@ import geopandas as gpd
 import os
 import warnings
 import cost_parameters as cp
+import plot_parameter as pp
 
 
 def infrascanrail():
@@ -98,7 +100,7 @@ def infrascanrail():
         # Liste der Einträge erstellen (z.B. die ID_point und NAME)
         inner_boundary_stations = points_in_inner_boundary[['ID_point', 'NAME']].values.tolist()
         #stationOD also saved as a file
-        getStationOD(settings.use_cache_stationsOD, inner_boundary_stations)
+        getStationOD(settings.use_cache_stationsOD, inner_boundary_stations, settings.only_demand_from_to_perimeter)
         #getScenarios(od_directory_scenario, pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH))
 
 
@@ -149,8 +151,8 @@ def infrascanrail():
     OD_matrix_flow = pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
     points = gpd.read_file(paths.RAIL_POINTS_PATH)
     flows_on_edges, flows_on_railway_lines = calculate_flow_on_edges(G_status_quo[0], OD_matrix_flow, points)
-    plot_flow_graph(flows_on_edges, output_path="plots/passenger_flows/passenger_flow_map.png", edge_scale=0.0007)
-    plot_flow_graph(flows_on_railway_lines, output_path="plots/passenger_flows/passenger_flow_map2.png", edge_scale=0.0007)
+    plot_flow_graph(flows_on_edges, output_path="plots/passenger_flows/passenger_flow_map.png", edge_scale=0.0007, selected_stations=pp.selected_stations, plot_perimeter = True)
+    plot_flow_graph(flows_on_railway_lines, output_path="plots/passenger_flows/passenger_flow_map2.png", edge_scale=0.0007, selected_stations=pp.selected_stations)
     plot_line_flows(flows_on_railway_lines, paths.RAIL_SERVICES_AK2035_EXTENDED_PATH, output_path="plots/passenger_flows/railway_line_load.png")
     runtimes["Calculate Traveltimes for all developments"] = time.time() - st
     st = time.time()
@@ -210,7 +212,7 @@ def infrascanrail():
 
     # Run the display results function to launch the GUI
     # Call the function to create_scenario_analysis_viewerreate and display the GUI
-    create_scenario_analysis_viewer(paths.TOTAL_COST_WITH_GEOMETRY)
+    #create_scenario_analysis_viewer(paths.TOTAL_COST_WITH_GEOMETRY)
 
 
 def compute_tts(dev_id_lookup,
@@ -517,7 +519,8 @@ def visualize_results(clear_plot_directory=False):
     # - Enhanced boxplot and strip plot for monetized savings by development.
     # Plots are saved in the 'plots' directory.
     results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
-    create_and_save_plots(results_raw)
+    railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
+    create_and_save_plots(results_raw, railway_lines)
     # Mit dem vorhandenen DataFrame
     plot_cumulative_cost_distribution(results_raw, "plots/cumulative_cost_distribution.png")
     '''

@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize, ListedColormap, BoundaryNorm
 from matplotlib.cm import ScalarMappable
 from matplotlib.patches import Patch, FancyArrowPatch
+from matplotlib.patches import Polygon as plotpolygon
 from matplotlib.lines import Line2D
 from matplotlib_scalebar.scalebar import ScaleBar
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -1931,7 +1932,7 @@ def plot_developments_expand_by_one_station():
 
     print(f"Plot saved at {output_path}")
 
-def create_and_save_plots(df, plot_directory="plots"):
+def create_and_save_plots(df, plot_directory="plots", railway_lines=None):
     """
     Creates and saves enhanced boxplots and strip plots of monetized savings,
     total net benefits, and CBA ratio by development.
@@ -1942,7 +1943,7 @@ def create_and_save_plots(df, plot_directory="plots"):
     # Rename the column 'ID_new' to 'Scenario'
     df.rename(columns={'ID_new': 'Scenario'}, inplace=True)
 
-    # Ensure all monetized savings are positive
+    # Ensure all monetized savincreate_and_save_plotsgs are positive
     df['monetized_savings_total'] = df['monetized_savings_total'].abs()
 
     # Calculate total net benefits and CBA ratio
@@ -3006,10 +3007,11 @@ def plot_cumulative_cost_distribution(df, output_path="plot/cumulative_cost_dist
 
 
 def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bahnnetz",
-                    node_size=100, node_color='skyblue', edge_scale=0.001, figsize=(20, 16)):
+                    node_size=100, node_color='skyblue', edge_scale=0.001, figsize=(20, 16),
+                    selected_stations=None, plot_perimeter=False):
     """
     Visualisiert einen Graph mit Passagierflüssen, wobei die Liniendicke proportional zum Fluss ist.
-    Flüsse in beide Richtungen werden zusammengefasst und als ungerichtete Kanten dargestellt.
+    Optional können nur bestimmte Stationen mit Namen beschriftet werden.
 
     Parameters:
         flow_graph (nx.DiGraph): Der Graph mit Flussattributen an den Kanten
@@ -3019,36 +3021,51 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
         node_color (str): Farbe der Knoten
         edge_scale (float): Skalierungsfaktor für die Kantendicke
         figsize (tuple): Größe der Abbildung (Breite, Höhe)
+        selected_stations (list of str, optional): Liste von Stationsnamen, die beschriftet werden sollen
 
     Returns:
         matplotlib.figure.Figure: Die erstellte Abbildung
     """
 
-    # Erstelle eine neue Figur
-    fig, ax = plt.subplots(figsize=figsize)
+    import matplotlib.pyplot as plt
+    import networkx as nx
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
 
-    # Extrahiere Positionen aus dem Graphen
+    fig, ax = plt.subplots(figsize=figsize)
+    if plot_perimeter:
+        # Dein Polygon (leicht angepasst, damit es geschlossen ist)
+        polygon_coords = [
+            (2700989.862, 1235663.403),
+            (2708491.515, 1239608.529),
+            (2694972.602, 1255514.900),
+            (2687415.817, 1251056.404),
+            (2700989.862, 1235663.403)  # schliesst das Polygon explizit
+        ]
+
+        # Polygon hinzufügen – nur Umrandung, keine Füllung
+        outline_polygon = plotpolygon(
+            polygon_coords,
+            closed=True,
+            facecolor='none',
+            edgecolor='gray',
+            linewidth=1.5,
+            zorder=-10  # ganz im Hintergrund
+        )
+
+        # Polygon ins Axes-Objekt einfügen
+        ax.add_patch(outline_polygon)
     pos = nx.get_node_attributes(flow_graph, 'position')
 
-    # Überprüfe, ob für jeden Knoten eine Position vorhanden ist
     if len(pos) != flow_graph.number_of_nodes():
         raise ValueError(f"Es fehlen Positionen für einige Knoten: {len(pos)} von {flow_graph.number_of_nodes()}")
 
-    # Erstelle ein Dictionary, um bidirektionale Flüsse zusammenzufassen
     combined_flows = {}
-
-    # Sammle alle Flüsse und kombiniere sie für bidirektionale Kanten
     for source, target, data in flow_graph.edges(data=True):
-        # Erstelle einen einheitlichen Kantenschlüssel (immer kleinerer Index zuerst)
         edge_key = tuple(sorted([source, target]))
         flow = data.get('flow', 0)
+        combined_flows[edge_key] = combined_flows.get(edge_key, 0) + flow
 
-        if edge_key in combined_flows:
-            combined_flows[edge_key] += flow
-        else:
-            combined_flows[edge_key] = flow
-
-    # Sammle die kombinierten Flüsse für Farbskala
     flows = list(combined_flows.values())
     if not flows:
         raise ValueError("Keine Flüsse im Graphen gefunden")
@@ -3056,11 +3073,9 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
     min_flow = min(flows)
     max_flow = max(flows)
 
-    # Erstelle eine Farbskala
     cmap = plt.cm.viridis_r
     norm = Normalize(vmin=min_flow, vmax=max_flow)
 
-    # Zeichne die Knoten
     nx.draw_networkx_nodes(flow_graph, pos,
                            node_size=node_size,
                            node_color=node_color,
@@ -3068,54 +3083,55 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
                            alpha=0.7,
                            ax=ax)
 
-    # Zeichne Kanten mit Dicke proportional zum kombinierten Fluss
     for edge_key, total_flow in combined_flows.items():
         source, target = edge_key
-
-        # Berechne die Liniendicke basierend auf dem Fluss
-        width = total_flow * edge_scale
-        # Minimal- und Maximalwerte für die Linienstärke
-        width = max(0.5, min(10, width))
-
-        # Wähle die Farbe basierend auf dem Fluss
+        width = max(0.5, min(10, total_flow * edge_scale))
         edge_color = cmap(norm(total_flow))
-
-        # Zeichne die Kante (ungerichtet)
         nx.draw_networkx_edges(flow_graph, pos,
                                edgelist=[(source, target)],
                                width=width,
                                edge_color=[edge_color],
                                alpha=0.7,
-                               arrows=False,  # Keine Pfeile für ungerichtete Kanten
+                               arrows=False,
                                ax=ax)
 
-    # Beschrifte die Knoten direkt mit Knotennamen
-    nx.draw_networkx_labels(flow_graph, pos, font_size=8, ax=ax)
+    # Stationsnamen nur selektiv anzeigen
+    if selected_stations:
+        labels = {node: node for node in flow_graph.nodes if node in selected_stations}
+        # Verschiebe die Beschriftung nach unten links
+        label_offset = (-1000, -600)  # x- und y-Verschiebung
 
-    # Erstelle eine Farbskala-Legende
+        label_pos = {node: (pos[node][0] + label_offset[0],
+                            pos[node][1] + label_offset[1]) for node in labels}
+
+        nx.draw_networkx_labels(flow_graph, label_pos, labels=labels, font_size=12, ax=ax)
+    else:
+        nx.draw_networkx_labels(flow_graph, pos, font_size=8, ax=ax)
+
+    # Kleinere Legende + 5k Tickformat
     sm = ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, shrink=0.8)
-    cbar.set_label('Kombinierter Passagierfluss', fontsize=12)
+    # Manuell positionierte, kürzere Farbskala (gleich breit)
+    cbar_ax = fig.add_axes([0.92, 0.25, 0.07, 0.3])  # [left, bottom, width, height]
+    cbar = plt.colorbar(sm, cax=cbar_ax)
+    cbar.set_label('Kombinierter Passagierfluss', fontsize=10)
+    ticks = cbar.get_ticks()
+    cbar.set_ticks(ticks)
+    cbar.ax.set_yticklabels([f'{int(t/1000)}k' for t in ticks])
 
-    # Füge Statistiken hinzu
     total_flow = sum(flows)
     text_info = (f"Gesamtfluss: {total_flow:.0f} Passagiere\n"
                  f"Max. Fluss: {max_flow:.0f}\n"
                  f"Min. Fluss: {min_flow:.0f}\n"
                  f"Anzahl Kanten: {len(combined_flows)}")
-
     plt.figtext(0.01, 0.01, text_info, fontsize=10,
                 bbox=dict(facecolor='white', alpha=0.7, boxstyle='round'))
 
-    # Setze Titel und entferne Achsen
     ax.set_title(title, fontsize=16)
+    ax.set_aspect('equal')  # ← wichtige Zeile für unverzerrte Darstellung
     ax.axis('off')
-
-    # Passe die Figur an und erhöhe die Auflösung
     plt.tight_layout()
 
-    # Speichere oder zeige die Figur
     if output_path:
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         print(f"Grafik wurde gespeichert unter: {output_path}")
