@@ -1,53 +1,49 @@
 # Core Libraries
-import os
 import math
+import os
+import pickle
 import re
 
-import networkx
-import numpy
+# Data Libraries
 import numpy as np
 import pandas as pd
 
 # Geospatial Libraries
+import contextily as ctx
 import geopandas as gpd
-import seaborn
-from shapely.geometry import Point, LineString, box
-from shapely import make_valid
-# Raster Data Libraries
 import rasterio
-from rasterio.plot import show
+import seaborn as sns
+from geo_northarrow import add_north_arrow
+from PIL import Image
+from pyrosm import OSM, get_data
 from rasterio.mask import mask
+from rasterio.plot import show
+from shapely import make_valid
+from shapely.geometry import LineString, Point, box
 
 # Network Analysis Libraries
 import networkx as nx
 
 # Visualization Libraries
-import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize, ListedColormap, BoundaryNorm
-from matplotlib.cm import ScalarMappable
-from matplotlib.patches import Patch, FancyArrowPatch
-from matplotlib.patches import Polygon as plotpolygon
-from matplotlib.lines import Line2D
-from matplotlib_scalebar.scalebar import ScaleBar
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-import seaborn as sns
-import contextily as ctx
-import contextily as cx
-from geo_northarrow import add_north_arrow
-from matplotlib import patches as mpatches, pyplot
-from matplotlib.colors import LinearSegmentedColormap
-from scipy.interpolate import griddata
-import matplotlib.lines as mlines
 import matplotlib.colors as mcolors
+import matplotlib.lines as mlines
+import matplotlib.pyplot as plt
+from matplotlib import patches as mpatches, pyplot
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap, ListedColormap, Normalize
+from matplotlib.lines import Line2D
+from matplotlib.patches import FancyArrowPatch, Patch, Polygon as plotpolygon
+from matplotlib_scalebar.scalebar import ScaleBar
 from matplotlib.ticker import FuncFormatter
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+# Interpolation
+from scipy.interpolate import griddata
 
-
-
-# Pyrosm for OpenStreetMap Data
-from pyrosm import get_data, OSM
-
+# Project-Specific Modules
+import paths
 import settings
+import importlib
 
 
 def plotting(input_file, output_file, node_file):
@@ -1946,7 +1942,13 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     dev_to_conn = railway_lines.set_index('name')['missing_connection'].to_dict()
     df['missing_connection'] = df['development'].map(lambda x: dev_to_conn.get(f"X{int(x) - 101000}", "unbekannt"))
 
-    df['line_name'] = df['development'].map(lambda x: f"X{int(x) - 101000}")
+    df['line_name'] = None  # Initialisierung
+    df.loc[df['development'] < settings.dev_id_start_new_direct_connections, 'line_name'] = \
+        df['development'].loc[df['development'] < settings.dev_id_start_new_direct_connections].map(
+            lambda x: str(int(x - 101000)))
+    df.loc[df['development'] >= settings.dev_id_start_new_direct_connections, 'line_name'] = \
+        df['development'].loc[df['development'] >= settings.dev_id_start_new_direct_connections].map(
+            lambda x: f"X{int(x - 101000)}")
 
     # Kleine Entwicklungen
     small_dev_data = df[df['development'] < settings.dev_id_start_new_direct_connections]
@@ -2112,6 +2114,11 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     df['plot_nr'] = None
     large_dev_data = df[df['development'] >= settings.dev_id_start_new_direct_connections]
 
+    df_network = gpd.read_file(settings.infra_generation_rail_network)
+    df_points = gpd.read_file(r'data\Network\processed\points.gpkg')
+    generate_infrastructure = importlib.import_module('generate_infrastructure')
+    G, pos = generate_infrastructure.prepare_Graph(df_network, df_points)
+
     for conn in large_dev_data['missing_connection'].dropna().unique():
         sub_df = large_dev_data[large_dev_data['missing_connection'] == conn].copy()
 
@@ -2125,7 +2132,70 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
             devs_in_plot = unique_devs[i * 8: (i + 1) * 8]
             selected = sub_df[sub_df['development'].isin(devs_in_plot)]
             df.loc[selected.index, 'plot_nr'] = f"{conn}_{i + 1}"
-            plot_basic_charts(selected, f"{conn}_gruppe_{i + 1}")
+            filename_prefix = f"{conn}_gruppe_{i + 1}"
+            filename_prefix = filename_prefix.replace(" - ", "_").replace(" ", "_")
+            plot_basic_charts(selected, filename_prefix)
+
+            # Liniennamen extrahieren und Subset erzeugen
+            line_names = selected['line_name'].unique()
+            filtered_lines = railway_lines[railway_lines["name"].isin(line_names)]
+            filtered_lines['path'] = filtered_lines['path'].str.split(',')
+            filtered_lines = filtered_lines.rename(columns={"missing_connection": "original_missing_connection"})
+            # Netzgrafik erzeugen
+            filename = f"railway_lines_{filename_prefix}.png"
+
+            output_file_name = os.path.join("plots", filename)
+            plot_railway_lines_only(
+                G, pos, filtered_lines.to_dict(orient='records'),output_file_name
+            )
+
+            # Beide Bilder kombinieren (z. B. Einsparungen)
+            for suffix in [
+                "boxplot_einsparungen",
+                "stripplot_einsparungen",
+                "boxplot_nettonutzen",
+                "boxplot_cba",
+                "kosten_einsparungen"
+            ]:
+                chart_path = os.path.join(plot_directory, f"{filename_prefix}_{suffix}.png")
+                map_path = os.path.join(plot_directory, f"railway_lines_{filename_prefix}.png")
+
+                # Zielverzeichnis für kombinierte Plots
+                combined_dir = os.path.join(plot_directory, "combined")
+                os.makedirs(combined_dir, exist_ok=True)
+
+                combined_path = os.path.join(combined_dir, f"{filename_prefix}_{suffix}_kombiniert.png")
+
+                try:
+                    if not os.path.exists(chart_path):
+                        raise FileNotFoundError(f"Diagrammbild nicht gefunden: {chart_path}")
+                    if not os.path.exists(map_path):
+                        raise FileNotFoundError(f"Kartenbild nicht gefunden: {map_path}")
+
+                    map_image = Image.open(map_path)
+                    chart_image = Image.open(chart_path)
+
+                    # Zielhöhe: maximale Höhe beider Bilder
+                    target_height = max(map_image.height, chart_image.height)
+
+                    # Skalierungsfaktor berechnen
+                    def resize_to_height(img, target_h):
+                        w, h = img.size
+                        new_w = int(w * (target_h / h))
+                        return img.resize((new_w, target_h), Image.LANCZOS)
+
+                    map_image_resized = resize_to_height(map_image, target_height)
+                    chart_image_resized = resize_to_height(chart_image, target_height)
+
+                    # Kombinieren
+                    total_width = map_image_resized.width + chart_image_resized.width
+                    combined = Image.new("RGB", (total_width, target_height), (255, 255, 255))
+                    combined.paste(map_image_resized, (0, 0))
+                    combined.paste(chart_image_resized, (map_image_resized.width, 0))
+                    combined.save(combined_path)
+
+                except Exception as e:
+                    print(f"Fehler beim Kombinieren der Bilder für {filename_prefix}_{suffix}: {e}")
 
     return df, railway_lines
 
@@ -2733,6 +2803,149 @@ def plot_missing_connection_lines(G, pos, new_railway_lines, connection_nodes, o
                 format='png')
     plt.close()
 
+def plot_railway_lines_only(G, pos, railway_lines, output_file):
+    """
+    Plot a railway graph with proposed railway lines,
+    zoomed to line extent with correct aspect ratio and compact figure size.
+    """
+
+    # === Validierungen ===
+    if not isinstance(G, nx.Graph):
+        raise TypeError("'G' muss ein NetworkX-Graph sein.")
+    if not isinstance(pos, dict) or not pos:
+        raise ValueError("'pos' muss ein nicht-leeres Dictionary mit Koordinaten sein.")
+    if not isinstance(railway_lines, list) or len(railway_lines) == 0:
+        raise ValueError("'railway_lines' muss eine nicht-leere Liste von Dictionaries sein.")
+    if not output_file or not isinstance(output_file, str):
+        raise ValueError("'output_file' muss ein gültiger Pfadstring sein.")
+
+    plt.figure(figsize=(8, 6), dpi=300)
+
+    nx.draw_networkx_edges(G, pos, edge_color='gray', width=0.5, alpha=0.3)
+
+    node_colors = []
+    node_sizes = []
+    node_labels = {}
+
+    for node in G.nodes():
+        station_name = G.nodes[node].get('station_name', '')
+        if G.nodes[node].get('type') == 'center':
+            node_colors.append('orange')
+            node_sizes.append(80)
+            node_labels[node] = station_name
+        elif G.nodes[node].get('end_station', False):
+            node_colors.append('green')
+            node_sizes.append(100)
+            node_labels[node] = station_name
+        elif any(int(node) in [int(n) for n in line.get('path', [])] for line in railway_lines):
+            node_colors.append('blue')
+            node_sizes.append(80)
+            node_labels[node] = station_name
+        else:
+            node_colors.append('lightgray')
+            node_sizes.append(30)
+
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, alpha=0.7)
+    nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=9)
+
+    edge_count = {}
+    for line in railway_lines:
+        path = [int(n) for n in line['path']]
+        for j in range(len(path) - 1):
+            edge = tuple(sorted([path[j], path[j + 1]]))
+            edge_count[edge] = edge_count.get(edge, 0) + 1
+
+    colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'brown', 'pink']
+    legend_handles = []
+
+    # --- Bereich für Zoom und Skalierung berechnen ---
+    line_nodes = set(int(n) for line in railway_lines for n in line['path'] if int(n) in pos)
+    if not line_nodes:
+        raise ValueError("Keine gültigen Knoten in 'railway_lines' für Zoom gefunden.")
+
+    x_coords = [pos[node][0] for node in line_nodes]
+    y_coords = [pos[node][1] for node in line_nodes]
+    padding = 2000
+    x_min, x_max = min(x_coords) - padding, max(x_coords) + padding
+    y_min, y_max = min(y_coords) - padding, max(y_coords) + padding
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    scale_factor = max(x_range, y_range) / 100  # dynamischer Offset-Basiswert
+
+    for i, line in enumerate(railway_lines):
+        path = [int(n) for n in line['path']]
+        color = colors[i % len(colors)]
+        label = f"{line.get('name', f'Linie {i+1}')}:\n{line.get('start_station', '?')} – {line.get('end_station', '?')}"
+        line_segments = []
+
+        for j in range(len(path) - 1):
+            node_a, node_b = path[j], path[j + 1]
+            start_pos = pos[node_a]
+            end_pos = pos[node_b]
+
+            dx = end_pos[0] - start_pos[0]
+            dy = end_pos[1] - start_pos[1]
+            length = np.hypot(dx, dy)
+            if length == 0:
+                continue
+
+            perpx = -dy / length
+            perpy = dx / length
+            edge = tuple(sorted([node_a, node_b]))
+            total_lines = edge_count[edge]
+
+            line_position = 0
+            for k, other_line in enumerate(railway_lines):
+                if k == i:
+                    break
+                other_path = [int(n) for n in other_line['path']]
+                for m in range(len(other_path) - 1):
+                    if tuple(sorted([other_path[m], other_path[m + 1]])) == edge:
+                        line_position += 1
+                        break
+
+            offset = (line_position - (total_lines - 1) / 2) * scale_factor
+
+            start_offset = (
+                start_pos[0] + perpx * offset,
+                start_pos[1] + perpy * offset
+            )
+            end_offset = (
+                end_pos[0] + perpx * offset,
+                end_pos[1] + perpy * offset
+            )
+
+            segment, = plt.plot(
+                [start_offset[0], end_offset[0]],
+                [start_offset[1], end_offset[1]],
+                color=color,
+                linewidth=3,
+                label="_nolegend_"
+            )
+            line_segments.append(segment)
+
+        if line_segments:
+            legend_line = Line2D([0], [0], color=color, lw=3, label=label)
+            legend_handles.append(legend_line)
+
+    # Legende mit größerer Schrift
+    plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.02, 1),
+               fontsize=12, framealpha=0.8)
+
+    plt.title("Generierte S-Bahn Linien", fontsize=14, pad=20)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.xlabel('X-Koordinate', fontsize=10)
+    plt.ylabel('Y-Koordinate', fontsize=10)
+
+    # Zoom auf Linienbereich
+    plt.axis('equal')
+    plt.xlim(x_min, x_max)
+    plt.ylim(y_min, y_max)
+
+    plt.savefig(output_file, dpi=300, bbox_inches='tight', pad_inches=0.2, format='png')
+    plt.close()
+
 
 def plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir):
 
@@ -2756,93 +2969,74 @@ def plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir)
         plot_missing_connection_lines(G, pos, new_railway_lines, connection, filename)
 
 
-def plot_cumulative_cost_distribution(df, output_path="plot/cumulative_cost_distribution.png"):
+def plot_cumulative_cost_distribution(df, output_path="plot/kumulative_kostenverteilung.png"):
     """
-    Erstellt eine kumulative Wahrscheinlichkeitsverteilung der Kosten für die 5 Entwicklungen
-    mit dem höchsten Nutzen.
+    Erstellt eine kumulative Wahrscheinlichkeitsverteilung des Nettonutzens
+    für alle im DataFrame enthaltenen Entwicklungen.
 
     Args:
         df: DataFrame mit den Kostendaten (monetized_savings_total)
         output_path: Pfad zum Speichern der Abbildung
-
     """
-    # Berechnung des Mittelwerts für jede Entwicklung
+    # Mittelwert für jede Entwicklung berechnen
     mean_by_dev = df.groupby('development')['monetized_savings_total'].mean().reset_index()
 
-    # Sortieren nach Mittelwert und Auswahl der 5 Entwicklungen mit dem höchsten Nutzen
-    top_5_devs = mean_by_dev.sort_values(by=['monetized_savings_total'], ascending=False).head(5)
-
-    # Extrahieren der relevanten Entwicklungs-IDs
-    top_dev_ids = top_5_devs['development'].unique()
-
-    # Datensatz auf die Top-5-Entwicklungen filtern
-    df_top = df[df['development'].isin(top_dev_ids)]
+    # Sortieren nach Mittelwert für konsistente Farben/Legende
+    sorted_devs = mean_by_dev.sort_values(by='monetized_savings_total', ascending=False)
+    dev_ids_sorted = sorted_devs['development'].tolist()
 
     # Erstellen einer Figur
     plt.figure(figsize=(10, 6))
 
-    # Farbpalette für die Entwicklungen
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    # Farbpalette generieren (ausreichend viele Farben)
+    cmap = plt.get_cmap('tab20')
+    colors = [cmap(i % 20) for i in range(len(dev_ids_sorted))]
 
-    # Für jede Entwicklung eine kumulative Verteilung plotten
-    for i, dev_id in enumerate(top_dev_ids):
-        dev_data = df_top[df_top['development'] == dev_id]
-
-        # Sammeln aller Nutzenwerte für diese Entwicklung und Umrechnung in Millionen CHF
-        values = dev_data['monetized_savings_total'].dropna().values / 1_000_000
-
-        # Sortieren der Werte für die kumulative Verteilung
+    # Kumulative Verteilungen plotten
+    for i, dev_id in enumerate(dev_ids_sorted):
+        dev_data = df[df['development'] == dev_id]
+        values = dev_data['monetized_savings_total'].dropna().values / 1_000_000  # in Mio. CHF
         values = np.sort(values)
-
-        # Berechnung der kumulativen Wahrscheinlichkeiten
         y_values = np.arange(1, len(values) + 1) / len(values)
 
-        # Label für die Legende erstellen
-        dev_name = f"Entwicklung {dev_id}"
-        mean_value = dev_data['monetized_savings_total'].mean() / 1_000_000
-        label = f"{dev_name}: {mean_value:.1f} Mio. CHF"
+        # Legendenlabel
+        mean_value = values.mean()
+        label = f"Linie {dev_id}: {mean_value:.1f} Mio. CHF"
 
-        # Kumulative Verteilung plotten
+        # Linie zeichnen
         plt.plot(values, y_values, '-', color=colors[i], linewidth=2, label=label)
 
-    # Nulllinie hinzufügen
+    # Nulllinie
     plt.axvline(x=0, color='lightgray', linestyle='-', linewidth=1)
 
     # Beschriftungen und Formatierung
     plt.xlabel('Nettonutzen [Mio. CHF]', fontsize=12)
     plt.ylabel('Kumulative Wahrscheinlichkeit', fontsize=12)
-    plt.title('Kumulative Wahrscheinlichkeitsverteilung des Nettonutzens\nfür die 5 besten Entwicklungen', fontsize=14)
+    plt.title('Kumulative Wahrscheinlichkeitsverteilung des Nettonutzens\naller betrachteten Entwicklungen', fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(title='Entwicklungen mit mittlerem Nettonutzen', fontsize=10, title_fontsize=11)
+    plt.legend(title='Linien mit mittlerem Nettonutzen', fontsize=9, title_fontsize=10, loc='center left', bbox_to_anchor=(1, 0.5))
 
-    # Y-Achse von 0 bis 1
+    # Y-Achse 0–1
     plt.ylim(0, 1.05)
 
-    # X-Achsen-Grenzen definieren
-    x_min = df_top['monetized_savings_total'].min() / 1_000_000
-    x_max = df_top['monetized_savings_total'].max() / 1_000_000
+    # X-Achse skalieren
+    x_min = df['monetized_savings_total'].min() / 1_000_000
+    x_max = df['monetized_savings_total'].max() / 1_000_000
     plt.xlim(x_min - 5, x_max + 5)
 
-    # Füge Markierungen bei 25%, 50% und 75% hinzu
-    plt.axhline(y=0.25, color='darkgray', linestyle=':', alpha=0.7)
-    plt.axhline(y=0.5, color='darkgray', linestyle=':', alpha=0.7)
-    plt.axhline(y=0.75, color='darkgray', linestyle=':', alpha=0.7)
-
-    # Beschriftung der horizontalen Linien
-    plt.text(x_max + 3, 0.25, '25%', va='center', fontsize=9, color='darkgray')
-    plt.text(x_max + 3, 0.5, '50%', va='center', fontsize=9, color='darkgray')
-    plt.text(x_max + 3, 0.75, '75%', va='center', fontsize=9, color='darkgray')
+    # Zusätzliche horizontale Linien
+    for q in [0.25, 0.5, 0.75]:
+        plt.axhline(y=q, color='darkgray', linestyle=':', alpha=0.7)
+        plt.text(x_max + 3, q, f'{int(q * 100)}%', va='center', fontsize=9, color='darkgray')
 
     plt.tight_layout()
 
-    # Verzeichnis erstellen, falls nicht vorhanden
+    # Verzeichnis anlegen
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    # Speichern und Anzeigen
-    plt.savefig(output_path, dpi=300)
+    # Speichern
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-
-    print(f"Kumulative Kostenverteilung gespeichert unter: {output_path}")
 
 
 def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bahnnetz",

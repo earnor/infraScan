@@ -1171,6 +1171,12 @@ def prepare_Graph(df_network, df_points):
     print(f"Total end stations identified: {len(end_stations)}")
     pos = get_node_positions(df_split, df_points, G)
     # First plot the regular network
+    # Pickle speichern
+    output_path = paths.GRAPH_POS_PATH
+    with open(output_path, 'wb') as f:
+        pickle.dump({'G': G, 'pos': pos}, f)
+        print(f"G und pos wurden in {output_path} gespeichert.")
+
     return G, pos
 
 def add_railway_lines_to_new_links(new_railway_lines_path, mod_type, new_links_path, rail_network_path):

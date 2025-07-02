@@ -520,8 +520,7 @@ def visualize_results(clear_plot_directory=False):
     # Plots are saved in the 'plots' directory.
     results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
     railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
-    railway_lines = assign_plot_numbers_by_missing_connection(railway_lines)
-    create_and_save_plots(results_raw, railway_lines)
+    create_and_save_plots(df=results_raw, railway_lines=railway_lines)
     # Mit dem vorhandenen DataFrame
     plot_cumulative_cost_distribution(results_raw, "plots/cumulative_cost_distribution.png")
     '''
