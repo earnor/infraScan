@@ -1929,8 +1929,24 @@ def plot_developments_expand_by_one_station():
 
     print(f"Plot saved at {output_path}")
 
+
 def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     os.makedirs(plot_directory, exist_ok=True)
+
+    # ZVV-Farbpalette definieren
+    zvv_colors = [
+        "#E2001A",  # Linie 2 – Rot
+        "#009932",  # Linien 3, 11, 302, 760 – Grün
+        "#443F8F",  # Linien 4, 9, 303, 751 – Blau
+        "#955C23",  # Linien 5, 305 – Braun
+        "#DDA245",  # Linien 6, 307 – Orange
+        "#000000",  # Linie 7 – Schwarz
+        "#B1C800",  # Linien 8, 301, 752 – Gelb
+        "#E52D87",  # Linien 10, 308, 748 – Pink/Magenta
+        "#5EB3DB",  # Linie 12 – Hellblau
+        "#8E224D",  # Linie 17 – Weinrot
+    ]
+
     df.rename(columns={'ID_new': 'Scenario'}, inplace=True)
     df['monetized_savings_total'] = df['monetized_savings_total'].abs()
     df['total_costs'] = df['TotalConstructionCost'] + df['TotalMaintenanceCost'] + df['TotalUncoveredOperatingCost']
@@ -1957,12 +1973,17 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     # Kleine Entwicklungen
     small_dev_data = df[df['development'] < settings.dev_id_start_new_direct_connections]
 
-    def plot_basic_charts(data, filename_prefix):
+    def plot_basic_charts(data, filename_prefix, line_colors=None):
         order = data.groupby('line_name')['total_net_benefit'].mean().sort_values(ascending=False).index.tolist()
         n_lines = len(order)
 
-        # Farben
-        farben = {
+        # Farbzuordnung für Linien erstellen
+        if line_colors is None:
+            # Erstelle Farbpalette aus ZVV-Farben (zyklisch wiederholen falls nötig)
+            line_colors = {line_name: zvv_colors[i % len(zvv_colors)] for i, line_name in enumerate(order)}
+
+        # Farben für Kosten/Nutzen
+        kosten_farben = {
             'TotalConstructionCost': '#a6bddb',
             'TotalMaintenanceCost': '#3690c0',
             'TotalUncoveredOperatingCost': '#034e7b',
@@ -1971,12 +1992,14 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
 
         # --- Boxplot Einsparungen ---
         plt.figure(figsize=(7, 5))
+        # Eine Farbpalette aus den ausgewählten Farben erstellen
+        colors = [line_colors[line] for line in order]
         ax = sns.boxplot(
             data=data,
             x='line_name',
             y=data['monetized_savings_total'] / 1e6,
             order=order,
-            palette="Blues",
+            palette=colors,  # Hier die eigenen Farben verwenden
             width=0.4,
             linewidth=0.8,
             showmeans=True,
@@ -1999,13 +2022,15 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
 
         # --- Stripplot Einsparungen ---
         plt.figure(figsize=(7, 5))
+        # Erstelle eine Farbzuordnung für Szenarien
+        scenario_colors = {scenario: 'gray' for scenario in data['scenario'].unique()}
         ax = sns.stripplot(
             data=data,
             x='line_name',
             y=data['monetized_savings_total'] / 1e6,
             order=order,
-            hue='scenario',
-            palette=dict(zip(data['scenario'], data['Color'])),
+            hue='line_name',  # Linienname für Farbzuordnung
+            palette=line_colors,  # Hier die eigenen Farben verwenden
             jitter=True,
             dodge=False,
             size=3,
@@ -2015,7 +2040,10 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
         plt.xlabel('Linie', fontsize=12)
         plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
         plt.xticks(rotation=90)
-        plt.legend(loc='upper left', bbox_to_anchor=(1.01, 1))
+        # Legende entfernen (zu viele Einträge)
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.remove()
         plt.tight_layout(rect=[0, 0, 0.95, 1])
         plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_stripplot_einsparungen.png"))
         plt.close()
@@ -2027,7 +2055,7 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
             x='line_name',
             y=data['total_net_benefit'] / 1e6,
             order=order,
-            palette="Blues",
+            palette=colors,  # Hier die eigenen Farben verwenden
             width=0.4,
             linewidth=0.8,
             showmeans=True,
@@ -2056,7 +2084,7 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
             x='line_name',
             y='cba_ratio',
             order=order,
-            palette="Blues",
+            palette=colors,  # Hier die eigenen Farben verwenden
             width=0.4,
             linewidth=0.8,
             showmeans=True,
@@ -2089,35 +2117,63 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
         x_pos = np.arange(n_lines)
         bar_width = 0.6
         plt.figure(figsize=(7, 5))
-        plt.bar(x_pos, -summary['TotalConstructionCost'] / 1e6, width=bar_width, color=farben['TotalConstructionCost'],
+
+        # Für das gestapelte Balkendiagramm verwenden wir die Linienfarbpalette für die Einsparungen
+        # und die bestehende Farbpalette für die Kosten
+        plt.bar(x_pos, -summary['TotalConstructionCost'] / 1e6, width=bar_width,
+                color=kosten_farben['TotalConstructionCost'],
                 label='Baukosten')
         plt.bar(x_pos, -summary['TotalMaintenanceCost'] / 1e6, width=bar_width,
-                bottom=-summary['TotalConstructionCost'] / 1e6, color=farben['TotalMaintenanceCost'],
+                bottom=-summary['TotalConstructionCost'] / 1e6, color=kosten_farben['TotalMaintenanceCost'],
                 label='ungedeckte Unterhaltskosten')
         plt.bar(x_pos, -summary['TotalUncoveredOperatingCost'] / 1e6, width=bar_width,
                 bottom=-(summary['TotalConstructionCost'] + summary['TotalMaintenanceCost']) / 1e6,
-                color=farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten')
-        plt.bar(x_pos, summary['monetized_savings_total'] / 1e6, width=bar_width,
-                color=farben['monetized_savings_total'], label='Monetarisierte Reisezeitersparnisse')
+                color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten')
+
+        # Hier die individuellen Farben pro Linie für die Einsparungen verwenden
+        for i, line_name in enumerate(order):
+            plt.bar(x_pos[i], summary[summary['line_name'] == line_name]['monetized_savings_total'].values[0] / 1e6,
+                    width=bar_width, color=line_colors[line_name])
+
         plt.axhline(y=0, color='black', linestyle='-')
         plt.xticks(x_pos, summary['line_name'], rotation=90)
         plt.xlabel('Linie', fontsize=12)
         plt.ylabel('Wert in Mio. CHF', fontsize=12)
         plt.title('Kosten und Nutzen je Modifikation', fontsize=14)
         plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.legend(bbox_to_anchor=(1.01, 1))
+
+        # Legende für Kosten
+        kosten_handles = [
+            mpatches.Patch(color=kosten_farben['TotalConstructionCost'], label='Baukosten'),
+            mpatches.Patch(color=kosten_farben['TotalMaintenanceCost'], label='ungedeckte Unterhaltskosten'),
+            mpatches.Patch(color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten'),
+        ]
+
+        # Legende für Einsparungen mit linienspezifischen Farben
+        nutzen_handles = [mpatches.Patch(color=line_colors[line], label=f'Einsparungen {line}') for line in order]
+
+        # Nur die Kostenlegende anzeigen, um die Darstellung sauber zu halten
+        plt.legend(handles=kosten_handles, bbox_to_anchor=(1.01, 1))
+
         plt.tight_layout(rect=[0, 0, 0.95, 1])
         plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_kosten_einsparungen.png"))
         plt.close()
 
         # NEU: Kumulatives Verteilungsdiagramm für diese Datengruppe
-        data = data.drop(columns=['development']).rename(columns={'line_name': 'development'})
+        data_copy = data.copy()  # Um Änderungen am Original zu vermeiden
+        data_copy = data_copy.drop(columns=['development']).rename(columns={'line_name': 'development'})
         cumulative_output_path = os.path.join(plot_directory, f"{filename_prefix}_kumulative_kostenverteilung.png")
-        plot_cumulative_cost_distribution(data, cumulative_output_path)
+        plot_cumulative_cost_distribution(data_copy, cumulative_output_path,
+                                          color_dict={dev: line_colors[dev] for dev in
+                                                      data_copy['development'].unique()})
+
+        # Farben zurückgeben für die Verwendung in der Kartenvisualisierung
+        return line_colors
 
     # Kleine Entwicklungen plotten
+    line_colors_small = None
     if not small_dev_data.empty:
-        plot_basic_charts(small_dev_data, "Expand_1_Stop")
+        line_colors_small = plot_basic_charts(small_dev_data, "Expand_1_Stop")
 
     # Große Entwicklungen gruppieren und plotten
     df['plot_nr'] = None
@@ -2143,22 +2199,33 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
             df.loc[selected.index, 'plot_nr'] = f"{conn}_{i + 1}"
             filename_prefix = f"{conn}_gruppe_{i + 1}"
             filename_prefix = filename_prefix.replace(" - ", "_").replace(" ", "_")
-            plot_basic_charts(selected, filename_prefix)
+
+            # Hier werden die Diagramme geplottet und Farbzuordnung zurückgegeben
+            line_colors = plot_basic_charts(selected, filename_prefix)
 
             # Liniennamen extrahieren und Subset erzeugen
             line_names = selected['line_name'].unique()
             filtered_lines = railway_lines[railway_lines["name"].isin(line_names)]
             filtered_lines['path'] = filtered_lines['path'].str.split(',')
             filtered_lines = filtered_lines.rename(columns={"missing_connection": "original_missing_connection"})
+
+            # Linienfarben in filtered_lines hinzufügen
+            filtered_lines_dict = filtered_lines.to_dict(orient='records')
+            for record in filtered_lines_dict:
+                line_name = record["name"]
+                if line_name in line_colors:
+                    record["color"] = line_colors[line_name]
+
             # Netzgrafik erzeugen
             filename = f"railway_lines_{filename_prefix}.png"
-
             output_file_name = os.path.join("plots", filename)
+
+            # Die Funktion plot_railway_lines_only muss angepasst werden, um die Farben zu berücksichtigen
             plot_railway_lines_only(
-                G, pos, filtered_lines.to_dict(orient='records'),output_file_name
+                G, pos, filtered_lines_dict, output_file_name, color_dict=line_colors
             )
 
-            # Beide Bilder kombinieren (z. B. Einsparungen)
+            # Beide Bilder kombinieren
             for suffix in [
                 "boxplot_einsparungen",
                 "stripplot_einsparungen",
@@ -2813,10 +2880,18 @@ def plot_missing_connection_lines(G, pos, new_railway_lines, connection_nodes, o
                 format='png')
     plt.close()
 
-def plot_railway_lines_only(G, pos, railway_lines, output_file):
+
+def plot_railway_lines_only(G, pos, railway_lines, output_file, color_dict=None):
     """
     Plot a railway graph with proposed railway lines,
     zoomed to line extent with correct aspect ratio and compact figure size.
+
+    Args:
+        G: NetworkX graph containing the railway network
+        pos: Dictionary mapping node IDs to coordinates
+        railway_lines: List of railway line dictionaries
+        output_file: Path where to save the plot
+        color_dict: Optional dictionary mapping line names to colors
     """
 
     # === Validierungen ===
@@ -2828,6 +2903,20 @@ def plot_railway_lines_only(G, pos, railway_lines, output_file):
         raise ValueError("'railway_lines' muss eine nicht-leere Liste von Dictionaries sein.")
     if not output_file or not isinstance(output_file, str):
         raise ValueError("'output_file' muss ein gültiger Pfadstring sein.")
+
+    # ZVV-Farbpalette definieren
+    zvv_colors = [
+        "#E2001A",  # Linie 2 – Rot
+        "#009932",  # Linien 3, 11, 302, 760 – Grün
+        "#443F8F",  # Linien 4, 9, 303, 751 – Blau
+        "#955C23",  # Linien 5, 305 – Braun
+        "#DDA245",  # Linien 6, 307 – Orange
+        "#000000",  # Linie 7 – Schwarz
+        "#B1C800",  # Linien 8, 301, 752 – Gelb
+        "#E52D87",  # Linien 10, 308, 748 – Pink/Magenta
+        "#5EB3DB",  # Linie 12 – Hellblau
+        "#8E224D",  # Linie 17 – Weinrot
+    ]
 
     plt.figure(figsize=(8, 6), dpi=300)
 
@@ -2865,7 +2954,6 @@ def plot_railway_lines_only(G, pos, railway_lines, output_file):
             edge = tuple(sorted([path[j], path[j + 1]]))
             edge_count[edge] = edge_count.get(edge, 0) + 1
 
-    colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'brown', 'pink']
     legend_handles = []
 
     # --- Bereich für Zoom und Skalierung berechnen ---
@@ -2884,8 +2972,17 @@ def plot_railway_lines_only(G, pos, railway_lines, output_file):
 
     for i, line in enumerate(railway_lines):
         path = [int(n) for n in line['path']]
-        color = colors[i % len(colors)]
-        label = f"{line.get('name', f'Linie {i+1}')}:\n{line.get('start_station', '?')} – {line.get('end_station', '?')}"
+        name = line.get('name', f'Linie {i + 1}')
+
+        # Farbe basierend auf color_dict, line.color oder ZVV-Palette auswählen
+        if color_dict and name in color_dict:
+            color = color_dict[name]
+        elif 'color' in line:
+            color = line['color']
+        else:
+            color = zvv_colors[i % len(zvv_colors)]
+
+        label = f"{name}:\n{line.get('start_station', '?')} – {line.get('end_station', '?')}"
         line_segments = []
 
         for j in range(len(path) - 1):
@@ -2906,12 +3003,12 @@ def plot_railway_lines_only(G, pos, railway_lines, output_file):
 
             line_position = 0
             for k, other_line in enumerate(railway_lines):
-                if k == i:
-                    break
                 other_path = [int(n) for n in other_line['path']]
-                for m in range(len(other_path) - 1):
-                    if tuple(sorted([other_path[m], other_path[m + 1]])) == edge:
+                if any(tuple(sorted([other_path[l], other_path[l + 1]])) == edge
+                       for l in range(len(other_path) - 1)):
+                    if k < i:
                         line_position += 1
+                    elif k == i:
                         break
 
             offset = (line_position - (total_lines - 1) / 2) * scale_factor
@@ -2953,6 +3050,48 @@ def plot_railway_lines_only(G, pos, railway_lines, output_file):
     plt.xlim(x_min, x_max)
     plt.ylim(y_min, y_max)
 
+    # === Nordpfeil hinzufügen ===
+    ax = plt.gca()
+    # Position des Nordpfeils (rechts oben)
+    arrow_pos_x = 0.96
+    arrow_pos_y = 0.92
+
+    # "N" Beschriftung
+    ax.text(arrow_pos_x, arrow_pos_y, "N",
+            fontsize=16, weight='bold',
+            ha='center', va='center',
+            transform=ax.transAxes,
+            zorder=1000)
+
+    # Pfeil zeichnen
+    arrow = FancyArrowPatch((arrow_pos_x, arrow_pos_y - 0.03),
+                            (arrow_pos_x, arrow_pos_y + 0.03),
+                            color='black',
+                            lw=2,
+                            arrowstyle='->',
+                            mutation_scale=15,
+                            transform=ax.transAxes,
+                            zorder=1000)
+    ax.add_patch(arrow)
+
+    # === Maßstab hinzufügen ===
+    # Skalenfaktor berechnen (x-Koordinaten sind in Metern)
+    scale_length = 5000  # 5 km
+
+    # Position des Maßstabs (unten links)
+    scale_x = x_min + 0.05 * x_range
+    scale_y = y_min + 0.05 * y_range
+    scale_height = y_range * 0.01
+
+    # Maßstabsbalken zeichnen
+    scale_rect = plt.Rectangle((scale_x, scale_y), scale_length, scale_height,
+                               facecolor='black', edgecolor='black', zorder=1000)
+    ax.add_patch(scale_rect)
+
+    # Maßstabstext
+    ax.text(scale_x + scale_length / 2, scale_y + scale_height * 2,
+            "5 km", ha='center', va='bottom', fontsize=12, zorder=1000)
+
     plt.savefig(output_file, dpi=300, bbox_inches='tight', pad_inches=0.2, format='png')
     plt.close()
 
@@ -2979,7 +3118,7 @@ def plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir)
         plot_missing_connection_lines(G, pos, new_railway_lines, connection, filename)
 
 
-def plot_cumulative_cost_distribution(df, output_path="plot/kumulative_kostenverteilung.png"):
+def plot_cumulative_cost_distribution(df, output_path="plot/kumulative_kostenverteilung.png", color_dict=None):
     """
     Erstellt eine kumulative Wahrscheinlichkeitsverteilung des Nettonutzens
     für alle im DataFrame enthaltenen Entwicklungen.
@@ -2999,8 +3138,10 @@ def plot_cumulative_cost_distribution(df, output_path="plot/kumulative_kostenver
     plt.figure(figsize=(10, 6))
 
     # Farbpalette generieren (ausreichend viele Farben)
-    cmap = plt.get_cmap('tab20')
-    colors = [cmap(i % 20) for i in range(len(dev_ids_sorted))]
+    if color_dict is None:
+        cmap = plt.get_cmap('tab20')
+        colors = [cmap(i % 20) for i in range(len(dev_ids_sorted))]
+        color_dict = {dev_id: colors[i] for i, dev_id in enumerate(dev_ids_sorted)}
 
     # Kumulative Verteilungen plotten
     for i, dev_id in enumerate(dev_ids_sorted):
@@ -3014,7 +3155,8 @@ def plot_cumulative_cost_distribution(df, output_path="plot/kumulative_kostenver
         label = f"Linie {dev_id}: {mean_value:.1f} Mio. CHF"
 
         # Linie zeichnen
-        plt.plot(values, y_values, '-', color=colors[i], linewidth=2, label=label)
+        color = color_dict.get(dev_id, f"C{i % 10}")  # Fallback zu matplotlib-Standardfarben
+        plt.plot(values, y_values, '-', color=color, linewidth=2, label=label)
 
     # Nulllinie
     plt.axvline(x=0, color='lightgray', linestyle='-', linewidth=1)
