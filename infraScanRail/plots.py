@@ -1943,11 +1943,15 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     df['missing_connection'] = df['development'].map(lambda x: dev_to_conn.get(f"X{int(x) - 101000}", "unbekannt"))
 
     df['line_name'] = None  # Initialisierung
-    df.loc[df['development'] < settings.dev_id_start_new_direct_connections, 'line_name'] = \
-        df['development'].loc[df['development'] < settings.dev_id_start_new_direct_connections].map(
-            lambda x: str(int(x - 101000)))
-    df.loc[df['development'] >= settings.dev_id_start_new_direct_connections, 'line_name'] = \
-        df['development'].loc[df['development'] >= settings.dev_id_start_new_direct_connections].map(
+
+    # Für IDs, die mit 100... beginnen → ohne X
+    df.loc[df['development'] < 101000, 'line_name'] = \
+        df['development'].loc[df['development'] < 101000].map(
+            lambda x: str(int(x - 100000)))
+
+    # Für IDs, die mit 101... beginnen → mit X
+    df.loc[df['development'] >= 101000, 'line_name'] = \
+        df['development'].loc[df['development'] >= 101000].map(
             lambda x: f"X{int(x - 101000)}")
 
     # Kleine Entwicklungen
@@ -2106,6 +2110,11 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
         plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_kosten_einsparungen.png"))
         plt.close()
 
+        # NEU: Kumulatives Verteilungsdiagramm für diese Datengruppe
+        data = data.drop(columns=['development']).rename(columns={'line_name': 'development'})
+        cumulative_output_path = os.path.join(plot_directory, f"{filename_prefix}_kumulative_kostenverteilung.png")
+        plot_cumulative_cost_distribution(data, cumulative_output_path)
+
     # Kleine Entwicklungen plotten
     if not small_dev_data.empty:
         plot_basic_charts(small_dev_data, "Expand_1_Stop")
@@ -2155,7 +2164,8 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
                 "stripplot_einsparungen",
                 "boxplot_nettonutzen",
                 "boxplot_cba",
-                "kosten_einsparungen"
+                "kosten_einsparungen",
+                "kumulative_kostenverteilung"
             ]:
                 chart_path = os.path.join(plot_directory, f"{filename_prefix}_{suffix}.png")
                 map_path = os.path.join(plot_directory, f"railway_lines_{filename_prefix}.png")
