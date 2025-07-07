@@ -782,8 +782,9 @@ def only_links_to_corridor():
     # Extract unique IDs of points within the corridor
     corridor_ids = access_corridor["ID_point"].unique()
 
-    # Filter new_links to keep only rows where from_ID_new is in corridor_ids
-    filtered_new_links = new_links[new_links["from_ID_new"].isin(corridor_ids)]
+    filtered_new_links = new_links[
+        new_links["from_ID_new"].isin(corridor_ids) | new_links["to_ID"].isin(corridor_ids)
+        ]
 
     # Add the new 'dev_id' column with unique values starting from 100000
     filtered_new_links = filtered_new_links.reset_index(drop=True)  # Reset index if needed

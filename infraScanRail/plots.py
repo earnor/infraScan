@@ -44,6 +44,7 @@ from scipy.interpolate import griddata
 import paths
 import settings
 import importlib
+import plot_parameter as pp
 
 
 def plotting(input_file, output_file, node_file):
@@ -1934,18 +1935,7 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     os.makedirs(plot_directory, exist_ok=True)
 
     # ZVV-Farbpalette definieren
-    zvv_colors = [
-        "#E2001A",  # Linie 2 – Rot
-        "#009932",  # Linien 3, 11, 302, 760 – Grün
-        "#443F8F",  # Linien 4, 9, 303, 751 – Blau
-        "#955C23",  # Linien 5, 305 – Braun
-        "#DDA245",  # Linien 6, 307 – Orange
-        "#000000",  # Linie 7 – Schwarz
-        "#B1C800",  # Linien 8, 301, 752 – Gelb
-        "#E52D87",  # Linien 10, 308, 748 – Pink/Magenta
-        "#5EB3DB",  # Linie 12 – Hellblau
-        "#8E224D",  # Linie 17 – Weinrot
-    ]
+    zvv_colors = pp.zvv_colors
 
     df.rename(columns={'ID_new': 'Scenario'}, inplace=True)
     df['monetized_savings_total'] = df['monetized_savings_total'].abs()
@@ -1973,207 +1963,219 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     # Kleine Entwicklungen
     small_dev_data = df[df['development'] < settings.dev_id_start_new_direct_connections]
 
-    def plot_basic_charts(data, filename_prefix, line_colors=None):
-        order = data.groupby('line_name')['total_net_benefit'].mean().sort_values(ascending=False).index.tolist()
-        n_lines = len(order)
+    def plot_basic_charts(data, filename_prefix, plot_directory, line_colors=None):
+            order = data.groupby('line_name')['total_net_benefit'].mean().sort_values(ascending=False).index.tolist()
+            n_lines = len(order)
 
-        # Farbzuordnung für Linien erstellen
-        if line_colors is None:
-            # Erstelle Farbpalette aus ZVV-Farben (zyklisch wiederholen falls nötig)
-            line_colors = {line_name: zvv_colors[i % len(zvv_colors)] for i, line_name in enumerate(order)}
+            # Farbzuordnung für Linien erstellen
+            if line_colors is None:
+                # Erstelle Farbpalette aus ZVV-Farben (zyklisch wiederholen falls nötig)
+                line_colors = {line_name: zvv_colors[i % len(zvv_colors)] for i, line_name in enumerate(order)}
 
-        # Farben für Kosten/Nutzen
-        kosten_farben = {
-            'TotalConstructionCost': '#a6bddb',
-            'TotalMaintenanceCost': '#3690c0',
-            'TotalUncoveredOperatingCost': '#034e7b',
-            'monetized_savings_total': '#31a354'
-        }
+            # Farben für Kosten/Nutzen
+            kosten_farben = {
+                'TotalConstructionCost': '#a6bddb',
+                'TotalMaintenanceCost': '#3690c0',
+                'TotalUncoveredOperatingCost': '#034e7b',
+                'monetized_savings_total': '#31a354'
+            }
 
-        # --- Boxplot Einsparungen ---
-        plt.figure(figsize=(7, 5))
-        # Eine Farbpalette aus den ausgewählten Farben erstellen
-        colors = [line_colors[line] for line in order]
-        ax = sns.boxplot(
-            data=data,
-            x='line_name',
-            y=data['monetized_savings_total'] / 1e6,
-            order=order,
-            palette=colors,  # Hier die eigenen Farben verwenden
-            width=0.4,
-            linewidth=0.8,
-            showmeans=True,
-            meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
-            fliersize=3,
-            showfliers=True
-        )
-        ax.set_xlim(-0.5, n_lines - 0.5)
-        plt.xlabel('Linie', fontsize=12)
-        plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
-        plt.xticks(rotation=90)
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.legend(
-            handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
-            loc='upper left', bbox_to_anchor=(1.01, 1)
-        )
-        plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_einsparungen.png"))
-        plt.close()
+            # --- Boxplot Einsparungen ---
+            plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+            # Eine Farbpalette aus den ausgewählten Farben erstellen
+            colors = [line_colors[line] for line in order]
+            ax = sns.boxplot(
+                data=data,
+                x='line_name',
+                y=data['monetized_savings_total'] / 1e6,
+                order=order,
+                palette=colors,  # Hier die eigenen Farben verwenden
+                width=0.4,
+                linewidth=0.8,
+                showmeans=True,
+                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+                fliersize=3,
+                showfliers=True
+            )
+            ax.set_xlim(-0.5, n_lines - 0.5)
+            plt.xlabel('Linie', fontsize=12)
+            plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
+            plt.xticks(rotation=90)
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.legend(
+                handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
+                loc='upper left', bbox_to_anchor=(1.01, 1)
+            )
+            plt.tight_layout(rect=[0, 0, 0.95, 1])
+            plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_einsparungen.png"), dpi=600)  # Höhere Auflösung
+            plt.close()
 
-        # --- Stripplot Einsparungen ---
-        plt.figure(figsize=(7, 5))
-        # Erstelle eine Farbzuordnung für Szenarien
-        scenario_colors = {scenario: 'gray' for scenario in data['scenario'].unique()}
-        ax = sns.stripplot(
-            data=data,
-            x='line_name',
-            y=data['monetized_savings_total'] / 1e6,
-            order=order,
-            hue='line_name',  # Linienname für Farbzuordnung
-            palette=line_colors,  # Hier die eigenen Farben verwenden
-            jitter=True,
-            dodge=False,
-            size=3,
-            alpha=0.7
-        )
-        ax.set_xlim(-0.5, n_lines - 0.5)
-        plt.xlabel('Linie', fontsize=12)
-        plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
-        plt.xticks(rotation=90)
-        # Legende entfernen (zu viele Einträge)
-        legend = ax.get_legend()
-        if legend is not None:
-            legend.remove()
-        plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_stripplot_einsparungen.png"))
-        plt.close()
+            # --- Violinplot Einsparungen mit Datenpunkten ---
+            plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+            ax = sns.violinplot(
+                data=data,
+                x='line_name',
+                y=data['monetized_savings_total'] / 1e6,
+                order=order,
+                palette=colors,  # Verwende die gleichen Farben wie bei den Boxplots
+                width=0.7,
+                inner=None,  # Kein Boxplot innerhalb der Violinen
+                linewidth=0.8,
+                cut=0,  # Keine Extrapolation über die Daten hinaus
+                scale='width'  # Alle Violinen haben die gleiche Breite
+            )
 
-        # --- Boxplot Nettonutzen ---
-        plt.figure(figsize=(7, 5))
-        ax = sns.boxplot(
-            data=data,
-            x='line_name',
-            y=data['total_net_benefit'] / 1e6,
-            order=order,
-            palette=colors,  # Hier die eigenen Farben verwenden
-            width=0.4,
-            linewidth=0.8,
-            showmeans=True,
-            meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
-            fliersize=3,
-            showfliers=True
-        )
-        ax.set_xlim(-0.5, n_lines - 0.5)
-        plt.xlabel('Linie', fontsize=12)
-        plt.ylabel('Nettonutzen in Mio. CHF', fontsize=12)
-        plt.axhline(y=0, color='red', linestyle='-', alpha=0.5)
-        plt.xticks(rotation=90)
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.legend(
-            handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
-            loc='upper left', bbox_to_anchor=(1.01, 1)
-        )
-        plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_nettonutzen.png"))
-        plt.close()
+            # Für jede Linie nur einzigartige Werte nach Szenario darstellen
+            unique_data = data.drop_duplicates(subset=['line_name', 'scenario', 'monetized_savings_total'])
 
-        # --- Boxplot CBA ---
-        plt.figure(figsize=(7, 5))
-        ax = sns.boxplot(
-            data=data,
-            x='line_name',
-            y='cba_ratio',
-            order=order,
-            palette=colors,  # Hier die eigenen Farben verwenden
-            width=0.4,
-            linewidth=0.8,
-            showmeans=True,
-            meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
-            fliersize=3,
-            showfliers=True
-        )
-        ax.set_xlim(-0.5, n_lines - 0.5)
-        plt.xlabel('Linie', fontsize=12)
-        plt.ylabel('Kosten-Nutzen-Faktor', fontsize=12)
-        plt.axhline(y=1, color='red', linestyle='-', alpha=0.5)
-        plt.xticks(rotation=90)
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.legend(
-            handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
-            loc='upper left', bbox_to_anchor=(1.01, 1)
-        )
-        plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_cba.png"))
-        plt.close()
+            # Datenpunkte mit Jitter hinzufügen - nur einzigartige Werte, aber dunkler
+            sns.stripplot(
+                data=unique_data,
+                x='line_name',
+                y=unique_data['monetized_savings_total'] / 1e6,
+                order=order,
+                color='black',
+                alpha=0.4,  # Erhöhte Sichtbarkeit der Punkte (vorher 0.15)
+                jitter=True,  # Jitter-Effekt aktivieren
+                size=2,      # Kleinere Punktgröße
+                dodge=False  # Keine zusätzliche Verschiebung
+            )
+            ax.set_xlim(-0.5, n_lines - 0.5)
+            plt.xlabel('Linie', fontsize=12)
+            plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
+            plt.xticks(rotation=90)
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.tight_layout(rect=[0, 0, 0.95, 1])
+            plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_violinplot_einsparungen.png"),
+                        dpi=600)  # Höhere Auflösung
+            plt.close()
 
-        # --- Gestapeltes Balkendiagramm ---
-        summary = data.groupby(['development', 'line_name']).agg({
-            'TotalConstructionCost': 'mean',
-            'TotalMaintenanceCost': 'mean',
-            'TotalUncoveredOperatingCost': 'mean',
-            'monetized_savings_total': 'mean'
-        }).loc[(slice(None), order), :].reset_index().set_index('line_name').loc[order].reset_index()
+            # --- Boxplot Nettonutzen ---
+            plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+            ax = sns.boxplot(
+                data=data,
+                x='line_name',
+                y=data['total_net_benefit'] / 1e6,
+                order=order,
+                palette=colors,  # Hier die eigenen Farben verwenden
+                width=0.4,
+                linewidth=0.8,
+                showmeans=True,
+                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+                fliersize=3,
+                showfliers=True
+            )
+            ax.set_xlim(-0.5, n_lines - 0.5)
+            plt.xlabel('Linie', fontsize=12)
+            plt.ylabel('Nettonutzen in Mio. CHF', fontsize=12)
+            plt.axhline(y=0, color='red', linestyle='-', alpha=0.5)
+            plt.xticks(rotation=90)
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.legend(
+                handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
+                loc='upper left', bbox_to_anchor=(1.01, 1)
+            )
+            plt.tight_layout(rect=[0, 0, 0.95, 1])
+            plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_nettonutzen.png"), dpi=600)  # Höhere Auflösung
+            plt.close()
 
-        x_pos = np.arange(n_lines)
-        bar_width = 0.6
-        plt.figure(figsize=(7, 5))
+            # --- Boxplot CBA ---
+            plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+            ax = sns.boxplot(
+                data=data,
+                x='line_name',
+                y='cba_ratio',
+                order=order,
+                palette=colors,  # Hier die eigenen Farben verwenden
+                width=0.4,
+                linewidth=0.8,
+                showmeans=True,
+                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+                fliersize=3,
+                showfliers=True
+            )
+            ax.set_xlim(-0.5, n_lines - 0.5)
+            plt.xlabel('Linie', fontsize=12)
+            plt.ylabel('Kosten-Nutzen-Faktor', fontsize=12)
+            plt.axhline(y=1, color='red', linestyle='-', alpha=0.5)
+            plt.xticks(rotation=90)
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.legend(
+                handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
+                loc='upper left', bbox_to_anchor=(1.01, 1)
+            )
+            plt.tight_layout(rect=[0, 0, 0.95, 1])
+            plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_cba.png"), dpi=600)  # Höhere Auflösung
+            plt.close()
 
-        # Für das gestapelte Balkendiagramm verwenden wir die Linienfarbpalette für die Einsparungen
-        # und die bestehende Farbpalette für die Kosten
-        plt.bar(x_pos, -summary['TotalConstructionCost'] / 1e6, width=bar_width,
-                color=kosten_farben['TotalConstructionCost'],
-                label='Baukosten')
-        plt.bar(x_pos, -summary['TotalMaintenanceCost'] / 1e6, width=bar_width,
-                bottom=-summary['TotalConstructionCost'] / 1e6, color=kosten_farben['TotalMaintenanceCost'],
-                label='ungedeckte Unterhaltskosten')
-        plt.bar(x_pos, -summary['TotalUncoveredOperatingCost'] / 1e6, width=bar_width,
-                bottom=-(summary['TotalConstructionCost'] + summary['TotalMaintenanceCost']) / 1e6,
-                color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten')
+            # --- Gestapeltes Balkendiagramm ---
+            summary = data.groupby(['development', 'line_name']).agg({
+                'TotalConstructionCost': 'mean',
+                'TotalMaintenanceCost': 'mean',
+                'TotalUncoveredOperatingCost': 'mean',
+                'monetized_savings_total': 'mean'
+            }).loc[(slice(None), order), :].reset_index().set_index('line_name').loc[order].reset_index()
 
-        # Hier die individuellen Farben pro Linie für die Einsparungen verwenden
-        for i, line_name in enumerate(order):
-            plt.bar(x_pos[i], summary[summary['line_name'] == line_name]['monetized_savings_total'].values[0] / 1e6,
-                    width=bar_width, color=line_colors[line_name])
+            x_pos = np.arange(n_lines)
+            bar_width = 0.6
+            plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
 
-        plt.axhline(y=0, color='black', linestyle='-')
-        plt.xticks(x_pos, summary['line_name'], rotation=90)
-        plt.xlabel('Linie', fontsize=12)
-        plt.ylabel('Wert in Mio. CHF', fontsize=12)
-        plt.title('Kosten und Nutzen je Modifikation', fontsize=14)
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
+            # Für das gestapelte Balkendiagramm verwenden wir die Linienfarbpalette für die Einsparungen
+            # und die bestehende Farbpalette für die Kosten
+            plt.bar(x_pos, -summary['TotalConstructionCost'] / 1e6, width=bar_width,
+                    color=kosten_farben['TotalConstructionCost'],
+                    label='Baukosten')
+            plt.bar(x_pos, -summary['TotalMaintenanceCost'] / 1e6, width=bar_width,
+                    bottom=-summary['TotalConstructionCost'] / 1e6, color=kosten_farben['TotalMaintenanceCost'],
+                    label='ungedeckte Unterhaltskosten')
+            plt.bar(x_pos, -summary['TotalUncoveredOperatingCost'] / 1e6, width=bar_width,
+                    bottom=-(summary['TotalConstructionCost'] + summary['TotalMaintenanceCost']) / 1e6,
+                    color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten')
 
-        # Legende für Kosten
-        kosten_handles = [
-            mpatches.Patch(color=kosten_farben['TotalConstructionCost'], label='Baukosten'),
-            mpatches.Patch(color=kosten_farben['TotalMaintenanceCost'], label='ungedeckte Unterhaltskosten'),
-            mpatches.Patch(color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten'),
-        ]
+            # Hier die individuellen Farben pro Linie für die Einsparungen verwenden
+            for i, line_name in enumerate(order):
+                plt.bar(x_pos[i], summary[summary['line_name'] == line_name]['monetized_savings_total'].values[0] / 1e6,
+                        width=bar_width, color=line_colors[line_name])
 
-        # Legende für Einsparungen mit linienspezifischen Farben
-        nutzen_handles = [mpatches.Patch(color=line_colors[line], label=f'Einsparungen {line}') for line in order]
+            plt.axhline(y=0, color='black', linestyle='-')
+            plt.xticks(x_pos, summary['line_name'], rotation=90)
+            plt.xlabel('Linie', fontsize=12)
+            plt.ylabel('Wert in Mio. CHF', fontsize=12)
+            plt.title('Kosten und Nutzen je Modifikation', fontsize=14)
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
 
-        # Nur die Kostenlegende anzeigen, um die Darstellung sauber zu halten
-        plt.legend(handles=kosten_handles, bbox_to_anchor=(1.01, 1))
+            # Legende für Kosten
+            kosten_handles = [
+                mpatches.Patch(color=kosten_farben['TotalConstructionCost'], label='Baukosten'),
+                mpatches.Patch(color=kosten_farben['TotalMaintenanceCost'], label='ungedeckte Unterhaltskosten'),
+                mpatches.Patch(color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten'),
+            ]
 
-        plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_kosten_einsparungen.png"))
-        plt.close()
+            # Legende für Einsparungen mit linienspezifischen Farben
+            nutzen_handles = [mpatches.Patch(color=line_colors[line], label=f'Einsparungen {line}') for line in order]
 
-        # NEU: Kumulatives Verteilungsdiagramm für diese Datengruppe
-        data_copy = data.copy()  # Um Änderungen am Original zu vermeiden
-        data_copy = data_copy.drop(columns=['development']).rename(columns={'line_name': 'development'})
-        cumulative_output_path = os.path.join(plot_directory, f"{filename_prefix}_kumulative_kostenverteilung.png")
-        plot_cumulative_cost_distribution(data_copy, cumulative_output_path,
-                                          color_dict={dev: line_colors[dev] for dev in
-                                                      data_copy['development'].unique()})
+            # Nur die Kostenlegende anzeigen, um die Darstellung sauber zu halten
+            plt.legend(handles=kosten_handles, bbox_to_anchor=(1.01, 1))
 
-        # Farben zurückgeben für die Verwendung in der Kartenvisualisierung
-        return line_colors
+            plt.tight_layout(rect=[0, 0, 0.95, 1])
+            plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_kosten_einsparungen.png"), dpi=600)  # Höhere Auflösung
+            plt.close()
+
+            # NEU: Kumulatives Verteilungsdiagramm für diese Datengruppe
+            data_copy = data.copy()  # Um Änderungen am Original zu vermeiden
+            data_copy = data_copy.drop(columns=['development']).rename(columns={'line_name': 'development'})
+            cumulative_output_path = os.path.join(plot_directory, f"{filename_prefix}_kumulative_kostenverteilung.png")
+            plot_cumulative_cost_distribution(data_copy, cumulative_output_path,
+                                              color_dict={dev: line_colors[dev] for dev in
+                                                          data_copy['development'].unique()})
+
+            # Farben zurückgeben für die Verwendung in der Kartenvisualisierung
+            return line_colors
 
     # Kleine Entwicklungen plotten
     line_colors_small = None
     if not small_dev_data.empty:
-        line_colors_small = plot_basic_charts(small_dev_data, "Expand_1_Stop")
+        line_colors_small = plot_basic_charts(small_dev_data, "Expand_1_Stop", plot_directory=plot_directory)
 
     # Große Entwicklungen gruppieren und plotten
     df['plot_nr'] = None
@@ -2201,7 +2203,7 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
             filename_prefix = filename_prefix.replace(" - ", "_").replace(" ", "_")
 
             # Hier werden die Diagramme geplottet und Farbzuordnung zurückgegeben
-            line_colors = plot_basic_charts(selected, filename_prefix)
+            line_colors = plot_basic_charts(selected, filename_prefix,plot_directory=plot_directory)
 
             # Liniennamen extrahieren und Subset erzeugen
             line_names = selected['line_name'].unique()
@@ -2222,13 +2224,13 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
 
             # Die Funktion plot_railway_lines_only muss angepasst werden, um die Farben zu berücksichtigen
             plot_railway_lines_only(
-                G, pos, filtered_lines_dict, output_file_name, color_dict=line_colors
+                G, pos, filtered_lines_dict, output_file_name, color_dict=line_colors, selected_stations=pp.selected_stations
             )
 
             # Beide Bilder kombinieren
             for suffix in [
                 "boxplot_einsparungen",
-                "stripplot_einsparungen",
+                "violinplot_einsparungen",
                 "boxplot_nettonutzen",
                 "boxplot_cba",
                 "kosten_einsparungen",
@@ -2273,6 +2275,100 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
 
                 except Exception as e:
                     print(f"Fehler beim Kombinieren der Bilder für {filename_prefix}_{suffix}: {e}")
+
+    # Verzeichnis für die Rankings erstellen
+    ranked_dir = os.path.join(plot_directory, "ranked")
+    os.makedirs(ranked_dir, exist_ok=True)
+    ranked_combined_dir = os.path.join(ranked_dir, "combined")
+    os.makedirs(ranked_combined_dir, exist_ok=True)
+
+    # Globaler Mittelwert des Nettonutzens je Entwicklung über alle missing_connections
+    global_mean_benefit = large_dev_data.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
+    global_unique_devs = global_mean_benefit.index.tolist()  # Sortierte Liste aller Developments
+
+    # Anzahl der 8er-Pakete berechnen
+    num_global_plots = len(global_unique_devs) // 8 + int(len(global_unique_devs) % 8 > 0)
+
+    for i in range(num_global_plots):
+        # 8 Developments pro Plot auswählen
+        devs_in_plot = global_unique_devs[i * 8: (i + 1) * 8]
+        global_selected = large_dev_data[large_dev_data['development'].isin(devs_in_plot)]
+
+        # Filename definieren
+        global_filename_prefix = f"ranked_gruppe_{i + 1}"
+
+        # Diagramme plotten und Farbzuordnung zurückgeben
+        global_line_colors = plot_basic_charts(global_selected, global_filename_prefix,
+                                               plot_directory=ranked_dir)
+
+        # Liniennamen extrahieren und Subset erzeugen
+        global_line_names = global_selected['line_name'].unique()
+        global_filtered_lines = railway_lines[railway_lines["name"].isin(global_line_names)]
+        global_filtered_lines['path'] = global_filtered_lines['path'].str.split(',')
+        global_filtered_lines = global_filtered_lines.rename(
+            columns={"missing_connection": "original_missing_connection"})
+
+        # Linienfarben in global_filtered_lines hinzufügen
+        global_filtered_lines_dict = global_filtered_lines.to_dict(orient='records')
+        for record in global_filtered_lines_dict:
+            line_name = record["name"]
+            if line_name in global_line_colors:
+                record["color"] = global_line_colors[line_name]
+
+        # Netzgrafik erzeugen
+        global_filename = f"railway_lines_{global_filename_prefix}.png"
+        global_output_file_name = os.path.join(ranked_dir, global_filename)
+
+        # Gleiche plot_railway_lines_only Funktion auch für die globalen Rankings verwenden
+        plot_railway_lines_only(
+            G, pos, global_filtered_lines_dict, global_output_file_name,
+            color_dict=global_line_colors, selected_stations=pp.selected_stations
+        )
+
+        # Auch hier Bilder kombinieren
+        for suffix in [
+            "boxplot_einsparungen",
+            "violinplot_einsparungen",
+            "boxplot_nettonutzen",
+            "boxplot_cba",
+            "kosten_einsparungen",
+            "kumulative_kostenverteilung"
+        ]:
+            chart_path = os.path.join(ranked_dir, f"{global_filename_prefix}_{suffix}.png")
+            map_path = os.path.join(ranked_dir, f"railway_lines_{global_filename_prefix}.png")
+
+            combined_path = os.path.join(ranked_combined_dir, f"{global_filename_prefix}_{suffix}_kombiniert.png")
+
+            try:
+                if not os.path.exists(chart_path):
+                    raise FileNotFoundError(f"Diagrammbild nicht gefunden: {chart_path}")
+                if not os.path.exists(map_path):
+                    raise FileNotFoundError(f"Kartenbild nicht gefunden: {map_path}")
+
+                map_image = Image.open(map_path)
+                chart_image = Image.open(chart_path)
+
+                # Zielhöhe: maximale Höhe beider Bilder
+                target_height = max(map_image.height, chart_image.height)
+
+                # Skalierungsfaktor berechnen
+                def resize_to_height(img, target_h):
+                    w, h = img.size
+                    new_w = int(w * (target_h / h))
+                    return img.resize((new_w, target_h), Image.LANCZOS)
+
+                map_image_resized = resize_to_height(map_image, target_height)
+                chart_image_resized = resize_to_height(chart_image, target_height)
+
+                # Kombinieren
+                total_width = map_image_resized.width + chart_image_resized.width
+                combined = Image.new("RGB", (total_width, target_height), (255, 255, 255))
+                combined.paste(map_image_resized, (0, 0))
+                combined.paste(chart_image_resized, (map_image_resized.width, 0))
+                combined.save(combined_path)
+
+            except Exception as e:
+                print(f"Fehler beim Kombinieren der Bilder für {global_filename_prefix}_{suffix}: {e}")
 
     return df, railway_lines
 
@@ -2881,219 +2977,263 @@ def plot_missing_connection_lines(G, pos, new_railway_lines, connection_nodes, o
     plt.close()
 
 
-def plot_railway_lines_only(G, pos, railway_lines, output_file, color_dict=None):
-    """
-    Plot a railway graph with proposed railway lines,
-    zoomed to line extent with correct aspect ratio and compact figure size.
+def plot_railway_lines_only(G, pos, railway_lines, output_file, color_dict=None, selected_stations=None):
+            """
+            Plot a railway graph with proposed railway lines,
+            zoomed to line extent with correct aspect ratio and compact figure size.
 
-    Args:
-        G: NetworkX graph containing the railway network
-        pos: Dictionary mapping node IDs to coordinates
-        railway_lines: List of railway line dictionaries
-        output_file: Path where to save the plot
-        color_dict: Optional dictionary mapping line names to colors
-    """
+            Args:
+                G: NetworkX graph containing the railway network
+                pos: Dictionary mapping node IDs to coordinates
+                railway_lines: List of railway line dictionaries
+                output_file: Path where to save the plot
+                color_dict: Optional dictionary mapping line names to colors
+                selected_stations: Optional list of station names to display on the map
+            """
+            zvv_colors = pp.zvv_colors
 
-    # === Validierungen ===
-    if not isinstance(G, nx.Graph):
-        raise TypeError("'G' muss ein NetworkX-Graph sein.")
-    if not isinstance(pos, dict) or not pos:
-        raise ValueError("'pos' muss ein nicht-leeres Dictionary mit Koordinaten sein.")
-    if not isinstance(railway_lines, list) or len(railway_lines) == 0:
-        raise ValueError("'railway_lines' muss eine nicht-leere Liste von Dictionaries sein.")
-    if not output_file or not isinstance(output_file, str):
-        raise ValueError("'output_file' muss ein gültiger Pfadstring sein.")
+            # Falls keine Liste ausgewählter Stationen übergeben wurde, leere Liste verwenden
+            if selected_stations is None:
+                selected_stations = []
 
-    # ZVV-Farbpalette definieren
-    zvv_colors = [
-        "#E2001A",  # Linie 2 – Rot
-        "#009932",  # Linien 3, 11, 302, 760 – Grün
-        "#443F8F",  # Linien 4, 9, 303, 751 – Blau
-        "#955C23",  # Linien 5, 305 – Braun
-        "#DDA245",  # Linien 6, 307 – Orange
-        "#000000",  # Linie 7 – Schwarz
-        "#B1C800",  # Linien 8, 301, 752 – Gelb
-        "#E52D87",  # Linien 10, 308, 748 – Pink/Magenta
-        "#5EB3DB",  # Linie 12 – Hellblau
-        "#8E224D",  # Linie 17 – Weinrot
-    ]
+            # === Validierungen ===
+            if not isinstance(G, nx.Graph):
+                raise TypeError("'G' muss ein NetworkX-Graph sein.")
+            if not isinstance(pos, dict) or not pos:
+                raise ValueError("'pos' muss ein nicht-leeres Dictionary mit Koordinaten sein.")
+            if not isinstance(railway_lines, list) or len(railway_lines) == 0:
+                raise ValueError("'railway_lines' muss eine nicht-leere Liste von Dictionaries sein.")
+            if not output_file or not isinstance(output_file, str):
+                raise ValueError("'output_file' muss ein gültiger Pfadstring sein.")
 
-    plt.figure(figsize=(8, 6), dpi=300)
+            plt.figure(figsize=(8, 6), dpi=300)
 
-    nx.draw_networkx_edges(G, pos, edge_color='gray', width=0.5, alpha=0.3)
+            nx.draw_networkx_edges(G, pos, edge_color='gray', width=0.5, alpha=0.3)
 
-    node_colors = []
-    node_sizes = []
-    node_labels = {}
+            node_colors = []
+            node_sizes = []
+            node_labels = {}
 
-    for node in G.nodes():
-        station_name = G.nodes[node].get('station_name', '')
-        if G.nodes[node].get('type') == 'center':
-            node_colors.append('orange')
-            node_sizes.append(80)
-            node_labels[node] = station_name
-        elif G.nodes[node].get('end_station', False):
-            node_colors.append('green')
-            node_sizes.append(100)
-            node_labels[node] = station_name
-        elif any(int(node) in [int(n) for n in line.get('path', [])] for line in railway_lines):
-            node_colors.append('blue')
-            node_sizes.append(80)
-            node_labels[node] = station_name
-        else:
-            node_colors.append('lightgray')
-            node_sizes.append(30)
+            # Bereich für Zoom berechnen - wird für die Bestimmung sichtbarer Stationen benötigt
+            line_nodes = set(int(n) for line in railway_lines for n in line['path'] if int(n) in pos)
+            if not line_nodes:
+                raise ValueError("Keine gültigen Knoten in 'railway_lines' für Zoom gefunden.")
 
-    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, alpha=0.7)
-    nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=9)
+            x_coords = [pos[node][0] for node in line_nodes]
+            y_coords = [pos[node][1] for node in line_nodes]
+            padding = 2000
+            x_min, x_max = min(x_coords) - padding, max(x_coords) + padding
+            y_min, y_max = min(y_coords) - padding, max(y_coords) + padding
+            x_range = x_max - x_min
+            y_range = y_max - y_min
 
-    edge_count = {}
-    for line in railway_lines:
-        path = [int(n) for n in line['path']]
-        for j in range(len(path) - 1):
-            edge = tuple(sorted([path[j], path[j + 1]]))
-            edge_count[edge] = edge_count.get(edge, 0) + 1
+            # Stationen nach Kriterien filtern
+            for node in G.nodes():
+                station_name = G.nodes[node].get('station_name', '')
+                is_main_node = G.nodes[node].get('end_station', False)
+                is_selected = station_name in selected_stations
 
-    legend_handles = []
+                # Prüfen, ob der Knoten auf einer der aktuellen Linien liegt
+                is_on_current_line = int(node) in line_nodes if node in G else False
 
-    # --- Bereich für Zoom und Skalierung berechnen ---
-    line_nodes = set(int(n) for line in railway_lines for n in line['path'] if int(n) in pos)
-    if not line_nodes:
-        raise ValueError("Keine gültigen Knoten in 'railway_lines' für Zoom gefunden.")
+                # Prüfen, ob der Knoten innerhalb des sichtbaren Bereichs liegt
+                if node in pos:
+                    node_x, node_y = pos[node]
+                    is_visible = (x_min <= node_x <= x_max) and (y_min <= node_y <= y_max)
+                else:
+                    is_visible = False
 
-    x_coords = [pos[node][0] for node in line_nodes]
-    y_coords = [pos[node][1] for node in line_nodes]
-    padding = 2000
-    x_min, x_max = min(x_coords) - padding, max(x_coords) + padding
-    y_min, y_max = min(y_coords) - padding, max(y_coords) + padding
-    x_range = x_max - x_min
-    y_range = y_max - y_min
-    scale_factor = max(x_range, y_range) / 100  # dynamischer Offset-Basiswert
+                # Farbzuweisungen
+                if G.nodes[node].get('type') == 'center':
+                    node_colors.append('orange')
+                    node_sizes.append(80)
+                    # Nur Labels für ausgewählte Stationen, wenn sie auf einer aktuellen Linie liegen
+                    if is_visible and (is_main_node or (is_selected and is_on_current_line)):
+                        node_labels[node] = station_name
+                elif is_main_node:
+                    node_colors.append('green')
+                    node_sizes.append(100)
+                    # Nur Labels für Hauptknoten innerhalb des sichtbaren Bereichs
+                    if is_visible:
+                        node_labels[node] = station_name
+                elif any(int(node) in [int(n) for n in line.get('path', [])] for line in railway_lines):
+                    node_colors.append('blue')
+                    node_sizes.append(80)
+                    # Nur Labels für ausgewählte Stationen, wenn sie auf einer aktuellen Linie liegen
+                    if is_visible and is_selected and is_on_current_line:
+                        node_labels[node] = station_name
+                else:
+                    node_colors.append('lightgray')
+                    node_sizes.append(30)
+                    # Nur Labels für ausgewählte Stationen, wenn sie auf einer aktuellen Linie liegen
+                    if is_visible and is_selected and is_on_current_line:
+                        node_labels[node] = station_name
 
-    for i, line in enumerate(railway_lines):
-        path = [int(n) for n in line['path']]
-        name = line.get('name', f'Linie {i + 1}')
+            # Knoten zeichnen
+            nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, alpha=0.7)
 
-        # Farbe basierend auf color_dict, line.color oder ZVV-Palette auswählen
-        if color_dict and name in color_dict:
-            color = color_dict[name]
-        elif 'color' in line:
-            color = line['color']
-        else:
-            color = zvv_colors[i % len(zvv_colors)]
+            scale_factor = max(x_range, y_range) / 100  # dynamischer Offset-Basiswert
 
-        label = f"{name}:\n{line.get('start_station', '?')} – {line.get('end_station', '?')}"
-        line_segments = []
+            # Kanten zählen für Offset-Berechnung
+            edge_count = {}
+            for line in railway_lines:
+                path = [int(n) for n in line['path']]
+                for j in range(len(path) - 1):
+                    edge = tuple(sorted([path[j], path[j + 1]]))
+                    edge_count[edge] = edge_count.get(edge, 0) + 1
 
-        for j in range(len(path) - 1):
-            node_a, node_b = path[j], path[j + 1]
-            start_pos = pos[node_a]
-            end_pos = pos[node_b]
+            legend_handles = []
 
-            dx = end_pos[0] - start_pos[0]
-            dy = end_pos[1] - start_pos[1]
-            length = np.hypot(dx, dy)
-            if length == 0:
-                continue
+            # Linien zeichnen
+            for i, line in enumerate(railway_lines):
+                path = [int(n) for n in line['path']]
+                name = line.get('name', f'Linie {i + 1}')
 
-            perpx = -dy / length
-            perpy = dx / length
-            edge = tuple(sorted([node_a, node_b]))
-            total_lines = edge_count[edge]
+                if color_dict and name in color_dict:
+                    color = color_dict[name]
+                elif 'color' in line:
+                    color = line['color']
+                else:
+                    color = zvv_colors[i % len(zvv_colors)]
 
-            line_position = 0
-            for k, other_line in enumerate(railway_lines):
-                other_path = [int(n) for n in other_line['path']]
-                if any(tuple(sorted([other_path[l], other_path[l + 1]])) == edge
-                       for l in range(len(other_path) - 1)):
-                    if k < i:
-                        line_position += 1
-                    elif k == i:
-                        break
+                label = f"{name}:\n{line.get('start_station', '?')} – {line.get('end_station', '?')}"
+                line_segments = []
 
-            offset = (line_position - (total_lines - 1) / 2) * scale_factor
+                for j in range(len(path) - 1):
+                    node_a, node_b = path[j], path[j + 1]
+                    if node_a not in pos or node_b not in pos:
+                        continue
 
-            start_offset = (
-                start_pos[0] + perpx * offset,
-                start_pos[1] + perpy * offset
-            )
-            end_offset = (
-                end_pos[0] + perpx * offset,
-                end_pos[1] + perpy * offset
-            )
+                    start_pos = pos[node_a]
+                    end_pos = pos[node_b]
 
-            segment, = plt.plot(
-                [start_offset[0], end_offset[0]],
-                [start_offset[1], end_offset[1]],
-                color=color,
-                linewidth=3,
-                label="_nolegend_"
-            )
-            line_segments.append(segment)
+                    dx = end_pos[0] - start_pos[0]
+                    dy = end_pos[1] - start_pos[1]
+                    length = np.hypot(dx, dy)
+                    if length == 0:
+                        continue
 
-        if line_segments:
-            legend_line = Line2D([0], [0], color=color, lw=3, label=label)
-            legend_handles.append(legend_line)
+                    perpx = -dy / length
+                    perpy = dx / length
+                    edge = tuple(sorted([node_a, node_b]))
+                    total_lines = edge_count[edge]
 
-    # Legende mit größerer Schrift
-    plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.02, 1),
-               fontsize=12, framealpha=0.8)
+                    line_position = 0
+                    for k, other_line in enumerate(railway_lines):
+                        if k >= i:
+                            break
+                        other_path = [int(n) for n in other_line['path']]
+                        for l in range(len(other_path) - 1):
+                            if tuple(sorted([other_path[l], other_path[l + 1]])) == edge:
+                                line_position += 1
+                                break
 
-    plt.title("Generierte S-Bahn Linien", fontsize=14, pad=20)
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.xlabel('X-Koordinate', fontsize=10)
-    plt.ylabel('Y-Koordinate', fontsize=10)
+                    offset = (line_position - (total_lines - 1) / 2) * scale_factor
 
-    # Zoom auf Linienbereich
-    plt.axis('equal')
-    plt.xlim(x_min, x_max)
-    plt.ylim(y_min, y_max)
+                    start_offset = (
+                        start_pos[0] + perpx * offset,
+                        start_pos[1] + perpy * offset
+                    )
+                    end_offset = (
+                        end_pos[0] + perpx * offset,
+                        end_pos[1] + perpy * offset
+                    )
 
-    # === Nordpfeil hinzufügen ===
-    ax = plt.gca()
-    # Position des Nordpfeils (rechts oben)
-    arrow_pos_x = 0.96
-    arrow_pos_y = 0.92
+                    segment, = plt.plot(
+                        [start_offset[0], end_offset[0]],
+                        [start_offset[1], end_offset[1]],
+                        color=color, linewidth=2.5, zorder=10
+                    )
+                    line_segments.append(segment)
 
-    # "N" Beschriftung
-    ax.text(arrow_pos_x, arrow_pos_y, "N",
-            fontsize=16, weight='bold',
-            ha='center', va='center',
-            transform=ax.transAxes,
-            zorder=1000)
+                if line_segments:
+                    legend_line = Line2D([0], [0], color=color, lw=2, label=label)
+                    legend_handles.append(legend_line)
 
-    # Pfeil zeichnen
-    arrow = FancyArrowPatch((arrow_pos_x, arrow_pos_y - 0.03),
-                            (arrow_pos_x, arrow_pos_y + 0.03),
-                            color='black',
-                            lw=2,
-                            arrowstyle='->',
-                            mutation_scale=15,
-                            transform=ax.transAxes,
-                            zorder=1000)
-    ax.add_patch(arrow)
+            # Stationsnamen mit weißlichem Hintergrund platzieren und innerhalb der Karte halten
+            ax = plt.gca()
+            for node, label in node_labels.items():
+                x, y = pos[node]
 
-    # === Maßstab hinzufügen ===
-    # Skalenfaktor berechnen (x-Koordinaten sind in Metern)
-    scale_length = 5000  # 5 km
+                # Prüfe, ob der Name zu nahe am linken oder rechten Rand ist
+                # und passe die horizontale Ausrichtung entsprechend an
+                ha = 'center'  # Standardwert: zentriert
+                x_offset = 0
+                if x < x_min + x_range * 0.1:  # Wenn nahe am linken Rand
+                    ha = 'left'
+                    x_offset = y_range * 0.01  # Kleiner Offset nach rechts
+                elif x > x_max - x_range * 0.1:  # Wenn nahe am rechten Rand
+                    ha = 'right'
+                    x_offset = -y_range * 0.01  # Kleiner Offset nach links
 
-    # Position des Maßstabs (unten links)
-    scale_x = x_min + 0.05 * x_range
-    scale_y = y_min + 0.05 * y_range
-    scale_height = y_range * 0.01
+                # Text mit angepasster horizontaler Ausrichtung und Position
+                text = ax.text(x + x_offset, y + y_range * 0.005, label,
+                              fontsize=9,
+                              ha=ha,
+                              va='bottom',
+                              bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1),
+                              zorder=1000)  # Höhere zorder für Text
 
-    # Maßstabsbalken zeichnen
-    scale_rect = plt.Rectangle((scale_x, scale_y), scale_length, scale_height,
-                               facecolor='black', edgecolor='black', zorder=1000)
-    ax.add_patch(scale_rect)
+            # Legende mit größerer Schrift
+            plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.02, 1),
+                       fontsize=12, framealpha=0.8)
 
-    # Maßstabstext
-    ax.text(scale_x + scale_length / 2, scale_y + scale_height * 2,
-            "5 km", ha='center', va='bottom', fontsize=12, zorder=1000)
+            plt.title("Generierte S-Bahn Linien", fontsize=14, pad=20)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.xlabel('X-Koordinate', fontsize=10)
+            plt.ylabel('Y-Koordinate', fontsize=10)
 
-    plt.savefig(output_file, dpi=300, bbox_inches='tight', pad_inches=0.2, format='png')
-    plt.close()
+            # Zoom auf Linienbereich
+            plt.axis('equal')
+            plt.xlim(x_min, x_max)
+            plt.ylim(y_min, y_max)
+
+            # === Nordpfeil überarbeitet ===
+            arrow_pos_x = 0.92  # Position oben rechts
+            arrow_pos_y = 0.92  # Position oben rechts
+
+            # "N" Beschriftung unter dem Pfeil platzieren
+            ax.text(arrow_pos_x, arrow_pos_y - 0.04, "N",
+                    fontsize=16, weight='bold',
+                    ha='center', va='center',
+                    transform=ax.transAxes,
+                    zorder=1000,
+                    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
+
+            # Pfeil zeichnen (oberhalb der Beschriftung)
+            arrow = FancyArrowPatch((arrow_pos_x, arrow_pos_y - 0.01),
+                                   (arrow_pos_x, arrow_pos_y + 0.03),
+                                   color='black',
+                                   lw=2,
+                                   arrowstyle='->',
+                                   mutation_scale=15,
+                                   transform=ax.transAxes,
+                                   zorder=1000)
+            ax.add_patch(arrow)
+
+            # === Maßstab in der Mitte des unteren Kartenrandes hinzufügen ===
+            scale_length = 5000  # 5 km
+            scale_x = x_min + (x_range / 2) - (scale_length / 2)  # Zentriert am unteren Rand
+            scale_y = y_min + 0.05 * y_range  # Nahe dem unteren Rand
+            scale_height = y_range * 0.01
+
+            # Maßstabsbalken mit weißem Hintergrund für bessere Sichtbarkeit
+            scale_bg = plt.Rectangle((scale_x - scale_length*0.05, scale_y - scale_height*1.5),
+                                    scale_length*1.1, scale_height*5,
+                                    facecolor='white', alpha=0.7, zorder=999)
+            ax.add_patch(scale_bg)
+
+            scale_rect = plt.Rectangle((scale_x, scale_y), scale_length, scale_height,
+                                      facecolor='black', edgecolor='black', zorder=1000)
+            ax.add_patch(scale_rect)
+
+            # Maßstabstext
+            ax.text(scale_x + scale_length / 2, scale_y + scale_height * 2,
+                   "5 km", ha='center', va='bottom', fontsize=12, zorder=1000)
+
+            plt.savefig(output_file, dpi=300, bbox_inches='tight', pad_inches=0.2, format='png')
+            plt.close()
 
 
 def plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir):
