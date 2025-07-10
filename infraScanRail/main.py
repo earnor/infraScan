@@ -78,8 +78,6 @@ def infrascanrail():
 
     generate_infra_development(use_cache=settings.use_cache_developments, mod_type=settings.infra_generation_modification_type)
 
-    ##here insert other network generations and save them also as a GPGK at: data/Network/processed/developments/
-
     runtimes["Generate infrastructure developments"] = time.time() - st
     st = time.time()
 
@@ -87,8 +85,8 @@ def infrascanrail():
     if settings.OD_type == 'pt_catchment_perimeter':
         get_catchment(use_cache=settings.use_cache_pt_catchment)
 
-    runtimes["Generate The Catchement based on the Bus network"] = time.time() - st
-    st = time.time()
+    #runtimes["Generate The Catchement based on the Bus network"] = time.time() - st
+    #st = time.time()
 
     # here would code be needed to get all catchements for the different developments, if access point are added
 
@@ -122,9 +120,7 @@ def infrascanrail():
     ##################################################################################
     # 1) Define scenario based on cantonal predictions
 
-    #generate_scenarios() #TODO
-    runtimes["Generate the scenarios"] = time.time() - st
-    st = time.time()
+
 
     ##################################################################################
     ##################################################################################
@@ -157,14 +153,22 @@ def infrascanrail():
     runtimes["Calculate Traveltimes for all developments"] = time.time() - st
     st = time.time()
 
+    runtimes["Compute and visualize passenger flows on network"] = time.time() - st
+    st = time.time()
+
     #################################################################################
 
     # Compute the OD matrix for the current infrastructure under all scenarios
     if settings.OD_type == 'canton_ZH':
         get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=settings.amount_of_scenarios,
                              use_cache=settings.use_cache_scenarios, do_plot=True)
+
+    elif settings.OD_type == 'pt_catchment_perimeter':runtimes["Generate the scenarios"] = time.time() - st
+    st = time.time()
+
     dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup=dev_id_lookup, od_times_dev= od_times_dev,
                                                         od_times_status_quo=od_times_status_quo, use_cache = settings.use_cache_tts_calc)
+
 
     runtimes["Calculate the TTT Savings"] = time.time() - st
     st = time.time()
@@ -188,7 +192,7 @@ def infrascanrail():
     costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=cp.discount_rate, base_year=settings.start_year_scenario)
     costs_and_benefits_dev_discounted.to_csv(paths.COST_AND_BENEFITS_DISCOUNTED)
 
-    runtimes["Compute construction and maintenance costs"] = time.time() - st
+    runtimes["Compute costs"] = time.time() - st
     st = time.time()
 
 
@@ -197,9 +201,7 @@ def infrascanrail():
     runtimes["Aggregate costs"] = time.time() - st
 
     # Write runtimes to a file
-    with open(r'runtimes.txt', 'w') as file:
-        for part, runtime in runtimes.items():
-            file.write(f"{part}: {runtime}/n")
+
 
     ##################################################################################
     # VISUALIZE THE RESULTS
@@ -209,6 +211,12 @@ def infrascanrail():
     visualize_results(clear_plot_directory=False)
     plot_costs_benefits_example(costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
 
+    runtimes["Visualize results"] = time.time() - st
+    st = time.time()
+
+    with open(r'runtimes.txt', 'w') as file:
+        for part, runtime in runtimes.items():
+            file.write(f"{part}: {runtime}/n")
 
     # Run the display results function to launch the GUI
     # Call the function to create_scenario_analysis_viewerreate and display the GUI

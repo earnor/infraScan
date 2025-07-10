@@ -3155,24 +3155,39 @@ def plot_railway_lines_only(G, pos, railway_lines, output_file, color_dict=None,
             for node, label in node_labels.items():
                 x, y = pos[node]
 
-                # Prüfe, ob der Name zu nahe am linken oder rechten Rand ist
-                # und passe die horizontale Ausrichtung entsprechend an
-                ha = 'center'  # Standardwert: zentriert
+                # Bestimme Position basierend auf Quadranten (relative Position im Bild)
+                # Standardwerte setzen
+                ha = 'center'  # horizontale Ausrichtung
+                va = 'bottom'  # vertikale Ausrichtung
                 x_offset = 0
-                if x < x_min + x_range * 0.1:  # Wenn nahe am linken Rand
-                    ha = 'left'
-                    x_offset = y_range * 0.01  # Kleiner Offset nach rechts
-                elif x > x_max - x_range * 0.1:  # Wenn nahe am rechten Rand
-                    ha = 'right'
-                    x_offset = -y_range * 0.01  # Kleiner Offset nach links
+                y_offset = y_range * 0.01  # Standard y-Offset über dem Knoten
 
-                # Text mit angepasster horizontaler Ausrichtung und Position
-                text = ax.text(x + x_offset, y + y_range * 0.005, label,
-                              fontsize=9,
-                              ha=ha,
-                              va='bottom',
-                              bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1),
-                              zorder=1000)  # Höhere zorder für Text
+                # X-Position: Links, Mitte oder Rechts des Bildes
+                x_rel_pos = (x - x_min) / x_range  # relative x-Position (0 bis 1)
+
+                if x_rel_pos < 0.33:  # Links im Bild
+                    ha = 'left'
+                    x_offset = y_range * 0.01
+                elif x_rel_pos > 0.67:  # Rechts im Bild
+                    ha = 'right'
+                    x_offset = -y_range * 0.01
+
+                # Verhindere, dass Labels am unteren Rand nach unten zeigen
+                if y < y_min + y_range * 0.1:  # Nahe am unteren Rand
+                    va = 'bottom'
+                    y_offset = abs(y_offset)
+
+                # Text mit angepasster Ausrichtung und Position
+                text = ax.text(
+                    x + x_offset,
+                    y + y_offset,
+                    label,
+                    fontsize=9,
+                    ha=ha,
+                    va=va,
+                    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1),
+                    zorder=1000
+                )
 
             # Legende mit größerer Schrift
             plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.02, 1),
