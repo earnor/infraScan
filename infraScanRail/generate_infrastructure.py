@@ -941,24 +941,24 @@ def get_missing_connections(G, pos, print_results=False, polygon=None):
 
 def generate_new_railway_lines(G, center_analysis):
     """
-    Generates new railway lines starting from missing connections.
-    Ensures lines only end at existing end stations of the railway network.
+    Generiert neue Bahnlinien basierend auf fehlenden Verbindungen.
+    Stellt sicher, dass Linien nur an existierenden Endbahnhöfen des Schienennetzes enden.
+    Entfernt duplizierte Pfade und nummeriert Linien neu.
 
     Args:
-        G (networkx.Graph): Input graph with service attributes and end_station node attributes
-        center_analysis (list): Results from find_center_and_borders function
+        G (networkx.Graph): Eingabegraph mit Service-Attributen und end_station Knotenattributen
+        center_analysis (list): Ergebnisse der find_center_and_borders Funktion
 
     Returns:
-        list: List of new railway lines with their paths and names
+        list: Liste neuer Bahnlinien mit ihren Pfaden und Namen
     """
 
     def find_path_continuation(current_node, visited_nodes, forbidden_nodes, target_is_end_station=False):
         """
-        Recursively finds all possible path continuations from a node.
-        If target_is_end_station is True, only returns paths that end at an end station.
-        Returns list of possible paths, each path is a list of nodes.
+        Findet rekursiv alle möglichen Pfadfortsetzungen von einem Knoten aus.
+        Wenn target_is_end_station True ist, werden nur Pfade zurückgegeben, die an einem Endbahnhof enden.
         """
-        # Base case - if we reached an end station and that's what we're looking for
+        # Basisfall - wenn wir einen Endbahnhof erreicht haben und das ist, was wir suchen
         if target_is_end_station and G.nodes[current_node].get('end_station', False):
             return [[current_node]]
 
@@ -969,84 +969,91 @@ def generate_new_railway_lines(G, center_analysis):
 
         paths = []
 
-        # If we're looking for end stations and this node is not an end station or we have neighbors,
-        # continue exploration
+        # Wenn wir nach Endbahnhöfen suchen und dieser Knoten kein Endbahnhof ist oder wir Nachbarn haben,
+        # setzen wir die Erkundung fort
         if not target_is_end_station or not G.nodes[current_node].get('end_station', False) or valid_neighbors:
             for next_node in valid_neighbors:
-                # Recursively find all paths from the next node
-                next_paths = find_path_continuation(next_node, visited_nodes.copy(), forbidden_nodes, target_is_end_station)
-                # Add current node to the beginning of each path
+                # Finde rekursiv alle Pfade vom nächsten Knoten aus
+                next_paths = find_path_continuation(next_node, visited_nodes.copy(), forbidden_nodes,
+                                                    target_is_end_station)
+                # Füge den aktuellen Knoten am Anfang jedes Pfades hinzu
                 for path in next_paths:
                     paths.append([current_node] + path)
 
-        # If we're not specifically looking for end stations, or if this is an end station,
-        # include this node as a single-node path
+        # Wenn wir nicht speziell nach Endbahnhöfen suchen oder wenn dies ein Endbahnhof ist,
+        # füge diesen Knoten als eigenständigen Pfad hinzu
         if not target_is_end_station or G.nodes[current_node].get('end_station', False):
             paths.append([current_node])
 
         return paths
 
-    new_lines = []
-    service_counter = 0
+    # Dictionary zum Speichern eindeutiger Pfade
+    unique_paths = {}
 
-    # Iterate through each center and its missing connections
+    # Iteriere durch jedes Zentrum und seine fehlenden Verbindungen
     for center_info in center_analysis:
         for missing in center_info['missing_connections']:
             node1, node2 = missing['nodes']
             name1, name2 = missing['node_names']
-            forbidden_nodes = set(center_info['borders'])  # Don't use any border nodes
+            forbidden_nodes = set(center_info['borders'])  # Verwende keine Grenzknoten
 
-            # Check if both missing connection nodes are already end stations
+            # Prüfe, ob beide Knoten der fehlenden Verbindung bereits Endbahnhöfe sind
             node1_is_end = G.nodes[node1].get('end_station', False)
             node2_is_end = G.nodes[node2].get('end_station', False)
 
-            print(f"Processing missing connection: {name1} - {name2}")
-            print(f"  Node {node1} ({name1}) is end station: {node1_is_end}")
-            print(f"  Node {node2} ({name2}) is end station: {node2_is_end}")
+            print(f"Verarbeite fehlende Verbindung: {name1} - {name2}")
+            print(f"  Knoten {node1} ({name1}) ist Endbahnhof: {node1_is_end}")
+            print(f"  Knoten {node2} ({name2}) ist Endbahnhof: {node2_is_end}")
 
-            # Start from first node
-            # If node1 is not an end station, find paths to end stations
-            # Otherwise, just use the node itself
+            # Starte vom ersten Knoten
+            # Wenn node1 kein Endbahnhof ist, finde Pfade zu Endbahnhöfen
+            # Andernfalls verwende nur den Knoten selbst
             if node1_is_end:
                 paths_from_node1 = [[node1]]
             else:
                 paths_from_node1 = find_path_continuation(node1, set(), forbidden_nodes - {node1}, True)
-                # Remove paths that don't end at an end station
+                # Entferne Pfade, die nicht an einem Endbahnhof enden
                 paths_from_node1 = [path for path in paths_from_node1
-                                   if G.nodes[path[-1]].get('end_station', False)]
+                                    if G.nodes[path[-1]].get('end_station', False)]
 
-            # Start from second node
-            # Same logic as for node1
+            # Starte vom zweiten Knoten
+            # Gleiche Logik wie für node1
             if node2_is_end:
                 paths_from_node2 = [[node2]]
             else:
                 paths_from_node2 = find_path_continuation(node2, set(), forbidden_nodes - {node2}, True)
-                # Remove paths that don't end at an end station
+                # Entferne Pfade, die nicht an einem Endbahnhof enden
                 paths_from_node2 = [path for path in paths_from_node2
-                                   if G.nodes[path[-1]].get('end_station', False)]
+                                    if G.nodes[path[-1]].get('end_station', False)]
 
-            print(f"  Found {len(paths_from_node1)} possible paths from {name1}")
-            print(f"  Found {len(paths_from_node2)} possible paths from {name2}")
+            print(f"  {len(paths_from_node1)} mögliche Pfade von {name1} gefunden")
+            print(f"  {len(paths_from_node2)} mögliche Pfade von {name2} gefunden")
 
-            # Combine paths from both ends to create complete lines
+            # Kombiniere Pfade von beiden Enden, um vollständige Linien zu erstellen
             valid_lines_created = 0
             for path1 in paths_from_node1:
                 for path2 in paths_from_node2:
-                    # Check if paths don't overlap (except possibly at endpoints)
-                    path1_nodes = set(path1[:-1])  # Exclude last node
-                    path2_nodes = set(path2[:-1])  # Exclude last node
+                    # Prüfe, ob sich die Pfade nicht überlappen (außer möglicherweise an Endpunkten)
+                    path1_nodes = set(path1[:-1])  # Letzten Knoten ausschließen
+                    path2_nodes = set(path2[:-1])  # Letzten Knoten ausschließen
 
-                    if not (path1_nodes & path2_nodes):  # Ensure paths don't overlap
-                        # Create complete path
+                    if not (path1_nodes & path2_nodes):  # Stelle sicher, dass sich die Pfade nicht überlappen
+                        # Erstelle vollständigen Pfad
                         complete_path = path2[::-1] + path1
 
-                        # Get station names for the path
-                        stations = [G.nodes[n].get('station_name', f"Unknown Station {n}")
-                                   for n in complete_path]
+                        # Erzeuge einen eindeutigen Schlüssel für diesen Pfad
+                        path_key = "-".join(map(str, complete_path))
 
-                        # Create new service line
+                        # Überspringe diesen Pfad, wenn wir bereits einen identischen haben
+                        if path_key in unique_paths:
+                            continue
+
+                        # Hole Stationsnamen für den Pfad
+                        stations = [G.nodes[n].get('station_name', f"Unknown Station {n}")
+                                    for n in complete_path]
+
+                        # Erstelle neue Servicelinie
                         new_line = {
-                            'name': f'X{service_counter}',
                             'path': complete_path,
                             'stations': stations,
                             'original_missing_connection': {
@@ -1064,12 +1071,20 @@ def generate_new_railway_lines(G, center_analysis):
                                 }
                             }
                         }
-                        new_lines.append(new_line)
-                        service_counter += 1
+
+                        # Speichere den eindeutigen Pfad
+                        unique_paths[path_key] = new_line
                         valid_lines_created += 1
 
-            print(f"  Created {valid_lines_created} valid new railway lines for this missing connection")
+            print(f"  {valid_lines_created} gültige neue Bahnlinien für diese fehlende Verbindung erstellt")
 
+    # Konvertiere unique_paths zu einer Liste und nummeriere sie neu
+    new_lines = []
+    for i, line_data in enumerate(unique_paths.values()):
+        line_data['name'] = f'X{i}'
+        new_lines.append(line_data)
+
+    print(f"Insgesamt {len(new_lines)} eindeutige neue Bahnlinien generiert")
     return new_lines
 
 

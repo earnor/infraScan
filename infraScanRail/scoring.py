@@ -405,7 +405,7 @@ def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100)):
     # This provides the necessary structure for the output DataFrame
     travel_time_path = "data/costs/traveltime_savings.csv"
     c_travel_time = pd.read_csv(travel_time_path)
-    total_costs = c_travel_time
+    total_costs = c_travel_time[c_travel_time['year'].between(valuation_period[0], valuation_period[1])]
     # Initialize total costs DataFrame with the existing structure
     # but using the aggregated values from cost_and_benefits
     
@@ -1490,7 +1490,7 @@ def discounting(df, discount_rate, base_year=2018):
     return df_discounted
 
 
-def create_cost_and_benefit_df(start_year=2018, end_year=2100):
+def create_cost_and_benefit_df(scenario_start_year=2018, end_year=2100, start_valuation_period=2050):
     # Load cached data
     with open(paths.TTS_CACHE, "rb") as f_in:
         _, monetized_tt, _ = pickle.load(f_in)
@@ -1500,7 +1500,7 @@ def create_cost_and_benefit_df(start_year=2018, end_year=2100):
     construction_and_maintenance_costs = pd.read_csv(paths.CONSTRUCTION_COSTS)
 
     # Build full index
-    years = list(range(start_year, end_year + 1))
+    years = list(range(scenario_start_year, end_year + 1))
     full_index = pd.MultiIndex.from_product([dev_list, scenario_list, years],
                                             names=["development", "scenario", "year"])
 
@@ -1520,16 +1520,21 @@ def create_cost_and_benefit_df(start_year=2018, end_year=2100):
         uncovered_op_cost = row["uncoveredOperatingCost"]
 
         # Construction costs: only in start year
-        const_idx = pd.MultiIndex.from_product([[dev_name], scenario_list, [start_year]],
+        const_idx = pd.MultiIndex.from_product([[dev_name], scenario_list, [scenario_start_year]],
                                                names=["development", "scenario", "year"])
         costs_and_benefits_dev.loc[const_idx, "const_cost"] = const_cost
 
         # Maintenance and uncovered op costs: from start_year + 1 to end_year
-        maint_years = list(range(start_year + 1, end_year + 1))
+        maint_years = list(range(scenario_start_year + 1, end_year + 1))
         maint_idx = pd.MultiIndex.from_product([[dev_name], scenario_list, maint_years],
                                                names=["development", "scenario", "year"])
         costs_and_benefits_dev.loc[maint_idx, "maint_cost"] = maint_cost
         costs_and_benefits_dev.loc[maint_idx, "uncovered_op_cost"] = uncovered_op_cost
+
+    # Nur Daten behalten, die nach oder im start_valuation_period liegen
+    costs_and_benefits_dev = costs_and_benefits_dev[
+        costs_and_benefits_dev.index.get_level_values('year') >= start_valuation_period
+    ]
 
     # Save results
     costs_benefits_csv_path = "data/costs/costs_and_benefits_dev.csv"

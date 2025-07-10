@@ -188,9 +188,10 @@ def infrascanrail():
                                                             duration=cp.duration)
 
 
-    cost_and_benefits_dev = create_cost_and_benefit_df(settings.start_year_scenario, settings.end_year_scenario)
+    cost_and_benefits_dev = create_cost_and_benefit_df(settings.start_year_scenario, settings.end_year_scenario, settings.start_valuation_year)
     costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=cp.discount_rate, base_year=settings.start_year_scenario)
     costs_and_benefits_dev_discounted.to_csv(paths.COST_AND_BENEFITS_DISCOUNTED)
+    plot_costs_benefits_example(costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
 
     runtimes["Compute costs"] = time.time() - st
     st = time.time()
@@ -202,14 +203,16 @@ def infrascanrail():
 
     # Write runtimes to a file
 
-
+    with open(r'runtimes.txt', 'w') as file:
+        for part, runtime in runtimes.items():
+            file.write(f"{part}: {runtime}/n")
     ##################################################################################
     # VISUALIZE THE RESULTS
 
     print("\nVISUALIZE THE RESULTS \n")
 
     visualize_results(clear_plot_directory=False)
-    plot_costs_benefits_example(costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
+
 
     runtimes["Visualize results"] = time.time() - st
     st = time.time()
@@ -644,9 +647,9 @@ def create_dev_id_lookup_table():
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    #infrascanrail()
-    os.chdir(paths.MAIN)
+    infrascanrail()
+    """os.chdir(paths.MAIN)
     results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
     railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
-    create_and_save_plots(df=results_raw, railway_lines=railway_lines)
+    create_and_save_plots(df=results_raw, railway_lines=railway_lines)"""
 

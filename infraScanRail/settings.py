@@ -6,10 +6,10 @@ rail_network = 'AK_2035_extended' # either 'AK_2035','AK_2035_extended' or 'curr
 #CACHE
 use_cache_network = True
 use_cache_pt_catchment = True
-use_cache_developments = False
+use_cache_developments = True
 use_cache_catchmentOD = True
-use_cache_stationsOD = False
-use_cache_traveltime_graph = True
+use_cache_stationsOD = True
+use_cache_traveltime_graph = False
 use_cache_scenarios = True
 use_cache_tts_calc = False
 
@@ -24,6 +24,7 @@ scenario_type = 'GENERATED' #either 'GENERATED' or 'STATIC_9' or 'dummy'
 amount_of_scenarios = 100
 start_year_scenario = 2018
 end_year_scenario = 2100
+start_valuation_year = 2050
 #choose which OD
 
 plot_passenger_flow = True
