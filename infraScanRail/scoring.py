@@ -1519,13 +1519,13 @@ def create_cost_and_benefit_df(scenario_start_year=2018, end_year=2100, start_va
         maint_cost = row["YearlyMaintenanceCost"]
         uncovered_op_cost = row["uncoveredOperatingCost"]
 
-        # Construction costs: only in start year
-        const_idx = pd.MultiIndex.from_product([[dev_name], scenario_list, [scenario_start_year]],
+        # Construction costs: only in start_valuation_period
+        const_idx = pd.MultiIndex.from_product([[dev_name], scenario_list, [start_valuation_period]],
                                                names=["development", "scenario", "year"])
         costs_and_benefits_dev.loc[const_idx, "const_cost"] = const_cost
 
         # Maintenance and uncovered op costs: from start_year + 1 to end_year
-        maint_years = list(range(scenario_start_year + 1, end_year + 1))
+        maint_years = list(range(start_valuation_period + 1, end_year + 1))
         maint_idx = pd.MultiIndex.from_product([[dev_name], scenario_list, maint_years],
                                                names=["development", "scenario", "year"])
         costs_and_benefits_dev.loc[maint_idx, "maint_cost"] = maint_cost

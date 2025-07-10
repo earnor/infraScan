@@ -32,39 +32,39 @@ def plot_tt_development_over_time(save_fig=False, output_dir=None, show_std_dev=
     merged_data['difference'] = merged_data['mean_2024'] - merged_data['mean_2035']  # Differenz (2024 - 2035)
 
     # Figur mit zwei Y-Achsen erstellen
-    fig, ax1 = plt.subplots(figsize=(10, 6), dpi=300)
+    fig, ax1 = plt.subplots(figsize=(7, 4), dpi=400)
     ax2 = ax1.twinx()  # Zweite Y-Achse erstellen
 
     # Dunklere Orange-Farbe für bessere Lesbarkeit
     darker_orange = '#D35400'  # Dunkleres Orange
 
-    # Differenz als Balken auf der zweiten Y-Achse (zuerst zeichnen, damit sie im Hintergrund sind)
+    # Differenz als Balken auf der zweiten Y-Achse (mit niedrigem zorder-Wert)
     bars = ax2.bar(merged_data["year"], merged_data["difference"],
-                   alpha=0.6, color=darker_orange, width=0.5,
-                   label="Reisezeit-Differenz (2024 - 2035)")
+                  alpha=0.6, color=darker_orange, width=0.5,
+                  label="Reisezeit-Differenz (2024 - 2035)", zorder=5)
 
     # Ausbaukonzept 2035 auf der ersten Y-Achse
     if show_std_dev:
         ax1.fill_between(grouped_1["year"],
-                         grouped_1["mean"] - grouped_1["std"],
-                         grouped_1["mean"] + grouped_1["std"],
-                         color="green", alpha=0.2)
+                        grouped_1["mean"] - grouped_1["std"],
+                        grouped_1["mean"] + grouped_1["std"],
+                        color="green", alpha=0.2, zorder=6)
 
     # Aktuelles Netz (Stand 2024) auf der ersten Y-Achse
     if show_std_dev:
         ax1.fill_between(grouped_2["year"],
-                         grouped_2["mean"] - grouped_2["std"],
-                         grouped_2["mean"] + grouped_2["std"],
-                         color="blue", alpha=0.2)
+                        grouped_2["mean"] - grouped_2["std"],
+                        grouped_2["mean"] + grouped_2["std"],
+                        color="blue", alpha=0.2, zorder=6)
 
-    # Linien im Vordergrund zeichnen (nach den Balken)
+    # Linien mit höherem zorder-Wert zeichnen, damit sie über den Balken erscheinen
     line1 = ax1.plot(grouped_1["year"], grouped_1["mean"],
-                     label="Mit Ausbaukonzept 2035",
-                     color="green", linewidth=2, zorder=10)
+                    label="Mit Ausbaukonzept 2035",
+                    color="green", linewidth=2, zorder=15)
 
     line2 = ax1.plot(grouped_2["year"], grouped_2["mean"],
-                     label="Netz Stand 2024",
-                     color="blue", linewidth=2, zorder=10)
+                    label="Netz Stand 2024",
+                    color="blue", linewidth=2, zorder=15)
 
     # Y-Achsenformatierung für die erste Y-Achse
     ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{int(x / 1000):,}k".replace(",", ".")))
@@ -294,5 +294,5 @@ def plot_scenarios():
     plot_scenarios_with_range(distance_per_person_scenarios, directory, 'distance_per_person',
                                   federal_2050_range=(34.77, 39.47))
 fig_dir = r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\network_performance_Ak2035 plot"
-#plot_tt_development_over_time(save_fig=True, output_dir=fig_dir, show_std_dev=False)
-plot_scenarios()
+plot_tt_development_over_time(save_fig=True, output_dir=fig_dir, show_std_dev=False)
+#plot_scenarios()

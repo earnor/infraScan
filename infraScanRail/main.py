@@ -92,14 +92,13 @@ def infrascanrail():
 
 
     if settings.OD_type == 'canton_ZH':
-        # Filtere Punkte innerhalb der innerboundary
-        points_in_inner_boundary = points[points.apply(lambda row: innerboundary.contains(row.geometry), axis=1)]
+        # Filtere Punkte innerhalb von settings.perimeter_demand anstatt innerboundary
+        points_in_perimeter = points[points.apply(lambda row: settings.perimeter_demand.contains(row.geometry), axis=1)]
 
         # Liste der Einträge erstellen (z.B. die ID_point und NAME)
-        inner_boundary_stations = points_in_inner_boundary[['ID_point', 'NAME']].values.tolist()
+        perimeter_stations = points_in_perimeter[['ID_point', 'NAME']].values.tolist()
         #stationOD also saved as a file
-        getStationOD(settings.use_cache_stationsOD, inner_boundary_stations, settings.only_demand_from_to_perimeter)
-        #getScenarios(od_directory_scenario, pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH))
+        getStationOD(settings.use_cache_stationsOD, perimeter_stations, settings.only_demand_from_to_perimeter)
 
 
     elif settings.OD_type == 'pt_catchment_perimeter':
@@ -142,7 +141,8 @@ def infrascanrail():
 
     dev_id_lookup = create_dev_id_lookup_table()
     od_times_dev, od_times_status_quo, G_status_quo, G_development = create_travel_time_graphs(settings.rail_network, settings.use_cache_traveltime_graph, dev_id_lookup)
-
+    runtimes["Calculate Traveltimes for all developments"] = time.time() - st
+    st = time.time()
     #Compute Passenger flow on network
     OD_matrix_flow = pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
     points = gpd.read_file(paths.RAIL_POINTS_PATH)
@@ -150,8 +150,7 @@ def infrascanrail():
     plot_flow_graph(flows_on_edges, output_path="plots/passenger_flows/passenger_flow_map.png", edge_scale=0.0007, selected_stations=pp.selected_stations, plot_perimeter = True)
     plot_flow_graph(flows_on_railway_lines, output_path="plots/passenger_flows/passenger_flow_map2.png", edge_scale=0.0007, selected_stations=pp.selected_stations)
     plot_line_flows(flows_on_railway_lines, paths.RAIL_SERVICES_AK2035_EXTENDED_PATH, output_path="plots/passenger_flows/railway_line_load.png")
-    runtimes["Calculate Traveltimes for all developments"] = time.time() - st
-    st = time.time()
+
 
     runtimes["Compute and visualize passenger flows on network"] = time.time() - st
     st = time.time()
@@ -163,7 +162,7 @@ def infrascanrail():
         get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=settings.amount_of_scenarios,
                              use_cache=settings.use_cache_scenarios, do_plot=True)
 
-    elif settings.OD_type == 'pt_catchment_perimeter':runtimes["Generate the scenarios"] = time.time() - st
+    runtimes["Generate the scenarios"] = time.time() - st
     st = time.time()
 
     dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup=dev_id_lookup, od_times_dev= od_times_dev,
