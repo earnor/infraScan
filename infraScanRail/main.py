@@ -130,6 +130,88 @@ def infrascanrail():
     runtimes["Calculate Traveltimes for all developments"] = time.time() - st
     st = time.time()
 
+    if settings.plot_passenger_flow:
+        plot_passenger_flows_on_network(G_development, G_status_quo, dev_id_lookup)
+
+    #Use it later when it functions
+    #plot_flow_graph(flows_on_railway_lines, output_path="plots/passenger_flows/passenger_flow_map2.png", edge_scale=0.0007, selected_stations=pp.selected_stations)
+    #plot_line_flows(flows_on_railway_lines, paths.RAIL_SERVICES_AK2035_EXTENDED_PATH, output_path="plots/passenger_flows/railway_line_load.png")
+
+
+    runtimes["Compute and visualize passenger flows on network"] = time.time() - st
+    st = time.time()
+
+    #################################################################################
+
+    # Compute the OD matrix for the current infrastructure under all scenarios
+    if settings.OD_type == 'canton_ZH':
+        get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=settings.amount_of_scenarios,
+                             use_cache=settings.use_cache_scenarios, do_plot=True)
+
+    runtimes["Generate the scenarios"] = time.time() - st
+    st = time.time()
+
+    dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup=dev_id_lookup, od_times_dev= od_times_dev,
+                                                        od_times_status_quo=od_times_status_quo, use_cache = settings.use_cache_tts_calc)
+
+
+    runtimes["Calculate the TTT Savings"] = time.time() - st
+    st = time.time()
+
+    # 2) Compute construction costs
+
+    ##here a check for capacity could be added
+    # Compute the construction costs for each development
+    file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
+    construction_and_maintenance_costs = construction_costs(file_path=file_path,
+                                                            cost_per_meter=cp.track_cost_per_meter,
+                                                            tunnel_cost_per_meter=cp.tunnel_cost_per_meter,
+                                                            bridge_cost_per_meter=cp.bridge_cost_per_meter,
+                                                            track_maintenance_cost=cp.track_maintenance_cost,
+                                                            tunnel_maintenance_cost=cp.tunnel_maintenance_cost,
+                                                            bridge_maintenance_cost=cp.bridge_maintenance_cost,
+                                                            duration=cp.duration)
+
+
+    cost_and_benefits_dev = create_cost_and_benefit_df(settings.start_year_scenario, settings.end_year_scenario, settings.start_valuation_year)
+    costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=cp.discount_rate, base_year=settings.start_valuation_year)
+    costs_and_benefits_dev_discounted.to_csv(paths.COST_AND_BENEFITS_DISCOUNTED)
+    plot_costs_benefits_example(costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
+
+    runtimes["Compute costs"] = time.time() - st
+    st = time.time()
+
+
+    rearange_costs(costs_and_benefits_dev_discounted)
+
+    runtimes["Aggregate costs"] = time.time() - st
+
+    # Write runtimes to a file
+
+    with open(r'runtimes.txt', 'w') as file:
+        for part, runtime in runtimes.items():
+            file.write(f"{part}: {runtime}/n")
+    ##################################################################################
+    # VISUALIZE THE RESULTS
+
+    print("\nVISUALIZE THE RESULTS \n")
+
+    visualize_results(clear_plot_directory=False)
+
+
+    runtimes["Visualize results"] = time.time() - st
+    st = time.time()
+
+    with open(r'runtimes.txt', 'w') as file:
+        for part, runtime in runtimes.items():
+            file.write(f"{part}: {runtime}/n")
+
+    # Run the display results function to launch the GUI
+    # Call the function to create_scenario_analysis_viewerreate and display the GUI
+    #create_scenario_analysis_viewer(paths.TOTAL_COST_WITH_GEOMETRY)
+
+
+def plot_passenger_flows_on_network(G_development, G_status_quo, dev_id_lookup):
     def calculate_flow_difference(status_quo_graph, development_graph, OD_matrix_flow, points):
         """
         Berechnet die Differenz der Passagierflüsse zwischen Status quo und einer Entwicklung
@@ -215,8 +297,7 @@ def infrascanrail():
 
         return difference_graph
 
-
-    #Compute Passenger flow on network
+    # Compute Passenger flow on network
     OD_matrix_flow = pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
     points = gpd.read_file(paths.RAIL_POINTS_PATH)
     # Passagierfluss für Status Quo (G_status_quo[0]) berechnen und visualisieren
@@ -229,11 +310,10 @@ def infrascanrail():
                     title="Passagierfluss - Status Quo",
                     style="absolute")
     """plot_flow_graph(flows_on_railway_lines_sq,
-                    output_path="plots/passenger_flows/railway_line_load_status_quo.png",
-                    edge_scale=0.0007,
-                    selected_stations=pp.selected_stations,
-                    title="Bahnstreckenauslastung - Status Quo")"""
-
+                        output_path="plots/passenger_flows/railway_line_load_status_quo.png",
+                        edge_scale=0.0007,
+                        selected_stations=pp.selected_stations,
+                        title="Bahnstreckenauslastung - Status Quo")"""
     # Passagierfluss für alle Entwicklungsszenarien berechnen und visualisieren
     for i, graph in enumerate(G_development):
         # Development-ID aus dem Lookup-Table ermitteln (falls verfügbar, sonst nur Index verwenden)
@@ -269,93 +349,12 @@ def infrascanrail():
 
         # Visualisierung der Differenz erstellen
         plot_flow_graph(flow_difference,
-                            output_path=f"plots/passenger_flows/passenger_flow_diff_{dev_id}.png",
-                            edge_scale=0.003,
-                            selected_stations=pp.selected_stations,
-                            plot_perimeter=True,
-                            title=f"Passagierfluss Differenz - Entwicklung {dev_id}",
-                            style="difference")
-
-
-
-
-
-    #Use it later when it functions
-    #plot_flow_graph(flows_on_railway_lines, output_path="plots/passenger_flows/passenger_flow_map2.png", edge_scale=0.0007, selected_stations=pp.selected_stations)
-    #plot_line_flows(flows_on_railway_lines, paths.RAIL_SERVICES_AK2035_EXTENDED_PATH, output_path="plots/passenger_flows/railway_line_load.png")
-
-
-    runtimes["Compute and visualize passenger flows on network"] = time.time() - st
-    st = time.time()
-
-    #################################################################################
-
-    # Compute the OD matrix for the current infrastructure under all scenarios
-    if settings.OD_type == 'canton_ZH':
-        get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=settings.amount_of_scenarios,
-                             use_cache=settings.use_cache_scenarios, do_plot=True)
-
-    runtimes["Generate the scenarios"] = time.time() - st
-    st = time.time()
-
-    dev_list, monetized_tt, scenario_list = compute_tts(dev_id_lookup=dev_id_lookup, od_times_dev= od_times_dev,
-                                                        od_times_status_quo=od_times_status_quo, use_cache = settings.use_cache_tts_calc)
-
-
-    runtimes["Calculate the TTT Savings"] = time.time() - st
-    st = time.time()
-
-    # 2) Compute construction costs
-
-    ##here a check for capacity could be added
-    # Compute the construction costs for each development
-    file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
-    construction_and_maintenance_costs = construction_costs(file_path=file_path,
-                                                            cost_per_meter=cp.track_cost_per_meter,
-                                                            tunnel_cost_per_meter=cp.tunnel_cost_per_meter,
-                                                            bridge_cost_per_meter=cp.bridge_cost_per_meter,
-                                                            track_maintenance_cost=cp.track_maintenance_cost,
-                                                            tunnel_maintenance_cost=cp.tunnel_maintenance_cost,
-                                                            bridge_maintenance_cost=cp.bridge_maintenance_cost,
-                                                            duration=cp.duration)
-
-
-    cost_and_benefits_dev = create_cost_and_benefit_df(settings.start_year_scenario, settings.end_year_scenario, settings.start_valuation_year)
-    costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=cp.discount_rate, base_year=settings.start_valuation_year)
-    costs_and_benefits_dev_discounted.to_csv(paths.COST_AND_BENEFITS_DISCOUNTED)
-    plot_costs_benefits_example(costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
-
-    runtimes["Compute costs"] = time.time() - st
-    st = time.time()
-
-
-    rearange_costs(costs_and_benefits_dev_discounted)
-
-    runtimes["Aggregate costs"] = time.time() - st
-
-    # Write runtimes to a file
-
-    with open(r'runtimes.txt', 'w') as file:
-        for part, runtime in runtimes.items():
-            file.write(f"{part}: {runtime}/n")
-    ##################################################################################
-    # VISUALIZE THE RESULTS
-
-    print("\nVISUALIZE THE RESULTS \n")
-
-    visualize_results(clear_plot_directory=False)
-
-
-    runtimes["Visualize results"] = time.time() - st
-    st = time.time()
-
-    with open(r'runtimes.txt', 'w') as file:
-        for part, runtime in runtimes.items():
-            file.write(f"{part}: {runtime}/n")
-
-    # Run the display results function to launch the GUI
-    # Call the function to create_scenario_analysis_viewerreate and display the GUI
-    #create_scenario_analysis_viewer(paths.TOTAL_COST_WITH_GEOMETRY)
+                        output_path=f"plots/passenger_flows/passenger_flow_diff_{dev_id}.png",
+                        edge_scale=0.003,
+                        selected_stations=pp.selected_stations,
+                        plot_perimeter=True,
+                        title=f"Passagierfluss Differenz - Entwicklung {dev_id}",
+                        style="difference")
 
 
 def compute_tts(dev_id_lookup,
@@ -779,9 +778,9 @@ def create_dev_id_lookup_table():
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    infrascanrail()
-    """os.chdir(paths.MAIN)
+    #infrascanrail()
+    os.chdir(paths.MAIN)
     results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
     railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
-    create_and_save_plots(df=results_raw, railway_lines=railway_lines)"""
+    create_and_save_plots(df=results_raw, railway_lines=railway_lines)
 

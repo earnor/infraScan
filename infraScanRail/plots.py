@@ -2135,7 +2135,7 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
             # Hier die individuellen Farben pro Linie für die Einsparungen verwenden
             for i, line_name in enumerate(order):
                 plt.bar(x_pos[i], summary[summary['line_name'] == line_name]['monetized_savings_total'].values[0] / 1e6,
-                        width=bar_width, color=line_colors[line_name])
+                        width=bar_width, color=line_colors[line_name], hatch='////', edgecolor='black')
 
             plt.axhline(y=0, color='black', linestyle='-')
             plt.xticks(x_pos, summary['line_name'], rotation=90)
@@ -2149,6 +2149,7 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
                 mpatches.Patch(color=kosten_farben['TotalConstructionCost'], label='Baukosten'),
                 mpatches.Patch(color=kosten_farben['TotalMaintenanceCost'], label='ungedeckte Unterhaltskosten'),
                 mpatches.Patch(color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten'),
+                mpatches.Patch(facecolor="none", hatch='////', edgecolor='black', label='Reisezeitersparnisse'),
             ]
 
             # Legende für Einsparungen mit linienspezifischen Farben

@@ -27,7 +27,7 @@ end_year_scenario = 2100
 start_valuation_year = 2050
 #choose which OD
 
-plot_passenger_flow = True
+plot_passenger_flow = False
 plot_railway_line_load = True
 
 
