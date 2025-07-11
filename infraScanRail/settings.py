@@ -4,12 +4,12 @@ import paths
 rail_network = 'AK_2035_extended' # either 'AK_2035','AK_2035_extended' or 'current' or '2024_extended'
 
 #CACHE
-use_cache_network = False
+use_cache_network = True
 use_cache_pt_catchment = True
-use_cache_developments = False
+use_cache_developments = True
 use_cache_catchmentOD = True
-use_cache_stationsOD = True
-use_cache_traveltime_graph = False
+use_cache_stationsOD = False
+use_cache_traveltime_graph = True
 use_cache_scenarios = False
 use_cache_tts_calc = False
 
@@ -18,7 +18,7 @@ infra_generation_modification_type = 'ALL' #either 'EXTEND_LINES' or 'NEW_DIRECT
 infra_generation_rail_network = paths.RAIL_SERVICES_AK2035_PATH
 
 OD_type = 'canton_ZH' #either 'canton_ZH' or 'pt_catchment_perimeter'
-only_demand_from_to_perimeter = True
+only_demand_from_to_perimeter = False
 
 scenario_type = 'GENERATED' #either 'GENERATED' or 'STATIC_9' or 'dummy'
 amount_of_scenarios = 100

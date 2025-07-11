@@ -112,20 +112,6 @@ def infrascanrail():
 
     ##################################################################################
     ##################################################################################
-    # SCENARIO
-    # 1) Define scenario based on cantonal predictions
-
-    print("\nSCENARIO \n")
-    ##################################################################################
-    # 1) Define scenario based on cantonal predictions
-
-
-
-    ##################################################################################
-    ##################################################################################
-    # IMPLEMENT THE SCORING
-    # 1) Compute construction and maintenance costs
-    # 2) Compute Traveltime Savings
 
     print("\nIMPLEMENT SCORING \n")
 
@@ -143,13 +129,160 @@ def infrascanrail():
     od_times_dev, od_times_status_quo, G_status_quo, G_development = create_travel_time_graphs(settings.rail_network, settings.use_cache_traveltime_graph, dev_id_lookup)
     runtimes["Calculate Traveltimes for all developments"] = time.time() - st
     st = time.time()
+
+    def calculate_flow_difference(status_quo_graph, development_graph, OD_matrix_flow, points):
+        """
+        Berechnet die Differenz der Passagierflüsse zwischen Status quo und einer Entwicklung
+
+        Args:
+            status_quo_graph: Graph des Status quo
+            development_graph: Graph einer Entwicklung
+            OD_matrix_flow: OD-Matrix mit Passagierflüssen
+            points: GeoDataFrame mit Stationspunkten
+
+        Returns:
+            difference_flows: GeoDataFrame mit den Differenzen der Flüsse, gleiche Struktur wie flows_on_edges
+        """
+        # Status quo und Entwicklungsflüsse berechnen
+        flows_sq_graph, _ = calculate_flow_on_edges(status_quo_graph, OD_matrix_flow, points)
+        flows_dev_graph, _ = calculate_flow_on_edges(development_graph, OD_matrix_flow, points)
+
+        # Fluss-Daten aus den Graphen extrahieren
+        flows_sq_data = []
+        for u, v, data in flows_sq_graph.edges(data=True):
+            flow = data.get('flow', 0)
+            flows_sq_data.append({'u': u, 'v': v, 'flow': flow})
+        flows_sq = pd.DataFrame(flows_sq_data)
+
+        flows_dev_data = []
+        for u, v, data in flows_dev_graph.edges(data=True):
+            flow = data.get('flow', 0)
+            flows_dev_data.append({'u': u, 'v': v, 'flow': flow})
+        flows_dev = pd.DataFrame(flows_dev_data)
+
+        # Alle Kanten zusammenführen
+        all_edges = pd.concat([flows_sq[['u', 'v']], flows_dev[['u', 'v']]]).drop_duplicates()
+
+        # Mit beiden Flüssen zusammenführen
+        merged = all_edges.merge(flows_sq[['u', 'v', 'flow']], on=['u', 'v'], how='left', suffixes=('', '_sq'))
+        merged = merged.merge(flows_dev[['u', 'v', 'flow']], on=['u', 'v'], how='left', suffixes=('', '_dev'))
+
+        # NaN-Werte durch 0 ersetzen
+        merged['flow'].fillna(0, inplace=True)
+        merged['flow_dev'].fillna(0, inplace=True)
+
+        # Differenz berechnen
+        merged['flow_diff'] = merged['flow_dev'] - merged['flow']
+
+        # Difference-Graph erstellen mit gleicher Struktur wie der originale flow_on_edges Graph
+        difference_graph = nx.DiGraph()
+
+        # Geometriedaten aus den ursprünglichen Graphen übernehmen
+        for index, row in merged.iterrows():
+            u = row['u']
+            v = row['v']
+            flow_diff = row['flow_diff']
+
+            # Knoten hinzufügen, falls noch nicht vorhanden
+            if not difference_graph.has_node(u) and flows_sq_graph.has_node(u):
+                # Attribute vom Status-quo-Graphen übernehmen
+                node_attrs = flows_sq_graph.nodes[u]
+                difference_graph.add_node(u, **node_attrs)
+            elif not difference_graph.has_node(u) and flows_dev_graph.has_node(u):
+                # Wenn nur im Entwicklungsgraphen vorhanden
+                node_attrs = flows_dev_graph.nodes[u]
+                difference_graph.add_node(u, **node_attrs)
+
+            if not difference_graph.has_node(v) and flows_sq_graph.has_node(v):
+                node_attrs = flows_sq_graph.nodes[v]
+                difference_graph.add_node(v, **node_attrs)
+            elif not difference_graph.has_node(v) and flows_dev_graph.has_node(v):
+                node_attrs = flows_dev_graph.nodes[v]
+                difference_graph.add_node(v, **node_attrs)
+
+            # Kante mit Differenz-Fluss hinzufügen
+            if difference_graph.has_node(u) and difference_graph.has_node(v):
+                # Geometrie von SQ oder Dev übernehmen
+                if flows_sq_graph.has_edge(u, v):
+                    edge_attrs = flows_sq_graph.get_edge_data(u, v)
+                    # Flow mit Differenz überschreiben
+                    edge_attrs['flow'] = flow_diff
+                    difference_graph.add_edge(u, v, **edge_attrs)
+                elif flows_dev_graph.has_edge(u, v):
+                    edge_attrs = flows_dev_graph.get_edge_data(u, v)
+                    edge_attrs['flow'] = flow_diff
+                    difference_graph.add_edge(u, v, **edge_attrs)
+
+        return difference_graph
+
+
     #Compute Passenger flow on network
     OD_matrix_flow = pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
     points = gpd.read_file(paths.RAIL_POINTS_PATH)
-    flows_on_edges, flows_on_railway_lines = calculate_flow_on_edges(G_status_quo[0], OD_matrix_flow, points)
-    plot_flow_graph(flows_on_edges, output_path="plots/passenger_flows/passenger_flow_map.png", edge_scale=0.0007, selected_stations=pp.selected_stations, plot_perimeter = True)
-    plot_flow_graph(flows_on_railway_lines, output_path="plots/passenger_flows/passenger_flow_map2.png", edge_scale=0.0007, selected_stations=pp.selected_stations)
-    plot_line_flows(flows_on_railway_lines, paths.RAIL_SERVICES_AK2035_EXTENDED_PATH, output_path="plots/passenger_flows/railway_line_load.png")
+    # Passagierfluss für Status Quo (G_status_quo[0]) berechnen und visualisieren
+    flows_on_edges_sq, flows_on_railway_lines_sq = calculate_flow_on_edges(G_status_quo[0], OD_matrix_flow, points)
+    plot_flow_graph(flows_on_edges_sq,
+                    output_path="plots/passenger_flows/passenger_flow_map_status_quo.png",
+                    edge_scale=0.0007,
+                    selected_stations=pp.selected_stations,
+                    plot_perimeter=True,
+                    title="Passagierfluss - Status Quo",
+                    style="absolute")
+    """plot_flow_graph(flows_on_railway_lines_sq,
+                    output_path="plots/passenger_flows/railway_line_load_status_quo.png",
+                    edge_scale=0.0007,
+                    selected_stations=pp.selected_stations,
+                    title="Bahnstreckenauslastung - Status Quo")"""
+
+    # Passagierfluss für alle Entwicklungsszenarien berechnen und visualisieren
+    for i, graph in enumerate(G_development):
+        # Development-ID aus dem Lookup-Table ermitteln (falls verfügbar, sonst nur Index verwenden)
+        dev_id = dev_id_lookup.loc[
+            i + 1, 'dev_id'] if 'dev_id_lookup' in locals() and i + 1 in dev_id_lookup.index else f"dev_{i + 1}"
+
+        # Passagierfluss berechnen
+        flows_on_edges, flows_on_railway_lines = calculate_flow_on_edges(graph, OD_matrix_flow, points)
+
+        # Visualisierungen erstellen
+        plot_flow_graph(flows_on_edges,
+                        output_path=f"plots/passenger_flows/passenger_flow_map_{dev_id}.png",
+                        edge_scale=0.0007,
+                        selected_stations=pp.selected_stations,
+                        plot_perimeter=True,
+                        title=f"Passagierfluss - Entwicklung {dev_id}",
+                        style="absolute")
+
+        """plot_flow_graph(flows_on_railway_lines,
+                        output_path=f"plots/passenger_flows/railway_line_load_{dev_id}.png",
+                        edge_scale=0.0007,
+                        selected_stations=pp.selected_stations,
+                        title=f"Bahnstreckenauslastung - Entwicklung {dev_id}")"""
+
+        # Verwende die Funktion für jedes Entwicklungsszenario
+        # Passagierfluss-Differenz für alle Entwicklungsszenarien berechnen und visualisieren
+
+        dev_id = dev_id_lookup.loc[
+            i + 1, 'dev_id'] if 'dev_id_lookup' in locals() and i + 1 in dev_id_lookup.index else f"dev_{i + 1}"
+
+        # Differenz der Flüsse zum Status quo berechnen
+        flow_difference = calculate_flow_difference(G_status_quo[0], graph, OD_matrix_flow, points)
+
+        # Visualisierung der Differenz erstellen
+        plot_flow_graph(flow_difference,
+                            output_path=f"plots/passenger_flows/passenger_flow_diff_{dev_id}.png",
+                            edge_scale=0.003,
+                            selected_stations=pp.selected_stations,
+                            plot_perimeter=True,
+                            title=f"Passagierfluss Differenz - Entwicklung {dev_id}",
+                            style="difference")
+
+
+
+
+
+    #Use it later when it functions
+    #plot_flow_graph(flows_on_railway_lines, output_path="plots/passenger_flows/passenger_flow_map2.png", edge_scale=0.0007, selected_stations=pp.selected_stations)
+    #plot_line_flows(flows_on_railway_lines, paths.RAIL_SERVICES_AK2035_EXTENDED_PATH, output_path="plots/passenger_flows/railway_line_load.png")
 
 
     runtimes["Compute and visualize passenger flows on network"] = time.time() - st
@@ -188,7 +321,7 @@ def infrascanrail():
 
 
     cost_and_benefits_dev = create_cost_and_benefit_df(settings.start_year_scenario, settings.end_year_scenario, settings.start_valuation_year)
-    costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=cp.discount_rate, base_year=settings.start_year_scenario)
+    costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=cp.discount_rate, base_year=settings.start_valuation_year)
     costs_and_benefits_dev_discounted.to_csv(paths.COST_AND_BENEFITS_DISCOUNTED)
     plot_costs_benefits_example(costs_and_benefits_dev_discounted)  # only plots cost&benefits for the dev with highest tts
 

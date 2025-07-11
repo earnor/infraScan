@@ -3348,7 +3348,7 @@ def plot_cumulative_cost_distribution(df, output_path="plot/kumulative_kostenver
 
 def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bahnnetz",
                     node_size=100, node_color='skyblue', edge_scale=0.001, figsize=(20, 16),
-                    selected_stations=None, plot_perimeter=False):
+                    selected_stations=None, plot_perimeter=False, style='absolute'):
     """
     Visualisiert einen Graph mit Passagierflüssen, wobei die Liniendicke proportional zum Fluss ist.
     Optional können nur bestimmte Stationen mit Namen beschriftet werden.
@@ -3362,6 +3362,8 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
         edge_scale (float): Skalierungsfaktor für die Kantendicke
         figsize (tuple): Größe der Abbildung (Breite, Höhe)
         selected_stations (list of str, optional): Liste von Stationsnamen, die beschriftet werden sollen
+        plot_perimeter (bool): Ob der Perimeter-Polygon gezeichnet werden soll
+        style (str): 'absolute' für absolute Flüsse oder 'difference' für Differenzdarstellung
 
     Returns:
         matplotlib.figure.Figure: Die erstellte Abbildung
@@ -3370,7 +3372,7 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
     import matplotlib.pyplot as plt
     import networkx as nx
     from matplotlib.cm import ScalarMappable
-    from matplotlib.colors import Normalize
+    from matplotlib.colors import Normalize, LinearSegmentedColormap
 
     fig, ax = plt.subplots(figsize=figsize)
     if plot_perimeter:
@@ -3413,8 +3415,20 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
     min_flow = min(flows)
     max_flow = max(flows)
 
-    cmap = plt.cm.viridis_r
-    norm = Normalize(vmin=min_flow, vmax=max_flow)
+    # Farbskala je nach Stil auswählen
+    if style == 'absolute':
+        cmap = plt.cm.viridis_r
+        norm = Normalize(vmin=min_flow, vmax=max_flow)
+        cbar_label = 'Kombinierter Passagierfluss'
+    else:  # 'difference' style
+        # Erstelle eine eigene Rot-Grau-Grün Farbskala für Differenzwerte
+        colors = [(0.8, 0.0, 0.0), (0.85, 0.85, 0.85), (0.0, 0.6, 0.0)]  # rot, grau, grün
+        cmap = LinearSegmentedColormap.from_list('RdGrGn', colors)
+
+        # Finde das Maximum der absoluten Differenzwerte für symmetrische Skala
+        max_abs_flow = max(abs(min_flow), abs(max_flow))
+        norm = Normalize(vmin=-max_abs_flow, vmax=max_abs_flow)
+        cbar_label = 'Flussänderung (Differenz)'
 
     nx.draw_networkx_nodes(flow_graph, pos,
                            node_size=node_size,
@@ -3423,10 +3437,31 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
                            alpha=0.7,
                            ax=ax)
 
+    # Wenn style=='difference', sammle alle Flows > 200 und zeige nur die größten an
+    if style == 'difference':
+        # Sammle alle Kanten mit Flows >= 200
+        edges_with_flows = [(edge_key, total_flow) for edge_key, total_flow in combined_flows.items()
+                            if abs(total_flow) >= 200]
+
+        # Sortiere nach absolutem Flow-Wert (absteigend)
+        edges_with_flows.sort(key=lambda x: abs(x[1]), reverse=True)
+
+        # Bereite Speicher für bereits belegte Positionen vor
+        label_positions = []
+
+        # Minimale Distanz zwischen Beschriftungen, um Überlappungen zu vermeiden
+        min_distance = 800  # Anpassbar je nach Skalierung
+
+    # Zeichne die Kanten
     for edge_key, total_flow in combined_flows.items():
         source, target = edge_key
-        width = max(0.5, min(10, total_flow * edge_scale))
+        # Die Liniendicke basiert auf dem Absolutwert (in beiden Modi)
+        abs_flow = abs(total_flow)
+        width = max(0.5, min(10, abs_flow * edge_scale))
+
+        # Die Farbe basiert auf dem Stil
         edge_color = cmap(norm(total_flow))
+
         nx.draw_networkx_edges(flow_graph, pos,
                                edgelist=[(source, target)],
                                width=width,
@@ -3435,18 +3470,49 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
                                arrows=False,
                                ax=ax)
 
-    # Stationsnamen nur selektiv anzeigen
+    # Wenn style=='difference', zeige Werte auf den Kanten
+    if style == 'difference':
+        for edge_key, total_flow in edges_with_flows:
+            source, target = edge_key
+            # Mittelpunkt der Kante berechnen
+            x1, y1 = pos[source]
+            x2, y2 = pos[target]
+            x_mid = (x1 + x2) / 2
+            y_mid = (y1 + y2) / 2
+
+            # Prüfen, ob Position zu nah an bereits vorhandenen Labels ist
+            too_close = False
+            for x_pos, y_pos in label_positions:
+                if ((x_mid - x_pos) ** 2 + (y_mid - y_pos) ** 2) < min_distance ** 2:
+                    too_close = True
+                    break
+
+            # Nur zeichnen, wenn genügend Abstand zu anderen Labels
+            if not too_close:
+                ax.text(x_mid, y_mid, f"{int(total_flow)}", fontsize=8, ha='center', va='center',
+                        bbox=dict(facecolor='white', alpha=0.7, pad=0.1, boxstyle='round', edgecolor='none'),
+                        zorder=5)
+                # Position merken
+                label_positions.append((x_mid, y_mid))
+
+    # Knotennamen anzeigen, mit leichtem weißem Hintergrund ohne Rahmen
     if selected_stations:
         labels = {node: node for node in flow_graph.nodes if node in selected_stations}
         # Verschiebe die Beschriftung nach unten links
         label_offset = (-1000, -600)  # x- und y-Verschiebung
 
-        label_pos = {node: (pos[node][0] + label_offset[0],
-                            pos[node][1] + label_offset[1]) for node in labels}
-
-        nx.draw_networkx_labels(flow_graph, label_pos, labels=labels, font_size=12, ax=ax)
+        for node, label in labels.items():
+            x, y = pos[node][0] + label_offset[0], pos[node][1] + label_offset[1]
+            ax.text(x, y, label, fontsize=12, ha='center', va='center',
+                    bbox=dict(facecolor='white', alpha=0.7, pad=0.1, boxstyle='round', edgecolor='none'),
+                    zorder=10)
     else:
-        nx.draw_networkx_labels(flow_graph, pos, font_size=8, ax=ax)
+        # Für alle Knoten einen leichten weißen Hintergrund hinzufügen
+        for node in flow_graph.nodes():
+            x, y = pos[node]
+            ax.text(x, y, node, fontsize=8, ha='center', va='center',
+                    bbox=dict(facecolor='white', alpha=0.7, pad=0.1, boxstyle='round', edgecolor='none'),
+                    zorder=10)
 
     # Kleinere Legende + 5k Tickformat
     sm = ScalarMappable(cmap=cmap, norm=norm)
@@ -3454,16 +3520,25 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
     # Manuell positionierte, kürzere Farbskala (gleich breit)
     cbar_ax = fig.add_axes([0.92, 0.25, 0.07, 0.3])  # [left, bottom, width, height]
     cbar = plt.colorbar(sm, cax=cbar_ax)
-    cbar.set_label('Kombinierter Passagierfluss', fontsize=10)
+    cbar.set_label(cbar_label, fontsize=10)
     ticks = cbar.get_ticks()
     cbar.set_ticks(ticks)
-    cbar.ax.set_yticklabels([f'{int(t/1000)}k' for t in ticks])
+    cbar.ax.set_yticklabels([f'{int(t / 1000)}k' for t in ticks])
 
     total_flow = sum(flows)
-    text_info = (f"Gesamtfluss: {total_flow:.0f} Passagiere\n"
-                 f"Max. Fluss: {max_flow:.0f}\n"
-                 f"Min. Fluss: {min_flow:.0f}\n"
-                 f"Anzahl Kanten: {len(combined_flows)}")
+    if style == 'absolute':
+        text_info = (f"Gesamtfluss: {total_flow:.0f} Passagiere\n"
+                     f"Max. Fluss: {max_flow:.0f}\n"
+                     f"Min. Fluss: {min_flow:.0f}\n"
+                     f"Anzahl Kanten: {len(combined_flows)}")
+    else:
+        pos_sum = sum(flow for flow in flows if flow > 0)
+        neg_sum = sum(flow for flow in flows if flow < 0)
+        text_info = (f"Gesamtänderung: {total_flow:.0f} Passagiere\n"
+                     f"Positive Änderung: +{pos_sum:.0f}\n"
+                     f"Negative Änderung: {neg_sum:.0f}\n"
+                     f"Anzahl Kanten: {len(combined_flows)}")
+
     plt.figtext(0.01, 0.01, text_info, fontsize=10,
                 bbox=dict(facecolor='white', alpha=0.7, boxstyle='round'))
 
@@ -3479,7 +3554,6 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
         plt.show()
 
     return fig
-
 
 def plot_line_flows(line_flow_graph, s_bahn_geopackage_path, output_path):
     """
