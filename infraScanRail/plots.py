@@ -1930,6 +1930,32 @@ def plot_developments_expand_by_one_station():
 
     print(f"Plot saved at {output_path}")
 
+def plot_selected_lines(selected_lines, color_dict = None):
+    railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
+    zvv_colors = pp.zvv_colors
+    df_network = gpd.read_file(settings.infra_generation_rail_network)
+    df_points = gpd.read_file(r'data\Network\processed\points.gpkg')
+    generate_infrastructure = importlib.import_module('generate_infrastructure')
+    G, pos = generate_infrastructure.prepare_Graph(df_network, df_points)
+
+    # Liniennamen aus selected_lines verwenden und Subset erzeugen
+    filtered_lines = railway_lines[railway_lines["name"].isin(selected_lines)]
+    filtered_lines['path'] = filtered_lines['path'].str.split(',')
+    filtered_lines = filtered_lines.rename(columns={"missing_connection": "original_missing_connection"})
+
+
+
+    # Linienfarben in filtered_lines hinzufügen
+    filtered_lines_dict = filtered_lines.to_dict(orient='records')
+
+    # Netzgrafik erzeugen
+    filename = f"railway_lines_very_special_plot.png"
+    output_file_name = os.path.join("plots", filename)
+
+    # Die Funktion plot_railway_lines_only muss angepasst werden, um die Farben zu berücksichtigen
+    plot_railway_lines_only(
+        G, pos, filtered_lines_dict, output_file_name, color_dict=color_dict, selected_stations=pp.selected_stations
+    )
 
 def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     os.makedirs(plot_directory, exist_ok=True)
@@ -1964,219 +1990,244 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     small_dev_data = df[df['development'] < settings.dev_id_start_new_direct_connections]
 
     def plot_basic_charts(data, filename_prefix, plot_directory, line_colors=None):
-            order = data.groupby('line_name')['total_net_benefit'].mean().sort_values(ascending=False).index.tolist()
-            n_lines = len(order)
+        order = data.groupby('line_name')['total_net_benefit'].mean().sort_values(ascending=False).index.tolist()
+        n_lines = len(order)
 
-            # Farbzuordnung für Linien erstellen
-            if line_colors is None:
-                # Erstelle Farbpalette aus ZVV-Farben (zyklisch wiederholen falls nötig)
-                line_colors = {line_name: zvv_colors[i % len(zvv_colors)] for i, line_name in enumerate(order)}
+        # Farbzuordnung für Linien erstellen
+        if line_colors is None:
+            # Erstelle Farbpalette aus ZVV-Farben (zyklisch wiederholen falls nötig)
+            line_colors = {line_name: zvv_colors[i % len(zvv_colors)] for i, line_name in enumerate(order)}
 
-            # Farben für Kosten/Nutzen
-            kosten_farben = {
-                'TotalConstructionCost': '#a6bddb',
-                'TotalMaintenanceCost': '#3690c0',
-                'TotalUncoveredOperatingCost': '#034e7b',
-                'monetized_savings_total': '#31a354'
-            }
+        # Farben für Kosten/Nutzen
+        kosten_farben = {
+            'TotalConstructionCost': '#a6bddb',
+            'TotalMaintenanceCost': '#3690c0',
+            'TotalUncoveredOperatingCost': '#034e7b',
+            'monetized_savings_total': '#31a354'
+        }
 
-            # --- Boxplot Einsparungen ---
-            plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
-            # Eine Farbpalette aus den ausgewählten Farben erstellen
-            colors = [line_colors[line] for line in order]
-            ax = sns.boxplot(
-                data=data,
-                x='line_name',
-                y=data['monetized_savings_total'] / 1e6,
-                order=order,
-                palette=colors,  # Hier die eigenen Farben verwenden
-                width=0.4,
-                linewidth=0.8,
-                showmeans=True,
-                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
-                fliersize=3,
-                showfliers=True
-            )
-            ax.set_xlim(-0.5, n_lines - 0.5)
-            plt.xlabel('Linie', fontsize=12)
-            plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
-            plt.xticks(rotation=90)
-            plt.grid(axis='y', linestyle='--', alpha=0.7)
-            plt.legend(
-                handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
-                loc='upper left', bbox_to_anchor=(1.01, 1)
-            )
-            plt.tight_layout(rect=[0, 0, 0.95, 1])
-            plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_einsparungen.png"), dpi=600)  # Höhere Auflösung
-            plt.close()
+        # --- Boxplot Einsparungen ---
+        plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+        # Eine Farbpalette aus den ausgewählten Farben erstellen
+        colors = [line_colors[line] for line in order]
+        ax = sns.boxplot(
+            data=data,
+            x='line_name',
+            y=data['monetized_savings_total'] / 1e6,
+            order=order,
+            palette=colors,  # Hier die eigenen Farben verwenden
+            width=0.4,
+            linewidth=0.8,
+            showmeans=True,
+            meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+            fliersize=3,
+            showfliers=True
+        )
+        ax.set_xlim(-0.5, n_lines - 0.5)
+        plt.xlabel('Linie', fontsize=12)
+        plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
+        plt.xticks(rotation=90)
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
 
-            # --- Violinplot Einsparungen mit Datenpunkten ---
-            plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
-            ax = sns.violinplot(
-                data=data,
-                x='line_name',
-                y=data['monetized_savings_total'] / 1e6,
-                order=order,
-                palette=colors,  # Verwende die gleichen Farben wie bei den Boxplots
-                width=0.7,
-                inner=None,  # Kein Boxplot innerhalb der Violinen
-                linewidth=0.8,
-                cut=0,  # Keine Extrapolation über die Daten hinaus
-                scale='width'  # Alle Violinen haben die gleiche Breite
-            )
+        # Vereinfachte Legende mit nur einem repräsentativen Farbelement und dem Mittelwert-Marker
+        legend_handles = [
+            mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5),
+            mpatches.Patch(color=colors[0], label='Linienfarbe')
+        ]
+        plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.01, 1), frameon=False)
 
-            # Für jede Linie nur einzigartige Werte nach Szenario darstellen
-            unique_data = data.drop_duplicates(subset=['line_name', 'scenario', 'monetized_savings_total'])
+        plt.tight_layout(rect=[0, 0, 0.95, 1])
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_einsparungen.png"),
+                    dpi=600)  # Höhere Auflösung
+        plt.close()
 
-            # Datenpunkte mit Jitter hinzufügen - nur einzigartige Werte, aber dunkler
-            sns.stripplot(
-                data=unique_data,
-                x='line_name',
-                y=unique_data['monetized_savings_total'] / 1e6,
-                order=order,
-                color='black',
-                alpha=0.4,  # Erhöhte Sichtbarkeit der Punkte (vorher 0.15)
-                jitter=True,  # Jitter-Effekt aktivieren
-                size=2,      # Kleinere Punktgröße
-                dodge=False  # Keine zusätzliche Verschiebung
-            )
-            ax.set_xlim(-0.5, n_lines - 0.5)
-            plt.xlabel('Linie', fontsize=12)
-            plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
-            plt.xticks(rotation=90)
-            plt.grid(axis='y', linestyle='--', alpha=0.7)
-            plt.tight_layout(rect=[0, 0, 0.95, 1])
-            plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_violinplot_einsparungen.png"),
-                        dpi=600)  # Höhere Auflösung
-            plt.close()
+        # --- Violinplot Einsparungen mit Datenpunkten ---
+        plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+        ax = sns.violinplot(
+            data=data,
+            x='line_name',
+            y=data['monetized_savings_total'] / 1e6,
+            order=order,
+            palette=colors,  # Verwende die gleichen Farben wie bei den Boxplots
+            width=0.7,
+            inner=None,  # Kein Boxplot innerhalb der Violinen
+            linewidth=0.8,
+            cut=0,  # Keine Extrapolation über die Daten hinaus
+            scale='width'  # Alle Violinen haben die gleiche Breite
+        )
 
-            # --- Boxplot Nettonutzen ---
-            plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
-            ax = sns.boxplot(
-                data=data,
-                x='line_name',
-                y=data['total_net_benefit'] / 1e6,
-                order=order,
-                palette=colors,  # Hier die eigenen Farben verwenden
-                width=0.4,
-                linewidth=0.8,
-                showmeans=True,
-                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
-                fliersize=3,
-                showfliers=True
-            )
-            ax.set_xlim(-0.5, n_lines - 0.5)
-            plt.xlabel('Linie', fontsize=12)
-            plt.ylabel('Nettonutzen in Mio. CHF', fontsize=12)
-            plt.axhline(y=0, color='red', linestyle='-', alpha=0.5)
-            plt.xticks(rotation=90)
-            plt.grid(axis='y', linestyle='--', alpha=0.7)
-            plt.legend(
-                handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
-                loc='upper left', bbox_to_anchor=(1.01, 1)
-            )
-            plt.tight_layout(rect=[0, 0, 0.95, 1])
-            plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_nettonutzen.png"), dpi=600)  # Höhere Auflösung
-            plt.close()
+        # Für jede Linie nur einzigartige Werte nach Szenario darstellen
+        unique_data = data.drop_duplicates(subset=['line_name', 'scenario', 'monetized_savings_total'])
 
-            # --- Boxplot CBA ---
-            plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
-            ax = sns.boxplot(
-                data=data,
-                x='line_name',
-                y='cba_ratio',
-                order=order,
-                palette=colors,  # Hier die eigenen Farben verwenden
-                width=0.4,
-                linewidth=0.8,
-                showmeans=True,
-                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
-                fliersize=3,
-                showfliers=True
-            )
-            ax.set_xlim(-0.5, n_lines - 0.5)
-            plt.xlabel('Linie', fontsize=12)
-            plt.ylabel('Kosten-Nutzen-Faktor', fontsize=12)
-            plt.axhline(y=1, color='red', linestyle='-', alpha=0.5)
-            plt.xticks(rotation=90)
-            plt.grid(axis='y', linestyle='--', alpha=0.7)
-            plt.legend(
-                handles=[mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5)],
-                loc='upper left', bbox_to_anchor=(1.01, 1)
-            )
-            plt.tight_layout(rect=[0, 0, 0.95, 1])
-            plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_cba.png"), dpi=600)  # Höhere Auflösung
-            plt.close()
+        # Datenpunkte mit Jitter hinzufügen - nur einzigartige Werte, aber dunkler
+        sns.stripplot(
+            data=unique_data,
+            x='line_name',
+            y=unique_data['monetized_savings_total'] / 1e6,
+            order=order,
+            color='black',
+            alpha=0.4,  # Erhöhte Sichtbarkeit der Punkte (vorher 0.15)
+            jitter=True,  # Jitter-Effekt aktivieren
+            size=2,  # Kleinere Punktgröße
+            dodge=False  # Keine zusätzliche Verschiebung
+        )
+        ax.set_xlim(-0.5, n_lines - 0.5)
+        plt.xlabel('Linie', fontsize=12)
+        plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
+        plt.xticks(rotation=90)
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
 
-            # --- Gestapeltes Balkendiagramm ---
-            summary = data.groupby(['development', 'line_name']).agg({
-                'TotalConstructionCost': 'mean',
-                'TotalMaintenanceCost': 'mean',
-                'TotalUncoveredOperatingCost': 'mean',
-                'monetized_savings_total': 'mean'
-            }).loc[(slice(None), order), :].reset_index().set_index('line_name').loc[order].reset_index()
+        # Vereinfachte Legende mit nur einem repräsentativen Farbelement und den Einzelwerten
+        legend_handles = [
+            mlines.Line2D([], [], marker='o', color='black', alpha=0.4, linestyle='None', markersize=3,
+                          label='Einzelwerte'),
+            mpatches.Patch(color=colors[0], label='Linienfarbe')
+        ]
+        plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.01, 1), frameon=False)
 
-            x_pos = np.arange(n_lines)
-            bar_width = 0.6
-            plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+        plt.tight_layout(rect=[0, 0, 0.95, 1])
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_violinplot_einsparungen.png"),
+                    dpi=600)  # Höhere Auflösung
+        plt.close()
 
-            # Für das gestapelte Balkendiagramm verwenden wir die Linienfarbpalette für die Einsparungen
-            # und die bestehende Farbpalette für die Kosten
-            plt.bar(x_pos, -summary['TotalConstructionCost'] / 1e6, width=bar_width,
-                    color=kosten_farben['TotalConstructionCost'],
-                    label='Baukosten')
-            plt.bar(x_pos, -summary['TotalMaintenanceCost'] / 1e6, width=bar_width,
-                    bottom=-summary['TotalConstructionCost'] / 1e6, color=kosten_farben['TotalMaintenanceCost'],
-                    label='ungedeckte Unterhaltskosten')
-            plt.bar(x_pos, -summary['TotalUncoveredOperatingCost'] / 1e6, width=bar_width,
-                    bottom=-(summary['TotalConstructionCost'] + summary['TotalMaintenanceCost']) / 1e6,
-                    color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten')
+        # --- Boxplot Nettonutzen ---
+        plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+        ax = sns.boxplot(
+            data=data,
+            x='line_name',
+            y=data['total_net_benefit'] / 1e6,
+            order=order,
+            palette=colors,  # Hier die eigenen Farben verwenden
+            width=0.4,
+            linewidth=0.8,
+            showmeans=True,
+            meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+            fliersize=3,
+            showfliers=True
+        )
+        ax.set_xlim(-0.5, n_lines - 0.5)
+        plt.xlabel('Linie', fontsize=12)
+        plt.ylabel('Nettonutzen in Mio. CHF', fontsize=12)
+        plt.axhline(y=0, color='red', linestyle='-', alpha=0.5)
+        plt.xticks(rotation=90)
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
 
-            # Hier die individuellen Farben pro Linie für die Einsparungen verwenden
-            for i, line_name in enumerate(order):
-                plt.bar(x_pos[i], summary[summary['line_name'] == line_name]['monetized_savings_total'].values[0] / 1e6,
-                        width=bar_width, color=line_colors[line_name], hatch='////', edgecolor='black')
+        # Vereinfachte Legende mit nur einem repräsentativen Farbelement und dem Mittelwert-Marker
+        legend_handles = [
+            mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5),
+            mpatches.Patch(color=colors[0], label='Linienfarbe')
+        ]
+        plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.01, 1), frameon=False)
 
-            plt.axhline(y=0, color='black', linestyle='-')
-            plt.xticks(x_pos, summary['line_name'], rotation=90)
-            plt.xlabel('Linie', fontsize=12)
-            plt.ylabel('Wert in Mio. CHF', fontsize=12)
-            plt.title('Kosten und Nutzen je Modifikation', fontsize=14)
-            plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout(rect=[0, 0, 0.95, 1])
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_nettonutzen.png"),
+                    dpi=600)  # Höhere Auflösung
+        plt.close()
 
-            # Legende für Kosten
-            kosten_handles = [
-                mpatches.Patch(color=kosten_farben['TotalConstructionCost'], label='Baukosten'),
-                mpatches.Patch(color=kosten_farben['TotalMaintenanceCost'], label='ungedeckte Unterhaltskosten'),
-                mpatches.Patch(color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten'),
-                mpatches.Patch(facecolor="none", hatch='////', edgecolor='black', label='Reisezeitersparnisse'),
-            ]
+        # --- Boxplot CBA ---
+        plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+        ax = sns.boxplot(
+            data=data,
+            x='line_name',
+            y='cba_ratio',
+            order=order,
+            palette=colors,  # Hier die eigenen Farben verwenden
+            width=0.4,
+            linewidth=0.8,
+            showmeans=True,
+            meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+            fliersize=3,
+            showfliers=True
+        )
+        ax.set_xlim(-0.5, n_lines - 0.5)
+        plt.xlabel('Linie', fontsize=12)
+        plt.ylabel('Kosten-Nutzen-Faktor', fontsize=12)
+        plt.axhline(y=1, color='red', linestyle='-', alpha=0.5)
+        plt.xticks(rotation=90)
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
 
-            # Legende für Einsparungen mit linienspezifischen Farben
-            nutzen_handles = [mpatches.Patch(color=line_colors[line], label=f'Einsparungen {line}') for line in order]
+        # Vereinfachte Legende mit nur einem repräsentativen Farbelement und dem Mittelwert-Marker
+        legend_handles = [
+            mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5),
+            mpatches.Patch(color=colors[0], label='Linienfarbe')
+        ]
+        plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.01, 1), frameon=False)
 
-            # Nur die Kostenlegende anzeigen, um die Darstellung sauber zu halten
-            plt.legend(handles=kosten_handles, bbox_to_anchor=(1.01, 1))
+        plt.tight_layout(rect=[0, 0, 0.95, 1])
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_cba.png"), dpi=600)  # Höhere Auflösung
+        plt.close()
 
-            plt.tight_layout(rect=[0, 0, 0.95, 1])
-            plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_kosten_einsparungen.png"), dpi=600)  # Höhere Auflösung
-            plt.close()
+        # --- Gestapeltes Balkendiagramm ---
+        summary = data.groupby(['development', 'line_name']).agg({
+            'TotalConstructionCost': 'mean',
+            'TotalMaintenanceCost': 'mean',
+            'TotalUncoveredOperatingCost': 'mean',
+            'monetized_savings_total': 'mean'
+        }).loc[(slice(None), order), :].reset_index().set_index('line_name').loc[order].reset_index()
 
-            # NEU: Kumulatives Verteilungsdiagramm für diese Datengruppe
-            data_copy = data.copy()  # Um Änderungen am Original zu vermeiden
-            data_copy = data_copy.drop(columns=['development']).rename(columns={'line_name': 'development'})
-            cumulative_output_path = os.path.join(plot_directory, f"{filename_prefix}_kumulative_kostenverteilung.png")
-            plot_cumulative_cost_distribution(data_copy, cumulative_output_path,
-                                              color_dict={dev: line_colors[dev] for dev in
-                                                          data_copy['development'].unique()})
+        x_pos = np.arange(n_lines)
+        bar_width = 0.6
+        plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
 
-            # Farben zurückgeben für die Verwendung in der Kartenvisualisierung
-            return line_colors
+        # Für das gestapelte Balkendiagramm verwenden wir die Linienfarbpalette für die Einsparungen
+        # und die bestehende Farbpalette für die Kosten
+        plt.bar(x_pos, -summary['TotalConstructionCost'] / 1e6, width=bar_width,
+                color=kosten_farben['TotalConstructionCost'],
+                label='Baukosten')
+        plt.bar(x_pos, -summary['TotalMaintenanceCost'] / 1e6, width=bar_width,
+                bottom=-summary['TotalConstructionCost'] / 1e6, color=kosten_farben['TotalMaintenanceCost'],
+                label='ungedeckte Unterhaltskosten')
+        plt.bar(x_pos, -summary['TotalUncoveredOperatingCost'] / 1e6, width=bar_width,
+                bottom=-(summary['TotalConstructionCost'] + summary['TotalMaintenanceCost']) / 1e6,
+                color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten')
+        # Hier die individuellen Farben pro Linie für die Einsparungen verwenden
+        for i, line_name in enumerate(order):
+            plt.bar(x_pos[i], summary[summary['line_name'] == line_name]['monetized_savings_total'].values[0] / 1e6,
+                    width=bar_width, color=line_colors[line_name], hatch='////', edgecolor='black')
+
+        plt.axhline(y=0, color='black', linestyle='-')
+        plt.xticks(x_pos, summary['line_name'], rotation=90)
+        plt.xlabel('Linie', fontsize=12)
+        plt.ylabel('Wert in Mio. CHF', fontsize=12)
+        plt.title('Kosten und Nutzen je Modifikation', fontsize=14)
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+        # Legende für Kosten
+        kosten_handles = [
+            mpatches.Patch(color=kosten_farben['TotalConstructionCost'], label='Baukosten'),
+            mpatches.Patch(color=kosten_farben['TotalMaintenanceCost'], label='ungedeckte Unterhaltskosten'),
+            mpatches.Patch(color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten'),
+            mpatches.Patch(facecolor="none", hatch='////', edgecolor='black', label='Reisezeitersparnisse'),
+        ]
+
+        # Legende für Einsparungen mit linienspezifischen Farben
+        nutzen_handles = [mpatches.Patch(color=line_colors[line], label=f'Einsparungen {line}') for line in order]
+
+        # Nur die Kostenlegende anzeigen, um die Darstellung sauber zu halten
+        plt.legend(handles=kosten_handles, bbox_to_anchor=(1.01, 1))
+
+        plt.tight_layout(rect=[0, 0, 0.95, 1])
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_kosten_einsparungen.png"),
+                    dpi=600)  # Höhere Auflösung
+        plt.close()
+
+        # NEU: Kumulatives Verteilungsdiagramm für diese Datengruppe
+        data_copy = data.copy()  # Um Änderungen am Original zu vermeiden
+        data_copy = data_copy.drop(columns=['development']).rename(columns={'line_name': 'development'})
+        cumulative_output_path = os.path.join(plot_directory, f"{filename_prefix}_kumulative_kostenverteilung.png")
+        plot_cumulative_cost_distribution(data_copy, cumulative_output_path,
+                                          color_dict={dev: line_colors[dev] for dev in
+                                                      data_copy['development'].unique()})
+
+        # Farben zurückgeben für die Verwendung in der Kartenvisualisierung
+        return line_colors
 
     # Kleine Entwicklungen plotten
     line_colors_small = None
     if not small_dev_data.empty:
-        line_colors_small = plot_basic_charts(small_dev_data, "Expand_1_Stop", plot_directory=plot_directory)
+        order = small_dev_data.groupby('line_name')['total_net_benefit'].mean().sort_values(ascending=False).index.tolist()
+        line_colors_small = {line_name: 'none' for line_name in order}
+        line_colors_small = plot_basic_charts(small_dev_data, "Expand_1_Stop", plot_directory=plot_directory, line_colors=line_colors_small)
 
     # Große Entwicklungen gruppieren und plotten
     df['plot_nr'] = None
@@ -2194,10 +2245,10 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
         mean_benefit = sub_df.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
         unique_devs = mean_benefit.index.tolist()  # Sortierte Liste der Developments
 
-        num_plots = len(unique_devs) // 8 + int(len(unique_devs) % 8 > 0)
+        num_plots = len(unique_devs) // 6 + int(len(unique_devs) % 6 > 0)
 
         for i in range(num_plots):
-            devs_in_plot = unique_devs[i * 8: (i + 1) * 8]
+            devs_in_plot = unique_devs[i * 6: (i + 1) * 6]
             selected = sub_df[sub_df['development'].isin(devs_in_plot)]
             df.loc[selected.index, 'plot_nr'] = f"{conn}_{i + 1}"
             filename_prefix = f"{conn}_gruppe_{i + 1}"
@@ -2288,11 +2339,11 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
     global_unique_devs = global_mean_benefit.index.tolist()  # Sortierte Liste aller Developments
 
     # Anzahl der 8er-Pakete berechnen
-    num_global_plots = len(global_unique_devs) // 8 + int(len(global_unique_devs) % 8 > 0)
+    num_global_plots = len(global_unique_devs) // 6 + int(len(global_unique_devs) % 6 > 0)
 
     for i in range(num_global_plots):
         # 8 Developments pro Plot auswählen
-        devs_in_plot = global_unique_devs[i * 8: (i + 1) * 8]
+        devs_in_plot = global_unique_devs[i * 6: (i + 1) * 6]
         global_selected = large_dev_data[large_dev_data['development'].isin(devs_in_plot)]
 
         # Filename definieren
@@ -2481,96 +2532,131 @@ def plot_catchment_and_distributions(
     print(f"Plots saved to {output_path}")
 
 
-def plot_costs_benefits_example(cost_benefit_df):
+def plot_costs_benefits_example(cost_benefit_df, line=None):
     """
-    Create a scientific-looking bar chart of costs and benefits over years
-    for the development with the highest benefit in year 1.
+    Erstellt ein wissenschaftlich aussehendes Balkendiagramm von Kosten und Nutzen über die Jahre
+    für die Entwicklung mit dem höchsten Nutzen im Jahr 1.
 
     Args:
-        cost_benefit_df: DataFrame with discounted costs and benefits
+        cost_benefit_df: DataFrame mit diskontierten Kosten und Nutzen
     """
     # Finde das niedrigste Jahr im DataFrame
     min_year = cost_benefit_df.index.get_level_values('year').min()
-    # Extrahiere Daten für das niedrigste Jahr
-    year1_benefits = cost_benefit_df.xs(min_year, level='year')
-    max_benefit_dev = year1_benefits.groupby('development')['benefit'].mean().idxmax()
+    if line:
+        try:
+            dev_data = cost_benefit_df.xs(line, level='development')
+        except KeyError:
+            # Falls der angegebene Wert nicht existiert, verwende die Entwicklung mit dem höchsten Nutzen
+            print(f"Entwicklung {line} nicht gefunden. Verwende Entwicklung mit höchstem Nutzen.")
+            year1_benefits = cost_benefit_df.xs(min_year, level='year')
+            max_benefit_dev = year1_benefits.groupby('development')['benefit'].mean().idxmax()
+            dev_data = cost_benefit_df.xs(max_benefit_dev, level='development')
+            line = max_benefit_dev
+    else:
+        # Extrahiere Daten für das niedrigste Jahr
+        year1_benefits = cost_benefit_df.xs(min_year, level='year')
+        max_benefit_dev = year1_benefits.groupby('development')['benefit'].mean().idxmax()
+        # Daten für die ausgewählte Entwicklung abrufen
+        dev_data = cost_benefit_df.xs(max_benefit_dev, level='development')
+        line = max_benefit_dev
 
-    # Get data for the selected development
-    dev_data = cost_benefit_df.xs(max_benefit_dev, level='development')
-
-    # Calculate mean values across scenarios for each year
+    # Berechne Mittelwerte über alle Szenarien für jedes Jahr
     plot_data = dev_data.groupby('year').mean()
 
-    # Create a figure with two subplots sharing the x-axis
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True,
-                                   gridspec_kw={'height_ratios': [2, 1], 'hspace': 0.1})
+    # Farben für die Kosten definieren
+    kosten_farben = {
+        'const_cost': '#a6bddb',  # TotalConstructionCost
+        'maint_cost': '#3690c0',  # TotalMaintenanceCost
+        'uncovered_op_cost': '#034e7b'  # TotalUncoveredOperatingCost
+    }
 
-    # Set style for scientific plot
+    # Negation der Kosten für das gemeinsame Diagramm
+    plot_data['const_cost_neg'] = -plot_data['const_cost']
+    plot_data['maint_cost_neg'] = -plot_data['maint_cost']
+    plot_data['uncovered_op_neg'] = -plot_data['uncovered_op_cost']
+
+    # Abbildung erstellen
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    # Wissenschaftlicher Stil
     sns.set_style('whitegrid')
     plt.rcParams['font.family'] = 'serif'
 
     width = 0.8
 
-    # Top subplot for costs (using appropriate scale)
-    # Plot stacked bars for costs
-    costs_bars1 = ax1.bar(plot_data.index, plot_data['const_cost'], width,
-                          label='Construction Costs', color='#1f77b4', alpha=0.8)
-    costs_bars2 = ax1.bar(plot_data.index, plot_data['maint_cost'], width,
-                          bottom=plot_data['const_cost'], label='Maintenance Costs',
-                          color='#ff7f0e', alpha=0.8)
+    # Gestapelte Balken für negative Kosten (nach unten)
+    costs_bars1 = ax.bar(plot_data.index, plot_data['const_cost_neg'], width,
+                         label='Baukosten', color=kosten_farben['const_cost'], alpha=0.8)
+    costs_bars2 = ax.bar(plot_data.index, plot_data['maint_cost_neg'], width,
+                         bottom=plot_data['const_cost_neg'], label='Unterhaltskosten',
+                         color=kosten_farben['maint_cost'], alpha=0.8)
+    sum_prev_costs = plot_data['const_cost_neg'] + plot_data['maint_cost_neg']
+    costs_bars3 = ax.bar(plot_data.index, plot_data['uncovered_op_neg'], width,
+                         bottom=sum_prev_costs, label='Betriebskosten',
+                         color=kosten_farben['uncovered_op_cost'], alpha=0.8)
 
-    # Add the operating costs as a third stacked bar
-    sum_prev_costs = plot_data['const_cost'] + plot_data['maint_cost']
-    costs_bars3 = ax1.bar(plot_data.index, plot_data['uncovered_op_cost'], width,
-                          bottom=sum_prev_costs, label='Operating Costs',
-                          color='#d62728', alpha=0.8)
+    # Balken für Reisezeitersparnisse (nach oben)
+    benefit_bars = ax.bar(plot_data.index, plot_data['benefit'], width,
+                          label='Reisezeitersparnisse', color='#2ca02c', alpha=0.8)
 
-    # Customize top subplot
-    ax1.set_ylabel('Costs (CHF)', fontsize=12)
-    ax1.set_title(f'Discounted Costs and Benefits Over Time\nDevelopment: {max_benefit_dev}',
-                  fontsize=14, pad=20)
-    ax1.legend(loc='upper right', frameon=True, edgecolor='black')
-    ax1.grid(True, which="both", ls="-", alpha=0.2)
-    ax1.set_yscale('log')
+    # Diagramm anpassen
+    ax.set_xlabel('Jahr', fontsize=12)
+    ax.set_ylabel('Werte in Mio. CHF', fontsize=12)
+    ax.set_title(f'Diskontierte Kosten und Nutzen im Zeitverlauf\nEntwicklung: {line}',
+                 fontsize=14, pad=20)
+    ax.legend(loc='lower right', frameon=True, edgecolor='black')
+    ax.grid(True, which="both", ls="-", alpha=0.2)
 
-    # If zero or negative values exist, handle them for log scale
-    min_positive_cost = plot_data[['const_cost', 'maint_cost', 'uncovered_op_cost']].stack().replace(0,
-                                                                                                     float('nan')).min()
-    ax1.set_ylim(bottom=min_positive_cost * 0.1 if pd.notna(min_positive_cost) else 1)
+    # Y-Achsengrenzen anhand der Kosten im Jahr 2 festlegen
+    year_2_costs = (plot_data['const_cost_neg'] + plot_data['maint_cost_neg'] +
+                    plot_data['uncovered_op_neg']).iloc[1] if len(plot_data) > 1 else 0
+    y_limit_bottom = year_2_costs * 1.5  # 150% der Kosten im Jahr 2
 
-    # Bottom subplot for benefits (using linear scale)
-    benefit_bars = ax2.bar(plot_data.index, plot_data['benefit'], width,
-                           label='Benefits', color='#2ca02c', alpha=0.8)
+    max_value = max(plot_data['benefit'])
+    y_limit_top = max_value * 1.2  # Obere Grenze bleibt wie zuvor
 
-    # Customize bottom subplot
-    ax2.set_xlabel('Year', fontsize=12)
-    ax2.set_ylabel('Benefits (CHF)', fontsize=12)
-    ax2.legend(loc='upper right', frameon=True, edgecolor='black')
-    ax2.grid(True, which="both", ls="-", alpha=0.2)
+    ax.set_ylim(bottom=y_limit_bottom, top=y_limit_top)
 
-    # Auto-adjust y-limits for benefits based on data
-    if plot_data['benefit'].max() > 0:
-        ax2.set_ylim(bottom=0, top=plot_data['benefit'].max() * 1.2)
+    # Formatter für Millionenwerte ohne wissenschaftliche Notation
+    def millions_formatter(x, pos):
+        return f'{x / 1e6:.1f}'
 
-    # Adjust layout to prevent label cutoff
+    ax.yaxis.set_major_formatter(FuncFormatter(millions_formatter))
+
+    # Beschriftung für abgeschnittene Construction Costs hinzufügen
+    # Finde die höchsten Construction Costs
+    total_costs_by_year = (plot_data['const_cost_neg'] + plot_data['maint_cost_neg'] +
+                           plot_data['uncovered_op_neg'])
+    max_cost_year = total_costs_by_year.idxmin()
+    max_cost_value = total_costs_by_year.min()
+
+    # Annotiere den gesamten abgeschnittenen Stapel
+    ax.annotate(f'{-max_cost_value / 1e6:.1f} Mio. CHF',
+                xy=(max_cost_year, y_limit_bottom * 0.95),
+                xytext=(0, 10),
+                textcoords='offset points',
+                ha='center', va='bottom',
+                fontsize=10)
+
+    # Layout anpassen
     plt.tight_layout()
 
-    # Ensure plots directory exists
+    # Stelle sicher, dass das Verzeichnis existiert
     os.makedirs('plots', exist_ok=True)
 
-    # Create filename with development name
-    filename = f'plots/discounted_costs_benefits_{max_benefit_dev}.png'
+    # Dateiname mit Entwicklungsname erstellen
+    filename = f'plots/kosten_nutzen_{line}.png'
 
-    # Delete the file if it already exists
+    # Lösche die Datei, wenn sie bereits existiert
     if os.path.exists(filename):
         os.remove(filename)
-        print(f"Deleted existing file: {filename}")
+        print(f"Bestehende Datei gelöscht: {filename}")
 
-    # Save the plot
+    # Plot speichern
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close()
 
-    print(f"Plot saved for development {max_benefit_dev} as {filename}")
+    print(f"Diagramm für Entwicklung {line} als {filename} gespeichert.")
 
 
 def plot_lines_to_network(points_gdf,lines_gdf):
@@ -3318,11 +3404,11 @@ def plot_cumulative_cost_distribution(df, output_path="plot/kumulative_kostenver
     plt.axvline(x=0, color='lightgray', linestyle='-', linewidth=1)
 
     # Beschriftungen und Formatierung
-    plt.xlabel('Nettonutzen [Mio. CHF]', fontsize=12)
+    plt.xlabel('Monetarisierte Reisezeitersparnisse [Mio. CHF]', fontsize=12)
     plt.ylabel('Kumulative Wahrscheinlichkeit', fontsize=12)
     plt.title('Kumulative Wahrscheinlichkeitsverteilung des Nettonutzens\naller betrachteten Entwicklungen', fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(title='Linien mit mittlerem Nettonutzen', fontsize=9, title_fontsize=10, loc='center left', bbox_to_anchor=(1, 0.5))
+    plt.legend(title='Linien mit mittlerem Nutzen', fontsize=9, title_fontsize=10, loc='center left', bbox_to_anchor=(1, 0.5))
 
     # Y-Achse 0–1
     plt.ylim(0, 1.05)

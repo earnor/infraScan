@@ -18,7 +18,7 @@ infra_generation_modification_type = 'ALL' #either 'EXTEND_LINES' or 'NEW_DIRECT
 infra_generation_rail_network = paths.RAIL_SERVICES_AK2035_PATH
 
 OD_type = 'canton_ZH' #either 'canton_ZH' or 'pt_catchment_perimeter'
-only_demand_from_to_perimeter = False
+only_demand_from_to_perimeter = True
 
 scenario_type = 'GENERATED' #either 'GENERATED' or 'STATIC_9' or 'dummy'
 amount_of_scenarios = 100
