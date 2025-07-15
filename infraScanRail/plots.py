@@ -2712,7 +2712,10 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
             if node1 in positions and node2 in positions:
                 x1, y1 = positions[node1]
                 x2, y2 = positions[node2]
-                ax.plot([x1, x2], [y1, y2], 'r--', linewidth=3.0, alpha=0.9, zorder=2)
+                # Hier gepunktete Linie (:) statt gestrichelte Linie (--)
+                # Mit feinerer Kontrolle über die Punktdichte
+                ax.plot([x1, x2], [y1, y2], 'r', linestyle=':', linewidth=3.0, alpha=0.9, zorder=2,
+                        dashes=[2, 1])  # [Punktlänge, Zwischenraum] - kleinere Werte = engere Punkte
                 missing_connections_coords.append((x1, y1))
                 missing_connections_coords.append((x2, y2))
 
@@ -2722,7 +2725,7 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
     important_nodes = set()  # Für Knoten mit Labels
 
     # Liste für Stationen mit Label unter dem Knoten
-    below_label_stations = ["Zürich Oerlikon", "Stettbach"]
+    below_label_stations = ["Zürich Oerlikon", "Stettbach", "Zürich HB", "Zürich Stadelhofen", "Zürich Altstetten"]
 
     for node in graph.nodes():
         station_name = graph.nodes[node].get('station_name', '')
@@ -2732,6 +2735,11 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
             node_colors.append('red')
             node_sizes.append(150)
             important_nodes.add(node)
+        # Prüfe zuerst auf fehlende Verbindungen vor der Prüfung auf Grenzknoten
+        elif node in nodes_in_missing_connections:
+            node_colors.append('orange')  # Knoten einer missing connection in Orange
+            node_sizes.append(100)        # Größe 100
+            important_nodes.add(node)
         elif graph.nodes[node].get('type') == 'border' and highlight_centers:
             node_colors.append('orange')
             node_sizes.append(100)
@@ -2739,13 +2747,13 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
             node_colors.append('green')
             node_sizes.append(100)
             important_nodes.add(node)
-        elif node in nodes_in_missing_connections:
-            node_colors.append('blue')  # Knoten einer missing connection
-            node_sizes.append(80)
-            important_nodes.add(node)
         else:
             node_colors.append('lightblue')
             node_sizes.append(50)
+
+    # Füge alle Knoten mit Stationsnamen in below_label_stations zu important_nodes hinzu
+    important_nodes.update(
+        [node for node in graph.nodes() if graph.nodes[node].get('station_name') in below_label_stations])
 
     # Draw nodes
     nx.draw_networkx_nodes(graph, positions, node_color=node_colors, node_size=node_sizes, ax=ax)
@@ -2754,16 +2762,17 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
     labels = {node: graph.nodes[node].get('station_name', '') for node in important_nodes}
 
     # Text-Positionen für Labels berechnen (doppelter Abstand vom Knoten)
+    # Text-Positionen für Labels berechnen (mit vergrößertem Abstand)
     label_pos = {}
     for node in labels:
         if node in positions:
             station_name = graph.nodes[node].get('station_name', '')
             if station_name in below_label_stations:
-                # Für Stettbach und Zürich Oerlikon unter dem Knoten mit doppeltem Abstand
-                label_pos[node] = (positions[node][0], positions[node][1] - 0.02)
+                # Für Stationen in below_label_stations UNTER dem Knoten mit doppeltem Abstand
+                label_pos[node] = (positions[node][0], positions[node][1] - 400)  # Doppelter Abstand nach unten (-2)
             else:
-                # Für alle anderen über dem Knoten mit doppeltem Abstand
-                label_pos[node] = (positions[node][0], positions[node][1] + 0.02)
+                # Für alle anderen ÜBER dem Knoten mit doppeltem Abstand
+                label_pos[node] = (positions[node][0], positions[node][1] + 400)  # Doppelter Abstand nach oben (+2)
 
     # Erstelle zwei separate Gruppen für Knoten, die oben bzw. unten beschriftet werden sollen
     top_labels = {node: labels[node] for node in labels if
@@ -2775,22 +2784,24 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
     top_label_pos = {node: label_pos[node] for node in top_labels}
     bottom_label_pos = {node: label_pos[node] for node in bottom_labels}
 
-    # Zeichne die oberen Labels
+    # Zeichne die oberen Labels (mit korrekter verticalalignment)
     nx.draw_networkx_labels(graph, top_label_pos, top_labels, font_size=10, font_weight='normal',
-                            verticalalignment='top', horizontalalignment='center', ax=ax)
-
-    # Zeichne die unteren Labels
-    nx.draw_networkx_labels(graph, bottom_label_pos, bottom_labels, font_size=10, font_weight='normal',
                             verticalalignment='bottom', horizontalalignment='center', ax=ax)
+
+    # Zeichne die unteren Labels (mit korrekter verticalalignment)
+    nx.draw_networkx_labels(graph, bottom_label_pos, bottom_labels, font_size=10, font_weight='normal',
+                            verticalalignment='top', horizontalalignment='center', ax=ax)
 
     # Zoom auf den Bereich mit fehlenden Verbindungen, falls vorhanden
     if missing_connections_coords:
         x_coords = [coord[0] for coord in missing_connections_coords]
         y_coords = [coord[1] for coord in missing_connections_coords]
 
-        # Berechne den Bereich der fehlenden Verbindungen mit etwas Puffer
-        min_x, max_x = min(x_coords) - 0.05, max(x_coords) + 0.05
-        min_y, max_y = min(y_coords) - 0.05, max(y_coords) + 0.05
+        # Berechne den Bereich der fehlenden Verbindungen mit 7km Puffer (7000 Meter)
+        # Annahme: 1 Einheit in Koordinaten = 1 Meter
+        buffer_size = 7000
+        min_x, max_x = min(x_coords) - buffer_size, max(x_coords) + buffer_size
+        min_y, max_y = min(y_coords) - buffer_size, max(y_coords) + buffer_size
 
         # Setze die Achsengrenzen auf den Bereich der fehlenden Verbindungen
         ax.set_xlim(min_x, max_x)
@@ -2801,7 +2812,7 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
     arrow_pos_y = 0.92  # Y-Position im Achsenkoordinatensystem
 
     # Pfeil zeichnen (näher zur Beschriftung)
-    arrow = FancyArrowPatch((arrow_pos_x, arrow_pos_y - 0.015),
+    arrow = FancyArrowPatch((arrow_pos_x, arrow_pos_y - 0.010),
                             (arrow_pos_x, arrow_pos_y + 0.05),
                             color='black',
                             lw=2.5,  # Etwas dicker
@@ -2847,9 +2858,13 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
             Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=10, label='Endstation'),
             Line2D([0], [0], marker='o', color='w', markerfacecolor='lightblue', markersize=10, label='Station')
         ]
+        # Polygon zur Legende hinzufügen, falls vorhanden
+        if polygon:
+            legend_elements.append(
+                Line2D([0], [0], color='blue', linewidth=5, alpha=0.4, label='Fallstudienkorridor'))
         if missing_links:
             legend_elements.append(
-                Line2D([0], [0], color='r', linestyle='--', linewidth=3, label='Fehlende Direktverbindung'))
+                Line2D([0], [0], color='r', linestyle=':', linewidth=3, label='Fehlende Direktverbindung'))
         plt.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1))
 
     plt.title("Fehlende Direktverbindungen von Korridoren")
