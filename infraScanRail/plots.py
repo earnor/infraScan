@@ -2667,7 +2667,7 @@ def plot_lines_to_network(points_gdf,lines_gdf):
     return None
 
 
-def plot_graph(graph, positions, highlight_centers=True, missing_links=None, directory='data/plots',polygon=None):
+def plot_graph(graph, positions, highlight_centers=True, missing_links=None, directory='data/plots', polygon=None):
     """
     Plot the railway network graph with optional highlighting of center nodes and missing connections.
 
@@ -2675,77 +2675,198 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
         graph (networkx.Graph): The railway network graph
         positions (dict): Dictionary mapping node IDs to (x,y) coordinates
         highlight_centers (bool): Whether to highlight center nodes
-        missing_connections (list): List of missing connections to highlight
+        missing_links (list): List of missing connections to highlight
+        directory (str): Directory to save the plot
+        polygon (shapely.geometry.Polygon): Optional polygon to draw around the network
     """
     # Create the plot
-    plt.figure(figsize=(20, 16), dpi=300)
+    plt.figure(figsize=(10, 8), dpi=600)
+    ax = plt.gca()
+
+    # Setze das Achsenverhältnis auf "gleich", damit X und Y die gleiche Skala haben
+    ax.set_aspect('equal')
+
+    # Zeichne das Polygon zuerst im Hintergrund
+    if polygon:
+        x, y = polygon.exterior.xy
+        ax.plot(x, y, 'b-', linewidth=5, alpha=0.4, zorder=0)
 
     # Draw edges
-    nx.draw_networkx_edges(graph, positions, edge_color='gray', width=0.5, alpha=0.6)
+    nx.draw_networkx_edges(graph, positions, edge_color='gray', width=0.5, alpha=0.6, ax=ax)
+
+    # Wenn missing_links vorhanden sind
+    nodes_in_missing_connections = set()
+    missing_connections_coords = []  # Für den Zoom
+
+    if missing_links:
+        missing_connections = []
+
+        for center in missing_links:
+            missing_connections.extend(center['missing_connections'])
+
+        for conn in missing_connections:
+            node1, node2 = conn['nodes']
+            nodes_in_missing_connections.add(node1)
+            nodes_in_missing_connections.add(node2)
+
+            if node1 in positions and node2 in positions:
+                x1, y1 = positions[node1]
+                x2, y2 = positions[node2]
+                ax.plot([x1, x2], [y1, y2], 'r--', linewidth=3.0, alpha=0.9, zorder=2)
+                missing_connections_coords.append((x1, y1))
+                missing_connections_coords.append((x2, y2))
 
     # Draw nodes with different colors based on type
     node_colors = []
     node_sizes = []
+    important_nodes = set()  # Für Knoten mit Labels
+
+    # Liste für Stationen mit Label unter dem Knoten
+    below_label_stations = ["Zürich Oerlikon", "Stettbach"]
+
     for node in graph.nodes():
+        station_name = graph.nodes[node].get('station_name', '')
+
+        # Bestimme, welche Knoten als wichtig gelten und beschriftet werden
         if graph.nodes[node].get('type') == 'center' and highlight_centers:
             node_colors.append('red')
             node_sizes.append(150)
+            important_nodes.add(node)
         elif graph.nodes[node].get('type') == 'border' and highlight_centers:
             node_colors.append('orange')
             node_sizes.append(100)
         elif graph.nodes[node].get('end_station', False):
             node_colors.append('green')
             node_sizes.append(100)
+            important_nodes.add(node)
+        elif node in nodes_in_missing_connections:
+            node_colors.append('blue')  # Knoten einer missing connection
+            node_sizes.append(80)
+            important_nodes.add(node)
         else:
             node_colors.append('lightblue')
             node_sizes.append(50)
 
     # Draw nodes
-    nx.draw_networkx_nodes(graph, positions, node_color=node_colors, node_size=node_sizes)
+    nx.draw_networkx_nodes(graph, positions, node_color=node_colors, node_size=node_sizes, ax=ax)
 
-    # Add labels with station names
-    labels = nx.get_node_attributes(graph, 'station_name')
-    nx.draw_networkx_labels(graph, positions, labels, font_size=8)
+    # Add labels only for important nodes
+    labels = {node: graph.nodes[node].get('station_name', '') for node in important_nodes}
 
-    # Highlight missing connections if provided
+    # Text-Positionen für Labels berechnen (doppelter Abstand vom Knoten)
+    label_pos = {}
+    for node in labels:
+        if node in positions:
+            station_name = graph.nodes[node].get('station_name', '')
+            if station_name in below_label_stations:
+                # Für Stettbach und Zürich Oerlikon unter dem Knoten mit doppeltem Abstand
+                label_pos[node] = (positions[node][0], positions[node][1] - 0.02)
+            else:
+                # Für alle anderen über dem Knoten mit doppeltem Abstand
+                label_pos[node] = (positions[node][0], positions[node][1] + 0.02)
 
-    if missing_links:
-        missing_connections = []
-        for center in missing_links:
-            missing_connections.extend(center['missing_connections'])
-        for conn in missing_connections:
-            node1, node2 = conn['nodes']
-            if node1 in positions and node2 in positions:
-                plt.plot([positions[node1][0], positions[node2][0]],
-                         [positions[node1][1], positions[node2][1]],
-                         'r--', linewidth=2, alpha=0.7)
+    # Erstelle zwei separate Gruppen für Knoten, die oben bzw. unten beschriftet werden sollen
+    top_labels = {node: labels[node] for node in labels if
+                  graph.nodes[node].get('station_name', '') not in below_label_stations}
+    bottom_labels = {node: labels[node] for node in labels if
+                     graph.nodes[node].get('station_name', '') in below_label_stations}
 
-    if polygon:
-        x, y = polygon.exterior.xy
-        plt.plot(x, y, 'b-', linewidth=2, alpha=0.8)
+    # Erstelle die entsprechenden Positionsdictionaries
+    top_label_pos = {node: label_pos[node] for node in top_labels}
+    bottom_label_pos = {node: label_pos[node] for node in bottom_labels}
+
+    # Zeichne die oberen Labels
+    nx.draw_networkx_labels(graph, top_label_pos, top_labels, font_size=10, font_weight='normal',
+                            verticalalignment='top', horizontalalignment='center', ax=ax)
+
+    # Zeichne die unteren Labels
+    nx.draw_networkx_labels(graph, bottom_label_pos, bottom_labels, font_size=10, font_weight='normal',
+                            verticalalignment='bottom', horizontalalignment='center', ax=ax)
+
+    # Zoom auf den Bereich mit fehlenden Verbindungen, falls vorhanden
+    if missing_connections_coords:
+        x_coords = [coord[0] for coord in missing_connections_coords]
+        y_coords = [coord[1] for coord in missing_connections_coords]
+
+        # Berechne den Bereich der fehlenden Verbindungen mit etwas Puffer
+        min_x, max_x = min(x_coords) - 0.05, max(x_coords) + 0.05
+        min_y, max_y = min(y_coords) - 0.05, max(y_coords) + 0.05
+
+        # Setze die Achsengrenzen auf den Bereich der fehlenden Verbindungen
+        ax.set_xlim(min_x, max_x)
+        ax.set_ylim(min_y, max_y)
+
+    # === Nordpfeil oben rechts positionieren ===
+    arrow_pos_x = 0.92  # X-Position im Achsenkoordinatensystem
+    arrow_pos_y = 0.92  # Y-Position im Achsenkoordinatensystem
+
+    # Pfeil zeichnen (näher zur Beschriftung)
+    arrow = FancyArrowPatch((arrow_pos_x, arrow_pos_y - 0.015),
+                            (arrow_pos_x, arrow_pos_y + 0.05),
+                            color='black',
+                            lw=2.5,  # Etwas dicker
+                            arrowstyle='->',
+                            mutation_scale=20,  # Größerer Pfeilkopf
+                            transform=ax.transAxes,
+                            zorder=1000)
+    ax.add_patch(arrow)
+
+    # "N" Beschriftung näher zum Pfeil platzieren und größer
+    ax.text(arrow_pos_x, arrow_pos_y - 0.035, "N",
+            fontsize=18, weight='bold',  # Größere Schrift
+            ha='center', va='center',
+            transform=ax.transAxes,
+            zorder=1000,
+            bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
+
+    # === Maßstab oben rechts neben dem Nordpfeil hinzufügen ===
+    scale_pos_x = 0.8  # Weiter links vom Nordpfeil
+    scale_pos_y = 0.92  # Gleiche Höhe wie der Nordpfeil
+    scale_width = 0.1  # Breite des Maßstabsbalkens in Achsenkoordinaten
+    scale_height = 0.01  # Höhe des Maßstabsbalkens
+
+    # Maßstabsbalken als schwarzes Rechteck
+    scale_rect = plt.Rectangle((scale_pos_x - scale_width / 2, scale_pos_y - scale_height / 2),
+                               scale_width, scale_height,
+                               facecolor='black', edgecolor='black',
+                               transform=ax.transAxes, zorder=1000)
+    ax.add_patch(scale_rect)
+
+    # Maßstabstext (5 km) unter dem Balken, größer
+    ax.text(scale_pos_x, scale_pos_y - 0.04, "5 km",
+            fontsize=12, ha='center', va='center',  # Größere Schrift
+            transform=ax.transAxes, zorder=1000,
+            bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
 
     # Add legend
     if highlight_centers:
         from matplotlib.lines import Line2D
         legend_elements = [
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=10, label='Center Node'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', markersize=10, label='Border Node'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=10, label='End Station'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='lightblue', markersize=10, label='Regular Node')
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=10, label='Zentrumsknoten'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', markersize=10, label='Grenzknoten'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=10, label='Endstation'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='lightblue', markersize=10, label='Station')
         ]
         if missing_links:
-            legend_elements.append(Line2D([0], [0], color='r', linestyle='--', label='Missing Connection'))
+            legend_elements.append(
+                Line2D([0], [0], color='r', linestyle='--', linewidth=3, label='Fehlende Direktverbindung'))
         plt.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1))
 
-    plt.title("Railway Network Analysis")
+    plt.title("Fehlende Direktverbindungen von Korridoren")
     plt.axis('on')
     plt.grid(True)
     plt.tight_layout()
+
+    # Ensure directory exists
+    os.makedirs(directory, exist_ok=True)
+
     plt.savefig(os.path.join(directory, 'network_graph.png'),
-                dpi=300,
+                dpi=600,
                 bbox_inches='tight',
                 pad_inches=0.2,
                 format='png')
+
+    plt.close()  # Schließe die Figur, um Speicher freizugeben
 
 
 def print_new_railway_lines(new_lines):
