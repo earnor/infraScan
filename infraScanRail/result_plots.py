@@ -3,6 +3,7 @@ import pandas as pd
 import pickle
 import os
 from matplotlib.ticker import EngFormatter
+import paths
 
 
 def plot_tt_development_over_time(save_fig=False, output_dir=None, show_std_dev=True):
@@ -293,6 +294,121 @@ def plot_scenarios():
     # Plot für Distance per Person mit absoluten Werten (34.77-39.47 km)
     plot_scenarios_with_range(distance_per_person_scenarios, directory, 'distance_per_person',
                                   federal_2050_range=(34.77, 39.47))
-fig_dir = r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\network_performance_Ak2035 plot"
-plot_tt_development_over_time(save_fig=True, output_dir=fig_dir, show_std_dev=False)
+#fig_dir = r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\network_performance_Ak2035 plot"
+#plot_tt_development_over_time(save_fig=True, output_dir=fig_dir, show_std_dev=False)
 #plot_scenarios()
+
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import matplotlib.colors as mcolors
+
+directory = r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\szenario_plot"
+with open(
+        r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\szenario_plot\scenario_data_for_plots.pkl",
+        'rb') as f:
+    components = pickle.load(f)
+
+# Extrahiere die einzelnen Komponenten
+population_scenarios = components['population_scenarios']
+
+# Read the shapefile
+gdf = gpd.read_file(paths.DISTRICT_PATH)
+
+
+def plot_population_growth_map(population_scenarios, gdf, year=2100, save_fig=False, output_dir=None):
+    """
+    Erstellt eine Karte mit dem durchschnittlichen Bevölkerungswachstum der Bezirke für das angegebene Jahr.
+
+    Parameters:
+    - population_scenarios: Dictionary mit Bezirken als Schlüssel und DataFrames als Werte
+    - gdf: GeoDataFrame mit Geometrien der Bezirke
+    - year: Jahr für das der Wachstumsindex berechnet wird (Standard: 2100)
+    - save_fig: Boolean, ob die Figur gespeichert werden soll
+    - output_dir: Zielverzeichnis zum Speichern der Figur (falls save_fig=True)
+    """
+    # Berechne den durchschnittlichen Wachstumsindex pro Bezirk für das Jahr 2100
+    growth_by_district = {}
+
+    for district, df in population_scenarios.items():
+        # Filtere für das gewünschte Jahr
+        year_df = df[df['year'] == year]
+
+        # Berechne durchschnittlichen Wachstumsindex über alle Szenarien
+        avg_growth = year_df['growth_index'].mean()
+        growth_by_district[district] = avg_growth
+
+    # Erstelle ein neues GeoDataFrame mit Wachstumsdaten
+    growth_df = pd.DataFrame(list(growth_by_district.items()), columns=['BEZIRK', 'avg_growth_index'])
+
+    # Merge mit dem ursprünglichen GeoDataFrame
+    merged_gdf = gdf.merge(growth_df, on='BEZIRK', how='left')
+
+    # Erstelle die Karte
+    fig, ax = plt.subplots(1, 1, figsize=(12, 10), dpi=900)
+
+    # Definiere eine gelb-grün bis dunkel-grün Farbskala
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        'yellow_green_to_dark_green',
+        [(0, '#ffff99'), (0.5, '#7cbe56'), (1, '#004d00')],
+        N=256
+    )
+
+    # Nimm die tatsächlichen min und max Werte für die Farbskala
+    vmin = merged_gdf['avg_growth_index'].min()
+    vmax = merged_gdf['avg_growth_index'].max()
+
+    # Plotte die Karte
+    plot = merged_gdf.plot(column='avg_growth_index',
+                    cmap=cmap,
+                    linewidth=3,
+                    ax=ax,
+                    edgecolor='lightgrey',
+                    vmin=vmin,  # Tatsächlicher Minimalwert
+                    vmax=vmax,  # Tatsächlicher Maximalwert
+                    legend=True,
+                    legend_kwds={'label': f"Mittlerer Wachstumsindex 2018 - {year}",
+                                 'shrink': 0.75})
+
+    # Aktualisiere die Schriftgröße der Colorbar-Beschriftungen
+    cbar = plot.get_figure().get_axes()[1]  # Zugriff auf die Colorbar-Achse
+    cbar.tick_params(labelsize=12)  # Schriftgröße der Tick-Labels
+    cbar.set_ylabel(f"Mittlerer Wachstumsindex 2018 - {year}", fontsize=14)  # Beschriftung und Schriftgröße
+
+    # Beschriftungen für die Bezirke hinzufügen
+    for idx, row in merged_gdf.iterrows():
+        # Berechne den Centroid der Geometrie für die Beschriftung
+        centroid = row.geometry.centroid
+        # Füge Bezirksnamen und Wachstumsindex hinzu
+        growth_value = row['avg_growth_index']
+        if pd.notna(growth_value):  # Überprüfe, ob der Wert nicht NaN ist
+            growth_text = f"{growth_value:.2f}"
+            ax.annotate(f"{row['BEZIRK']}\n({growth_text})",
+                        xy=(centroid.x, centroid.y),
+                        ha='center', va='center',
+                        fontsize=12,
+                        fontweight='bold',
+                        color='black',
+                        bbox=dict(facecolor='white', alpha=0.6, edgecolor='none', boxstyle='round,pad=0.3'))
+
+    # Titel und Layout
+    ax.set_title(
+        f"Bevölkerungswachstum nach Bezirk von 2018 bis {year}\n(Mittlerer Wachstumsindex über alle Szenarien)", fontsize=16)
+    ax.set_axis_off()
+    plt.tight_layout()
+
+    # Optional: Figur speichern
+    if save_fig and output_dir:
+        import os
+        os.makedirs(output_dir, exist_ok=True)
+        fig_path = os.path.join(output_dir, f"population_growth_map_{year}.png")
+        plt.savefig(fig_path, dpi=1200, bbox_inches='tight')
+        print(f"Abbildung gespeichert unter: {fig_path}")
+
+    plt.show()
+    return fig, ax
+
+
+# Die Funktion aufrufen
+plot_population_growth_map(population_scenarios, gdf, year=2100, save_fig=True, output_dir=directory)

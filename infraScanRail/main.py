@@ -665,12 +665,6 @@ def visualize_results(clear_plot_directory=False):
     create_and_save_plots(df=results_raw, railway_lines=railway_lines)
     # Mit dem vorhandenen DataFrame
     plot_cumulative_cost_distribution(results_raw, "plots/cumulative_cost_distribution.png")
-    '''
-    plot_developments_and_table_for_scenarios(
-    osm_file="data/osm_map.gpkg",  # Use the converted GeoPackage file
-    input_dir="data/costs",
-    output_dir="data/plots")
-    '''
 
 
 def generate_infra_development(use_cache, mod_type):
@@ -708,7 +702,8 @@ def generate_infra_development(use_cache, mod_type):
         print("\n=== New Direct connections ===")
         print("Identifying missing connections...")
         missing_connections = get_missing_connections(G, pos, print_results=True,
-                                                      polygon=settings.perimeter_infra_generation)
+                                                      polygon=None)
+        #settings.perimeter_infra_generation
         plot_graph(G, pos, highlight_centers=True, missing_links=missing_connections, directory=paths.PLOT_DIRECTORY,
                    polygon=settings.perimeter_infra_generation)
 
@@ -779,9 +774,3 @@ def create_dev_id_lookup_table():
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     infrascanrail()
-    """os.chdir(paths.MAIN)
-    results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
-    railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
-    create_and_save_plots(df=results_raw, railway_lines=railway_lines)"""
-
-    #plot_selected_lines(["X11", "X12", "X24", "X30", "X32"])

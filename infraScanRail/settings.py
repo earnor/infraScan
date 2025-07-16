@@ -13,7 +13,7 @@ use_cache_traveltime_graph = True
 use_cache_scenarios = False
 use_cache_tts_calc = False
 
-infra_generation_modification_type = 'NEW_DIRECT_CONNECTIONS' #either 'EXTEND_LINES' or 'NEW_DIRECT_CONNECTIONS' or 'ALL'
+infra_generation_modification_type = 'ALL' #either 'EXTEND_LINES' or 'NEW_DIRECT_CONNECTIONS' or 'ALL'
 #infra_generation_rail_network: either 'RAIL_SERVICES_AK2035_PATH' or 'RAIL_SERVICES_AK2035_EXTENDED_PATH' or 'RAIL_SERVICES_2024_PATH' or 'RAIL_SERVICES_2024_EXTENDED_PATH'
 infra_generation_rail_network = paths.RAIL_SERVICES_AK2035_PATH
 

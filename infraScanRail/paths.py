@@ -23,6 +23,7 @@ POPULATION_SCENARIO_CH_BFS_2055 = r"data\Scenario\pop_scenario_switzerland_2055.
 POPULATION_SCENARIO_CH_EUROSTAT_2100 = r"data\Scenario\Eurostat_population_CH_2100.xlsx"
 POPULATION_PER_COMMUNE_ZH_2018 = r"data\Scenario\population_by_gemeinde_2018.csv"
 RANDOM_SCENARIO_CACHE_PATH = r"data\Scenario\cache"
+DISTRICT_PATH = r"data\_basic_data\Gemeindegrenzen\UP_BEZIRKE_F.shp"
 
 CONSTRUCTION_COSTS =  r"data/costs/construction_cost.csv"
 TOTAL_COST_WITH_GEOMETRY = r"data/costs/total_costs_with_geometry.csv"
