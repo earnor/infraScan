@@ -702,7 +702,7 @@ def generate_infra_development(use_cache, mod_type):
         print("\n=== New Direct connections ===")
         print("Identifying missing connections...")
         missing_connections = get_missing_connections(G, pos, print_results=True,
-                                                      polygon=None)
+                                                      polygon=settings.perimeter_infra_generation)
         #settings.perimeter_infra_generation
         plot_graph(G, pos, highlight_centers=True, missing_links=missing_connections, directory=paths.PLOT_DIRECTORY,
                    polygon=settings.perimeter_infra_generation)
