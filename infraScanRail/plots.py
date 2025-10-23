@@ -13,7 +13,7 @@ import contextily as ctx
 import geopandas as gpd
 import rasterio
 import seaborn as sns
-from geo_northarrow import add_north_arrow
+#from geo_northarrow import add_north_arrow
 from PIL import Image
 from pyrosm import OSM, get_data
 from rasterio.mask import mask
@@ -1887,7 +1887,7 @@ def plot_developments_expand_by_one_station():
                         textcoords="offset points", fontsize=12, color="black", zorder=7)
 
     # Add north arrow
-    add_north_arrow(ax, scale=.75, xlim_pos=.9025, ylim_pos=.835, color='#000', text_scaler=4, text_yT=-1.25)
+    #add_north_arrow(ax, scale=.75, xlim_pos=.9025, ylim_pos=.835, color='#000', text_scaler=4, text_yT=-1.25)
 
     # Add a scale bar
     scalebar = ScaleBar(dx=1, units="m", location="lower left", scale_loc="bottom")

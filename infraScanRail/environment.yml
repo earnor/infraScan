@@ -285,7 +285,6 @@ dependencies:
       - exceptiongroup==1.1.1
       - fiona==1.8.22
       - fonttools==4.39.3
-      - geo-northarrow==0.2.0a0
       - geographiclib==2.0
       - geopandas==0.12.2
       - geopy==2.4.1

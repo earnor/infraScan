@@ -1,5 +1,5 @@
 
-MAIN = r"D:\ETH_Msc\MA\infraScan\infraScanRail"
+MAIN = r"C:\Users\ETH\Documents\GitHub\infraScan\infraScanRail"
 RAIL_SERVICES_AK2035_PATH= r'data\temp\railway_services_ak2035.gpkg'
 RAIL_SERVICES_AK2035_EXTENDED_PATH = r'data\temp\railway_services_ak2035_extended.gpkg'
 RAIL_SERVICES_2024_PATH= r'data/temp/network_railway-services.gpkg'

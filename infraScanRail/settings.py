@@ -1,7 +1,7 @@
 from shapely.geometry import Polygon
 import paths
 
-rail_network = 'AK_2035_extended' # either 'AK_2035','AK_2035_extended' or 'current' or '2024_extended'
+rail_network = 'current' # either 'AK_2035','AK_2035_extended' or 'current' or '2024_extended'
 
 #CACHE
 use_cache_network = False
@@ -15,13 +15,13 @@ use_cache_tts_calc = False
 
 infra_generation_modification_type = 'ALL' #either 'EXTEND_LINES' or 'NEW_DIRECT_CONNECTIONS' or 'ALL'
 #infra_generation_rail_network: either 'RAIL_SERVICES_AK2035_PATH' or 'RAIL_SERVICES_AK2035_EXTENDED_PATH' or 'RAIL_SERVICES_2024_PATH' or 'RAIL_SERVICES_2024_EXTENDED_PATH'
-infra_generation_rail_network = paths.RAIL_SERVICES_AK2035_PATH
+infra_generation_rail_network = paths.RAIL_SERVICES_2024_PATH
 
 OD_type = 'canton_ZH' #either 'canton_ZH' or 'pt_catchment_perimeter'
 only_demand_from_to_perimeter = True
 
 scenario_type = 'GENERATED' #either 'GENERATED' or 'STATIC_9' or 'dummy'
-amount_of_scenarios = 100
+amount_of_scenarios = 10
 start_year_scenario = 2018
 end_year_scenario = 2100
 start_valuation_year = 2050
