@@ -46,27 +46,18 @@ DECIMAL_COMMA = ","
 LV95_E_OFFSET = 2_000_000
 LV95_N_OFFSET = 1_000_000
 
-try:
-    import xlsxwriter  # noqa: F401
-
-    EXCEL_ENGINE = "xlsxwriter"
-except ImportError:
-    try:
-        import openpyxl  # noqa: F401
-
-        EXCEL_ENGINE = "openpyxl"
-    except ImportError as exc:  # pragma: no cover - fail fast if neither available
-        raise ImportError(
-            "Neither 'xlsxwriter' nor 'openpyxl' is installed. "
-            "Please install one of them to export Excel files."
-        ) from exc
+DEFAULT_HEADWAY_MIN = 3.0  # minutes
 
 try:
     import openpyxl  # noqa: F401
 
+    EXCEL_ENGINE = "openpyxl"
     APPEND_ENGINE = "openpyxl"
-except ImportError:
-    APPEND_ENGINE = None
+except ImportError as exc:  # pragma: no cover - fail fast if dependency missing
+    raise ImportError(
+        "The 'openpyxl' package is required to export Excel files. "
+        "Install it and rerun the script."
+    ) from exc
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -129,6 +120,87 @@ def extract_via_nodes(value: str) -> List[int]:
         if as_int >= 0:
             nodes.append(as_int)
     return nodes
+
+
+def _format_frequency_value(value: float) -> str:
+    """Format frequency values without trailing zeroes."""
+    if value is None:
+        return ""
+    numeric = float(value)
+    if math.isnan(numeric):
+        return ""
+    rounded = round(numeric)
+    if math.isclose(numeric, rounded, abs_tol=1e-6):
+        return str(int(rounded))
+    return f"{numeric:.3f}".rstrip("0").rstrip(".")
+
+
+def _format_service_frequency_map(frequencies: Dict[str, float]) -> str:
+    """Return formatted bidirectional service frequency tokens."""
+    tokens: List[str] = []
+    for service, freq in sorted(frequencies.items(), key=lambda item: item[0]):
+        formatted = _format_frequency_value(freq)
+        if formatted:
+            tokens.append(f"{service}.{formatted}")
+    return ", ".join(tokens)
+
+
+def _format_service_direction_frequency_map(
+    frequencies: Dict[Tuple[str, str], float]
+) -> str:
+    """Return formatted per-direction service frequency tokens."""
+    tokens: List[str] = []
+    for (service, direction), freq in sorted(
+        frequencies.items(), key=lambda item: (item[0][0], item[0][1])
+    ):
+        formatted = _format_frequency_value(freq)
+        if not formatted:
+            continue
+        direction_token = str(direction).strip()
+        if not direction_token:
+            direction_token = "?"
+        tokens.append(f"{service}.{direction_token}.{formatted}")
+    return ", ".join(tokens)
+
+
+def _parse_service_frequency_string(cell: str) -> Dict[str, float]:
+    """Convert a string of 'Service.Frequency' tokens into a mapping."""
+    result: Dict[str, float] = {}
+    if not cell:
+        return result
+    tokens = [token.strip() for token in re.split(r"[;,]", str(cell)) if token.strip()]
+    for token in tokens:
+        parts = token.split(".", 1)
+        if len(parts) != 2:
+            continue
+        service = parts[0].strip()
+        freq = parse_float(parts[1])
+        if service:
+            result[service] = max(result.get(service, 0.0), freq)
+    return result
+
+
+def _parse_service_direction_frequency_string(cell: str) -> Dict[Tuple[str, str], float]:
+    """Convert 'Service.Direction.Frequency' tokens into a mapping."""
+    result: Dict[Tuple[str, str], float] = {}
+    if not cell:
+        return result
+    tokens = [token.strip() for token in re.split(r"[;,]", str(cell)) if token.strip()]
+    for token in tokens:
+        first = token.split(".", 1)
+        if len(first) != 2:
+            continue
+        service = first[0].strip()
+        remainder = first[1]
+        second = remainder.split(".", 1)
+        if len(second) != 2:
+            continue
+        direction = second[0].strip()
+        freq = parse_float(second[1])
+        if service:
+            key = (service, direction)
+            result[key] = max(result.get(key, 0.0), freq)
+    return result
 
 
 def load_service_links() -> pd.DataFrame:
@@ -206,17 +278,13 @@ def build_segment_contributions(
             if start not in corridor_node_ids or end not in corridor_node_ids:
                 continue
             pair = tuple(sorted((start, end)))
-            segment = contributions.setdefault(
-                pair,
-                {"stop_freq": 0.0, "pass_freq": 0.0, "dir_freq": defaultdict(float)},
-            )
+            segment = contributions.setdefault(pair, {"stop_freq": 0.0, "pass_freq": 0.0})
             stop_start = (service, direction, start) in stop_lookup
             stop_end = (service, direction, end) in stop_lookup
             if stop_start and stop_end:
                 segment["stop_freq"] += frequency
             else:
                 segment["pass_freq"] += frequency
-            segment["dir_freq"][(service, direction)] += frequency
 
     return contributions
 
@@ -238,7 +306,7 @@ def aggregate_station_metrics(
     # record in ``stop_records`` represents an actual station stop.
     stopping_per_node = (
         stop_records.groupby("Node")["Frequency"].sum().rename("stopping_tph").fillna(0.0)
-    )  # Total trains per hour that stop at each corridor node.
+    )  # Total trains per hour (both directions) that stop at each corridor node.
     stop_services: Dict[int, set[str]] = defaultdict(set)
     for service, direction, node_id in stop_lookup:
         if node_id in corridor_node_ids:
@@ -278,6 +346,8 @@ def aggregate_station_metrics(
 
     merged["stopping_tph"] = merged["stopping_tph"].fillna(0.0)
     merged["passing_tph"] = merged["passing_tph"].fillna(0.0)
+    merged["stopping_tphpd"] = merged["stopping_tph"] / 2.0
+    merged["passing_tphpd"] = merged["passing_tph"] / 2.0
     merged["stopping_services"] = merged["NR"].map(stop_services_map).fillna("")
     merged["passing_services"] = merged["NR"].map(passing_services_map).fillna("")
     merged["tracks"] = pd.NA  # Placeholder to be filled manually.
@@ -291,6 +361,8 @@ def aggregate_station_metrics(
         "N_LV95",
         "stopping_tph",
         "passing_tph",
+        "stopping_tphpd",
+        "passing_tphpd",
         "stopping_services",
         "passing_services",
         "tracks",
@@ -315,7 +387,7 @@ def aggregate_segment_metrics(
     """Compute segment-level statistics directly from processed service links."""
     segment_contribs = build_segment_contributions(service_links, stop_lookup, corridor_node_ids)
 
-    pair_meta: Dict[Tuple[int, int], Dict[str, List[float]]] = {}
+    pair_meta: Dict[Tuple[int, int], Dict[str, object]] = {}
     for _, row in service_links.iterrows():
         frequency = row["Frequency"]
         if frequency <= 0:
@@ -330,7 +402,24 @@ def aggregate_segment_metrics(
             if start not in corridor_node_ids or end not in corridor_node_ids:
                 continue
             pair = tuple(sorted((start, end)))
-            meta = pair_meta.setdefault(pair, {"stop_tts": [], "pass_tts": []})
+            meta = pair_meta.setdefault(
+                pair,
+                {
+                    "stop_tts": [],
+                    "pass_tts": [],
+                    "service_totals": defaultdict(float),
+                    "service_direction_totals": defaultdict(float),
+                },
+            )
+            if "service_totals" not in meta:
+                meta["service_totals"] = defaultdict(float)
+            if "service_direction_totals" not in meta:
+                meta["service_direction_totals"] = defaultdict(float)
+            service_totals: defaultdict[str, float] = meta["service_totals"]  # type: ignore[assignment]
+            direction_totals: defaultdict[Tuple[str, str], float] = meta["service_direction_totals"]  # type: ignore[assignment]
+            service_totals[service] += frequency
+            direction_key = str(direction).strip()
+            direction_totals[(service, direction_key)] += frequency
             stop_from = (service, direction, start) in stop_lookup
             stop_to = (service, direction, end) in stop_lookup
             if pd.notna(row["TravelTime"]) and segment_count == 1:
@@ -341,23 +430,32 @@ def aggregate_segment_metrics(
 
     records: List[Dict[str, object]] = []
     for from_node, to_node in sorted(segment_contribs.keys()):
-        meta = pair_meta.get((from_node, to_node), {"stop_tts": [], "pass_tts": []})
-        contrib = segment_contribs.get((from_node, to_node), {"stop_freq": 0.0, "pass_freq": 0.0, "dir_freq": {}})
+        meta = pair_meta.get(
+            (from_node, to_node),
+            {
+                "stop_tts": [],
+                "pass_tts": [],
+                "service_totals": {},
+                "service_direction_totals": {},
+            },
+        )
+        contrib = segment_contribs.get((from_node, to_node), {"stop_freq": 0.0, "pass_freq": 0.0})
 
         stop_tts = meta.get("stop_tts", [])
         pass_tts = meta.get("pass_tts", [])
+        service_totals_map = dict(meta.get("service_totals", {}))
+        service_direction_totals_map = dict(meta.get("service_direction_totals", {}))
+        services_tph = _format_service_frequency_map(service_totals_map)
+        services_tphpd = _format_service_direction_frequency_map(service_direction_totals_map)
 
         travel_time_stopping = max(stop_tts) if stop_tts else pd.NA
         travel_time_passing = max(pass_tts) if pass_tts else pd.NA
         stopping_tph = contrib.get("stop_freq", 0.0)
         passing_tph = contrib.get("pass_freq", 0.0)
-        dir_freq = contrib.get("dir_freq", {})
-        freq_items = dir_freq.items() if dir_freq else []
-        frequency_summary = "; ".join(
-            f"{svc}.{direction}: {freq:g}"
-            for (svc, direction), freq in sorted(freq_items)
-        )
-
+        total_tph = stopping_tph + passing_tph
+        stopping_tphpd = stopping_tph / 2.0
+        passing_tphpd = passing_tph / 2.0
+        total_tphpd = stopping_tphpd + passing_tphpd
         records.append(
             {
                 "from_node": from_node,
@@ -369,8 +467,12 @@ def aggregate_segment_metrics(
                 "travel_time_passing": travel_time_passing,
                 "stopping_tph": stopping_tph,
                 "passing_tph": passing_tph,
-                "tphpd": stopping_tph + passing_tph,
-                "directional_frequency": frequency_summary,
+                "total_tph": total_tph,
+                "stopping_tphpd": stopping_tphpd,
+                "passing_tphpd": passing_tphpd,
+                "total_tphpd": total_tphpd,
+                "services_tph": services_tph,
+                "services_tphpd": services_tphpd,
             }
         )
 
@@ -541,9 +643,19 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
         segments_df.get("travel_time_passing"), errors="coerce"
     ).fillna(0.0)
     segments_df["speed_value"] = pd.to_numeric(segments_df.get("speed"), errors="coerce")
-    segments_df["stopping_value"] = pd.to_numeric(segments_df.get("stopping_tph"), errors="coerce").fillna(0.0)
-    segments_df["passing_tph_value"] = pd.to_numeric(segments_df.get("passing_tph"), errors="coerce").fillna(0.0)
-    segments_df["tphpd_value"] = pd.to_numeric(segments_df.get("tphpd"), errors="coerce").fillna(0.0)
+    def _coerce_frequency(column: str) -> pd.Series:
+        if column in segments_df.columns:
+            series = pd.to_numeric(segments_df[column], errors="coerce")
+        else:
+            series = pd.Series([float("nan")] * len(segments_df), index=segments_df.index, dtype="float64")
+        return series.fillna(0.0)
+
+    segments_df["stopping_bidirectional_value"] = _coerce_frequency("stopping_tph")
+    segments_df["passing_bidirectional_value"] = _coerce_frequency("passing_tph")
+    segments_df["total_bidirectional_value"] = _coerce_frequency("total_tph")
+    segments_df["stopping_per_direction_value"] = _coerce_frequency("stopping_tphpd")
+    segments_df["passing_per_direction_value"] = _coerce_frequency("passing_tphpd")
+    segments_df["total_per_direction_value"] = _coerce_frequency("total_tphpd")
     segments_df["stop_time_value"] = pd.to_numeric(segments_df.get("travel_time_stopping"), errors="coerce").fillna(0.0)
 
     for column in service_columns:
@@ -587,12 +699,8 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
             via_tokens = tuple(int(token) for token in via_value)
         else:
             via_tokens = tuple()
-
-        directional_raw = getattr(row, "directional_frequency", "")
-        if pd.isna(directional_raw):
-            directional_raw = ""
-        directional_raw = str(directional_raw)
-        directional_tokens = _parse_services(directional_raw)[1] if directional_raw else tuple()
+        services_tph_cell = str(getattr(row, "services_tph", "") or "")
+        services_tphpd_cell = str(getattr(row, "services_tphpd", "") or "")
 
         edge_info = {
             "from_node": u,
@@ -601,17 +709,22 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
             "passing_time": float(row.passing_value),
             "stopping_time": float(row.stop_time_value),
             "speed": None if pd.isna(row.speed_value) else float(row.speed_value),
-            "stopping_tph": float(row.stopping_value),
-            "passing_tph": float(row.passing_tph_value),
-            "tphpd": float(row.tphpd_value),
+            "stopping_tph": float(row.stopping_bidirectional_value),
+            "passing_tph": float(row.passing_bidirectional_value),
+            "total_tph": float(row.total_bidirectional_value),
+            "stopping_tphpd": float(row.stopping_per_direction_value),
+            "passing_tphpd": float(row.passing_per_direction_value),
+            "total_tphpd": float(row.total_per_direction_value),
             "stopping_services": row.stopping_services,
             "stopping_service_tokens": stopping_tokens,
             "passing_services": row.passing_services,
             "passing_service_tokens": passing_tokens,
+            "services_tph": services_tph_cell,
+            "services_tphpd": services_tphpd_cell,
+            "services_tph_map": _parse_service_frequency_string(services_tph_cell),
+            "services_tphpd_map": _parse_service_direction_frequency_string(services_tphpd_cell),
             "track_count": track,
             "via_nodes": via_tokens,
-            "directional_frequency": directional_raw,
-            "directional_service_tokens": directional_tokens,
         }
 
         track_edges = edges_by_track.setdefault(track, {})
@@ -829,6 +942,49 @@ def _summarise_section(
     node_pass_services: Dict[int, set[str]],
 ) -> Dict[str, object]:
     """Combine edge metrics into a section summary."""
+    def _collect_unique_numeric(field: str) -> List[float]:
+        unique: set[float] = set()
+        for _, _, edge_info in edge_records:
+            value = edge_info.get(field)
+            if value is None:
+                continue
+            numeric = float(value)
+            if math.isnan(numeric):
+                continue
+            unique.add(numeric)
+        return sorted(unique)
+
+    def _collect_frequency_map(field: str) -> Dict[object, float]:
+        aggregated: Dict[object, float] = {}
+        for _, _, edge_info in edge_records:
+            freq_map = edge_info.get(field)
+            if not isinstance(freq_map, dict):
+                continue
+            for key, value in freq_map.items():
+                numeric = float(value)
+                if math.isnan(numeric):
+                    continue
+                aggregated[key] = max(aggregated.get(key, 0.0), numeric)
+        return aggregated
+
+    def _floor_capacity(value: float) -> float:
+        if value is None:
+            return float("nan")
+        if math.isnan(value) or value <= 0:
+            return float("nan")
+        return float(math.floor(value))
+
+    def _strategy_pattern_changes(strategy: str, stops: int, passes: int) -> int:
+        if stops <= 0 or passes <= 0:
+            return 0
+        if strategy == "bad":
+            return min(stops, passes)
+        if strategy == "base":
+            return max(min(stops, passes) - 1, 0)
+        if strategy == "good":
+            return 1
+        return 0
+
     total_length = 0.0
     passing_time_values: List[float] = []
     total_stopping_time = 0.0
@@ -851,9 +1007,14 @@ def _summarise_section(
 
     total_passing_time = sum(passing_time_values)
 
-    stopping_tph_values = sorted({edge_info["stopping_tph"] for _, _, edge_info in edge_records})
-    passing_tph_values = sorted({edge_info["passing_tph"] for _, _, edge_info in edge_records})
-    tphpd_values = sorted({edge_info["tphpd"] for _, _, edge_info in edge_records})
+    stopping_tph_values = _collect_unique_numeric("stopping_tph")
+    passing_tph_values = _collect_unique_numeric("passing_tph")
+    total_tph_values = _collect_unique_numeric("total_tph")
+    stopping_tphpd_values = _collect_unique_numeric("stopping_tphpd")
+    passing_tphpd_values = _collect_unique_numeric("passing_tphpd")
+    total_tphpd_values = _collect_unique_numeric("total_tphpd")
+    services_tph_map = _collect_frequency_map("services_tph_map")
+    services_tphpd_map = _collect_frequency_map("services_tphpd_map")
 
     start_node = path_nodes[0]
     end_node = path_nodes[-1]
@@ -879,11 +1040,164 @@ def _summarise_section(
         elif passes_some or not stops_some:
             passing_services_list.append(service)
 
-    local_services = stopping_services
+    n_stop = len(stopping_services)
+    n_pass = len(passing_services_list)
+    all_services = sorted(set(stopping_services) | set(passing_services_list))
 
-    stopping_tph_value = stopping_tph_values[0] if len(stopping_tph_values) == 1 else float("nan")
-    passing_tph_value = passing_tph_values[0] if len(passing_tph_values) == 1 else float("nan")
-    tphpd_value = tphpd_values[0] if len(tphpd_values) == 1 else float("nan")
+    stopping_tph_value = (
+        stopping_tph_values[0] if len(stopping_tph_values) == 1 else float("nan")
+    )
+    passing_tph_value = (
+        passing_tph_values[0] if len(passing_tph_values) == 1 else float("nan")
+    )
+    total_tph_value = (
+        total_tph_values[0] if len(total_tph_values) == 1 else float("nan")
+    )
+    stopping_tphpd_value = (
+        stopping_tphpd_values[0] if len(stopping_tphpd_values) == 1 else float("nan")
+    )
+    passing_tphpd_value = (
+        passing_tphpd_values[0] if len(passing_tphpd_values) == 1 else float("nan")
+    )
+    total_tphpd_value = (
+        total_tphpd_values[0] if len(total_tphpd_values) == 1 else float("nan")
+    )
+    services_tph_value = _format_service_frequency_map(services_tph_map)
+    services_tphpd_value = _format_service_direction_frequency_map(services_tphpd_map)
+
+    stopping_tph_estimate = (
+        stopping_tph_values[0] if stopping_tph_values else float("nan")
+    )
+    passing_tph_estimate = (
+        passing_tph_values[0] if passing_tph_values else float("nan")
+    )
+    stopping_tphpd_estimate = (
+        stopping_tphpd_values[0] if stopping_tphpd_values else float("nan")
+    )
+    passing_tphpd_estimate = (
+        passing_tphpd_values[0] if passing_tphpd_values else float("nan")
+    )
+
+    bidirectional_estimates = [
+        estimate for estimate in (stopping_tph_estimate, passing_tph_estimate) if not math.isnan(estimate)
+    ]
+    per_direction_estimates = [
+        estimate for estimate in (stopping_tphpd_estimate, passing_tphpd_estimate) if not math.isnan(estimate)
+    ]
+
+    total_tph = float(sum(bidirectional_estimates)) if bidirectional_estimates else float("nan")
+    total_tphpd = float(sum(per_direction_estimates)) if per_direction_estimates else float("nan")
+    has_bidirectional_data = len(bidirectional_estimates) > 0
+    has_per_direction_data = len(per_direction_estimates) > 0
+
+    def _utilization(capacity_value: float, demand: float) -> float:
+        if capacity_value is None or math.isnan(capacity_value) or capacity_value <= 0:
+            return float("nan")
+        if demand is None or math.isnan(demand):
+            return float("nan")
+        return demand / capacity_value
+
+    capacity_columns = {
+        "capacity_single_track_tphpd": float("nan"),
+        "capacity_uniform_pattern_tphpd": float("nan"),
+        "capacity_bad_tphpd": float("nan"),
+        "capacity_base_tphpd": float("nan"),
+        "capacity_good_tphpd": float("nan"),
+        "pattern_changes_bad": float("nan"),
+        "pattern_changes_base": float("nan"),
+        "pattern_changes_good": float("nan"),
+        "utilization_single_track": float("nan"),
+        "utilization_uniform_pattern": float("nan"),
+        "utilization_bad": float("nan"),
+        "utilization_base": float("nan"),
+        "utilization_good": float("nan"),
+    }
+
+    headway = DEFAULT_HEADWAY_MIN
+    travel_time_penalty = max(0.0, float(total_stopping_time) - float(total_passing_time) - headway)
+    service_count = len(all_services)
+    strategy_metrics: List[Tuple[str, float, float]] = []
+
+    if track == 1:
+        single_capacity = float("nan")
+        if total_stopping_time > 0:
+            raw_capacity = _floor_capacity(60.0 / float(total_stopping_time))
+            single_capacity = raw_capacity / 2.0 if not math.isnan(raw_capacity) else float("nan")
+        capacity_columns["capacity_single_track_tphpd"] = single_capacity
+        demand_single_track = (
+            total_tphpd if not math.isnan(total_tphpd) else (total_tph / 2.0 if not math.isnan(total_tph) else float("nan"))
+        )
+        capacity_columns["utilization_single_track"] = _utilization(single_capacity, demand_single_track)
+    elif track == 2:
+        if not stopping_services or not passing_services_list:
+            uniform_capacity = _floor_capacity(60.0 / headway)
+            capacity_columns["capacity_uniform_pattern_tphpd"] = uniform_capacity
+            capacity_columns["utilization_uniform_pattern"] = _utilization(
+                uniform_capacity, total_tphpd
+            )
+        elif service_count > 0:
+            strategy_definitions: List[str] = []
+            if service_count >= 6:
+                strategy_definitions = ["bad", "base", "good"]
+            elif service_count >= 4:
+                strategy_definitions = ["bad", "good"]
+            elif service_count >= 2:
+                strategy_definitions = ["bad"]
+            for strategy_key in strategy_definitions:
+                pattern_changes = _strategy_pattern_changes(strategy_key, n_stop, n_pass)
+                feasible_changes = min(pattern_changes, max(service_count - 1, 0))
+                denominator = headway + (feasible_changes / service_count) * travel_time_penalty
+                capacity_value = _floor_capacity(60.0 / denominator) if denominator > 0 else float("nan")
+                capacity_columns[f"capacity_{strategy_key}_tphpd"] = capacity_value
+                capacity_columns[f"pattern_changes_{strategy_key}"] = float(feasible_changes)
+                capacity_columns[f"utilization_{strategy_key}"] = _utilization(
+                    capacity_value, total_tphpd
+                )
+                strategy_metrics.append(
+                    (
+                        strategy_key,
+                        capacity_columns[f"capacity_{strategy_key}_tphpd"],
+                        capacity_columns[f"utilization_{strategy_key}"],
+                    )
+                )
+    selected_capacity = float("nan")
+    selected_utilization = float("nan")
+
+    if track == 1:
+        selected_capacity = capacity_columns["capacity_single_track_tphpd"]
+        selected_utilization = capacity_columns["utilization_single_track"]
+    elif track == 2:
+        if not stopping_services or not passing_services_list:
+            selected_capacity = capacity_columns["capacity_uniform_pattern_tphpd"]
+            selected_utilization = capacity_columns["utilization_uniform_pattern"]
+        elif strategy_metrics:
+            if len(strategy_metrics) == 1:
+                _, cap_value, util_value = strategy_metrics[0]
+                selected_capacity = cap_value
+                selected_utilization = util_value
+            else:
+                print(
+                    f"\nSection {section_id} ({start_node}->{end_node}) offers multiple capacity groupings."
+                )
+                print("Available options:")
+                for idx, (strategy_key, cap_value, util_value) in enumerate(strategy_metrics, start=1):
+                    label = strategy_key.capitalize()
+                    cap_display = "n/a" if cap_value is None or math.isnan(cap_value) else str(cap_value)
+                    util_display = "n/a" if util_value is None or math.isnan(util_value) else f"{util_value:.3f}"
+                    print(f"  {idx}) {label} (capacity={cap_display}, utilization={util_display})")
+                while True:
+                    response = input("Select the strategy number to apply (press Enter to skip): ").strip()
+                    if response == "":
+                        print("No strategy selected; leaving Capacity/Utilization empty for this section.")
+                        break
+                    if response.isdigit():
+                        choice = int(response)
+                        if 1 <= choice <= len(strategy_metrics):
+                            _, cap_value, util_value = strategy_metrics[choice - 1]
+                            selected_capacity = cap_value
+                            selected_utilization = util_value
+                            break
+                    print("Invalid selection. Please enter a listed number or press Enter to skip.")
 
     return {
         "section_id": section_id,
@@ -900,9 +1214,19 @@ def _summarise_section(
         "total_travel_time_stopping_min": total_stopping_time,
         "stopping_tph": stopping_tph_value,
         "passing_tph": passing_tph_value,
-        "tphpd": tphpd_value,
-        "stopping_services": ", ".join(local_services),
+        "total_tph": total_tph_value,
+        "stopping_tphpd": stopping_tphpd_value,
+        "passing_tphpd": passing_tphpd_value,
+        "total_tphpd": total_tphpd_value,
+        "distinct_service_count": service_count,
+        "stopping_services": ", ".join(stopping_services),
         "passing_services": ", ".join(passing_services_list),
+        "all_services": ", ".join(all_services),
+        "services_tph": services_tph_value,
+        "services_tphpd": services_tphpd_value,
+        "Capacity": selected_capacity,
+        "Utilization": selected_utilization,
+        **capacity_columns,
     }
 
 
@@ -972,8 +1296,12 @@ def export_capacity_workbook() -> Path:
         "travel_time_passing",
         "stopping_tph",
         "passing_tph",
-        "tphpd",
-        "directional_frequency",
+        "total_tph",
+        "stopping_tphpd",
+        "passing_tphpd",
+        "total_tphpd",
+        "services_tph",
+        "services_tphpd",
     ]
     segment_metrics = segment_metrics[output_columns]
 
