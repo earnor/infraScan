@@ -12,10 +12,11 @@ capacity inputs.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 import math
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, TYPE_CHECKING, Union
 
 import matplotlib.pyplot as plt
 from matplotlib.cm import ScalarMappable
@@ -23,7 +24,7 @@ from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 from matplotlib.legend_handler import HandlerBase
 from matplotlib.lines import Line2D
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Polygon, Rectangle
 from matplotlib.ticker import PercentFormatter
 import pandas as pd
 
@@ -38,6 +39,19 @@ except ImportError:  # pragma: no cover - optional geospatial support
     gpd = None  # type: ignore
     make_valid = None  # type: ignore
     LineString = None  # type: ignore
+
+if TYPE_CHECKING:
+    from geopandas import GeoDataFrame
+else:
+    GeoDataFrame = Any  # type: ignore[misc]
+
+# Colour palette for service plot.
+SERVICE_COLOUR_STOP = "#2e7d32"
+SERVICE_COLOUR_PASS = "#0277bd"
+SERVICE_OFFSET_SPACING = 120.0
+SERVICE_RECT_MARGIN = 40.0
+STATION_BASE_HALF_SIZE = 60.0
+STATION_PER_SERVICE_INCREMENT = 14.0
 
 
 def _safe_make_valid(geometry):
@@ -90,7 +104,8 @@ DEFAULT_OUTPUT_DIR = Path(paths.MAIN) / "plots" / "network"
 DEFAULT_OUTPUT = DEFAULT_OUTPUT_DIR / f"{settings.rail_network}_network_infrastructure.png"
 DEFAULT_CAPACITY_OUTPUT = DEFAULT_OUTPUT_DIR / f"{settings.rail_network}_network_capacity.png"
 DEFAULT_SPEED_OUTPUT = DEFAULT_OUTPUT_DIR / f"{settings.rail_network}_network_speed.png"
-DEFAULT_SECTIONS_WORKBOOK = CAPACITY_DIR / "capacity_current_network_sections.xlsx"
+DEFAULT_SERVICE_OUTPUT = DEFAULT_OUTPUT_DIR / f"{settings.rail_network}_network_service.png"
+DEFAULT_SECTIONS_WORKBOOK = CAPACITY_DIR / f"capacity_{settings.rail_network}_network_sections.xlsx"
 
 
 def _derive_capacity_output(base_output: Path, explicit: bool) -> Path:
@@ -110,6 +125,9 @@ class Station:
     y: float  # LV95 Northing
     tracks: float
     platforms: float
+    stopping_services: frozenset[str] = field(default_factory=frozenset)
+    passing_services: frozenset[str] = field(default_factory=frozenset)
+    stopping_tphpd: float = math.nan
 
 
 @dataclass(frozen=True)
@@ -125,6 +143,18 @@ class Segment:
     length_m: float = math.nan
     travel_time_stopping: float = math.nan
     travel_time_passing: float = math.nan
+    services_tphpd: str = ""
+    travel_time_passing: float = math.nan
+
+
+@dataclass(frozen=True)
+class StationShape:
+    orientation: float
+    axis_u: Tuple[float, float]
+    axis_v: Tuple[float, float]
+    along_half: float
+    across_half: float
+    polygon: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float], Tuple[float, float]]
 
 
 @dataclass(frozen=True)
@@ -170,6 +200,17 @@ def _load_workbook(workbook_path: Optional[Path]) -> Tuple[pd.DataFrame, pd.Data
     return stations, segments
 
 
+def _parse_station_services(cell) -> Set[str]:
+    if cell is None:
+        return set()
+    tokens = []
+    for chunk in str(cell).replace(",", ";").split(";"):
+        token = chunk.strip()
+        if token:
+            tokens.append(token)
+    return set(tokens)
+
+
 def _to_stations(stations_df: pd.DataFrame) -> Dict[int, Station]:
     """Convert the stations dataframe into Station records indexed by NR."""
     parsed: Dict[int, Station] = {}
@@ -185,6 +226,9 @@ def _to_stations(stations_df: pd.DataFrame) -> Dict[int, Station]:
         name = str(getattr(row, "NAME", "") or "").strip()
         tracks = _coerce_number(getattr(row, "tracks", math.nan))
         platforms = _coerce_number(getattr(row, "platforms", math.nan))
+        stopping_services = frozenset(_parse_station_services(getattr(row, "stopping_services", "")))
+        passing_services = frozenset(_parse_station_services(getattr(row, "passing_services", "")))
+        stopping_tphpd = _coerce_number(getattr(row, "stopping_tphpd", math.nan))
         parsed[node_id] = Station(
             node_id=node_id,
             code=code or name or str(node_id),
@@ -193,6 +237,9 @@ def _to_stations(stations_df: pd.DataFrame) -> Dict[int, Station]:
             y=y,
             tracks=tracks,
             platforms=platforms,
+            stopping_services=stopping_services,
+            passing_services=passing_services,
+            stopping_tphpd=stopping_tphpd,
         )
     return parsed
 
@@ -220,6 +267,7 @@ def _to_segments(segments_df: pd.DataFrame, valid_nodes: Iterable[int]) -> List[
         length_m = _coerce_number(getattr(row, "length_m", math.nan))
         travel_time_stopping = _coerce_number(getattr(row, "travel_time_stopping", math.nan))
         travel_time_passing = _coerce_number(getattr(row, "travel_time_passing", math.nan))
+        services_tphpd_cell = str(getattr(row, "services_tphpd", "") or "")
         records.append(
             Segment(
                 from_node=from_node,
@@ -233,6 +281,7 @@ def _to_segments(segments_df: pd.DataFrame, valid_nodes: Iterable[int]) -> List[
                 length_m=length_m,
                 travel_time_stopping=travel_time_stopping,
                 travel_time_passing=travel_time_passing,
+                services_tphpd=services_tphpd_cell,
             )
         )
     return records
@@ -252,6 +301,9 @@ def _coerce_number(value) -> float:
 def _segment_key(from_node: int, to_node: int) -> Tuple[int, int]:
     """Generate a stable key for undirected segment lookup."""
     return tuple(sorted((from_node, to_node)))
+
+
+_SERVICE_WARNING_EMITTED: Set[str] = set()
 
 
 def _merge_bounds(
@@ -279,6 +331,199 @@ def _merge_bounds(
     return min_x, max_x, min_y, max_y
 
 
+def _parse_service_frequencies(cell: str, segment_label: str) -> Dict[str, float]:
+    tokens = []
+    for chunk in str(cell or "").replace(",", ";").split(";"):
+        token = chunk.strip()
+        if token:
+            tokens.append(token)
+
+    frequency_lists: Dict[str, List[float]] = {}
+    for token in tokens:
+        parts = token.split(".")
+        if len(parts) < 2:
+            continue
+        freq_part = parts[-1]
+        try:
+            freq_value = float(freq_part)
+        except ValueError:
+            continue
+        base_service = parts[0].strip()
+        if not base_service:
+            continue
+        frequency_lists.setdefault(base_service, []).append(freq_value)
+
+    result: Dict[str, float] = {}
+    for service, freq_values in frequency_lists.items():
+        if not freq_values:
+            continue
+        max_freq = max(freq_values)
+        if any(abs(value - max_freq) > 1e-6 for value in freq_values):
+            warning_key = f"{segment_label}:{service}"
+            if warning_key not in _SERVICE_WARNING_EMITTED:
+                print(
+                    f"Warning: Directional frequency not homogenous for service '{service}' on segment {segment_label}; "
+                    f"using max value {max_freq}."
+                )
+                _SERVICE_WARNING_EMITTED.add(warning_key)
+        result[service] = max_freq
+    return result
+
+
+def _station_polygon_points(
+    center_x: float,
+    center_y: float,
+    axis_u: Tuple[float, float],
+    axis_v: Tuple[float, float],
+    along_half: float,
+    across_half: float,
+) -> List[Tuple[float, float]]:
+    """Return the four vertex coordinates of an oriented station polygon."""
+    corners = [
+        (
+            center_x + axis_u[0] * along_half + axis_v[0] * across_half,
+            center_y + axis_u[1] * along_half + axis_v[1] * across_half,
+        ),
+        (
+            center_x + axis_u[0] * along_half - axis_v[0] * across_half,
+            center_y + axis_u[1] * along_half - axis_v[1] * across_half,
+        ),
+        (
+            center_x - axis_u[0] * along_half - axis_v[0] * across_half,
+            center_y - axis_u[1] * along_half - axis_v[1] * across_half,
+        ),
+        (
+            center_x - axis_u[0] * along_half + axis_v[0] * across_half,
+            center_y - axis_u[1] * along_half + axis_v[1] * across_half,
+        ),
+    ]
+    return corners
+
+
+def _compute_station_shapes(
+    stations: Dict[int, Station],
+    segments: Sequence[Segment],
+) -> Dict[int, StationShape]:
+    """Compute oriented station polygons sized to encompass service offsets."""
+    direction_angles: Dict[int, List[float]] = defaultdict(list)
+    max_service_counts: Dict[int, int] = defaultdict(lambda: 1)
+
+    for segment in segments:
+        start = stations.get(segment.from_node)
+        end = stations.get(segment.to_node)
+        if start is None or end is None:
+            continue
+        dx = end.x - start.x
+        dy = end.y - start.y
+        if dx == 0.0 and dy == 0.0:
+            angle = 0.0
+        else:
+            angle = math.atan2(dy, dx)
+        direction_angles[segment.from_node].append(angle)
+        direction_angles[segment.to_node].append(angle)
+
+        service_map = _parse_service_frequencies(segment.services_tphpd, f"{segment.from_node}-{segment.to_node}")
+        count = len(service_map)
+        if count > 0:
+            max_service_counts[segment.from_node] = max(max_service_counts[segment.from_node], count)
+            max_service_counts[segment.to_node] = max(max_service_counts[segment.to_node], count)
+
+    station_shapes: Dict[int, StationShape] = {}
+    for node_id, station in stations.items():
+        angles = direction_angles.get(node_id, [])
+        if angles:
+            sum_sin = sum(math.sin(2.0 * angle) for angle in angles)
+            sum_cos = sum(math.cos(2.0 * angle) for angle in angles)
+            if math.isclose(sum_sin, 0.0, abs_tol=1e-9) and math.isclose(sum_cos, 0.0, abs_tol=1e-9):
+                orientation = 0.0
+            else:
+                orientation = 0.5 * math.atan2(sum_sin, sum_cos)
+        else:
+            orientation = 0.0
+
+        axis_u = (math.cos(orientation), math.sin(orientation))
+        axis_v = (-axis_u[1], axis_u[0])
+
+        service_total = len(station.stopping_services | station.passing_services)
+        size_multiplier = max(1, service_total)
+        along_half = STATION_BASE_HALF_SIZE + STATION_PER_SERVICE_INCREMENT * (size_multiplier - 1)
+
+        max_services = max_service_counts.get(node_id, 1)
+        if max_services > 1:
+            max_offset = SERVICE_OFFSET_SPACING * (max_services - 1) / 2.0
+        else:
+            max_offset = 0.0
+        across_half = max(along_half, STATION_BASE_HALF_SIZE + max_offset + SERVICE_RECT_MARGIN)
+
+        polygon = _station_polygon_points(station.x, station.y, axis_u, axis_v, along_half, across_half)
+        station_shapes[node_id] = StationShape(
+            orientation=orientation,
+            axis_u=axis_u,
+            axis_v=axis_v,
+            along_half=along_half,
+            across_half=across_half,
+            polygon=tuple(polygon),
+        )
+
+    return station_shapes
+
+
+def _project_point_to_station_boundary(
+    point: Tuple[float, float],
+    reference: Tuple[float, float],
+    station: Station,
+    shape: StationShape,
+) -> Tuple[float, float]:
+    """Project a point onto the station polygon boundary along the segment direction."""
+    if shape.along_half <= 0.0:
+        return point
+
+    center_x, center_y = station.x, station.y
+    px, py = point
+    rx, ry = reference
+
+    rel_px = px - center_x
+    rel_py = py - center_y
+    rel_rx = rx - center_x
+    rel_ry = ry - center_y
+
+    point_u = rel_px * shape.axis_u[0] + rel_py * shape.axis_u[1]
+    point_v = rel_px * shape.axis_v[0] + rel_py * shape.axis_v[1]
+    ref_u = rel_rx * shape.axis_u[0] + rel_ry * shape.axis_u[1]
+    ref_v = rel_rx * shape.axis_v[0] + rel_ry * shape.axis_v[1]
+
+    target_sign = 1.0 if ref_u >= 0.0 else -1.0
+    target_u = target_sign * shape.along_half
+
+    delta_u = ref_u - point_u
+    delta_v = ref_v - point_v
+    if math.isclose(delta_u, 0.0, abs_tol=1e-9):
+        new_v = max(-shape.across_half, min(shape.across_half, point_v))
+    else:
+        t = (target_u - point_u) / delta_u
+        t = max(0.0, min(1.0, t))
+        new_v = point_v + t * delta_v
+        new_v = max(-shape.across_half, min(shape.across_half, new_v))
+
+    new_x = center_x + shape.axis_u[0] * target_u + shape.axis_v[0] * new_v
+    new_y = center_y + shape.axis_u[1] * target_u + shape.axis_v[1] * new_v
+    return (new_x, new_y)
+
+
+def _service_line_width(frequency: float) -> float:
+    if math.isnan(frequency) or frequency <= 0.0:
+        return 1.0
+    return max(1.0, 0.6 + 0.5 * frequency)
+
+
+def _service_station_table(station: Station) -> Optional[str]:
+    if not station.stopping_services:
+        return None
+    services = ", ".join(sorted(station.stopping_services))
+    total_text = _format_track(station.stopping_tphpd)
+    return f"Stops: {services}\nTotal: {total_text} tphpd"
+
+
 def _normalise_station_label(label: str) -> str:
     return " ".join(str(label or "").strip().lower().split())
 
@@ -295,7 +540,10 @@ def _build_name_lookup(stations: Dict[int, Station]) -> Dict[str, Station]:
 
 def _load_capacity_sections(workbook_path: Optional[Path] = None) -> List[SectionSummary]:
     """Load section summaries from the dedicated sections workbook."""
-    workbook = Path(workbook_path) if workbook_path else DEFAULT_SECTIONS_WORKBOOK
+    if workbook_path:
+        workbook = Path(workbook_path)
+    else:
+        workbook = DEFAULT_SECTIONS_WORKBOOK
     if not workbook.exists():
         raise FileNotFoundError(f"Sections workbook not found: {workbook}")
 
@@ -372,6 +620,52 @@ def _offset_line(coords: List[Tuple[float, float]], offset: float) -> Optional[L
         return [(float(x), float(y)) for x, y in offset_geom.coords]
     except Exception:
         return None
+
+
+def _offset_polyline_uniform(coords: Sequence[Tuple[float, float]], offset: float) -> List[Tuple[float, float]]:
+    """Return a consistently shifted copy of the polyline, keeping lines parallel."""
+    if not coords:
+        return []
+    coords_list = [(float(x), float(y)) for x, y in coords]
+    if len(coords_list) < 2 or math.isclose(offset, 0.0, abs_tol=1e-9):
+        return coords_list
+
+    offset_coords: List[Tuple[float, float]] = []
+    total_points = len(coords_list)
+    for index, (x, y) in enumerate(coords_list):
+        if index == 0:
+            nx, ny = coords_list[1]
+            dir_x, dir_y = nx - x, ny - y
+        elif index == total_points - 1:
+            px, py = coords_list[-2]
+            dir_x, dir_y = x - px, y - py
+        else:
+            px, py = coords_list[index - 1]
+            nx, ny = coords_list[index + 1]
+            dir_x = 0.0
+            dir_y = 0.0
+            seg1_x, seg1_y = x - px, y - py
+            seg2_x, seg2_y = nx - x, ny - y
+            length1 = math.hypot(seg1_x, seg1_y)
+            length2 = math.hypot(seg2_x, seg2_y)
+            if length1 > 0.0:
+                dir_x += seg1_x / length1
+                dir_y += seg1_y / length1
+            if length2 > 0.0:
+                dir_x += seg2_x / length2
+                dir_y += seg2_y / length2
+            if math.isclose(dir_x, 0.0, abs_tol=1e-9) and math.isclose(dir_y, 0.0, abs_tol=1e-9):
+                dir_x, dir_y = seg2_x, seg2_y
+
+        length = math.hypot(dir_x, dir_y)
+        if length == 0.0:
+            offset_coords.append((x, y))
+            continue
+        normal_x = -dir_y / length
+        normal_y = dir_x / length
+        offset_coords.append((x + normal_x * offset, y + normal_y * offset))
+
+    return offset_coords
 
 
 def _station_colour(station_tracks: float, connected_tracks: List[float]) -> str:
@@ -523,12 +817,26 @@ def _find_label_position(
         bounds = _bounds_from_anchor(candidate_x, candidate_y, width, height, anchor)
         if not _overlaps(bounds, existing):
             return candidate_x, candidate_y
-    # Fallback: accept last candidate even if overlapping.
-    fallback_dx, fallback_dy = candidate_list[-1]
+    # Fall back to a radial search that incrementally increases offset distance.
+    step = max(width, height, 120.0)
+    max_radius = step * 8.0
+    radius = step
+    directions = 16
+    while radius <= max_radius:
+        for idx in range(directions):
+            angle = (2.0 * math.pi / directions) * idx
+            candidate_x = base_x + radius * math.cos(angle)
+            candidate_y = base_y + radius * math.sin(angle)
+            bounds = _bounds_from_anchor(candidate_x, candidate_y, width, height, anchor)
+            if not _overlaps(bounds, existing):
+                return candidate_x, candidate_y
+        radius += step
+    # As a last resort, fall back to the final provided candidate even if overlapping.
+    fallback_dx, fallback_dy = candidate_list[-1] if candidate_list else (0.0, 0.0)
     return base_x + fallback_dx, base_y + fallback_dy
 
 
-def _load_map_overlays() -> Tuple[Optional["gpd.GeoDataFrame"], Dict[Tuple[int, int], List[Tuple[float, float]]]]:
+def _load_map_overlays() -> Tuple[Optional["GeoDataFrame"], Dict[Tuple[int, int], List[Tuple[float, float]]]]:
     """Load optional GIS overlays used to enrich the network map."""
     if gpd is None or make_valid is None or LineString is None:
         return None, {}
@@ -623,68 +931,15 @@ def _load_map_overlays() -> Tuple[Optional["gpd.GeoDataFrame"], Dict[Tuple[int, 
     return lakes, segment_geometries
 
 
-def _annotation_offset(
-    existing: List[Tuple[float, float, float, float]],
-    base_x: float,
-    base_y: float,
-    text_width: float,
-    text_height: float,
-    preference: str,
-) -> Tuple[float, float]:
-    """Choose an annotation offset that minimises overlaps."""
-    horizontal_margin = 200.0
-    vertical_offsets = [0.0, 180.0, -180.0, 360.0, -360.0, 540.0, -540.0]
-
-    if preference == "station":
-        horizontal_shifts = [horizontal_margin, horizontal_margin + 200.0, horizontal_margin + 400.0]
-        anchor_mode = "station"
-    elif preference == "segment":
-        horizontal_shifts = [-horizontal_margin, -horizontal_margin - 200.0, -horizontal_margin - 400.0]
-        anchor_mode = "segment"
-    else:
-        horizontal_shifts = [
-            -horizontal_margin,
-            -horizontal_margin - 200.0,
-            0.0,
-            horizontal_margin,
-            horizontal_margin + 200.0,
-        ]
-        anchor_mode = "center"
-
-    candidates = [(base_x + dx, base_y + dy) for dx in horizontal_shifts for dy in vertical_offsets]
-
-    def overlaps(candidate_x: float, candidate_y: float) -> bool:
-        if anchor_mode == "station":
-            left = candidate_x
-            right = candidate_x + text_width
-        elif anchor_mode == "segment":
-            left = candidate_x - text_width
-            right = candidate_x
-        else:
-            left = candidate_x - text_width / 2.0
-            right = candidate_x + text_width / 2.0
-        bottom = candidate_y - text_height / 2.0
-        top = candidate_y + text_height / 2.0
-        for xmin, xmax, ymin, ymax in existing:
-            if left <= xmax and right >= xmin and bottom <= ymax and top >= ymin:
-                return True
-        return False
-
-    for cx, cy in candidates:
-        if not overlaps(cx, cy):
-            return cx, cy
-
-    # Default to last candidate if all options overlap.
-    return candidates[-1]
-
-
 def _draw_station_annotations(
     ax,
     stations: Dict[int, Station],
     segments: List[Segment],
+    station_shapes: Optional[Dict[int, StationShape]] = None,
     include_tables: bool = True,
     colour_mode: str = "status",
     uniform_colour: str = "#222222",
+    table_text_func: Optional[Callable[[Station], Optional[str]]] = None,
 ) -> Tuple[Optional[Tuple[float, float, float, float]], Set[str]]:
     """Render station markers, codes, and optionally attribute tables."""
     connectivity: Dict[int, List[float]] = {}
@@ -692,37 +947,48 @@ def _draw_station_annotations(
         connectivity.setdefault(segment.from_node, []).append(segment.tracks)
         connectivity.setdefault(segment.to_node, []).append(segment.tracks)
 
-    xs: List[float] = []
-    ys: List[float] = []
-    colors: List[str] = []
     used_station_colours: Set[str] = set()
-
-    for node_id, station in stations.items():
-        xs.append(station.x)
-        ys.append(station.y)
-        if colour_mode == "status":
-            colour = _station_colour(station.tracks, connectivity.get(node_id, []))
-        else:
-            colour = uniform_colour
-        colors.append(colour)
-        used_station_colours.add(colour)
-
-    ax.scatter(
-        xs,
-        ys,
-        s=80,
-        c=colors,
-        edgecolors="black",
-        linewidths=0.8,
-        zorder=3,
-    )
-
     annotation_boxes: List[Tuple[float, float, float, float]] = []
     extent_min_x, extent_max_x = math.inf, -math.inf
     extent_min_y, extent_max_y = math.inf, -math.inf
     fig = ax.figure
 
     for node_id, station in stations.items():
+        if colour_mode == "status":
+            colour = _station_colour(station.tracks, connectivity.get(node_id, []))
+        else:
+            colour = uniform_colour
+        used_station_colours.add(colour)
+
+        shape = station_shapes.get(node_id) if station_shapes else None
+        if shape:
+            patch = Polygon(shape.polygon, closed=True, facecolor=colour, edgecolor="black", linewidth=0.8, zorder=3)
+            ax.add_patch(patch)
+            poly_x = [pt[0] for pt in shape.polygon]
+            poly_y = [pt[1] for pt in shape.polygon]
+            extent_min_x = min(extent_min_x, min(poly_x))
+            extent_max_x = max(extent_max_x, max(poly_x))
+            extent_min_y = min(extent_min_y, min(poly_y))
+            extent_max_y = max(extent_max_y, max(poly_y))
+        else:
+            service_total = len(station.stopping_services | station.passing_services)
+            size_multiplier = max(1, service_total)
+            half_size = STATION_BASE_HALF_SIZE + STATION_PER_SERVICE_INCREMENT * (size_multiplier - 1)
+            rect = Rectangle(
+                (station.x - half_size, station.y - half_size),
+                2 * half_size,
+                2 * half_size,
+                facecolor=colour,
+                edgecolor="black",
+                linewidth=0.8,
+                zorder=3,
+            )
+            ax.add_patch(rect)
+            extent_min_x = min(extent_min_x, station.x - half_size)
+            extent_max_x = max(extent_max_x, station.x + half_size)
+            extent_min_y = min(extent_min_y, station.y - half_size)
+            extent_max_y = max(extent_max_y, station.y + half_size)
+
         code_text = station.code or station.name or str(node_id)
         code_width, code_height = _estimate_text_extent(code_text, char_width=48.0, line_height=120.0)
         code_candidates = [
@@ -774,58 +1040,62 @@ def _draw_station_annotations(
         extent_min_y = min(extent_min_y, code_min_y)
         extent_max_y = max(extent_max_y, code_max_y)
 
-        if not include_tables:
-            continue
+        if include_tables:
+            if table_text_func:
+                table_text = table_text_func(station)
+            else:
+                table_text = f"Platforms: {_format_track(station.platforms)}\nTracks: {_format_track(station.tracks)}"
 
-        table_text = f"Platforms: {_format_track(station.platforms)}\nTracks: {_format_track(station.tracks)}"
-        table_width, table_height = _estimate_text_extent(table_text, char_width=52.0, line_height=120.0)
-        table_base_x = code_x + code_width
-        table_base_y = code_y + code_height / 2.0
-        table_candidates = [
-            (120.0, 0.0),
-            (160.0, 160.0),
-            (160.0, -160.0),
-            (200.0, 240.0),
-            (200.0, -240.0),
-            (240.0, 0.0),
-        ]
-        table_x, table_y = _find_label_position(
-            annotation_boxes,
-            table_base_x,
-            table_base_y,
-            table_width,
-            table_height,
-            table_candidates,
-            anchor="left_center",
-        )
-        table_artist = ax.text(
-            table_x,
-            table_y,
-            table_text,
-            fontsize=7,
-            fontfamily="monospace",
-            ha="left",
-            va="center",
-            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", linewidth=0.6),
-            zorder=4,
-        )
+            if table_text:
+                table_width, table_height = _estimate_text_extent(table_text, char_width=52.0, line_height=120.0)
+                table_base_x = code_x + code_width
+                table_base_y = code_y + code_height / 2.0
+                table_candidates = [
+                    (120.0, 0.0),
+                    (160.0, 160.0),
+                    (160.0, -160.0),
+                    (200.0, 240.0),
+                    (200.0, -240.0),
+                    (240.0, 0.0),
+                ]
+                table_x, table_y = _find_label_position(
+                    annotation_boxes,
+                    table_base_x,
+                    table_base_y,
+                    table_width,
+                    table_height,
+                    table_candidates,
+                    anchor="left_center",
+                )
+                table_artist = ax.text(
+                    table_x,
+                    table_y,
+                    table_text,
+                    fontsize=7,
+                    fontfamily="monospace",
+                    ha="left",
+                    va="center",
+                    color="#111111",
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", linewidth=0.6),
+                    zorder=4,
+                )
 
-        table_bounds_index = len(annotation_boxes)
-        annotation_boxes.append(_bounds_from_anchor(table_x, table_y, table_width, table_height, "left_center"))
+                table_bounds_index = len(annotation_boxes)
+                annotation_boxes.append(
+                    _bounds_from_anchor(table_x, table_y, table_width, table_height, "left_center")
+                )
 
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
+                fig.canvas.draw()
+                table_canvas = table_artist.get_window_extent(renderer=renderer)
+                table_min_x, table_min_y = inv.transform((table_canvas.x0, table_canvas.y0))
+                table_max_x, table_max_y = inv.transform((table_canvas.x1, table_canvas.y1))
 
-        table_canvas = table_artist.get_window_extent(renderer=renderer)
-        table_min_x, table_min_y = inv.transform((table_canvas.x0, table_canvas.y0))
-        table_max_x, table_max_y = inv.transform((table_canvas.x1, table_canvas.y1))
+                annotation_boxes[table_bounds_index] = (table_min_x, table_max_x, table_min_y, table_max_y)
 
-        annotation_boxes[table_bounds_index] = (table_min_x, table_max_x, table_min_y, table_max_y)
-
-        extent_min_x = min(extent_min_x, table_min_x)
-        extent_max_x = max(extent_max_x, table_max_x)
-        extent_min_y = min(extent_min_y, table_min_y)
-        extent_max_y = max(extent_max_y, table_max_y)
+                extent_min_x = min(extent_min_x, table_min_x)
+                extent_max_x = max(extent_max_x, table_max_x)
+                extent_min_y = min(extent_min_y, table_min_y)
+                extent_max_y = max(extent_max_y, table_max_y)
 
     if extent_min_x == math.inf:
         return None, used_station_colours
@@ -1328,6 +1598,264 @@ def _draw_speed_profile(
     return extent_min_x, extent_max_x, extent_min_y, extent_max_y
 
 
+def _draw_service_map(
+    ax,
+    stations: Dict[int, Station],
+    segments: List[Segment],
+    segment_geometries: Optional[Dict[Tuple[int, int], List[Tuple[float, float]]]] = None,
+    station_shapes: Optional[Dict[int, StationShape]] = None,
+) -> Optional[Tuple[float, float, float, float]]:
+    """Render service frequencies with coloured lines and service labels."""
+    annotation_boxes: List[Tuple[float, float, float, float]] = []
+    extent_min_x = math.inf
+    extent_max_x = -math.inf
+    extent_min_y = math.inf
+    extent_max_y = -math.inf
+
+    fig = ax.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    service_order: Dict[str, int] = {}
+    service_station_links: Dict[Tuple[str, int], List[Tuple[Tuple[float, float], str, float]]] = defaultdict(list)
+    label_candidates: List[Dict[str, Any]] = []
+
+    for segment in segments:
+        service_map = _parse_service_frequencies(segment.services_tphpd, f"{segment.from_node}-{segment.to_node}")
+        if not service_map:
+            continue
+
+        for service_name in service_map:
+            if service_name not in service_order:
+                service_order[service_name] = len(service_order)
+
+        start = stations[segment.from_node]
+        end = stations[segment.to_node]
+        key = _segment_key(segment.from_node, segment.to_node)
+        if segment_geometries and key in segment_geometries:
+            base_coords = list(segment_geometries[key])
+        else:
+            base_coords = [(start.x, start.y), (end.x, end.y)]
+        canonical_from, _ = key
+        if segment.from_node != canonical_from:
+            coords = list(reversed(base_coords))
+        else:
+            coords = list(base_coords)
+
+        services_sorted = sorted(
+            service_map.items(),
+            key=lambda kv: service_order.get(kv[0], float("inf")),
+        )
+        service_count = len(services_sorted)
+
+        start_shape = station_shapes.get(segment.from_node) if station_shapes else None
+        end_shape = station_shapes.get(segment.to_node) if station_shapes else None
+
+        base_sign = 1.0
+        if coords:
+            if len(coords) >= 2:
+                first_point = coords[0]
+                next_point = coords[1]
+                dir_x = next_point[0] - first_point[0]
+                dir_y = next_point[1] - first_point[1]
+            else:
+                dir_x = end.x - start.x
+                dir_y = end.y - start.y
+            normal_x = -dir_y
+            normal_y = dir_x
+            normal_length = math.hypot(normal_x, normal_y)
+            if normal_length > 0.0:
+                normal_x /= normal_length
+                normal_y /= normal_length
+            else:
+                normal_x, normal_y = 0.0, 1.0
+
+            if start_shape:
+                dot = normal_x * start_shape.axis_v[0] + normal_y * start_shape.axis_v[1]
+                if dot < 0.0:
+                    base_sign = -1.0
+            else:
+                base_sign = 1.0 if normal_y >= 0.0 else -1.0
+
+        for index, (service_name, frequency) in enumerate(services_sorted):
+            width = _service_line_width(frequency)
+
+            start_stops = service_name in start.stopping_services
+            end_stops = service_name in end.stopping_services
+            start_colour = SERVICE_COLOUR_STOP if start_stops else SERVICE_COLOUR_PASS
+            end_colour = SERVICE_COLOUR_STOP if end_stops else SERVICE_COLOUR_PASS
+
+            if service_count <= 1:
+                offset_distance = 0.0
+            else:
+                offset_distance = base_sign * (index - (service_count - 1) / 2.0) * SERVICE_OFFSET_SPACING
+
+            offset_coords = _offset_polyline_uniform(coords, offset_distance)
+
+            if station_shapes and len(offset_coords) >= 2:
+                if start_shape:
+                    offset_coords[0] = _project_point_to_station_boundary(offset_coords[0], offset_coords[1], start, start_shape)
+                if end_shape:
+                    offset_coords[-1] = _project_point_to_station_boundary(
+                        offset_coords[-1], offset_coords[-2], end, end_shape
+                    )
+
+            xs_all = [pt[0] for pt in offset_coords]
+            ys_all = [pt[1] for pt in offset_coords]
+            extent_min_x = min(extent_min_x, min(xs_all))
+            extent_max_x = max(extent_max_x, max(xs_all))
+            extent_min_y = min(extent_min_y, min(ys_all))
+            extent_max_y = max(extent_max_y, max(ys_all))
+
+            start_offset = offset_coords[0]
+            end_offset = offset_coords[-1]
+            mid_x = (start_offset[0] + end_offset[0]) / 2.0
+            mid_y = (start_offset[1] + end_offset[1]) / 2.0
+
+            service_station_links[(service_name, segment.from_node)].append((start_offset, start_colour, width))
+            service_station_links[(service_name, segment.to_node)].append((end_offset, end_colour, width))
+
+            if start_colour == end_colour:
+                ox, oy = zip(*offset_coords)
+                ax.plot(ox, oy, color=start_colour, linewidth=width, zorder=2)
+            else:
+                ax.plot(
+                    [start_offset[0], mid_x],
+                    [start_offset[1], mid_y],
+                    color=start_colour,
+                    linewidth=width,
+                    zorder=2,
+                )
+                ax.plot(
+                    [mid_x, end_offset[0]],
+                    [mid_y, end_offset[1]],
+                    color=end_colour,
+                    linewidth=width,
+                    zorder=2,
+                )
+
+            int_frequency = max(int(round(frequency)), 1)
+            if int_frequency >= 2:
+                separator_count = int_frequency - 1
+                separator_width = max(0.6, width * 0.18)
+                spacing = max(12.0, width * 5.0)
+                if separator_count == 1:
+                    separator_offsets = [0.0]
+                else:
+                    center = int_frequency / 2.0
+                    separator_offsets = [((i + 1) - center) * spacing for i in range(separator_count)]
+
+                for sep_offset in separator_offsets:
+                    separator_coords = _offset_polyline_uniform(coords, offset_distance + sep_offset)
+                    if station_shapes and len(separator_coords) >= 2:
+                        if start_shape:
+                            separator_coords[0] = _project_point_to_station_boundary(
+                                separator_coords[0], separator_coords[1], start, start_shape
+                            )
+                        if end_shape:
+                            separator_coords[-1] = _project_point_to_station_boundary(
+                                separator_coords[-1], separator_coords[-2], end, end_shape
+                            )
+                    sep_x, sep_y = zip(*separator_coords)
+                    ax.plot(sep_x, sep_y, color="white", linewidth=separator_width, zorder=2.5)
+
+            label_candidates.append(
+                {
+                    "service": service_name,
+                    "mid_x": mid_x,
+                    "mid_y": mid_y,
+                    "start_node": segment.from_node,
+                    "end_node": segment.to_node,
+                }
+            )
+
+    for (service_name, station_id), endpoints in service_station_links.items():
+        if len(endpoints) != 2:
+            continue
+        (point_a, colour_a, width_a), (point_b, colour_b, width_b) = endpoints
+        station = stations.get(station_id)
+        if station is None:
+            continue
+        if colour_a == colour_b:
+            connector_colour = colour_a
+        elif service_name in station.stopping_services:
+            connector_colour = SERVICE_COLOUR_STOP
+        else:
+            connector_colour = SERVICE_COLOUR_PASS
+        connector_width = max(0.8, min(width_a, width_b) * 0.35)
+        ax.plot(
+            [point_a[0], point_b[0]],
+            [point_a[1], point_b[1]],
+            color=connector_colour,
+            linewidth=connector_width,
+            zorder=3.2,
+        )
+
+    endpoint_stations: Set[Tuple[str, int]] = {
+        key for key, touches in service_station_links.items() if len(touches) <= 1
+    }
+
+    for candidate in label_candidates:
+        service_name = candidate["service"]
+        start_node = candidate["start_node"]
+        end_node = candidate["end_node"]
+        if (service_name, start_node) not in endpoint_stations and (service_name, end_node) not in endpoint_stations:
+            continue
+
+        service_text = service_name
+        service_width, service_height = _estimate_text_extent(
+            service_text, char_width=50.0, line_height=120.0
+        )
+        service_candidates = [
+            (0.0, 0.0),
+            (200.0, 0.0),
+            (-200.0, 0.0),
+            (0.0, 200.0),
+            (0.0, -200.0),
+            (200.0, 200.0),
+            (200.0, -200.0),
+            (-200.0, 200.0),
+            (-200.0, -200.0),
+        ]
+        label_x, label_y = _find_label_position(
+            annotation_boxes,
+            candidate["mid_x"],
+            candidate["mid_y"],
+            service_width,
+            service_height,
+            service_candidates,
+            anchor="center",
+        )
+
+        label_artist = ax.text(
+            label_x,
+            label_y,
+            service_text,
+            fontsize=8,
+            fontweight="bold",
+            ha="center",
+            va="center",
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", linewidth=0.6),
+            zorder=4,
+        )
+
+        fig.canvas.draw()
+        label_bbox = label_artist.get_window_extent(renderer=renderer)
+        inv = ax.transData.inverted()
+        l_min_x, l_min_y = inv.transform((label_bbox.x0, label_bbox.y0))
+        l_max_x, l_max_y = inv.transform((label_bbox.x1, label_bbox.y1))
+        annotation_boxes.append((l_min_x, l_max_x, l_min_y, l_max_y))
+
+        extent_min_x = min(extent_min_x, l_min_x)
+        extent_max_x = max(extent_max_x, l_max_x)
+        extent_min_y = min(extent_min_y, l_min_y)
+        extent_max_y = max(extent_max_y, l_max_y)
+
+    if extent_min_x == math.inf:
+        return None
+    return extent_min_x, extent_max_x, extent_min_y, extent_max_y
+
+
 def _configure_axes(
     ax,
     stations: Dict[int, Station],
@@ -1555,11 +2083,82 @@ def plot_speed_profile_network(
     return speed_output
 
 
+def plot_service_network(
+    workbook_path: Optional[str] = None,
+    output_path: Optional[str] = None,
+    show: bool = False,
+) -> Path:
+    """Plot network services with frequency-based styling and return the saved image path."""
+    stations_df, segments_df = _load_workbook(Path(workbook_path) if workbook_path else None)
+    stations = _to_stations(stations_df)
+    segments = _to_segments(segments_df, stations.keys())
+
+    if not stations:
+        raise ValueError("No stations were found in the prep workbook.")
+    if not segments:
+        raise ValueError("No segments were found linking the stations.")
+
+    segments_with_services = [segment for segment in segments if segment.services_tphpd.strip()]
+    if not segments_with_services:
+        raise ValueError("No service frequency data was found in the segments sheet.")
+
+    water_layer, segment_geometries = _load_map_overlays()
+
+    station_shapes = _compute_station_shapes(stations, segments_with_services)
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+    if water_layer is not None and not getattr(water_layer, "empty", True):
+        try:
+            water_layer.plot(ax=ax, color="#b7d4f0", edgecolor="#6ea3d5", linewidth=0.5, zorder=1)
+        except Exception:
+            pass
+
+    service_annotation_bounds = _draw_service_map(
+        ax,
+        stations,
+        segments_with_services,
+        segment_geometries,
+        station_shapes=station_shapes,
+    )
+    station_annotation_bounds, _ = _draw_station_annotations(
+        ax,
+        stations,
+        segments_with_services,
+        station_shapes=station_shapes,
+        include_tables=True,
+        colour_mode="uniform",
+        uniform_colour="#ffffff",
+        table_text_func=_service_station_table,
+    )
+    combined_bounds = _merge_bounds(service_annotation_bounds, station_annotation_bounds)
+    _configure_axes(ax, stations, title="Service Frequencies", annotation_bounds=combined_bounds)
+
+    legend_handles = [
+        Line2D([0], [0], color=SERVICE_COLOUR_STOP, linewidth=2.0, label="Stopping"),
+        Line2D([0], [0], color=SERVICE_COLOUR_PASS, linewidth=2.0, label="Passing"),
+    ]
+    ax.legend(handles=legend_handles, title="Service type", loc="upper left", frameon=True, fontsize=8, title_fontsize=9)
+
+    service_output = Path(output_path) if output_path else DEFAULT_SERVICE_OUTPUT
+    service_output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(service_output, dpi=300, bbox_inches="tight")
+    service_pdf_output = service_output.with_suffix(".pdf")
+    fig.savefig(service_pdf_output, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return service_output
+
+
 if __name__ == "__main__":
-    # network_output = network_current_map(show=True)
-    # print(f"Network plot saved to {network_output}")
+    network_output = network_current_map(show=True)
+    print(f"Network plot saved to {network_output}")
     speed_output = plot_speed_profile_network(show=True)
     print(f"Speed profile plot saved to {speed_output}")
-    # capacity_output = plot_capacity_network(show=True, generate_network=False)
-    # print(f"Capacity plot saved to {capacity_output}")
-    
+    service_output = plot_service_network(show=True)
+    print(f"Service plot saved to {service_output}")
+    capacity_output = plot_capacity_network(show=True, generate_network=False)
+    print(f"Capacity plot saved to {capacity_output}")
