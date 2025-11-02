@@ -753,7 +753,7 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
                 edge_key = frozenset({start, neighbor})
                 if edge_key in visited_edges:
                     continue
-                path_nodes, edge_records = _traverse_path(
+                path_nodes, edge_records, path_edge_keys = _traverse_path(
                     start,
                     neighbor,
                     adjacency,
@@ -781,12 +781,13 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
                             )
                         )
                         section_counter += 1
+                    visited_edges.update(path_edge_keys)
 
         for edge_key, edge_info in edges_dict.items():
             if edge_key in visited_edges:
                 continue
             u, v = tuple(edge_key)
-            path_nodes, edge_records = _traverse_path(
+            path_nodes, edge_records, path_edge_keys = _traverse_path(
                 u,
                 v,
                 adjacency,
@@ -814,6 +815,7 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
                         )
                     )
                     section_counter += 1
+                visited_edges.update(path_edge_keys)
 
     return pd.DataFrame(sections)
 
@@ -825,22 +827,25 @@ def _traverse_path(
     edges_dict: Dict[frozenset, Dict[str, float]],
     visited_edges: set[frozenset],
     node_valid,
-) -> Tuple[List[int], List[Tuple[int, int, Dict[str, float]]]]:
+) -> Tuple[List[int], List[Tuple[int, int, Dict[str, float]]], List[frozenset]]:
     """Walk a path while track conditions remain satisfied."""
     path_nodes: List[int] = [start]
     edge_records: List[Tuple[int, int, Dict[str, float]]] = []
+    path_edge_keys: List[frozenset] = []
     current = start
     next_node = neighbor
+    local_edges: set[frozenset] = set()
 
     while True:
         edge_key = frozenset({current, next_node})
-        if edge_key in visited_edges:
+        if edge_key in visited_edges or edge_key in local_edges:
             break
         edge_info = edges_dict.get(edge_key)
         if edge_info is None:
             break
 
-        visited_edges.add(edge_key)
+        local_edges.add(edge_key)
+        path_edge_keys.append(edge_key)
         edge_records.append((current, next_node, edge_info))
         path_nodes.append(next_node)
 
@@ -852,7 +857,7 @@ def _traverse_path(
             break
         candidate = next(iter(candidates))
         candidate_edge = frozenset({next_node, candidate})
-        if candidate_edge in visited_edges:
+        if candidate_edge in visited_edges or candidate_edge in local_edges:
             break
 
         # Stop section if the next edge changes track or service patterns.
@@ -869,7 +874,7 @@ def _traverse_path(
 
         current, next_node = next_node, candidate
 
-    return path_nodes, edge_records
+    return path_nodes, edge_records, path_edge_keys
 
 
 def _split_section_by_service_patterns(
@@ -882,16 +887,34 @@ def _split_section_by_service_patterns(
     if len(path_nodes) <= 2 or not edge_records:
         return [(path_nodes, edge_records)]
 
-    node_stop_seq = [node_stop_services.get(node, set()) for node in path_nodes]
-    node_pass_seq = [node_pass_services.get(node, set()) for node in path_nodes]
-    candidate_services: set[str] = set().union(*node_stop_seq, *node_pass_seq)
+    edge_service_sets: List[set[str]] = []
+    candidate_services: set[str] = set()
+    for _, _, edge_info in edge_records:
+        stopping_tokens = edge_info.get("stopping_service_tokens", ())
+        passing_tokens = edge_info.get("passing_service_tokens", ())
+        services = {
+            str(token)
+            for token in (*stopping_tokens, *passing_tokens)
+            if token is not None and str(token)
+        }
+        edge_service_sets.append(services)
+        candidate_services.update(services)
 
     if not candidate_services:
         return [(path_nodes, edge_records)]
 
     service_order = sorted(candidate_services)
     node_patterns: List[Tuple[str, ...]] = []
-    for stop_set, pass_set in zip(node_stop_seq, node_pass_seq):
+    for idx, node in enumerate(path_nodes):
+        relevant_services: set[str] = set()
+        if idx > 0:
+            relevant_services.update(edge_service_sets[idx - 1])
+        if idx < len(edge_service_sets):
+            relevant_services.update(edge_service_sets[idx])
+
+        stop_set = node_stop_services.get(node, set()) & relevant_services
+        pass_set = node_pass_services.get(node, set()) & relevant_services
+
         pattern = []
         for service in service_order:
             if service in stop_set:

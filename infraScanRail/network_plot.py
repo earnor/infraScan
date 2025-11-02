@@ -24,7 +24,7 @@ from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 from matplotlib.legend_handler import HandlerBase
 from matplotlib.lines import Line2D
-from matplotlib.patches import Patch, Polygon, Rectangle
+from matplotlib.patches import Patch, Polygon, Rectangle, Circle
 from matplotlib.ticker import PercentFormatter
 import pandas as pd
 
@@ -936,6 +936,8 @@ def _draw_station_annotations(
     stations: Dict[int, Station],
     segments: List[Segment],
     station_shapes: Optional[Dict[int, StationShape]] = None,
+    marker_style: str = "square",
+    marker_size_mode: str = "auto",
     include_tables: bool = True,
     colour_mode: str = "status",
     uniform_colour: str = "#222222",
@@ -952,6 +954,7 @@ def _draw_station_annotations(
     extent_min_x, extent_max_x = math.inf, -math.inf
     extent_min_y, extent_max_y = math.inf, -math.inf
     fig = ax.figure
+    marker_style = (marker_style or "square").lower()
 
     for node_id, station in stations.items():
         if colour_mode == "status":
@@ -973,21 +976,39 @@ def _draw_station_annotations(
         else:
             service_total = len(station.stopping_services | station.passing_services)
             size_multiplier = max(1, service_total)
-            half_size = STATION_BASE_HALF_SIZE + STATION_PER_SERVICE_INCREMENT * (size_multiplier - 1)
-            rect = Rectangle(
-                (station.x - half_size, station.y - half_size),
-                2 * half_size,
-                2 * half_size,
-                facecolor=colour,
-                edgecolor="black",
-                linewidth=0.8,
-                zorder=3,
-            )
-            ax.add_patch(rect)
-            extent_min_x = min(extent_min_x, station.x - half_size)
-            extent_max_x = max(extent_max_x, station.x + half_size)
-            extent_min_y = min(extent_min_y, station.y - half_size)
-            extent_max_y = max(extent_max_y, station.y + half_size)
+            if marker_size_mode == "fixed":
+                half_size = STATION_BASE_HALF_SIZE + STATION_PER_SERVICE_INCREMENT
+            else:
+                half_size = STATION_BASE_HALF_SIZE + STATION_PER_SERVICE_INCREMENT * (size_multiplier - 1)
+            if marker_style == "circle":
+                marker = Circle(
+                    (station.x, station.y),
+                    radius=half_size,
+                    facecolor=colour,
+                    edgecolor="black",
+                    linewidth=0.8,
+                    zorder=3,
+                )
+                ax.add_patch(marker)
+                extent_min_x = min(extent_min_x, station.x - half_size)
+                extent_max_x = max(extent_max_x, station.x + half_size)
+                extent_min_y = min(extent_min_y, station.y - half_size)
+                extent_max_y = max(extent_max_y, station.y + half_size)
+            else:
+                rect = Rectangle(
+                    (station.x - half_size, station.y - half_size),
+                    2 * half_size,
+                    2 * half_size,
+                    facecolor=colour,
+                    edgecolor="black",
+                    linewidth=0.8,
+                    zorder=3,
+                )
+                ax.add_patch(rect)
+                extent_min_x = min(extent_min_x, station.x - half_size)
+                extent_max_x = max(extent_max_x, station.x + half_size)
+                extent_min_y = min(extent_min_y, station.y - half_size)
+                extent_max_y = max(extent_max_y, station.y + half_size)
 
         code_text = station.code or station.name or str(node_id)
         code_width, code_height = _estimate_text_extent(code_text, char_width=48.0, line_height=120.0)
@@ -1931,7 +1952,13 @@ def network_current_map(
     segment_categories, separators_used = _draw_segments(
         ax, stations, segments_list, segment_geometries=segment_geometries
     )
-    annotation_bounds, station_colours = _draw_station_annotations(ax, stations, segments_list)
+    annotation_bounds, station_colours = _draw_station_annotations(
+        ax,
+        stations,
+        segments_list,
+        marker_style="circle",
+        marker_size_mode="fixed",
+    )
     _configure_axes(ax, stations, annotation_bounds=annotation_bounds)
     _add_network_legends(ax, station_colours, segment_categories, separators_used)
 
@@ -2008,9 +2035,11 @@ def plot_capacity_network(
         capacity_ax,
         section_stations,
         annotation_segments,
+        marker_style="circle",
+        marker_size_mode="fixed",
         include_tables=False,
         colour_mode="uniform",
-        uniform_colour="#222222",
+        uniform_colour="#000000",
     )
     combined_bounds = _merge_bounds(capacity_annotation_bounds, station_annotation_bounds)
     _configure_axes(
@@ -2062,6 +2091,8 @@ def plot_speed_profile_network(
         ax,
         stations,
         segments,
+        marker_style="circle",
+        marker_size_mode="fixed",
         include_tables=False,
         colour_mode="uniform",
         uniform_colour="#ffffff",
