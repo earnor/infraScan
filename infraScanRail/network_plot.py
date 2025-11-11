@@ -945,9 +945,12 @@ def _draw_station_annotations(
 ) -> Tuple[Optional[Tuple[float, float, float, float]], Set[str]]:
     """Render station markers, codes, and optionally attribute tables."""
     connectivity: Dict[int, List[float]] = {}
+    neighbor_map: Dict[int, List[int]] = defaultdict(list)
     for segment in segments:
         connectivity.setdefault(segment.from_node, []).append(segment.tracks)
         connectivity.setdefault(segment.to_node, []).append(segment.tracks)
+        neighbor_map[segment.from_node].append(segment.to_node)
+        neighbor_map[segment.to_node].append(segment.from_node)
 
     used_station_colours: Set[str] = set()
     annotation_boxes: List[Tuple[float, float, float, float]] = []
@@ -955,6 +958,12 @@ def _draw_station_annotations(
     extent_min_y, extent_max_y = math.inf, -math.inf
     fig = ax.figure
     marker_style = (marker_style or "square").lower()
+    if stations:
+        centroid_x = sum(station.x for station in stations.values()) / len(stations)
+        centroid_y = sum(station.y for station in stations.values()) / len(stations)
+    else:
+        centroid_x = 0.0
+        centroid_y = 0.0
 
     for node_id, station in stations.items():
         if colour_mode == "status":
@@ -962,6 +971,47 @@ def _draw_station_annotations(
         else:
             colour = uniform_colour
         used_station_colours.add(colour)
+
+        neighbor_ids = neighbor_map.get(node_id, [])
+        neighbor_vectors: List[Tuple[float, float]] = []
+        for neighbor_id in neighbor_ids:
+            neighbor = stations.get(neighbor_id)
+            if neighbor is None:
+                continue
+            dx = neighbor.x - station.x
+            dy = neighbor.y - station.y
+            length = math.hypot(dx, dy)
+            if length > 1e-6:
+                neighbor_vectors.append((dx / length, dy / length))
+
+        if neighbor_vectors:
+            avg_dx = sum(vec[0] for vec in neighbor_vectors) / len(neighbor_vectors)
+            avg_dy = sum(vec[1] for vec in neighbor_vectors) / len(neighbor_vectors)
+            norm = math.hypot(avg_dx, avg_dy)
+            if norm <= 1e-6:
+                along_dir = neighbor_vectors[0]
+            else:
+                along_dir = (avg_dx / norm, avg_dy / norm)
+        else:
+            radial_dx = station.x - centroid_x
+            radial_dy = station.y - centroid_y
+            radial_norm = math.hypot(radial_dx, radial_dy)
+            if radial_norm > 1e-6:
+                along_dir = (radial_dx / radial_norm, radial_dy / radial_norm)
+            else:
+                along_dir = (1.0, 0.0)
+
+        perp_dir = (-along_dir[1], along_dir[0])
+        perp_norm = math.hypot(perp_dir[0], perp_dir[1])
+        if perp_norm <= 1e-6:
+            perp_dir = (0.0, 1.0)
+        else:
+            perp_dir = (perp_dir[0] / perp_norm, perp_dir[1] / perp_norm)
+
+        centroid_vec_x = station.x - centroid_x
+        centroid_vec_y = station.y - centroid_y
+        if centroid_vec_x * perp_dir[0] + centroid_vec_y * perp_dir[1] < 0:
+            perp_dir = (-perp_dir[0], -perp_dir[1])
 
         shape = station_shapes.get(node_id) if station_shapes else None
         if shape:
@@ -1071,7 +1121,23 @@ def _draw_station_annotations(
                 table_width, table_height = _estimate_text_extent(table_text, char_width=52.0, line_height=120.0)
                 table_base_x = code_x + code_width
                 table_base_y = code_y + code_height / 2.0
-                table_candidates = [
+                table_primary = 260.0
+                table_lateral = 180.0
+                dynamic_table_candidates = [
+                    (perp_dir[0] * table_primary, perp_dir[1] * table_primary),
+                    (
+                        perp_dir[0] * table_primary + along_dir[0] * table_lateral,
+                        perp_dir[1] * table_primary + along_dir[1] * table_lateral,
+                    ),
+                    (
+                        perp_dir[0] * table_primary - along_dir[0] * table_lateral,
+                        perp_dir[1] * table_primary - along_dir[1] * table_lateral,
+                    ),
+                    (perp_dir[0] * (table_primary + 80.0), perp_dir[1] * (table_primary + 80.0)),
+                    (-perp_dir[0] * (table_primary + 60.0), -perp_dir[1] * (table_primary + 60.0)),
+                    (along_dir[0] * (table_primary + 40.0), along_dir[1] * (table_primary + 40.0)),
+                ]
+                fallback_table_candidates = [
                     (120.0, 0.0),
                     (160.0, 160.0),
                     (160.0, -160.0),
@@ -1079,6 +1145,7 @@ def _draw_station_annotations(
                     (200.0, -240.0),
                     (240.0, 0.0),
                 ]
+                table_candidates = dynamic_table_candidates + fallback_table_candidates
                 table_x, table_y = _find_label_position(
                     annotation_boxes,
                     table_base_x,

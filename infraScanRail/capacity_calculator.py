@@ -480,6 +480,79 @@ def aggregate_segment_metrics(
     return segments_df.sort_values(["from_node", "to_node"]).reset_index(drop=True)
 
 
+def build_capacity_tables() -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Return the station and segment capacity tables for the active network."""
+    corridor_points = load_corridor_nodes()
+    corridor_nodes = set(corridor_points["ID_point"].astype(int))
+
+    service_links_full = load_service_links()
+
+    def _link_has_corridor_relation(row: pd.Series) -> bool:
+        return (
+            row["FromNode"] in corridor_nodes
+            or row["ToNode"] in corridor_nodes
+            or any(node in corridor_nodes for node in row["ViaNodes"])
+        )
+
+    service_links = (
+        service_links_full[service_links_full.apply(_link_has_corridor_relation, axis=1)]
+        .reset_index(drop=True)
+    )
+
+    stop_records = build_stop_records(service_links, corridor_nodes)
+    stop_lookup = build_stop_lookup(stop_records)
+
+    corridor_table = corridor_points.drop(columns=[corridor_points.geometry.name], errors="ignore").copy()
+    corridor_table.rename(columns={"ID_point": "NR"}, inplace=True)
+    corridor_table["NR"] = corridor_table["NR"].apply(parse_int)
+    corridor_table["NAME"] = corridor_table["NAME"].astype(str)
+    if "CODE" in corridor_table.columns:
+        corridor_table["CODE"] = corridor_table["CODE"].astype(str)
+    else:
+        corridor_table["CODE"] = ""
+    corridor_table["XKOORD"] = corridor_table["XKOORD"].apply(parse_float)
+    corridor_table["YKOORD"] = corridor_table["YKOORD"].apply(parse_float)
+    corridor_table["E_LV95"] = corridor_table["XKOORD"] + LV95_E_OFFSET
+    corridor_table["N_LV95"] = corridor_table["YKOORD"] + LV95_N_OFFSET
+
+    station_metrics = aggregate_station_metrics(
+        corridor_table,
+        stop_records,
+        service_links,
+        corridor_nodes,
+        stop_lookup,
+    )
+
+    node_name_lookup = dict(zip(corridor_table["NR"], corridor_table["NAME"]))
+
+    segment_metrics = aggregate_segment_metrics(service_links, stop_lookup, corridor_nodes)
+    segment_metrics["from_station"] = segment_metrics["from_node"].map(node_name_lookup)
+    segment_metrics["to_station"] = segment_metrics["to_node"].map(node_name_lookup)
+
+    output_columns = [
+        "from_node",
+        "from_station",
+        "to_node",
+        "to_station",
+        "length_m",
+        "speed",
+        "tracks",
+        "travel_time_stopping",
+        "travel_time_passing",
+        "stopping_tph",
+        "passing_tph",
+        "total_tph",
+        "stopping_tphpd",
+        "passing_tphpd",
+        "total_tphpd",
+        "services_tph",
+        "services_tphpd",
+    ]
+    segment_metrics = segment_metrics[output_columns]
+
+    return station_metrics, segment_metrics
+
+
 def _derive_prep_path(output_path: Path) -> Path:
     """Return the expected path of the manually enriched workbook."""
     return output_path.with_name(f"{output_path.stem}_prep{output_path.suffix}")
@@ -1261,72 +1334,7 @@ def export_capacity_workbook() -> Path:
     """Build the capacity workbook and return the output path."""
     ensure_output_directory()
 
-    # Corridor definition is taken directly from the dedicated GeoPackage.
-    corridor_points = load_corridor_nodes()
-    corridor_nodes = set(corridor_points["ID_point"].astype(int))  # Corridor nodes drive scope of capacity aggregation.
-
-    service_links_full = load_service_links()
-
-    # Retain only links that touch corridor nodes or list a corridor node in
-    # their Via column. This keeps relevant services while ignoring distant
-    # parts of the network.
-    def _link_has_corridor_relation(row: pd.Series) -> bool:
-        return (
-            row["FromNode"] in corridor_nodes
-            or row["ToNode"] in corridor_nodes
-            or any(node in corridor_nodes for node in row["ViaNodes"])
-        )
-
-    service_links = (
-        service_links_full[service_links_full.apply(_link_has_corridor_relation, axis=1)]
-        .reset_index(drop=True)
-    )
-
-    stop_records = build_stop_records(service_links, corridor_nodes)
-    stop_lookup = build_stop_lookup(stop_records)  # Precompute set lookups for fast segment aggregation.
-
-    corridor_table = corridor_points.drop(columns=[corridor_points.geometry.name], errors="ignore").copy()
-    corridor_table.rename(columns={"ID_point": "NR"}, inplace=True)
-    corridor_table["NR"] = corridor_table["NR"].apply(parse_int)
-    corridor_table["NAME"] = corridor_table["NAME"].astype(str)
-    if "CODE" in corridor_table.columns:
-        corridor_table["CODE"] = corridor_table["CODE"].astype(str)
-    else:
-        corridor_table["CODE"] = ""
-    corridor_table["XKOORD"] = corridor_table["XKOORD"].apply(parse_float)
-    corridor_table["YKOORD"] = corridor_table["YKOORD"].apply(parse_float)
-    corridor_table["E_LV95"] = corridor_table["XKOORD"] + LV95_E_OFFSET
-    corridor_table["N_LV95"] = corridor_table["YKOORD"] + LV95_N_OFFSET
-
-    station_metrics = aggregate_station_metrics(corridor_table, stop_records, service_links, corridor_nodes, stop_lookup)
-
-    # Look up human-readable station names for the aggregated segments.
-    node_name_lookup = dict(zip(corridor_table["NR"], corridor_table["NAME"]))
-
-    segment_metrics = aggregate_segment_metrics(service_links, stop_lookup, corridor_nodes)
-    segment_metrics["from_station"] = segment_metrics["from_node"].map(node_name_lookup)  # Provide human-readable names for output.
-    segment_metrics["to_station"] = segment_metrics["to_node"].map(node_name_lookup)
-
-    output_columns = [
-        "from_node",
-        "from_station",
-        "to_node",
-        "to_station",
-        "length_m",
-        "speed",
-        "tracks",
-        "travel_time_stopping",
-        "travel_time_passing",
-        "stopping_tph",
-        "passing_tph",
-        "total_tph",
-        "stopping_tphpd",
-        "passing_tphpd",
-        "total_tphpd",
-        "services_tph",
-        "services_tphpd",
-    ]
-    segment_metrics = segment_metrics[output_columns]
+    station_metrics, segment_metrics = build_capacity_tables()
 
     output_path = capacity_output_path()  # Name workbook after the active rail network.
 
@@ -1336,6 +1344,7 @@ def export_capacity_workbook() -> Path:
 
     _post_export_capacity_processing(output_path)
 
+    print(f"Capacity workbook written to {output_path}")
     return output_path
 
 
