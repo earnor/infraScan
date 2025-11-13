@@ -15,7 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 import math
 import re
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Tuple
 
 import geopandas as gpd
 import pandas as pd
@@ -31,45 +31,14 @@ DATA_ROOT = Path(paths.MAIN) / "data" / "Network"
 PROCESSED_ROOT = DATA_ROOT / "processed"
 CAPACITY_ROOT = DATA_ROOT / "capacity"
 
-def capacity_output_path(network_label: str = None, output_dir: Path = None) -> Path:
-    """Return the capacity workbook path for the active rail network.
-
-    For baseline workflow (no output_dir), creates subdirectories based on network name:
-      - CAPACITY_ROOT / AK_2035 / capacity_AK_2035_network.xlsx
-      - CAPACITY_ROOT / AK_2035_extended / capacity_AK_2035_extended_network.xlsx
-
-    For development workflow (with output_dir), uses provided directory directly.
-
-    Args:
-        network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
-                      If None, uses settings.rail_network.
-        output_dir: Optional custom output directory.
-                   - If None: baseline mode (creates subdirectory)
-                   - If provided: development mode (uses directory as-is)
-
-    Returns:
-        Path to the capacity workbook.
-    """
-    if network_label is not None:
-        network_tag = network_label
-    else:
-        network_tag = getattr(settings, "rail_network", "current")  # Use the configured scenario name.
-
+def capacity_output_path() -> Path:
+    """Return the capacity workbook path for the active rail network."""
+    network_tag = getattr(settings, "rail_network", "current")  # Use the configured scenario name.
     safe_network_tag = re.sub(r"[^\w-]+", "_", str(network_tag)).strip("_") or "current"
     filename = f"capacity_{safe_network_tag}_network.xlsx"
-
-    if output_dir is not None:
-        # DEVELOPMENT MODE: Use provided directory directly
-        return output_dir / filename
-    else:
-        # BASELINE MODE: Create subdirectory based on network name
-        network_subdir = CAPACITY_ROOT / safe_network_tag
-        network_subdir.mkdir(parents=True, exist_ok=True)
-        return network_subdir / filename
+    return CAPACITY_ROOT / filename
 
 EDGES_IN_CORRIDOR_PATH = PROCESSED_ROOT / "edges_in_corridor.gpkg"
-EDGES_ON_BORDER_PATH = PROCESSED_ROOT / "edges_on_corridor_border.gpkg"
-MASTER_POINTS_PATH = PROCESSED_ROOT / "points.gpkg"
 CORRIDOR_POINTS_PATH = PROCESSED_ROOT / "points_corridor.gpkg"
 
 DECIMAL_COMMA = ","
@@ -234,205 +203,14 @@ def _parse_service_direction_frequency_string(cell: str) -> Dict[Tuple[str, str]
     return result
 
 
-def extract_stations_from_edges(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Derive station points from edge endpoints when no separate points file exists.
+def load_service_links() -> pd.DataFrame:
+    """Load service link records from the processed corridor edges GeoPackage."""
+    if not EDGES_IN_CORRIDOR_PATH.exists():
+        raise FileNotFoundError(
+            f"Processed corridor edges not found at {EDGES_IN_CORRIDOR_PATH}."
+        )
 
-    Used for development networks where only edges are available.
-    Returns a GeoDataFrame with columns: ID_point, NAME, CODE, XKOORD, YKOORD, geometry.
-    Extracts station names and codes from edge attributes.
-    """
-    from shapely.geometry import Point
-
-    # DEBUG: Print available columns in edges
-    print(f"\n[DEBUG] Edges columns available: {list(edges_gdf.columns)}")
-
-    # Collect unique endpoints with their names and codes
-    node_data: Dict[int, Dict[str, any]] = {}
-
-    # Try different possible column name variations
-    name_columns = ["FromStation", "FromName", "From_Station", "From_Name", "from_station", "from_name"]
-    code_columns = ["FromCode", "From_Code", "from_code", "FromStationCode", "from_station_code"]
-
-    # DEBUG: Check which name/code columns exist
-    existing_name_cols = [col for col in name_columns if col in edges_gdf.columns]
-    existing_code_cols = [col for col in code_columns if col in edges_gdf.columns]
-    print(f"[DEBUG] Found name columns: {existing_name_cols}")
-    print(f"[DEBUG] Found code columns: {existing_code_cols}")
-
-    for _, row in edges_gdf.iterrows():
-        from_node = parse_int(row.get("FromNode", 0))
-        to_node = parse_int(row.get("ToNode", 0))
-
-        # Extract FromNode data
-        if from_node and from_node not in node_data and hasattr(row.geometry, 'coords'):
-            coords = list(row.geometry.coords)
-            if coords:
-                # Try to find name in various column names
-                from_name = None
-                for col in name_columns:
-                    if col in row.index and row.get(col):
-                        from_name = row.get(col)
-                        break
-                if not from_name:
-                    from_name = f"Node_{from_node}"
-
-                # Try to find code in various column names
-                from_code = None
-                for col in code_columns:
-                    if col in row.index and row.get(col):
-                        from_code = row.get(col)
-                        break
-                if not from_code:
-                    from_code = str(from_node)
-
-                node_data[from_node] = {
-                    "coords": coords[0],
-                    "name": from_name,
-                    "code": from_code
-                }
-
-        # Extract ToNode data
-        if to_node and to_node not in node_data and hasattr(row.geometry, 'coords'):
-            coords = list(row.geometry.coords)
-            if coords:
-                # Try to find name (replace "From" with "To" in column names)
-                to_name = None
-                to_name_columns = [col.replace("From", "To") for col in name_columns]
-                for col in to_name_columns:
-                    if col in row.index and row.get(col):
-                        to_name = row.get(col)
-                        break
-                if not to_name:
-                    to_name = f"Node_{to_node}"
-
-                # Try to find code
-                to_code = None
-                to_code_columns = [col.replace("From", "To") for col in code_columns]
-                for col in to_code_columns:
-                    if col in row.index and row.get(col):
-                        to_code = row.get(col)
-                        break
-                if not to_code:
-                    to_code = str(to_node)
-
-                node_data[to_node] = {
-                    "coords": coords[-1],
-                    "name": to_name,
-                    "code": to_code
-                }
-
-    # Build points GeoDataFrame
-    records = []
-    sample_count = 0
-    for node_id, data in node_data.items():
-        x, y = data["coords"]
-        # Convert from LV95 to offset coordinates
-        x_offset = x - LV95_E_OFFSET
-        y_offset = y - LV95_N_OFFSET
-
-        # DEBUG: Print first 3 stations to verify extraction
-        if sample_count < 3:
-            print(f"[DEBUG] Station {node_id}: name='{data['name']}', code='{data['code']}'")
-            sample_count += 1
-
-        records.append({
-            "ID_point": node_id,
-            "NAME": str(data["name"]) if data["name"] else f"Node_{node_id}",
-            "CODE": str(data["code"]) if data["code"] else str(node_id),
-            "XKOORD": x_offset,
-            "YKOORD": y_offset,
-            "geometry": Point(x, y),
-        })
-
-    points_gdf = gpd.GeoDataFrame(records, crs=edges_gdf.crs)
-    print(f"[DEBUG] Extracted {len(points_gdf)} unique stations from edges\n")
-    return points_gdf
-
-
-def load_service_links(edges_path: Path = None) -> pd.DataFrame:
-    """Load service link records from the processed corridor edges GeoPackage.
-
-    Args:
-        edges_path: Optional custom path to edges file. If None, uses default baseline path(s).
-                   For baseline mode with _extended suffix, combines edges_in_corridor.gpkg
-                   and edges_on_corridor_border.gpkg.
-
-    Returns:
-        DataFrame with service link records.
-    """
-    # BASELINE MODE: Load from default path(s)
-    if edges_path is None:
-        # Check if extended mode based on settings
-        is_extended = str(getattr(settings, "rail_network", "")).endswith("_extended")
-
-        # Always load main corridor edges
-        if not EDGES_IN_CORRIDOR_PATH.exists():
-            raise FileNotFoundError(
-                f"Processed corridor edges not found at {EDGES_IN_CORRIDOR_PATH}."
-            )
-
-        gdf_main = gpd.read_file(EDGES_IN_CORRIDOR_PATH)
-        print(f"[INFO] Loaded {len(gdf_main)} edges from edges_in_corridor.gpkg")
-
-        # Always load border edges (needed for both modes)
-        if not EDGES_ON_BORDER_PATH.exists():
-            raise FileNotFoundError(
-                f"Border edges not found at {EDGES_ON_BORDER_PATH}. "
-                f"Required for baseline workflow."
-            )
-
-        gdf_border = gpd.read_file(EDGES_ON_BORDER_PATH)
-        print(f"[INFO] Loaded {len(gdf_border)} edges from edges_on_corridor_border.gpkg")
-
-        if is_extended:
-            # EXTENDED MODE: Combine both, remove duplicates
-            gdf = gpd.GeoDataFrame(
-                pd.concat([gdf_main, gdf_border], ignore_index=True),
-                crs=gdf_main.crs
-            )
-
-            # Remove duplicate service links based on key columns
-            # (same service traversing same segment should only be counted once)
-            initial_count = len(gdf)
-            gdf = gdf.drop_duplicates(
-                subset=['FromNode', 'ToNode', 'Via', 'Service', 'Direction'],
-                keep='first'
-            )
-            if len(gdf) < initial_count:
-                print(f"[INFO] Removed {initial_count - len(gdf)} duplicate service links")
-        else:
-            # STANDARD MODE: Remove edges from in_corridor that also appear in border
-            # Find duplicates (edges that appear in BOTH files)
-            initial_count = len(gdf_main)
-
-            # Merge to find which rows in gdf_main exist in gdf_border
-            # Using indicator to identify matches
-            merged = gdf_main.merge(
-                gdf_border,
-                how='left',
-                indicator=True,
-                on=list(gdf_main.columns.drop('geometry'))  # Match on all non-geometry columns
-            )
-
-            # Keep only rows that are NOT in border file (left_only)
-            gdf = gdf_main[merged['_merge'] == 'left_only'].copy()
-
-            removed_count = initial_count - len(gdf)
-            if removed_count > 0:
-                print(f"[INFO] Removed {removed_count} edges from in_corridor that also appear in border")
-
-        print(f"[INFO] Total edges for baseline: {len(gdf)}")
-
-    # DEVELOPMENT MODE: Load from custom path
-    else:
-        if not edges_path.exists():
-            raise FileNotFoundError(
-                f"Development edges not found at {edges_path}."
-            )
-
-        gdf = gpd.read_file(edges_path)
-        print(f"[INFO] Loaded {len(gdf)} edges from {edges_path.name}")
-
+    gdf = gpd.read_file(EDGES_IN_CORRIDOR_PATH)
     geometry_columns = [col for col in ("geom", "geometry") if col in gdf.columns]
     df = pd.DataFrame(gdf.drop(columns=geometry_columns, errors="ignore"))
 
@@ -447,310 +225,9 @@ def load_service_links(edges_path: Path = None) -> pd.DataFrame:
     df["ToEndFlag"] = df["ToEnd"].apply(parse_bool_flag)
     return df
 
-def apply_enrichment(
-    stations_df: pd.DataFrame,
-    segments_df: pd.DataFrame,
-    baseline_prep: Path,
-    edges_gdf: gpd.GeoDataFrame,
-    new_station_ids: Set[int] = None
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Apply enrichment from baseline prep workbook to development network data.
-
-    Inherits infrastructure attributes from baseline for existing nodes/segments.
-    For NEW stations: sets tracks/platforms to NA (requires manual enrichment).
-    For NEW segments: calculates length from geometry, sets tracks/speed to NA.
-
-    Args:
-        stations_df: Raw station metrics (tracks/platforms = NA)
-        segments_df: Raw segment metrics (tracks/speed/length = NA)
-        baseline_prep: Path to manually enriched baseline workbook
-        edges_gdf: Original edges GeoDataFrame for geometry lookups
-        new_station_ids: Set of station IDs that are NEW (not in points.gpkg)
-
-    Returns:
-        Enriched (stations_df, segments_df) with infrastructure attributes filled where possible.
-    """
-    if new_station_ids is None:
-        new_station_ids = set()
-
-    if not baseline_prep.exists():
-        raise FileNotFoundError(f"Baseline prep workbook not found: {baseline_prep}")
-
-    # Load baseline enrichment data
-    baseline_stations = pd.read_excel(baseline_prep, sheet_name="Stations")
-    baseline_segments = pd.read_excel(baseline_prep, sheet_name="Segments")
-
-    # Create lookup maps for baseline data
-    station_lookup = {}
-    for _, row in baseline_stations.iterrows():
-        node_id = int(row["NR"])
-        station_lookup[node_id] = {
-            "tracks": row.get("tracks"),
-            "platforms": row.get("platforms"),
-        }
-
-    segment_lookup = {}
-    for _, row in baseline_segments.iterrows():
-        from_node = int(row["from_node"])
-        to_node = int(row["to_node"])
-        pair = tuple(sorted((from_node, to_node)))
-        segment_lookup[pair] = {
-            "tracks": row.get("tracks"),
-            "speed": row.get("speed"),
-            "length_m": row.get("length_m"),
-        }
-
-    # Create geometry lookup for segments (need to calculate length)
-    geometry_lookup = {}
-    for _, row in edges_gdf.iterrows():
-        from_node = parse_int(row.get("FromNode", 0))
-        to_node = parse_int(row.get("ToNode", 0))
-        if from_node and to_node:
-            pair = tuple(sorted((from_node, to_node)))
-            if hasattr(row.geometry, 'length'):
-                geometry_lookup[pair] = row.geometry.length
-
-    # Enrich stations
-    enriched_stations = stations_df.copy()
-    new_station_count = 0
-
-    for idx, row in enriched_stations.iterrows():
-        node_id = int(row["NR"])
-        if node_id in station_lookup:
-            # Existing station: inherit from baseline
-            baseline_data = station_lookup[node_id]
-            enriched_stations.at[idx, "tracks"] = baseline_data["tracks"]
-            enriched_stations.at[idx, "platforms"] = baseline_data["platforms"]
-        elif node_id in new_station_ids:
-            # NEW station: set to NA (requires manual enrichment)
-            enriched_stations.at[idx, "tracks"] = pd.NA
-            enriched_stations.at[idx, "platforms"] = pd.NA
-            new_station_count += 1
-        else:
-            # Should not happen if logic is correct
-            enriched_stations.at[idx, "tracks"] = pd.NA
-            enriched_stations.at[idx, "platforms"] = pd.NA
-
-    if new_station_count > 0:
-        print(f"[INFO] {new_station_count} NEW stations require manual enrichment (tracks/platforms = NA)")
-
-    # Enrich segments
-    enriched_segments = segments_df.copy()
-    new_segment_count = 0
-
-    for idx, row in enriched_segments.iterrows():
-        from_node = int(row["from_node"])
-        to_node = int(row["to_node"])
-        pair = tuple(sorted((from_node, to_node)))
-
-        # Check if segment has any new endpoints
-        has_new_endpoint = (from_node in new_station_ids) or (to_node in new_station_ids)
-
-        if pair in segment_lookup and not has_new_endpoint:
-            # Existing segment with no new endpoints: inherit from baseline
-            baseline_data = segment_lookup[pair]
-            enriched_segments.at[idx, "tracks"] = baseline_data["tracks"]
-            enriched_segments.at[idx, "speed"] = baseline_data["speed"]
-            enriched_segments.at[idx, "length_m"] = baseline_data["length_m"]
-        else:
-            # NEW segment or segment with new endpoint: set to NA, calculate length
-            enriched_segments.at[idx, "tracks"] = pd.NA
-            enriched_segments.at[idx, "speed"] = pd.NA
-            new_segment_count += 1
-
-            # Calculate length from geometry
-            if pair in geometry_lookup:
-                enriched_segments.at[idx, "length_m"] = geometry_lookup[pair]
-            else:
-                # Fallback: try reverse pair
-                reverse_pair = (pair[1], pair[0])
-                if reverse_pair in geometry_lookup:
-                    enriched_segments.at[idx, "length_m"] = geometry_lookup[reverse_pair]
-                else:
-                    enriched_segments.at[idx, "length_m"] = pd.NA
-
-    if new_segment_count > 0:
-        print(f"[INFO] {new_segment_count} NEW or modified segments require manual enrichment (tracks/speed = NA)")
-
-    return enriched_stations, enriched_segments
-
-
-def load_corridor_nodes_from_master(
-    edges_gdf: gpd.GeoDataFrame,
-    master_points_path: Path = None,
-    baseline_prep_path: Path = None,
-    is_development: bool = False,
-) -> Tuple[gpd.GeoDataFrame, Set[int]]:
-    """Load stations from master points file, filtered to nodes present in edges and baseline.
-
-    This function is used for BOTH baseline and development workflows.
-    For development: Filters stations to those in baseline prep NR column + flags new stations.
-
-    Args:
-        edges_gdf: Edges GeoDataFrame containing FromNode and ToNode columns.
-        master_points_path: Path to master points file. If None, uses MASTER_POINTS_PATH.
-        baseline_prep_path: Path to baseline prep workbook (required for development workflow).
-        is_development: If True, applies development filtering logic.
-
-    Returns:
-        Tuple of:
-        - GeoDataFrame with station points (columns: ID_point, NAME, CODE, XKOORD, YKOORD, geometry).
-        - Set of new station IDs (empty for baseline, contains IDs not in points.gpkg for development)
-
-    Raises:
-        FileNotFoundError: If master points file doesn't exist.
-        ValueError: If edge references node not found in master points, or baseline prep incomplete.
-    """
-    if master_points_path is None:
-        master_points_path = MASTER_POINTS_PATH
-
-    if not master_points_path.exists():
-        raise FileNotFoundError(
-            f"Master points file not found at {master_points_path}. "
-            f"Please ensure the points.gpkg file exists."
-        )
-
-    # Extract unique node IDs from edges (FromNode, ToNode, Via)
-    node_ids = set()
-    for _, row in edges_gdf.iterrows():
-        from_node = parse_int(row.get("FromNode", 0))
-        to_node = parse_int(row.get("ToNode", 0))
-
-        # Parse Via column directly here (edges_gdf doesn't have ViaNodes yet)
-        via_value = row.get("Via", "")
-        via_nodes = extract_via_nodes(via_value)
-
-        if from_node:
-            node_ids.add(from_node)
-        if to_node:
-            node_ids.add(to_node)
-
-        # Add Via nodes
-        if via_nodes:
-            for via_node in via_nodes:
-                if via_node and via_node != -99:
-                    node_ids.add(via_node)
-
-    print(f"[INFO] Extracted {len(node_ids)} unique node IDs from edges (FromNode, ToNode, Via)")
-
-    # Load master points file
-    master_points = gpd.read_file(master_points_path)
-    print(f"[INFO] Loaded {len(master_points)} stations from master points file")
-
-    # Ensure ID_point is integer for matching
-    master_points["ID_point"] = master_points["ID_point"].apply(parse_int)
-    points_station_ids = set(master_points["ID_point"])
-
-    # Classify stations: existing (in points.gpkg) vs new (not in points.gpkg)
-    new_station_ids = node_ids - points_station_ids
-    existing_station_ids = node_ids & points_station_ids
-
-    if new_station_ids:
-        print(f"[INFO] Found {len(new_station_ids)} NEW stations not in points.gpkg: {sorted(new_station_ids)}")
-
-    # DEVELOPMENT WORKFLOW: Filter to baseline prep NR column
-    if is_development:
-        if baseline_prep_path is None:
-            raise ValueError("baseline_prep_path is required for development workflow")
-
-        if not baseline_prep_path.exists():
-            raise FileNotFoundError(f"Baseline prep workbook not found: {baseline_prep_path}")
-
-        # Load baseline prep stations
-        baseline_prep_stations = pd.read_excel(baseline_prep_path, sheet_name="Stations")
-        baseline_station_ids = set(baseline_prep_stations["NR"].apply(parse_int))
-
-        print(f"[INFO] Loaded {len(baseline_station_ids)} stations from baseline prep workbook")
-
-        # Filter: Keep only stations that are EITHER in baseline prep OR are new
-        # This filters the development to relevant stations based on baseline scope
-        relevant_existing_stations = existing_station_ids & baseline_station_ids
-        stations_to_keep = relevant_existing_stations | new_station_ids
-
-        # Report filtering results
-        filtered_out = existing_station_ids - baseline_station_ids
-        if filtered_out:
-            print(f"[INFO] Filtered out {len(filtered_out)} stations not in baseline prep scope")
-
-        print(f"[INFO] Keeping {len(relevant_existing_stations)} baseline + {len(new_station_ids)} new = {len(stations_to_keep)} total stations")
-
-    else:
-        # BASELINE WORKFLOW: Keep all stations found in edges
-        stations_to_keep = node_ids
-        new_station_ids = set()  # No new stations in baseline
-
-        # Validate: all edge nodes must exist in master points
-        matched_ids = existing_station_ids
-        missing_ids = node_ids - matched_ids
-
-        if missing_ids:
-            missing_list = sorted(list(missing_ids)[:10])
-            missing_str = "\n".join([f'Station "{station_id}" is missing' for station_id in missing_list])
-            if len(missing_ids) > 10:
-                missing_str += f"\n... and {len(missing_ids) - 10} more"
-
-            raise ValueError(
-                f"{len(missing_ids)} node IDs not found in master points file:\n"
-                f"{missing_str}\n"
-                f"Please ensure all nodes (FromNode, ToNode, Via) in edges exist in points.gpkg."
-            )
-
-    # Filter master points to stations we're keeping
-    points_gdf = master_points[master_points["ID_point"].isin(stations_to_keep)].copy()
-
-    # For NEW stations (not in points.gpkg), we need to extract from edges
-    if new_station_ids:
-        print(f"[INFO] Extracting {len(new_station_ids)} new stations from edge geometry...")
-        new_stations_gdf = extract_stations_from_edges(edges_gdf)
-        new_stations_gdf = new_stations_gdf[new_stations_gdf["ID_point"].isin(new_station_ids)].copy()
-
-        # Flag new stations with [NEW] suffix in NAME
-        for idx, row in new_stations_gdf.iterrows():
-            original_name = row["NAME"]
-            new_stations_gdf.at[idx, "NAME"] = f"{original_name} [NEW]"
-
-        # Combine with points from master
-        points_gdf = gpd.GeoDataFrame(
-            pd.concat([points_gdf, new_stations_gdf], ignore_index=True),
-            crs=points_gdf.crs
-        )
-
-    print(f"[INFO] Final station count: {len(points_gdf)} stations")
-
-    # Convert offset coordinates to LV95
-    points_gdf["E_LV95"] = points_gdf["XKOORD"] + LV95_E_OFFSET
-    points_gdf["N_LV95"] = points_gdf["YKOORD"] + LV95_N_OFFSET
-
-    # Remove duplicates based on ID_point (shouldn't happen but be safe)
-    initial_count = len(points_gdf)
-    points_gdf = points_gdf.drop_duplicates(subset=["ID_point"])
-    if len(points_gdf) < initial_count:
-        print(f"[WARNING] Removed {initial_count - len(points_gdf)} duplicate stations")
-
-    # Return with required columns
-    return points_gdf[["ID_point", "NAME", "CODE", "XKOORD", "YKOORD", "geometry"]].copy(), new_station_ids
-
-
-def load_corridor_nodes(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Extract station points from edges (used for DEVELOPMENT workflow).
-
-    This function derives station points from edge geometry endpoints.
-    For BASELINE workflow, use load_corridor_nodes_from_master() instead.
-
-    Args:
-        edges_gdf: Edges GeoDataFrame to extract stations from.
-
-    Returns:
-        GeoDataFrame with station points.
-    """
-    if edges_gdf is None or len(edges_gdf) == 0:
-        raise ValueError("edges_gdf must be provided and non-empty")
-
-    # Extract stations from edges
-    points_gdf = extract_stations_from_edges(edges_gdf)
-    print(f"[INFO] Extracted {len(points_gdf)} stations from development edges")
-
-    return points_gdf
+def load_corridor_nodes() -> gpd.GeoDataFrame:
+    """Load the corridor-only nodes GeoPackage."""
+    return gpd.read_file(CORRIDOR_POINTS_PATH)
 
 
 def build_stop_records(
@@ -1003,123 +480,13 @@ def aggregate_segment_metrics(
     return segments_df.sort_values(["from_node", "to_node"]).reset_index(drop=True)
 
 
-def _derive_baseline_prep_path() -> Path:
-    """Auto-detect baseline prep workbook path from settings.
-
-    Returns:
-        Path to the baseline prep workbook.
-
-    Raises:
-        FileNotFoundError: If baseline prep workbook doesn't exist.
-    """
-    network_tag = getattr(settings, "rail_network", "current")
-    safe_network_tag = re.sub(r"[^\w-]+", "_", str(network_tag)).strip("_") or "current"
-
-    # Try with _prep suffix first (most common)
-    prep_path = CAPACITY_ROOT / safe_network_tag / f"capacity_{safe_network_tag}_network_prep.xlsx"
-
-    if prep_path.exists():
-        return prep_path
-
-    # Fallback: try without subdirectory
-    prep_path_fallback = CAPACITY_ROOT / f"capacity_{safe_network_tag}_network_prep.xlsx"
-    if prep_path_fallback.exists():
-        return prep_path_fallback
-
-    raise FileNotFoundError(
-        f"Baseline prep workbook not found. Tried:\n"
-        f"  - {prep_path}\n"
-        f"  - {prep_path_fallback}\n\n"
-        f"Please run the baseline workflow and manually enrich the workbook first."
-    )
-
-
-def build_capacity_tables(
-    edges_path: Path = None,
-    network_label: str = None,
-    enrichment_source: Path = None,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Return the station and segment capacity tables for the active network.
-
-    Args:
-        edges_path: Optional custom path to edges file.
-                   - If None: BASELINE workflow (uses edges_in_corridor.gpkg + master points)
-                   - If provided: DEVELOPMENT workflow (uses custom edges + edge-derived stations)
-        network_label: Optional custom network label for output naming.
-        enrichment_source: Optional path to baseline prep workbook for auto-enrichment.
-                          - If None: generates empty workbook for manual enrichment (baseline workflow)
-                          - If provided: inherits baseline data and applies defaults (development workflow)
-
-    Returns:
-        Tuple of (stations_df, segments_df) with capacity metrics.
-    """
-    is_baseline = edges_path is None
-
-    print(f"\n{'='*80}")
-    print(f"[INFO] build_capacity_tables - {'BASELINE' if is_baseline else 'DEVELOPMENT'} workflow")
-    print(f"  - edges_path: {edges_path if edges_path else 'Default (baseline)'}")
-    print(f"  - network_label: {network_label}")
-    print(f"  - enrichment_source: {enrichment_source}")
-    print(f"{'='*80}\n")
-
-    # Load service links (handles baseline extended mode internally)
-    service_links_full = load_service_links(edges_path=edges_path)
-
-    # Get edges GeoDataFrame for later use (needed for enrichment geometry lookups)
-    if is_baseline:
-        # For baseline, need to reload edges to get GeoDataFrame
-        # Check if extended mode
-        is_extended = str(getattr(settings, "rail_network", "")).endswith("_extended")
-        gdf_main = gpd.read_file(EDGES_IN_CORRIDOR_PATH)
-        gdf_border = gpd.read_file(EDGES_ON_BORDER_PATH)
-
-        if is_extended:
-            # EXTENDED MODE: Combine both, remove duplicates
-            edges_gdf = gpd.GeoDataFrame(
-                pd.concat([gdf_main, gdf_border], ignore_index=True),
-                crs=gdf_main.crs
-            )
-            # Remove duplicate service links based on key columns
-            edges_gdf = edges_gdf.drop_duplicates(
-                subset=['FromNode', 'ToNode', 'Via', 'Service', 'Direction'],
-                keep='first'
-            )
-        else:
-            # STANDARD MODE: Remove edges from in_corridor that also appear in border
-            merged = gdf_main.merge(
-                gdf_border,
-                how='left',
-                indicator=True,
-                on=list(gdf_main.columns.drop('geometry'))
-            )
-            edges_gdf = gdf_main[merged['_merge'] == 'left_only'].copy()
-    else:
-        # For development, load from custom path
-        edges_gdf = gpd.read_file(edges_path)
-
-    # Extract stations based on workflow
-    new_station_ids = set()  # Track new stations for enrichment
-
-    if is_baseline:
-        # BASELINE: Load stations from master points file
-        corridor_points, new_station_ids = load_corridor_nodes_from_master(
-            edges_gdf,
-            is_development=False
-        )
-    else:
-        # DEVELOPMENT: Load and filter stations
-        # Auto-detect baseline prep path
-        baseline_prep_path = _derive_baseline_prep_path()
-
-        corridor_points, new_station_ids = load_corridor_nodes_from_master(
-            edges_gdf,
-            baseline_prep_path=baseline_prep_path,
-            is_development=True
-        )
-
+def build_capacity_tables() -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Return the station and segment capacity tables for the active network."""
+    corridor_points = load_corridor_nodes()
     corridor_nodes = set(corridor_points["ID_point"].astype(int))
 
-    # Filter service links to those related to corridor nodes
+    service_links_full = load_service_links()
+
     def _link_has_corridor_relation(row: pd.Series) -> bool:
         return (
             row["FromNode"] in corridor_nodes
@@ -1135,7 +502,6 @@ def build_capacity_tables(
     stop_records = build_stop_records(service_links, corridor_nodes)
     stop_lookup = build_stop_lookup(stop_records)
 
-    # Prepare corridor table with proper coordinate handling
     corridor_table = corridor_points.drop(columns=[corridor_points.geometry.name], errors="ignore").copy()
     corridor_table.rename(columns={"ID_point": "NR"}, inplace=True)
     corridor_table["NR"] = corridor_table["NR"].apply(parse_int)
@@ -1146,13 +512,8 @@ def build_capacity_tables(
         corridor_table["CODE"] = ""
     corridor_table["XKOORD"] = corridor_table["XKOORD"].apply(parse_float)
     corridor_table["YKOORD"] = corridor_table["YKOORD"].apply(parse_float)
-
-    # E_LV95/N_LV95 already added by load_corridor_nodes_from_master for baseline
-    # For development, need to add them
-    if "E_LV95" not in corridor_table.columns:
-        corridor_table["E_LV95"] = corridor_table["XKOORD"] + LV95_E_OFFSET
-    if "N_LV95" not in corridor_table.columns:
-        corridor_table["N_LV95"] = corridor_table["YKOORD"] + LV95_N_OFFSET
+    corridor_table["E_LV95"] = corridor_table["XKOORD"] + LV95_E_OFFSET
+    corridor_table["N_LV95"] = corridor_table["YKOORD"] + LV95_N_OFFSET
 
     station_metrics = aggregate_station_metrics(
         corridor_table,
@@ -1188,26 +549,6 @@ def build_capacity_tables(
         "services_tphpd",
     ]
     segment_metrics = segment_metrics[output_columns]
-
-    # Apply enrichment if source provided (development workflow)
-    if enrichment_source is not None:
-        station_metrics, segment_metrics = apply_enrichment(
-            station_metrics,
-            segment_metrics,
-            enrichment_source,
-            edges_gdf,
-            new_station_ids
-        )
-    elif not is_baseline:
-        # Development workflow without explicit enrichment_source: use auto-detected baseline prep
-        baseline_prep_path = _derive_baseline_prep_path()
-        station_metrics, segment_metrics = apply_enrichment(
-            station_metrics,
-            segment_metrics,
-            baseline_prep_path,
-            edges_gdf,
-            new_station_ids
-        )
 
     return station_metrics, segment_metrics
 
@@ -1989,142 +1330,24 @@ def _summarise_section(
 # Entry point
 # ---------------------------------------------------------------------------
 
-def export_capacity_workbook(
-    edges_path: Path = None,
-    network_label: str = None,
-    enrichment_source: Path = None,
-    output_dir: Path = None,
-    skip_manual_checkpoint: bool = False,
-) -> Path:
-    """Build the capacity workbook and return the output path.
+def export_capacity_workbook() -> Path:
+    """Build the capacity workbook and return the output path."""
+    ensure_output_directory()
 
-    Args:
-        edges_path: Optional custom path to edges file.
-                   - If None: BASELINE workflow (uses edges_in_corridor.gpkg + master points)
-                   - If provided: DEVELOPMENT workflow (uses custom edges + edge-derived stations)
-        network_label: Optional custom network label for output naming.
-                      For developments, should include dev ID (e.g., "AK_2035_dev_100023")
-        enrichment_source: Optional path to baseline prep workbook for auto-enrichment.
-                          - If None: generates empty workbook for manual enrichment (baseline workflow)
-                          - If provided: inherits baseline data and applies defaults (development workflow)
-        output_dir: Optional custom output directory.
-                   - If None: auto-detected (baseline or development based on network_label)
-                   - If provided: uses directory as-is
-        skip_manual_checkpoint: If True, skips manual enrichment prompt and sections export.
-                               Used for development workflow with auto-enrichment.
+    station_metrics, segment_metrics = build_capacity_tables()
 
-    Returns:
-        Path to the exported capacity workbook.
-    """
-    is_baseline = edges_path is None
+    output_path = capacity_output_path()  # Name workbook after the active rail network.
 
-    # Auto-detect output directory for developments
-    if output_dir is None and not is_baseline and network_label is not None:
-        # Extract dev ID from network_label (e.g., "AK_2035_dev_100023" → "100023")
-        import re
-        dev_match = re.search(r'_dev_(\d+)', network_label)
-        if dev_match:
-            dev_id = dev_match.group(1)
-            output_dir = CAPACITY_ROOT / "developments" / dev_id
-            print(f"[INFO] Auto-detected development output directory: {output_dir}")
-
-    if output_dir is not None:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        ensure_output_directory()
-
-    station_metrics, segment_metrics = build_capacity_tables(
-        edges_path=edges_path,
-        network_label=network_label,
-        enrichment_source=enrichment_source,
-    )
-
-    output_path = capacity_output_path(network_label=network_label, output_dir=output_dir)
-    prep_path = _derive_prep_path(output_path)
-
-    # Save initial workbook
     with pd.ExcelWriter(output_path, engine=EXCEL_ENGINE) as writer:
-        station_metrics.to_excel(writer, sheet_name="Stations", index=False)
+        station_metrics.to_excel(writer, sheet_name="Stations", index=False)  # Station-level metrics tab.
         segment_metrics.to_excel(writer, sheet_name="Segments", index=False)
 
-    print(f"[INFO] Capacity workbook written to {output_path}")
+    _post_export_capacity_processing(output_path)
 
-    # Check if manual enrichment is needed
-    has_na_tracks_stations = station_metrics["tracks"].isna().any()
-    has_na_platforms = station_metrics["platforms"].isna().any()
-    has_na_tracks_segments = segment_metrics["tracks"].isna().any()
-    has_na_speed = segment_metrics["speed"].isna().any()
-
-    needs_manual_enrichment = has_na_tracks_stations or has_na_platforms or has_na_tracks_segments or has_na_speed
-
-    if needs_manual_enrichment and not skip_manual_checkpoint:
-        # Save as prep workbook for user to fill
-        import shutil
-        shutil.copy2(output_path, prep_path)
-        print(f"[INFO] Prep workbook saved to {prep_path} for manual enrichment")
-
-        # Prompt user to fill missing values
-        print("\n" + "="*80)
-        print("MANUAL ENRICHMENT REQUIRED")
-        print("="*80)
-        if has_na_tracks_stations or has_na_platforms:
-            print(f"  - {station_metrics['tracks'].isna().sum()} stations missing 'tracks'")
-            print(f"  - {station_metrics['platforms'].isna().sum()} stations missing 'platforms'")
-        if has_na_tracks_segments or has_na_speed:
-            print(f"  - {segment_metrics['tracks'].isna().sum()} segments missing 'tracks'")
-            print(f"  - {segment_metrics['speed'].isna().sum()} segments missing 'speed'")
-        print(f"\nPlease open the prep workbook and fill the missing values:")
-        print(f"  {prep_path}")
-        print("="*80)
-
-        response = input("\nHave you filled the missing data (y/n)? ").strip().lower()
-        if response not in {"y", "yes"}:
-            print("Skipping section calculation. Re-run after updating the workbook.")
-            return output_path
-
-        # Reload enriched data from prep workbook
-        print(f"[INFO] Reloading enriched data from {prep_path}...")
-        station_metrics = pd.read_excel(prep_path, sheet_name="Stations")
-        segment_metrics = pd.read_excel(prep_path, sheet_name="Segments")
-
-    elif needs_manual_enrichment and skip_manual_checkpoint:
-        # Skip manual enrichment but still save prep workbook
-        import shutil
-        shutil.copy2(output_path, prep_path)
-        print(f"[INFO] Prep workbook saved to {prep_path} (manual enrichment skipped)")
-        return output_path
-    else:
-        # No manual enrichment needed: save prep workbook for sections calculation
-        import shutil
-        shutil.copy2(output_path, prep_path)
-        print(f"[INFO] Prep workbook saved to {prep_path}")
-
-    # Calculate and export sections
-    try:
-        print(f"[INFO] Calculating sections...")
-        sections_df = _build_sections_dataframe(station_metrics, segment_metrics)
-        if not sections_df.empty:
-            # Round float columns
-            float_columns = sections_df.select_dtypes(include=["float"]).columns
-            if len(float_columns) > 0:
-                sections_df[float_columns] = sections_df[float_columns].round(3)
-
-            # Export sections workbook
-            sections_path = _derive_sections_path(output_path)
-            sections_engine = APPEND_ENGINE or EXCEL_ENGINE
-            with pd.ExcelWriter(sections_path, engine=sections_engine) as writer:
-                station_metrics.to_excel(writer, sheet_name="Stations", index=False)
-                segment_metrics.to_excel(writer, sheet_name="Segments", index=False)
-                sections_df.to_excel(writer, sheet_name="Sections", index=False)
-
-            print(f"[INFO] Sections workbook written to {sections_path}")
-        else:
-            print("[WARNING] No sections could be identified from the enriched data")
-    except Exception as e:
-        print(f"[WARNING] Could not calculate sections: {e}")
-
+    print(f"Capacity workbook written to {output_path}")
     return output_path
 
 
 if __name__ == "__main__":
-    export_capacity_workbook()
+    output_file = export_capacity_workbook()
+    print(f"Capacity workbook written to {output_file}")

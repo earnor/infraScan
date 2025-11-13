@@ -116,114 +116,6 @@ def _derive_capacity_output(base_output: Path, explicit: bool) -> Path:
     return base_output.with_name(f"{base_output.stem}_capacity{suffix}")
 
 
-def _derive_plot_output_path(
-    plot_type: str,
-    network_label: str = None,
-    output_path: str = None,
-    output_dir: Path = None,
-) -> Path:
-    """Derive plot output path with network-based subdirectories.
-
-    For baseline workflow:
-      - plots/network/AK_2035/AK_2035_network_{plot_type}.png
-      - plots/network/AK_2035_extended/AK_2035_extended_network_{plot_type}.png
-
-    For development workflow:
-      - plots/network/developments/{devID}/AK_2035_dev_{devID}_network_{plot_type}.png
-
-    Args:
-        plot_type: Type of plot (e.g., "infrastructure", "capacity", "speed", "service")
-        network_label: Optional custom network label (e.g., "AK_2035_dev_100023")
-        output_path: Optional explicit path for output file
-        output_dir: Optional custom output directory
-
-    Returns:
-        Path to the plot output file.
-    """
-    import re
-
-    # If explicit output_path provided, use it directly
-    if output_path is not None:
-        return Path(output_path)
-
-    # Determine network name
-    if network_label is not None:
-        network_tag = network_label
-    else:
-        network_tag = getattr(settings, "rail_network", "current")
-
-    safe_network_tag = re.sub(r"[^\w-]+", "_", str(network_tag)).strip("_") or "current"
-    filename = f"{safe_network_tag}_network_{plot_type}.png"
-
-    # Auto-detect development output directory from network_label
-    if output_dir is None and network_label is not None:
-        dev_match = re.search(r'_dev_(\d+)', network_label)
-        if dev_match:
-            dev_id = dev_match.group(1)
-            output_dir = DEFAULT_OUTPUT_DIR / "developments" / dev_id
-
-    if output_dir is not None:
-        # DEVELOPMENT MODE: Use provided/detected directory
-        output_dir.mkdir(parents=True, exist_ok=True)
-        return output_dir / filename
-    else:
-        # BASELINE MODE: Create subdirectory based on network name
-        network_subdir = DEFAULT_OUTPUT_DIR / safe_network_tag
-        network_subdir.mkdir(parents=True, exist_ok=True)
-        return network_subdir / filename
-
-
-def _calculate_figure_size(stations: Dict[int, Station]) -> Tuple[float, float]:
-    """Calculate dynamic figure size based on station bounding box (Option A: aspect ratio).
-
-    Uses fixed aspect ratio scaling with min/max limits:
-    - Minimum: (12, 10) - the existing default size
-    - Maximum: (24, 20) - reasonable upper limit
-
-    Args:
-        stations: Dictionary of stations with coordinates
-
-    Returns:
-        Tuple of (width, height) in inches
-    """
-    if not stations:
-        return (12.0, 10.0)
-
-    # Calculate bounding box
-    x_coords = [s.x for s in stations.values()]
-    y_coords = [s.y for s in stations.values()]
-
-    min_x, max_x = min(x_coords), max(x_coords)
-    min_y, max_y = min(y_coords), max(y_coords)
-
-    bbox_width = max_x - min_x
-    bbox_height = max_y - min_y
-
-    if bbox_width <= 0 or bbox_height <= 0:
-        return (12.0, 10.0)
-
-    # Calculate aspect ratio
-    aspect_ratio = bbox_width / bbox_height
-
-    # Scale figure size based on aspect ratio, starting from base width
-    base_width = 12.0
-    fig_height = base_width / aspect_ratio
-
-    # Apply minimum constraints (existing size)
-    if base_width < 12.0:
-        base_width = 12.0
-    if fig_height < 10.0:
-        fig_height = 10.0
-
-    # Apply maximum constraints
-    if base_width > 24.0:
-        base_width = 24.0
-    if fig_height > 20.0:
-        fig_height = 20.0
-
-    return (base_width, fig_height)
-
-
 @dataclass(frozen=True)
 class Station:
     node_id: int
@@ -284,15 +176,9 @@ class SectionSummary:
 
 
 def _latest_prep_workbook() -> Path:
-    """Return the most recently modified capacity prep workbook.
-
-    Searches both:
-    - New structure: CAPACITY_DIR/<network>/*_prep.xlsx
-    - Legacy flat structure: CAPACITY_DIR/*_prep.xlsx
-    """
-    # Search recursively for prep workbooks (includes subdirectories)
+    """Return the most recently modified capacity prep workbook."""
     prep_files = sorted(
-        CAPACITY_DIR.glob("**/*_prep.xlsx"),
+        CAPACITY_DIR.glob("capacity_*_prep.xlsx"),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -303,55 +189,9 @@ def _latest_prep_workbook() -> Path:
     return prep_files[0]
 
 
-def _resolve_workbook_path(network_label: str = None, output_dir: Path = None) -> Path:
-    """Resolve workbook path using same logic as capacity_calculator.
-
-    For development networks, auto-detects output directory from network_label.
-
-    Args:
-        network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
-                      If None, uses settings.rail_network.
-        output_dir: Optional custom output directory. If None, auto-detects based on label.
-
-    Returns:
-        Path to the capacity prep workbook.
-    """
-    # Auto-detect development output directory from network_label
-    if output_dir is None and network_label is not None:
-        import re
-        dev_match = re.search(r'_dev_(\d+)', network_label)
-        if dev_match:
-            dev_id = dev_match.group(1)
-            from capacity_calculator import CAPACITY_ROOT
-            output_dir = CAPACITY_ROOT / "developments" / dev_id
-
-    from capacity_calculator import capacity_output_path
-    base_path = capacity_output_path(network_label=network_label, output_dir=output_dir)
-    return base_path.with_name(f"{base_path.stem}_prep{base_path.suffix}")
-
-
-def _load_workbook(
-    workbook_path: Optional[Path] = None,
-    network_label: str = None,
-    output_dir: Path = None
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Load station and segment tables from the prep workbook.
-
-    Args:
-        workbook_path: Optional explicit path to workbook. If provided, other args are ignored.
-        network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
-        output_dir: Optional custom output directory.
-
-    Returns:
-        Tuple of (stations_df, segments_df).
-    """
-    if workbook_path is not None:
-        workbook = Path(workbook_path)
-    elif network_label is not None or output_dir is not None:
-        workbook = _resolve_workbook_path(network_label=network_label, output_dir=output_dir)
-    else:
-        workbook = _latest_prep_workbook()
-
+def _load_workbook(workbook_path: Optional[Path]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Load station and segment tables from the prep workbook."""
+    workbook = Path(workbook_path) if workbook_path else _latest_prep_workbook()
     if not workbook.exists():
         raise FileNotFoundError(f"Workbook not found: {workbook}")
 
@@ -698,69 +538,12 @@ def _build_name_lookup(stations: Dict[int, Station]) -> Dict[str, Station]:
     return lookup
 
 
-def _load_capacity_sections(
-    workbook_path: Optional[Path] = None,
-    network_label: str = None,
-    output_dir: Path = None
-) -> List[SectionSummary]:
-    """Load section summaries from the dedicated sections workbook.
-
-    Supports both baseline and development networks:
-    - Baseline: CAPACITY_DIR/<network>/*_sections.xlsx
-    - Development: CAPACITY_DIR/developments/<dev_id>/*_sections.xlsx
-    - Legacy: CAPACITY_DIR/*_sections.xlsx
-
-    Args:
-        workbook_path: Optional explicit path to sections workbook.
-        network_label: Optional network label (e.g., "AK_2035_dev_101023").
-        output_dir: Optional custom output directory.
-
-    Returns:
-        List of SectionSummary objects.
-    """
+def _load_capacity_sections(workbook_path: Optional[Path] = None) -> List[SectionSummary]:
+    """Load section summaries from the dedicated sections workbook."""
     if workbook_path:
         workbook = Path(workbook_path)
     else:
-        # Determine network tag
-        import re
-        if network_label is not None:
-            network_tag = network_label
-        else:
-            network_tag = getattr(settings, "rail_network", "current")
-
-        safe_network_tag = re.sub(r"[^\w-]+", "_", str(network_tag)).strip("_") or "current"
-        expected_filename = f"capacity_{safe_network_tag}_network_sections.xlsx"
-
-        # Auto-detect output directory for developments
-        if output_dir is None and network_label is not None:
-            dev_match = re.search(r'_dev_(\d+)', network_label)
-            if dev_match:
-                dev_id = dev_match.group(1)
-                from capacity_calculator import CAPACITY_ROOT
-                output_dir = CAPACITY_ROOT / "developments" / dev_id
-
-        if output_dir is not None:
-            # Development or custom directory
-            new_path = output_dir / expected_filename
-        else:
-            # Baseline: Try new structure first
-            network_subdir = CAPACITY_DIR / safe_network_tag
-            new_path = network_subdir / expected_filename
-
-        if new_path.exists():
-            workbook = new_path
-        else:
-            # Fall back to legacy flat structure (baseline only)
-            legacy_path = CAPACITY_DIR / expected_filename
-            if legacy_path.exists():
-                workbook = legacy_path
-            else:
-                raise FileNotFoundError(
-                    f"Sections workbook not found:\n"
-                    f"  Tried: {new_path}\n"
-                    f"  Tried: {legacy_path}"
-                )
-
+        workbook = DEFAULT_SECTIONS_WORKBOOK
     if not workbook.exists():
         raise FileNotFoundError(f"Sections workbook not found: {workbook}")
 
@@ -2020,10 +1803,6 @@ def _draw_service_map(
             service_station_links[(service_name, segment.from_node)].append((start_offset, start_colour, width))
             service_station_links[(service_name, segment.to_node)].append((end_offset, end_colour, width))
 
-            # Draw service line (scales with frequency) with white separators
-            int_frequency = max(int(round(frequency)), 1)
-
-            # Draw the main service line (width scales with frequency)
             if start_colour == end_colour:
                 ox, oy = zip(*offset_coords)
                 ax.plot(ox, oy, color=start_colour, linewidth=width, zorder=2)
@@ -2043,31 +1822,19 @@ def _draw_service_map(
                     zorder=2,
                 )
 
-            # Draw white separators to split the line based on frequency
+            int_frequency = max(int(round(frequency)), 1)
             if int_frequency >= 2:
                 separator_count = int_frequency - 1
-
-                # Adjust separator width based on count
+                separator_width = max(0.6, width * 0.18)
+                spacing = max(12.0, width * 5.0)
                 if separator_count == 1:
-                    # Single separator: standard thickness
-                    separator_width = max(0.4, width * 0.12)
+                    separator_offsets = [0.0]
                 else:
-                    # Multiple separators: reduce thickness by 50%
-                    separator_width = max(0.3, width * 0.06)
+                    center = int_frequency / 2.0
+                    separator_offsets = [((i + 1) - center) * spacing for i in range(separator_count)]
 
-                # Calculate separator positions perpendicular to the line
-                # For n trains, we need n-1 separators that divide the line width into n equal parts
-                # The offsets are perpendicular distances from the center of the service line
-                for i in range(separator_count):
-                    # Position separators to divide the line width into equal sections
-                    # For int_frequency sections, separators are at positions:
-                    # -width/2 + (i+1) * (width/int_frequency)
-                    # Which simplifies to positions that divide the width evenly
-                    separator_position = (i + 1 - int_frequency / 2.0) * (width / int_frequency)
-
-                    # Apply perpendicular offset to create the separator line
-                    separator_coords = _offset_polyline_uniform(coords, offset_distance + separator_position)
-
+                for sep_offset in separator_offsets:
+                    separator_coords = _offset_polyline_uniform(coords, offset_distance + sep_offset)
                     if station_shapes and len(separator_coords) >= 2:
                         if start_shape:
                             separator_coords[0] = _project_point_to_station_boundary(
@@ -2077,7 +1844,6 @@ def _draw_service_map(
                             separator_coords[-1] = _project_point_to_station_boundary(
                                 separator_coords[-1], separator_coords[-2], end, end_shape
                             )
-
                     sep_x, sep_y = zip(*separator_coords)
                     ax.plot(sep_x, sep_y, color="white", linewidth=separator_width, zorder=2.5)
 
@@ -2178,37 +1944,6 @@ def _draw_service_map(
     return extent_min_x, extent_max_x, extent_min_y, extent_max_y
 
 
-def _format_plot_title(base_title: str, network_label: str = None) -> str:
-    """Format plot title to include development ID if applicable.
-
-    Args:
-        base_title: Base title (e.g., "Rail Network Infrastructure")
-        network_label: Optional network label (e.g., "AK_2035_dev_100023")
-
-    Returns:
-        Formatted title with network information.
-    """
-    if network_label is None:
-        network_tag = getattr(settings, "rail_network", "")
-    else:
-        network_tag = network_label
-
-    if not network_tag:
-        return base_title
-
-    # Check if development network
-    import re
-    dev_match = re.search(r'_dev_(\d+)', network_tag)
-    if dev_match:
-        dev_id = dev_match.group(1)
-        # Extract base network name (e.g., "AK_2035" from "AK_2035_dev_100023")
-        base_network = network_tag.split('_dev_')[0]
-        return f"{base_title} - {base_network} Development {dev_id}"
-    else:
-        # Baseline network
-        return f"{base_title} - {network_tag}"
-
-
 def _configure_axes(
     ax,
     stations: Dict[int, Station],
@@ -2259,33 +1994,11 @@ def network_current_map(
     stations: Optional[Dict[int, Station]] = None,
     segments_list: Optional[List[Segment]] = None,
     return_figure: bool = False,
-    network_label: str = None,
-    output_dir: Path = None,
 ) -> Union[Path, Tuple[Path, Figure]]:
-    """Render the current network infrastructure map.
-
-    Args:
-        workbook_path: Optional explicit path to workbook.
-        output_path: Optional path for output file.
-        show: If True, display the plot.
-        stations_df: Optional preloaded stations DataFrame.
-        segments_df: Optional preloaded segments DataFrame.
-        stations: Optional preloaded stations dict.
-        segments_list: Optional preloaded segments list.
-        return_figure: If True, return both path and figure.
-        network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
-        output_dir: Optional custom output directory.
-
-    Returns:
-        Path to saved image, or (Path, Figure) if return_figure=True.
-    """
+    """Render the current network infrastructure map."""
     if stations is None or segments_list is None:
         if stations_df is None or segments_df is None:
-            stations_df, segments_df = _load_workbook(
-                workbook_path=Path(workbook_path) if workbook_path else None,
-                network_label=network_label,
-                output_dir=output_dir
-            )
+            stations_df, segments_df = _load_workbook(Path(workbook_path) if workbook_path else None)
         stations = _to_stations(stations_df)
         segments_list = _to_segments(segments_df, stations.keys())
 
@@ -2296,9 +2009,7 @@ def network_current_map(
 
     water_layer, segment_geometries = _load_map_overlays()
 
-    # Calculate dynamic figure size based on station bounding box
-    figsize = _calculate_figure_size(stations)
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=(12, 10))
     if water_layer is not None and not getattr(water_layer, "empty", True):
         try:
             water_layer.plot(ax=ax, color="#b7d4f0", edgecolor="#6ea3d5", linewidth=0.5, zorder=1)
@@ -2315,19 +2026,10 @@ def network_current_map(
         marker_style="circle",
         marker_size_mode="fixed",
     )
-
-    # Format title with network information
-    plot_title = _format_plot_title("Rail Network Infrastructure", network_label)
-    _configure_axes(ax, stations, title=plot_title, annotation_bounds=annotation_bounds)
+    _configure_axes(ax, stations, annotation_bounds=annotation_bounds)
     _add_network_legends(ax, station_colours, segment_categories, separators_used)
 
-    # Use new path derivation logic with network subdirectories
-    base_output = _derive_plot_output_path(
-        plot_type="infrastructure",
-        network_label=network_label,
-        output_path=output_path,
-        output_dir=output_dir
-    )
+    base_output = Path(output_path) if output_path else DEFAULT_OUTPUT
     base_output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(base_output, dpi=300, bbox_inches="tight")
     pdf_output = base_output.with_suffix(".pdf")
@@ -2349,35 +2051,12 @@ def plot_capacity_network(
     sections_workbook_path: Optional[str] = None,
     generate_network: bool = True,
     show: bool = False,
-    network_label: str = None,
-    output_dir: Path = None,
 ) -> Tuple[Path, Path]:
-    """Plot the capacity prep workbook and return the saved image paths (network, capacity).
-
-    Args:
-        workbook_path: Optional explicit path to prep workbook.
-        output_path: Optional path for output file.
-        sections_workbook_path: Optional path to sections workbook.
-        generate_network: If True, also generate network map.
-        show: If True, display the plots.
-        network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
-        output_dir: Optional custom output directory.
-
-    Returns:
-        Tuple of (network_output_path, capacity_output_path).
-    """
-    stations_df, segments_df = _load_workbook(
-        workbook_path=Path(workbook_path) if workbook_path else None,
-        network_label=network_label,
-        output_dir=output_dir
-    )
+    """Plot the capacity prep workbook and return the saved image paths (network, capacity)."""
+    stations_df, segments_df = _load_workbook(Path(workbook_path) if workbook_path else None)
     stations = _to_stations(stations_df)
     segments = _to_segments(segments_df, stations.keys())
-    sections = _load_capacity_sections(
-        workbook_path=Path(sections_workbook_path) if sections_workbook_path else None,
-        network_label=network_label,
-        output_dir=output_dir
-    )
+    sections = _load_capacity_sections(Path(sections_workbook_path) if sections_workbook_path else None)
     if not sections:
         raise ValueError("No sections were found in the sections workbook.")
 
@@ -2405,8 +2084,6 @@ def plot_capacity_network(
             segments_list=segments,
             show=False,
             return_figure=True,
-            network_label=network_label,
-            output_dir=output_dir,
         )
 
         if isinstance(base_result, tuple):
@@ -2414,25 +2091,12 @@ def plot_capacity_network(
         else:
             base_output = base_result
     else:
-        base_output = _derive_plot_output_path(
-            plot_type="infrastructure",
-            network_label=network_label,
-            output_path=output_path,
-            output_dir=output_dir
-        )
+        base_output = Path(output_path) if output_path else DEFAULT_OUTPUT
 
-    # Derive capacity output path with network subdirectories
-    capacity_output = _derive_plot_output_path(
-        plot_type="capacity",
-        network_label=network_label,
-        output_path=output_path,
-        output_dir=output_dir
-    )
+    capacity_output = _derive_capacity_output(base_output, explicit=output_path is not None)
     capacity_output.parent.mkdir(parents=True, exist_ok=True)
 
-    # Calculate dynamic figure size based on section station bounding box
-    figsize = _calculate_figure_size(section_stations)
-    capacity_fig, capacity_ax = plt.subplots(figsize=figsize)
+    capacity_fig, capacity_ax = plt.subplots(figsize=(12, 10))
     capacity_annotation_bounds, _ = _draw_capacity_map(capacity_ax, sections)
     station_annotation_bounds, _ = _draw_station_annotations(
         capacity_ax,
@@ -2445,13 +2109,10 @@ def plot_capacity_network(
         uniform_colour="#000000",
     )
     combined_bounds = _merge_bounds(capacity_annotation_bounds, station_annotation_bounds)
-
-    # Format title with network information
-    capacity_title = _format_plot_title("Capacity Utilization", network_label)
     _configure_axes(
         capacity_ax,
         section_stations,
-        title=capacity_title,
+        title="Capacity Utilization",
         annotation_bounds=combined_bounds,
     )
     capacity_fig.savefig(capacity_output, dpi=300, bbox_inches="tight")
@@ -2472,26 +2133,9 @@ def plot_speed_profile_network(
     workbook_path: Optional[str] = None,
     output_path: Optional[str] = None,
     show: bool = False,
-    network_label: str = None,
-    output_dir: Path = None,
 ) -> Path:
-    """Plot the network speed profile and return the saved image path.
-
-    Args:
-        workbook_path: Optional explicit path to prep workbook.
-        output_path: Optional path for output file.
-        show: If True, display the plot.
-        network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
-        output_dir: Optional custom output directory.
-
-    Returns:
-        Path to saved speed profile image.
-    """
-    stations_df, segments_df = _load_workbook(
-        workbook_path=Path(workbook_path) if workbook_path else None,
-        network_label=network_label,
-        output_dir=output_dir
-    )
+    """Plot the network speed profile and return the saved image path."""
+    stations_df, segments_df = _load_workbook(Path(workbook_path) if workbook_path else None)
     stations = _to_stations(stations_df)
     segments = _to_segments(segments_df, stations.keys())
 
@@ -2502,9 +2146,7 @@ def plot_speed_profile_network(
 
     water_layer, segment_geometries = _load_map_overlays()
 
-    # Calculate dynamic figure size based on station bounding box
-    figsize = _calculate_figure_size(stations)
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=(12, 10))
     if water_layer is not None and not getattr(water_layer, "empty", True):
         try:
             water_layer.plot(ax=ax, color="#b7d4f0", edgecolor="#6ea3d5", linewidth=0.5, zorder=1)
@@ -2523,18 +2165,9 @@ def plot_speed_profile_network(
         uniform_colour="#ffffff",
     )
     combined_bounds = _merge_bounds(speed_annotation_bounds, station_annotation_bounds)
+    _configure_axes(ax, stations, title="Speed Profile", annotation_bounds=combined_bounds)
 
-    # Format title with network information
-    speed_title = _format_plot_title("Speed Profile", network_label)
-    _configure_axes(ax, stations, title=speed_title, annotation_bounds=combined_bounds)
-
-    # Use new path derivation logic with network subdirectories
-    speed_output = _derive_plot_output_path(
-        plot_type="speed",
-        network_label=network_label,
-        output_path=output_path,
-        output_dir=output_dir
-    )
+    speed_output = Path(output_path) if output_path else DEFAULT_SPEED_OUTPUT
     speed_output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(speed_output, dpi=300, bbox_inches="tight")
     speed_pdf_output = speed_output.with_suffix(".pdf")
@@ -2552,26 +2185,9 @@ def plot_service_network(
     workbook_path: Optional[str] = None,
     output_path: Optional[str] = None,
     show: bool = False,
-    network_label: str = None,
-    output_dir: Path = None,
 ) -> Path:
-    """Plot network services with frequency-based styling and return the saved image path.
-
-    Args:
-        workbook_path: Optional explicit path to prep workbook.
-        output_path: Optional path for output file.
-        show: If True, display the plot.
-        network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
-        output_dir: Optional custom output directory.
-
-    Returns:
-        Path to saved service network image.
-    """
-    stations_df, segments_df = _load_workbook(
-        workbook_path=Path(workbook_path) if workbook_path else None,
-        network_label=network_label,
-        output_dir=output_dir
-    )
+    """Plot network services with frequency-based styling and return the saved image path."""
+    stations_df, segments_df = _load_workbook(Path(workbook_path) if workbook_path else None)
     stations = _to_stations(stations_df)
     segments = _to_segments(segments_df, stations.keys())
 
@@ -2588,9 +2204,7 @@ def plot_service_network(
 
     station_shapes = _compute_station_shapes(stations, segments_with_services)
 
-    # Calculate dynamic figure size based on station bounding box
-    figsize = _calculate_figure_size(stations)
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=(12, 10))
     if water_layer is not None and not getattr(water_layer, "empty", True):
         try:
             water_layer.plot(ax=ax, color="#b7d4f0", edgecolor="#6ea3d5", linewidth=0.5, zorder=1)
@@ -2615,10 +2229,7 @@ def plot_service_network(
         table_text_func=_service_station_table,
     )
     combined_bounds = _merge_bounds(service_annotation_bounds, station_annotation_bounds)
-
-    # Format title with network information
-    service_title = _format_plot_title("Service Frequencies", network_label)
-    _configure_axes(ax, stations, title=service_title, annotation_bounds=combined_bounds)
+    _configure_axes(ax, stations, title="Service Frequencies", annotation_bounds=combined_bounds)
 
     legend_handles = [
         Line2D([0], [0], color=SERVICE_COLOUR_STOP, linewidth=2.0, label="Stopping"),
@@ -2626,13 +2237,7 @@ def plot_service_network(
     ]
     ax.legend(handles=legend_handles, title="Service type", loc="upper left", frameon=True, fontsize=8, title_fontsize=9)
 
-    # Use new path derivation logic with network subdirectories
-    service_output = _derive_plot_output_path(
-        plot_type="service",
-        network_label=network_label,
-        output_path=output_path,
-        output_dir=output_dir
-    )
+    service_output = Path(output_path) if output_path else DEFAULT_SERVICE_OUTPUT
     service_output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(service_output, dpi=300, bbox_inches="tight")
     service_pdf_output = service_output.with_suffix(".pdf")
