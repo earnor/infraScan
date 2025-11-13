@@ -450,9 +450,9 @@ if __name__ == "__main__":
     # Uncomment the workflow you want to test:
 
     # Test individual interactive workflows
-    #test_baseline_standard_interactive()
+    test_baseline_standard_interactive()
     #test_baseline_extended_interactive()
-    test_development_interactive()
+    #test_development_interactive()
 
     # Or test all interactive workflows (requires manual work for each!)
     # test_all_workflows_interactive()

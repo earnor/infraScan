@@ -1594,43 +1594,43 @@ def _split_section_by_service_patterns(
     if len(path_nodes) <= 2 or not edge_records:
         return [(path_nodes, edge_records)]
 
-    edge_service_sets: List[set[str]] = []
     candidate_services: set[str] = set()
-    for _, _, edge_info in edge_records:
-        stopping_tokens = edge_info.get("stopping_service_tokens", ())
-        passing_tokens = edge_info.get("passing_service_tokens", ())
-        services = {
-            str(token)
-            for token in (*stopping_tokens, *passing_tokens)
-            if token is not None and str(token)
-        }
-        edge_service_sets.append(services)
-        candidate_services.update(services)
+    for node in path_nodes:
+        candidate_services.update(node_stop_services.get(node, set()))
+        candidate_services.update(node_pass_services.get(node, set()))
 
     if not candidate_services:
         return [(path_nodes, edge_records)]
 
     service_order = sorted(candidate_services)
-    node_patterns: List[Tuple[str, ...]] = []
-    for idx, node in enumerate(path_nodes):
-        relevant_services: set[str] = set()
-        if idx > 0:
-            relevant_services.update(edge_service_sets[idx - 1])
-        if idx < len(edge_service_sets):
-            relevant_services.update(edge_service_sets[idx])
-
-        stop_set = node_stop_services.get(node, set()) & relevant_services
-        pass_set = node_pass_services.get(node, set()) & relevant_services
-
-        pattern = []
-        for service in service_order:
-            if service in stop_set:
-                pattern.append("stop")
-            elif service in pass_set:
-                pattern.append("pass")
+    service_node_states: Dict[str, List[str]] = {}
+    for service in service_order:
+        states: List[str] = []
+        for node in path_nodes:
+            if service in node_stop_services.get(node, set()):
+                states.append("stop")
+            elif service in node_pass_services.get(node, set()):
+                states.append("pass")
             else:
-                pattern.append("absent")
-        node_patterns.append(tuple(pattern))
+                states.append("absent")
+
+        service_node_states[service] = states
+
+    def _should_split(pattern_a: Tuple[str, ...], pattern_b: Tuple[str, ...]) -> bool:
+        """Return True when a service transitions from pass/absent to stop."""
+        for state_a, state_b in zip(pattern_a, pattern_b):
+            if state_a == state_b:
+                continue
+            if state_b == "stop" and state_a != "stop":
+                return True
+            if state_a == "stop" and state_b == "pass":
+                continue
+        return False
+
+    node_patterns: List[Tuple[str, ...]] = []
+    for idx in range(len(path_nodes)):
+        pattern = tuple(service_node_states[service][idx] for service in service_order)
+        node_patterns.append(pattern)
 
     refined_sections: List[Tuple[List[int], List[Tuple[int, int, Dict[str, float]]]]] = []
     start_index = 0
@@ -1639,7 +1639,8 @@ def _split_section_by_service_patterns(
     idx = 1
     while idx < len(path_nodes):
         next_pattern = node_patterns[idx]
-        if next_pattern == current_pattern:
+        if not _should_split(current_pattern, next_pattern):
+            current_pattern = next_pattern
             idx += 1
             continue
 
