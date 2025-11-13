@@ -354,8 +354,7 @@ def load_service_links(edges_path: Path = None) -> pd.DataFrame:
 
     Args:
         edges_path: Optional custom path to edges file. If None, uses default baseline path(s).
-                   For baseline mode with _extended suffix, combines edges_in_corridor.gpkg
-                   and edges_on_corridor_border.gpkg.
+                   Both standard and extended baseline modes use edges_in_corridor.gpkg.
 
     Returns:
         DataFrame with service link records.
@@ -365,61 +364,18 @@ def load_service_links(edges_path: Path = None) -> pd.DataFrame:
         # Check if extended mode based on settings
         is_extended = str(getattr(settings, "rail_network", "")).endswith("_extended")
 
-        # Always load main corridor edges
+        # Load main corridor edges (used for both standard and extended modes)
         if not EDGES_IN_CORRIDOR_PATH.exists():
             raise FileNotFoundError(
                 f"Processed corridor edges not found at {EDGES_IN_CORRIDOR_PATH}."
             )
 
-        gdf_main = gpd.read_file(EDGES_IN_CORRIDOR_PATH)
-        print(f"[INFO] Loaded {len(gdf_main)} edges from edges_in_corridor.gpkg")
-
-        # Always load border edges (needed for both modes)
-        if not EDGES_ON_BORDER_PATH.exists():
-            raise FileNotFoundError(
-                f"Border edges not found at {EDGES_ON_BORDER_PATH}. "
-                f"Required for baseline workflow."
-            )
-
-        gdf_border = gpd.read_file(EDGES_ON_BORDER_PATH)
-        print(f"[INFO] Loaded {len(gdf_border)} edges from edges_on_corridor_border.gpkg")
+        gdf = gpd.read_file(EDGES_IN_CORRIDOR_PATH)
 
         if is_extended:
-            # EXTENDED MODE: Combine both, remove duplicates
-            gdf = gpd.GeoDataFrame(
-                pd.concat([gdf_main, gdf_border], ignore_index=True),
-                crs=gdf_main.crs
-            )
-
-            # Remove duplicate service links based on key columns
-            # (same service traversing same segment should only be counted once)
-            initial_count = len(gdf)
-            gdf = gdf.drop_duplicates(
-                subset=['FromNode', 'ToNode', 'Via', 'Service', 'Direction'],
-                keep='first'
-            )
-            if len(gdf) < initial_count:
-                print(f"[INFO] Removed {initial_count - len(gdf)} duplicate service links")
+            print(f"[INFO] Baseline extended mode: loaded {len(gdf)} edges from edges_in_corridor.gpkg")
         else:
-            # STANDARD MODE: Remove edges from in_corridor that also appear in border
-            # Find duplicates (edges that appear in BOTH files)
-            initial_count = len(gdf_main)
-
-            # Merge to find which rows in gdf_main exist in gdf_border
-            # Using indicator to identify matches
-            merged = gdf_main.merge(
-                gdf_border,
-                how='left',
-                indicator=True,
-                on=list(gdf_main.columns.drop('geometry'))  # Match on all non-geometry columns
-            )
-
-            # Keep only rows that are NOT in border file (left_only)
-            gdf = gdf_main[merged['_merge'] == 'left_only'].copy()
-
-            removed_count = initial_count - len(gdf)
-            if removed_count > 0:
-                print(f"[INFO] Removed {removed_count} edges from in_corridor that also appear in border")
+            print(f"[INFO] Baseline standard mode: loaded {len(gdf)} edges from edges_in_corridor.gpkg")
 
         print(f"[INFO] Total edges for baseline: {len(gdf)}")
 
@@ -581,14 +537,19 @@ def load_corridor_nodes_from_master(
     baseline_prep_path: Path = None,
     is_development: bool = False,
 ) -> Tuple[gpd.GeoDataFrame, Set[int]]:
-    """Load stations from master points file, filtered to nodes present in edges and baseline.
+    """Load stations from points file, filtered to nodes present in edges and baseline.
 
     This function is used for BOTH baseline and development workflows.
-    For development: Filters stations to those in baseline prep NR column + flags new stations.
+    For baseline standard: Uses points_corridor.gpkg (stations within corridor boundary).
+    For baseline extended: Uses points.gpkg (all stations in edges, no corridor filtering).
+    For development: Uses points.gpkg, filters to baseline prep NR column + flags new stations.
 
     Args:
         edges_gdf: Edges GeoDataFrame containing FromNode and ToNode columns.
-        master_points_path: Path to master points file. If None, uses MASTER_POINTS_PATH.
+        master_points_path: Path to points file. If None, auto-detects based on mode:
+                           - Baseline standard: points_corridor.gpkg
+                           - Baseline extended: points.gpkg
+                           - Development: points.gpkg
         baseline_prep_path: Path to baseline prep workbook (required for development workflow).
         is_development: If True, applies development filtering logic.
 
@@ -598,16 +559,27 @@ def load_corridor_nodes_from_master(
         - Set of new station IDs (empty for baseline, contains IDs not in points.gpkg for development)
 
     Raises:
-        FileNotFoundError: If master points file doesn't exist.
-        ValueError: If edge references node not found in master points, or baseline prep incomplete.
+        FileNotFoundError: If points file doesn't exist.
+        ValueError: If baseline edge references corridor node not found in points_corridor.gpkg.
     """
     if master_points_path is None:
-        master_points_path = MASTER_POINTS_PATH
+        # Check if extended mode based on settings
+        is_extended = str(getattr(settings, "rail_network", "")).endswith("_extended")
+
+        if is_development:
+            # DEVELOPMENT: Use full master points
+            master_points_path = MASTER_POINTS_PATH
+        elif is_extended:
+            # BASELINE EXTENDED: Use full master points (no corridor filtering)
+            master_points_path = MASTER_POINTS_PATH
+        else:
+            # BASELINE STANDARD: Use corridor points only
+            master_points_path = CORRIDOR_POINTS_PATH
 
     if not master_points_path.exists():
         raise FileNotFoundError(
-            f"Master points file not found at {master_points_path}. "
-            f"Please ensure the points.gpkg file exists."
+            f"Points file not found at {master_points_path}. "
+            f"Please ensure the file exists."
         )
 
     # Extract unique node IDs from edges (FromNode, ToNode, Via)
@@ -633,9 +605,21 @@ def load_corridor_nodes_from_master(
 
     print(f"[INFO] Extracted {len(node_ids)} unique node IDs from edges (FromNode, ToNode, Via)")
 
-    # Load master points file
+    # Load points file
     master_points = gpd.read_file(master_points_path)
-    print(f"[INFO] Loaded {len(master_points)} stations from master points file")
+
+    # Check if extended mode based on settings
+    is_extended = str(getattr(settings, "rail_network", "")).endswith("_extended")
+
+    # Determine points file name for logging
+    if is_development:
+        points_file_name = "points.gpkg"
+    elif is_extended:
+        points_file_name = "points.gpkg"
+    else:
+        points_file_name = "points_corridor.gpkg"
+
+    print(f"[INFO] Loaded {len(master_points)} stations from {points_file_name}")
 
     # Ensure ID_point is integer for matching
     master_points["ID_point"] = master_points["ID_point"].apply(parse_int)
@@ -674,29 +658,43 @@ def load_corridor_nodes_from_master(
 
         print(f"[INFO] Keeping {len(relevant_existing_stations)} baseline + {len(new_station_ids)} new = {len(stations_to_keep)} total stations")
 
-    else:
-        # BASELINE WORKFLOW: Keep all stations found in edges
-        stations_to_keep = node_ids
+    elif is_extended:
+        # BASELINE EXTENDED WORKFLOW: Keep ALL stations from edges (no corridor filtering)
+        # This captures all stations including those outside corridor boundary
+        # Via nodes are included if they appear in edges
+        stations_to_keep = existing_station_ids  # All nodes that exist in points.gpkg
         new_station_ids = set()  # No new stations in baseline
 
-        # Validate: all edge nodes must exist in master points
-        matched_ids = existing_station_ids
-        missing_ids = node_ids - matched_ids
+        # Report stations not found in points.gpkg (should extract from edges if any)
+        outside_points = node_ids - existing_station_ids
+        if outside_points:
+            print(f"[INFO] {len(outside_points)} edge nodes not found in points.gpkg (will extract from edges)")
 
-        if missing_ids:
-            missing_list = sorted(list(missing_ids)[:10])
-            missing_str = "\n".join([f'Station "{station_id}" is missing' for station_id in missing_list])
-            if len(missing_ids) > 10:
-                missing_str += f"\n... and {len(missing_ids) - 10} more"
+        print(f"[INFO] Keeping {len(stations_to_keep)} stations from edges (no corridor filtering)")
 
-            raise ValueError(
-                f"{len(missing_ids)} node IDs not found in master points file:\n"
-                f"{missing_str}\n"
-                f"Please ensure all nodes (FromNode, ToNode, Via) in edges exist in points.gpkg."
-            )
+    else:
+        # BASELINE STANDARD WORKFLOW: Keep only corridor stations (intersection of edge nodes and corridor points)
+        # This filters out stations outside the corridor (e.g., endpoints of through-services)
+        # but still captures services passing through corridor stations via the Via list
+        stations_to_keep = existing_station_ids  # Only nodes that exist in points_corridor.gpkg
+        new_station_ids = set()  # No new stations in baseline
+
+        # Report stations filtered out (appear in edges but not in corridor)
+        outside_corridor = node_ids - existing_station_ids
+        if outside_corridor:
+            print(f"[INFO] {len(outside_corridor)} edge nodes are outside corridor boundary (filtered out)")
+            print(f"       These are typically endpoints of through-services")
+
+        print(f"[INFO] Keeping {len(stations_to_keep)} stations within corridor boundary")
 
     # Filter master points to stations we're keeping
     points_gdf = master_points[master_points["ID_point"].isin(stations_to_keep)].copy()
+
+    # For extended mode, also need to extract stations not found in points.gpkg
+    if is_extended and not is_development:
+        outside_points = node_ids - existing_station_ids
+        if outside_points:
+            new_station_ids = outside_points
 
     # For NEW stations (not in points.gpkg), we need to extract from edges
     if new_station_ids:
@@ -704,10 +702,11 @@ def load_corridor_nodes_from_master(
         new_stations_gdf = extract_stations_from_edges(edges_gdf)
         new_stations_gdf = new_stations_gdf[new_stations_gdf["ID_point"].isin(new_station_ids)].copy()
 
-        # Flag new stations with [NEW] suffix in NAME
-        for idx, row in new_stations_gdf.iterrows():
-            original_name = row["NAME"]
-            new_stations_gdf.at[idx, "NAME"] = f"{original_name} [NEW]"
+        # Flag new stations with [NEW] suffix in NAME (only for development mode)
+        if is_development:
+            for idx, row in new_stations_gdf.iterrows():
+                original_name = row["NAME"]
+                new_stations_gdf.at[idx, "NAME"] = f"{original_name} [NEW]"
 
         # Combine with points from master
         points_gdf = gpd.GeoDataFrame(
@@ -1067,32 +1066,8 @@ def build_capacity_tables(
 
     # Get edges GeoDataFrame for later use (needed for enrichment geometry lookups)
     if is_baseline:
-        # For baseline, need to reload edges to get GeoDataFrame
-        # Check if extended mode
-        is_extended = str(getattr(settings, "rail_network", "")).endswith("_extended")
-        gdf_main = gpd.read_file(EDGES_IN_CORRIDOR_PATH)
-        gdf_border = gpd.read_file(EDGES_ON_BORDER_PATH)
-
-        if is_extended:
-            # EXTENDED MODE: Combine both, remove duplicates
-            edges_gdf = gpd.GeoDataFrame(
-                pd.concat([gdf_main, gdf_border], ignore_index=True),
-                crs=gdf_main.crs
-            )
-            # Remove duplicate service links based on key columns
-            edges_gdf = edges_gdf.drop_duplicates(
-                subset=['FromNode', 'ToNode', 'Via', 'Service', 'Direction'],
-                keep='first'
-            )
-        else:
-            # STANDARD MODE: Remove edges from in_corridor that also appear in border
-            merged = gdf_main.merge(
-                gdf_border,
-                how='left',
-                indicator=True,
-                on=list(gdf_main.columns.drop('geometry'))
-            )
-            edges_gdf = gdf_main[merged['_merge'] == 'left_only'].copy()
+        # For baseline (both standard and extended), load edges from edges_in_corridor.gpkg
+        edges_gdf = gpd.read_file(EDGES_IN_CORRIDOR_PATH)
     else:
         # For development, load from custom path
         edges_gdf = gpd.read_file(edges_path)
@@ -2058,11 +2033,6 @@ def export_capacity_workbook(
     needs_manual_enrichment = has_na_tracks_stations or has_na_platforms or has_na_tracks_segments or has_na_speed
 
     if needs_manual_enrichment and not skip_manual_checkpoint:
-        # Save as prep workbook for user to fill
-        import shutil
-        shutil.copy2(output_path, prep_path)
-        print(f"[INFO] Prep workbook saved to {prep_path} for manual enrichment")
-
         # Prompt user to fill missing values
         print("\n" + "="*80)
         print("MANUAL ENRICHMENT REQUIRED")
@@ -2073,13 +2043,22 @@ def export_capacity_workbook(
         if has_na_tracks_segments or has_na_speed:
             print(f"  - {segment_metrics['tracks'].isna().sum()} segments missing 'tracks'")
             print(f"  - {segment_metrics['speed'].isna().sum()} segments missing 'speed'")
-        print(f"\nPlease open the prep workbook and fill the missing values:")
-        print(f"  {prep_path}")
+        print(f"\nPlease do the following:")
+        print(f"  1. Open the raw workbook in Excel: {output_path}")
+        print(f"  2. Fill all NA values for tracks, platforms, speed, length_m")
+        print(f"  3. Save the file as: {prep_path}")
+        print(f"  4. Return here and confirm completion")
         print("="*80)
 
-        response = input("\nHave you filled the missing data (y/n)? ").strip().lower()
+        response = input("\nHave you filled the missing data and saved as *_prep.xlsx (y/n)? ").strip().lower()
         if response not in {"y", "yes"}:
             print("Skipping section calculation. Re-run after updating the workbook.")
+            return output_path
+
+        # Check if prep workbook exists
+        if not prep_path.exists():
+            print(f"\n[ERROR] Prep workbook not found at: {prep_path}")
+            print(f"Please save your enriched workbook as {prep_path.name} and re-run.")
             return output_path
 
         # Reload enriched data from prep workbook
@@ -2088,16 +2067,22 @@ def export_capacity_workbook(
         segment_metrics = pd.read_excel(prep_path, sheet_name="Segments")
 
     elif needs_manual_enrichment and skip_manual_checkpoint:
-        # Skip manual enrichment but still save prep workbook
+        # Skip manual enrichment but still save prep workbook (only if it doesn't exist)
         import shutil
-        shutil.copy2(output_path, prep_path)
-        print(f"[INFO] Prep workbook saved to {prep_path} (manual enrichment skipped)")
+        if not prep_path.exists():
+            shutil.copy2(output_path, prep_path)
+            print(f"[INFO] Prep workbook saved to {prep_path} (manual enrichment skipped)")
+        else:
+            print(f"[INFO] Prep workbook already exists, not overwriting: {prep_path}")
         return output_path
     else:
-        # No manual enrichment needed: save prep workbook for sections calculation
+        # No manual enrichment needed: save prep workbook for sections calculation (only if doesn't exist)
         import shutil
-        shutil.copy2(output_path, prep_path)
-        print(f"[INFO] Prep workbook saved to {prep_path}")
+        if not prep_path.exists():
+            shutil.copy2(output_path, prep_path)
+            print(f"[INFO] Prep workbook saved to {prep_path}")
+        else:
+            print(f"[INFO] Using existing prep workbook: {prep_path}")
 
     # Calculate and export sections
     try:
