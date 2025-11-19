@@ -1,1 +1,15 @@
-Initialize variables: 0.1401352882385254/nImport land use and land cover data: 0.19631052017211914/nPreprocess the network: 1.4518299102783203/nGenerate infrastructure developments: 31.903023958206177/nGenerate OD matrix: 15.859405994415283/nCalculate Traveltimes for all developments: 35.55583357810974/nCompute and visualize passenger flows on network: 0.0/nGenerate the scenarios: 146.62676811218262/nCalculate the TTT Savings: 374.7276301383972/nCompute costs: 7.426204204559326/nAggregate costs: 2.776740550994873/n
+Phase 0 – Setup & runtime tracking: 0.00s
+Preprocess the network: 4.24s
+Import raw data / Generate OD matrix: 2.70s
+Visualize base network: 12.35s
+Sections export & plot: 48.99s
+Generate infrastructure developments: 56.65s
+Calculate Traveltimes for all developments: 39.43s
+Generate the scenarios: 18.15s
+Calculate the TTT savings: 28.88s
+Compute costs: 4.82s
+Aggregate costs: 0.65s
+Capacity evaluation: 0.01s
+User selection: 0.00s
+Intervention 101032 simulation: 18.87s
+Reporting & wrap-up: 0.00s
