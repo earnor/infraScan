@@ -24,3 +24,8 @@ discount_rate = 0.03  # 3% discount rate
 average_train_change_time = 7.1 #Axhausen, 2014
 change_time_comfort_factor = 1.7
 comfort_weighted_change_time = int(np.round(average_train_change_time * change_time_comfort_factor))  # Comfort weighted change time in minutes
+
+# Phase 4: Capacity Enhancement Interventions
+# These are placeholder values and should be updated based on actual cost estimates
+station_track_cost_chf = 50_000_000  # CHF per additional station track (placeholder)
+passing_siding_cost_chf_per_km = 25_000_000  # CHF/km for passing siding construction (placeholder)

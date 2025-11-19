@@ -155,12 +155,18 @@ def _derive_plot_output_path(
     safe_network_tag = re.sub(r"[^\w-]+", "_", str(network_tag)).strip("_") or "current"
     filename = f"{safe_network_tag}_network_{plot_type}.png"
 
-    # Auto-detect development output directory from network_label
+    # Auto-detect development or enhanced output directory from network_label
     if output_dir is None and network_label is not None:
         dev_match = re.search(r'_dev_(\d+)', network_label)
+        is_enhanced = "_enhanced" in network_label
+
         if dev_match:
+            # Development network
             dev_id = dev_match.group(1)
-            output_dir = DEFAULT_OUTPUT_DIR / "developments" / dev_id
+            output_dir = DEFAULT_OUTPUT_DIR / "Developments" / dev_id
+        elif is_enhanced:
+            # Enhanced network
+            output_dir = DEFAULT_OUTPUT_DIR / safe_network_tag
 
     if output_dir is not None:
         # DEVELOPMENT MODE: Use provided/detected directory
@@ -316,14 +322,21 @@ def _resolve_workbook_path(network_label: str = None, output_dir: Path = None) -
     Returns:
         Path to the capacity prep workbook.
     """
-    # Auto-detect development output directory from network_label
+    # Auto-detect output directory from network_label (development or enhanced)
     if output_dir is None and network_label is not None:
         import re
         dev_match = re.search(r'_dev_(\d+)', network_label)
+        is_enhanced = "_enhanced" in network_label
+
         if dev_match:
+            # Development network
             dev_id = dev_match.group(1)
             from capacity_calculator import CAPACITY_ROOT
-            output_dir = CAPACITY_ROOT / "developments" / dev_id
+            output_dir = CAPACITY_ROOT / "Developments" / dev_id
+        elif is_enhanced:
+            # Enhanced network - capacity_output_path will handle this
+            # Just pass through to capacity_output_path
+            pass
 
     from capacity_calculator import capacity_output_path
     base_path = capacity_output_path(network_label=network_label, output_dir=output_dir)
@@ -731,35 +744,51 @@ def _load_capacity_sections(
         safe_network_tag = re.sub(r"[^\w-]+", "_", str(network_tag)).strip("_") or "current"
         expected_filename = f"capacity_{safe_network_tag}_network_sections.xlsx"
 
-        # Auto-detect output directory for developments
+        # Auto-detect output directory for developments and enhanced
         if output_dir is None and network_label is not None:
             dev_match = re.search(r'_dev_(\d+)', network_label)
+            is_enhanced = "_enhanced" in network_label
+
             if dev_match:
+                # Development network
                 dev_id = dev_match.group(1)
                 from capacity_calculator import CAPACITY_ROOT
-                output_dir = CAPACITY_ROOT / "developments" / dev_id
+                output_dir = CAPACITY_ROOT / "Developments" / dev_id
+            elif is_enhanced:
+                # Enhanced network
+                from capacity_calculator import CAPACITY_ROOT
+                output_dir = CAPACITY_ROOT / "Enhanced" / safe_network_tag
 
         if output_dir is not None:
-            # Development or custom directory
+            # Development, Enhanced, or custom directory
             new_path = output_dir / expected_filename
         else:
-            # Baseline: Try new structure first
-            network_subdir = CAPACITY_DIR / safe_network_tag
+            # Baseline: Try new structure first (Baseline subdirectory)
+            network_subdir = CAPACITY_DIR / "Baseline" / safe_network_tag
             new_path = network_subdir / expected_filename
+
+        # Fallback attempts
+        tried_paths = [new_path]
 
         if new_path.exists():
             workbook = new_path
         else:
-            # Fall back to legacy flat structure (baseline only)
-            legacy_path = CAPACITY_DIR / expected_filename
-            if legacy_path.exists():
-                workbook = legacy_path
+            # Fallback 1: Old structure with network subdirectory (no Baseline parent)
+            fallback1 = CAPACITY_DIR / safe_network_tag / expected_filename
+            tried_paths.append(fallback1)
+            if fallback1.exists():
+                workbook = fallback1
             else:
-                raise FileNotFoundError(
-                    f"Sections workbook not found:\n"
-                    f"  Tried: {new_path}\n"
-                    f"  Tried: {legacy_path}"
-                )
+                # Fallback 2: Legacy flat structure (no subdirectory)
+                fallback2 = CAPACITY_DIR / expected_filename
+                tried_paths.append(fallback2)
+                if fallback2.exists():
+                    workbook = fallback2
+                else:
+                    raise FileNotFoundError(
+                        f"Sections workbook not found. Tried:\n" +
+                        "\n".join(f"  - {p}" for p in tried_paths)
+                    )
 
     if not workbook.exists():
         raise FileNotFoundError(f"Sections workbook not found: {workbook}")

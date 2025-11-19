@@ -34,18 +34,17 @@ CAPACITY_ROOT = DATA_ROOT / "capacity"
 def capacity_output_path(network_label: str = None, output_dir: Path = None) -> Path:
     """Return the capacity workbook path for the active rail network.
 
-    For baseline workflow (no output_dir), creates subdirectories based on network name:
-      - CAPACITY_ROOT / AK_2035 / capacity_AK_2035_network.xlsx
-      - CAPACITY_ROOT / AK_2035_extended / capacity_AK_2035_extended_network.xlsx
-
-    For development workflow (with output_dir), uses provided directory directly.
+    Directory structure:
+      - CAPACITY_ROOT / Baseline / {network} / capacity_{network}_network.xlsx
+      - CAPACITY_ROOT / Enhanced / {network}_enhanced / capacity_{network}_enhanced_network.xlsx
+      - CAPACITY_ROOT / Developments / {dev_id} / capacity_{network}_dev_{dev_id}_network.xlsx
 
     Args:
-        network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
+        network_label: Optional custom network label (e.g., "AK_2035_dev_100023" or "AK_2035_enhanced").
                       If None, uses settings.rail_network.
         output_dir: Optional custom output directory.
-                   - If None: baseline mode (creates subdirectory)
-                   - If provided: development mode (uses directory as-is)
+                   - If None: auto-detects category (Baseline/Enhanced/Developments)
+                   - If provided: uses directory directly (for Developments workflow)
 
     Returns:
         Path to the capacity workbook.
@@ -59,11 +58,26 @@ def capacity_output_path(network_label: str = None, output_dir: Path = None) -> 
     filename = f"capacity_{safe_network_tag}_network.xlsx"
 
     if output_dir is not None:
-        # DEVELOPMENT MODE: Use provided directory directly
+        # DEVELOPMENT MODE: Use provided directory directly (already in Developments subdirectory)
         return output_dir / filename
     else:
-        # BASELINE MODE: Create subdirectory based on network name
-        network_subdir = CAPACITY_ROOT / safe_network_tag
+        # AUTO-DETECT MODE: Determine category based on network_label
+        # Check if this is a development network (_dev_XXXXX pattern)
+        dev_match = re.search(r"_dev_(\d+)", safe_network_tag)
+        # Check if this is an enhanced network (_enhanced suffix)
+        is_enhanced = "_enhanced" in safe_network_tag
+
+        if dev_match:
+            # DEVELOPMENT: CAPACITY_ROOT / Developments / {dev_id} / ...
+            dev_id = dev_match.group(1)
+            network_subdir = CAPACITY_ROOT / "Developments" / dev_id
+        elif is_enhanced:
+            # ENHANCED: CAPACITY_ROOT / Enhanced / {network}_enhanced / ...
+            network_subdir = CAPACITY_ROOT / "Enhanced" / safe_network_tag
+        else:
+            # BASELINE: CAPACITY_ROOT / Baseline / {network} / ...
+            network_subdir = CAPACITY_ROOT / "Baseline" / safe_network_tag
+
         network_subdir.mkdir(parents=True, exist_ok=True)
         return network_subdir / filename
 
@@ -1014,21 +1028,27 @@ def _derive_baseline_prep_path() -> Path:
     network_tag = getattr(settings, "rail_network", "current")
     safe_network_tag = re.sub(r"[^\w-]+", "_", str(network_tag)).strip("_") or "current"
 
-    # Try with _prep suffix first (most common)
-    prep_path = CAPACITY_ROOT / safe_network_tag / f"capacity_{safe_network_tag}_network_prep.xlsx"
+    # Try new structure first: Baseline subdirectory
+    prep_path = CAPACITY_ROOT / "Baseline" / safe_network_tag / f"capacity_{safe_network_tag}_network_prep.xlsx"
 
     if prep_path.exists():
         return prep_path
 
-    # Fallback: try without subdirectory
-    prep_path_fallback = CAPACITY_ROOT / f"capacity_{safe_network_tag}_network_prep.xlsx"
-    if prep_path_fallback.exists():
-        return prep_path_fallback
+    # Fallback 1: Old structure with subdirectory (for backwards compatibility)
+    prep_path_old_subdir = CAPACITY_ROOT / safe_network_tag / f"capacity_{safe_network_tag}_network_prep.xlsx"
+    if prep_path_old_subdir.exists():
+        return prep_path_old_subdir
+
+    # Fallback 2: Old structure without subdirectory
+    prep_path_old_flat = CAPACITY_ROOT / f"capacity_{safe_network_tag}_network_prep.xlsx"
+    if prep_path_old_flat.exists():
+        return prep_path_old_flat
 
     raise FileNotFoundError(
         f"Baseline prep workbook not found. Tried:\n"
         f"  - {prep_path}\n"
-        f"  - {prep_path_fallback}\n\n"
+        f"  - {prep_path_old_subdir}\n"
+        f"  - {prep_path_old_flat}\n\n"
         f"Please run the baseline workflow and manually enrich the workbook first."
     )
 
@@ -2001,7 +2021,7 @@ def export_capacity_workbook(
         dev_match = re.search(r'_dev_(\d+)', network_label)
         if dev_match:
             dev_id = dev_match.group(1)
-            output_dir = CAPACITY_ROOT / "developments" / dev_id
+            output_dir = CAPACITY_ROOT / "Developments" / dev_id
             print(f"[INFO] Auto-detected development output directory: {output_dir}")
 
     if output_dir is not None:
@@ -2110,7 +2130,3 @@ def export_capacity_workbook(
         print(f"[WARNING] Could not calculate sections: {e}")
 
     return output_path
-
-
-if __name__ == "__main__":
-    export_capacity_workbook()
