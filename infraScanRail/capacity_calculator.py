@@ -1302,10 +1302,10 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
     stations_df["NR"] = stations_df["NR"].astype(int)
 
     node_tracks_series = pd.to_numeric(stations_df.get("tracks"), errors="coerce")
-    node_tracks: Dict[int, int] = {}
+    node_tracks: Dict[int, float] = {}
     for node_id, track_value in zip(stations_df["NR"], node_tracks_series):
         if pd.notna(track_value):
-            node_tracks[int(node_id)] = int(track_value)
+            node_tracks[int(node_id)] = float(track_value)
 
     node_names = {
         int(row_NR): str(name) if pd.notna(name) else ""
@@ -1363,7 +1363,7 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
 
     segments_df["from_node"] = segments_df["from_node"].astype(int)
     segments_df["to_node"] = segments_df["to_node"].astype(int)
-    segments_df["track_key"] = segments_df["track_key"].astype(int)
+    segments_df["track_key"] = segments_df["track_key"].astype(float)
 
     segments_df["length_value"] = pd.to_numeric(segments_df.get("length_m"), errors="coerce").fillna(0.0)
     segments_df["passing_value"] = pd.to_numeric(
@@ -1393,11 +1393,11 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
         segments_df[column] = parsed.map(lambda pair: pair[0])
         segments_df[f"{column}_tokens"] = parsed.map(lambda pair: pair[1])
 
-    edges_by_track: Dict[int, Dict[frozenset, Dict[str, float]]] = {}
-    adjacency_by_track: Dict[int, defaultdict[int, set[int]]] = {}
+    edges_by_track: Dict[float, Dict[frozenset, Dict[str, float]]] = {}
+    adjacency_by_track: Dict[float, defaultdict[int, set[int]]] = {}
 
     for row in segments_df.itertuples(index=False):
-        track = int(row.track_key)
+        track = float(row.track_key)
         u = int(row.from_node)
         v = int(row.to_node)
         key = frozenset({u, v})
@@ -1685,7 +1685,7 @@ def _split_section_by_service_patterns(
 
 def _summarise_section(
     section_id: int,
-    track: int,
+    track: float,
     path_nodes: List[int],
     edge_records: List[Tuple[int, int, Dict[str, float]]],
     node_names: Dict[int, str],
@@ -1869,7 +1869,20 @@ def _summarise_section(
     service_count = len(all_services)
     strategy_metrics: List[Tuple[str, float, float]] = []
 
-    if track == 1:
+    # Fractional track support: .5 increments halve section travel times
+    is_fractional = (track % 1 == 0.5)  # True for 1.5, 2.5
+    base_track = math.floor(track)  # 1.5→1, 2.5→2
+
+    if is_fractional:
+        # Halve travel times to simulate section_length_m / 2
+        total_stopping_time = total_stopping_time / 2.0
+        total_passing_time = total_passing_time / 2.0
+        travel_time_penalty = max(0.0, total_stopping_time - total_passing_time - headway)
+        formula_track = base_track
+    else:
+        formula_track = int(track)
+
+    if formula_track == 1:
         single_capacity = float("nan")
         if total_stopping_time > 0:
             raw_capacity = _floor_capacity(60.0 / float(total_stopping_time))
@@ -1879,7 +1892,7 @@ def _summarise_section(
             total_tphpd if not math.isnan(total_tphpd) else (total_tph / 2.0 if not math.isnan(total_tph) else float("nan"))
         )
         capacity_columns["utilization_single_track"] = _utilization(single_capacity, demand_single_track)
-    elif track == 2:
+    elif formula_track == 2:
         if not stopping_services or not passing_services_list:
             uniform_capacity = _floor_capacity(60.0 / headway)
             capacity_columns["capacity_uniform_pattern_tphpd"] = uniform_capacity
@@ -1914,10 +1927,10 @@ def _summarise_section(
     selected_capacity = float("nan")
     selected_utilization = float("nan")
 
-    if track == 1:
+    if formula_track == 1:
         selected_capacity = capacity_columns["capacity_single_track_tphpd"]
         selected_utilization = capacity_columns["utilization_single_track"]
-    elif track == 2:
+    elif formula_track == 2:
         if not stopping_services or not passing_services_list:
             selected_capacity = capacity_columns["capacity_uniform_pattern_tphpd"]
             selected_utilization = capacity_columns["utilization_uniform_pattern"]

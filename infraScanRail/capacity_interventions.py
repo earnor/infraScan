@@ -346,8 +346,8 @@ def visualize_enhanced_network(
     enhanced_prep_path: Path,
     enhanced_sections_path: Path,
     interventions_list: List[CapacityIntervention],
-    output_dir: Path,
-    network_label: str = "AK_2035_enhanced"
+    network_label: str = "AK_2035_enhanced",
+    output_dir: Path = None
 ) -> Tuple[Path, Path]:
     """
     Generate infrastructure and capacity plots for enhanced network.
@@ -359,26 +359,22 @@ def visualize_enhanced_network(
         enhanced_prep_path: Path to enhanced prep workbook
         enhanced_sections_path: Path to enhanced sections workbook
         interventions_list: List of interventions applied
-        output_dir: Directory to save plots
-        network_label: Network label for plot paths
+        network_label: Network label for plot paths (auto-detects plot directory)
+        output_dir: (Deprecated) Not used - plot directory auto-detected from network_label
 
     Returns:
         Tuple of (infrastructure_plot_path, capacity_plot_path)
     """
     logger.info("Generating enhanced network visualizations")
 
-    # Create output directory for plots
-    plot_dir = Path("plots") / "network" / network_label
-    plot_dir.mkdir(parents=True, exist_ok=True)
-
     # Generate infrastructure and capacity plots using existing function
+    # Note: output_dir is NOT passed to allow auto-detection based on network_label
     infrastructure_plot, capacity_plot = plot_capacity_network(
         workbook_path=str(enhanced_prep_path),
         sections_workbook_path=str(enhanced_sections_path),
         generate_network=True,
         show=False,
-        network_label=network_label,
-        output_dir=output_dir
+        network_label=network_label
     )
 
     logger.info(f"Infrastructure plot saved to: {infrastructure_plot}")
@@ -513,9 +509,11 @@ def run_phase_four(
     interventions_df.to_csv(catalog_path, index=False)
     logger.info(f"Interventions catalog saved to: {catalog_path}")
 
-    # Save final sections
+    # Save final sections (with stations and segments for plotting)
     final_sections_path = output_dir / "capacity_AK_2035_enhanced_network_sections.xlsx"
     with pd.ExcelWriter(final_sections_path, engine='openpyxl') as writer:
+        original_stations_df.to_excel(writer, sheet_name='Stations', index=False)
+        original_segments_df.to_excel(writer, sheet_name='Segments', index=False)
         current_sections_df.to_excel(writer, sheet_name='Sections', index=False)
     logger.info(f"Final sections saved to: {final_sections_path}")
 

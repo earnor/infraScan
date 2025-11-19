@@ -32,6 +32,11 @@ import pandas as pd
 from capacity_calculator import export_capacity_workbook, _derive_prep_path, _derive_sections_path
 from capacity_interventions import run_phase_four, visualize_enhanced_network
 import settings
+import paths
+
+# Define absolute paths (consistent with capacity_calculator.py)
+DATA_ROOT = Path(paths.MAIN) / "data" / "Network"
+CAPACITY_ROOT = DATA_ROOT / "capacity"
 
 
 def run_baseline_workflow(network_label: str, visualize: bool = True) -> int:
@@ -241,12 +246,12 @@ def run_development_workflow(
     print(f"Development ID: {dev_id}")
 
     # Construct paths
-    dev_edges_path = Path("data/Network/processed/developments") / f"{dev_id}.gpkg"
-    baseline_prep_path = Path("data/Network/capacity/Baseline") / base_network / f"capacity_{base_network}_network_prep.xlsx"
+    dev_edges_path = DATA_ROOT / "processed" / "developments" / f"{dev_id}.gpkg"
+    baseline_prep_path = CAPACITY_ROOT / "Baseline" / base_network / f"capacity_{base_network}_network_prep.xlsx"
 
     # Fallback to old structure if new structure doesn't exist
     if not baseline_prep_path.exists():
-        baseline_prep_path = Path("data/Network/capacity") / base_network / f"capacity_{base_network}_network_prep.xlsx"
+        baseline_prep_path = CAPACITY_ROOT / base_network / f"capacity_{base_network}_network_prep.xlsx"
 
     print(f"\nDevelopment edges: {dev_edges_path}")
     print(f"Baseline prep: {baseline_prep_path}")
@@ -362,18 +367,18 @@ def run_enhanced_workflow(
     print(f"Max iterations: {max_iterations}")
 
     # Input paths from Baseline subdirectory
-    base_capacity_dir = Path("data/Network/capacity/Baseline") / network_label
+    base_capacity_dir = CAPACITY_ROOT / "Baseline" / network_label
     prep_workbook_path = base_capacity_dir / f"capacity_{network_label}_network_prep.xlsx"
     sections_workbook_path = base_capacity_dir / f"capacity_{network_label}_network_sections.xlsx"
 
     # Fallback to old structure
     if not prep_workbook_path.exists():
-        base_capacity_dir = Path("data/Network/capacity") / network_label
+        base_capacity_dir = CAPACITY_ROOT / network_label
         prep_workbook_path = base_capacity_dir / f"capacity_{network_label}_network_prep.xlsx"
         sections_workbook_path = base_capacity_dir / f"capacity_{network_label}_network_sections.xlsx"
 
     # Output paths to Enhanced subdirectory
-    output_dir = Path("data/Network/capacity/Enhanced") / f"{network_label}_enhanced"
+    output_dir = CAPACITY_ROOT / "Enhanced" / f"{network_label}_enhanced"
 
     print(f"\nInput:")
     print(f"  Prep workbook: {prep_workbook_path}")
@@ -436,7 +441,6 @@ def run_enhanced_workflow(
             enhanced_prep_path=enhanced_prep_path,
             enhanced_sections_path=enhanced_sections_path,
             interventions_list=interventions_catalog,
-            output_dir=output_dir,
             network_label=f"{network_label}_enhanced"
         )
 

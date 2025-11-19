@@ -155,26 +155,29 @@ def _derive_plot_output_path(
     safe_network_tag = re.sub(r"[^\w-]+", "_", str(network_tag)).strip("_") or "current"
     filename = f"{safe_network_tag}_network_{plot_type}.png"
 
-    # Auto-detect development or enhanced output directory from network_label
+    # Auto-detect category from network_label (mirrors data structure)
     if output_dir is None and network_label is not None:
         dev_match = re.search(r'_dev_(\d+)', network_label)
         is_enhanced = "_enhanced" in network_label
 
         if dev_match:
-            # Development network
+            # Development network: plots/network/Developments/{dev_id}/
             dev_id = dev_match.group(1)
             output_dir = DEFAULT_OUTPUT_DIR / "Developments" / dev_id
         elif is_enhanced:
-            # Enhanced network
-            output_dir = DEFAULT_OUTPUT_DIR / safe_network_tag
+            # Enhanced network: plots/network/Enhanced/{network_label}/
+            output_dir = DEFAULT_OUTPUT_DIR / "Enhanced" / safe_network_tag
+        else:
+            # Baseline network: plots/network/Baseline/{network_label}/
+            output_dir = DEFAULT_OUTPUT_DIR / "Baseline" / safe_network_tag
 
     if output_dir is not None:
-        # DEVELOPMENT MODE: Use provided/detected directory
+        # Use detected/provided directory
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir / filename
     else:
-        # BASELINE MODE: Create subdirectory based on network name
-        network_subdir = DEFAULT_OUTPUT_DIR / safe_network_tag
+        # Fallback: Baseline with current network
+        network_subdir = DEFAULT_OUTPUT_DIR / "Baseline" / safe_network_tag
         network_subdir.mkdir(parents=True, exist_ok=True)
         return network_subdir / filename
 
@@ -1460,15 +1463,69 @@ def _draw_segments(
             xs, ys = (start.x, end.x), (start.y, end.y)
             coords = list(zip(xs, ys))
 
-        ax.plot(
-            xs,
-            ys,
-            color="black",
-            linewidth=line_width,
-            zorder=2,
-        )
+        # Check for fractional tracks (passing sidings)
+        is_fractional = (segment.tracks % 1 == 0.5) if not math.isnan(segment.tracks) else False
 
-        separator_count = max(track_count - 1, 0)
+        if is_fractional:
+            # Fractional tracks (e.g., 1.5): Draw single track + partial double track in middle 30%
+            # Draw full single-track line
+            ax.plot(
+                xs,
+                ys,
+                color="black",
+                linewidth=_line_width(math.floor(segment.tracks)),  # Use base track width
+                zorder=2,
+            )
+
+            # Draw partial double-track section in middle 30% of segment
+            line_geom = LineString(coords)
+            total_length = line_geom.length
+
+            if total_length > 0:
+                # Calculate middle 30% section (centered at 50%)
+                start_fraction = 0.35
+                end_fraction = 0.65
+
+                # Extract middle section coordinates
+                middle_start = line_geom.interpolate(start_fraction, normalized=True)
+                middle_end = line_geom.interpolate(end_fraction, normalized=True)
+
+                # Create LineString for middle section
+                middle_section = LineString([middle_start, middle_end])
+                middle_coords = list(middle_section.coords)
+                mx, my = zip(*middle_coords)
+
+                # Draw double-track width for passing siding section
+                double_line_width = _line_width(math.ceil(segment.tracks))  # Width for next integer track
+                ax.plot(
+                    mx,
+                    my,
+                    color="black",
+                    linewidth=double_line_width,
+                    zorder=2.1,
+                )
+
+                # Draw separator for passing siding section
+                separator_width = max(0.6, double_line_width * 0.18)
+                ax.plot(
+                    mx,
+                    my,
+                    color="white",
+                    linewidth=separator_width,
+                    zorder=2.5,
+                )
+                separators_used = True
+        else:
+            # Integer tracks: Draw normally
+            ax.plot(
+                xs,
+                ys,
+                color="black",
+                linewidth=line_width,
+                zorder=2,
+            )
+
+        separator_count = max(track_count - 1, 0) if not is_fractional else 0
         if separator_count > 0:
             separator_width = max(0.6, line_width * 0.18)
             spacing = max(12.0, line_width * 5.0)
