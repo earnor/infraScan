@@ -39,14 +39,14 @@ DATA_ROOT = Path(paths.MAIN) / "data" / "Network"
 CAPACITY_ROOT = DATA_ROOT / "capacity"
 
 
-def run_baseline_workflow(network_label: str, visualize: bool = True) -> int:
+def run_baseline_workflow(network_label: str = None, visualize: bool = True) -> int:
     """
     Execute baseline (standard) capacity workflow.
 
     Uses corridor-filtered stations (points_corridor.gpkg).
 
     Args:
-        network_label: Network label (e.g., "AK_2035")
+        network_label: Network label (e.g., "AK_2035"). If None, uses settings.rail_network.
         visualize: Whether to generate plots after sections calculation
 
     Returns:
@@ -55,6 +55,11 @@ def run_baseline_workflow(network_label: str, visualize: bool = True) -> int:
     print("\n" + "=" * 70)
     print("BASELINE WORKFLOW - Standard (Corridor-Filtered)")
     print("=" * 70)
+
+    # Use settings.rail_network if no network label provided
+    if network_label is None:
+        network_label = settings.rail_network
+
     print(f"\nNetwork: {network_label}")
     print(f"Stations: points_corridor.gpkg (corridor boundary only)")
     print(f"Edges: edges_in_corridor.gpkg")
@@ -131,14 +136,15 @@ def run_baseline_workflow(network_label: str, visualize: bool = True) -> int:
         settings.rail_network = original_network
 
 
-def run_baseline_extended_workflow(network_label: str, visualize: bool = True) -> int:
+def run_baseline_extended_workflow(network_label: str = None, visualize: bool = True) -> int:
     """
     Execute baseline extended capacity workflow.
 
     Uses all stations (points.gpkg), no corridor filtering.
 
     Args:
-        network_label: Network label (e.g., "AK_2035_extended")
+        network_label: Network label (e.g., "AK_2035_extended").
+                      If None, uses settings.rail_network + "_extended".
         visualize: Whether to generate plots after sections calculation
 
     Returns:
@@ -147,6 +153,11 @@ def run_baseline_extended_workflow(network_label: str, visualize: bool = True) -
     print("\n" + "=" * 70)
     print("BASELINE EXTENDED WORKFLOW - All Stations (No Corridor Filter)")
     print("=" * 70)
+
+    # Use settings.rail_network + "_extended" if no network label provided
+    if network_label is None:
+        network_label = f"{settings.rail_network}_extended"
+
     print(f"\nNetwork: {network_label}")
     print(f"Stations: points.gpkg (all stations)")
     print(f"Edges: edges_in_corridor.gpkg")
@@ -224,24 +235,30 @@ def run_baseline_extended_workflow(network_label: str, visualize: bool = True) -
 
 
 def run_development_workflow(
-    base_network: str,
     dev_id: str,
+    base_network: str = None,
     visualize: bool = True
 ) -> int:
     """
     Execute development capacity workflow with auto-enrichment.
 
     Args:
-        base_network: Base network label (e.g., "AK_2035_extended")
-        dev_id: Development ID (e.g., "101032.0")
+        dev_id: Development ID (e.g., "101032.0") - Required
+        base_network: Base network label (e.g., "AK_2035_extended").
+                     If None, uses settings.rail_network + "_extended".
         visualize: Whether to generate plots after sections calculation
 
     Returns:
         Exit code (0 for success, 1 for error)
     """
     print("\n" + "=" * 70)
-    print("DEVELOPMENT WORKFLOW - Auto-Enriched from Baseline")
+    print("DEVELOPMENT WORKFLOW - Selective Enhanced Enrichment")
     print("=" * 70)
+
+    # Use settings.rail_network + "_extended" if no base network provided
+    if base_network is None:
+        base_network = f"{settings.rail_network}_extended"
+
     print(f"\nBase network: {base_network}")
     print(f"Development ID: {dev_id}")
 
@@ -255,6 +272,7 @@ def run_development_workflow(
 
     print(f"\nDevelopment edges: {dev_edges_path}")
     print(f"Baseline prep: {baseline_prep_path}")
+    print(f"Enhanced baseline: Auto-detected (selective enrichment based on capacity demand increases)")
     print("\n" + "-" * 70 + "\n")
 
     # Validation
@@ -278,7 +296,8 @@ def run_development_workflow(
         network_label = f"{base_network}_dev_{dev_id}"
 
         print("Step 1: Generating auto-enriched capacity workbook...")
-        print("NOTE: Existing infrastructure inherited from baseline.")
+        print("NOTE: Baseline infrastructure used for unchanged services.")
+        print("      Enhanced baseline infrastructure used for segments/stations with capacity demand increases.")
         print("      You may be prompted to fill NEW infrastructure only.\n")
 
         output_path = export_capacity_workbook(
@@ -344,7 +363,7 @@ def run_development_workflow(
 
 
 def run_enhanced_workflow(
-    network_label: str,
+    network_label: str = None,
     threshold: float = 2.0,
     max_iterations: int = 10
 ) -> int:
@@ -352,7 +371,7 @@ def run_enhanced_workflow(
     Execute Phase 4 enhanced capacity workflow (capacity interventions).
 
     Args:
-        network_label: Base network label (e.g., "AK_2035")
+        network_label: Base network label (e.g., "AK_2035"). If None, uses settings.rail_network.
         threshold: Minimum required available capacity in tphpd (default: 2.0)
         max_iterations: Maximum intervention iterations (default: 10)
 
@@ -362,6 +381,11 @@ def run_enhanced_workflow(
     print("\n" + "=" * 70)
     print("ENHANCED WORKFLOW - Phase 4 Capacity Interventions")
     print("=" * 70)
+
+    # Use settings.rail_network if no network label provided
+    if network_label is None:
+        network_label = settings.rail_network
+
     print(f"\nBase network: {network_label}")
     print(f"Threshold: ≥{threshold} tphpd available capacity")
     print(f"Max iterations: {max_iterations}")
@@ -487,7 +511,7 @@ def main_interactive():
         elif choice == '1':
             # Baseline workflow
             print("\n--- Baseline Workflow Configuration ---")
-            network = input("Network label [AK_2035]: ").strip() or "AK_2035"
+            network = input(f"Network label [{settings.rail_network}]: ").strip() or settings.rail_network
             visualize_input = input("Generate visualizations? (y/n) [y]: ").strip().lower()
             visualize = visualize_input != 'n'
 
@@ -499,7 +523,8 @@ def main_interactive():
         elif choice == '2':
             # Baseline Extended workflow
             print("\n--- Baseline Extended Workflow Configuration ---")
-            network = input("Network label [AK_2035_extended]: ").strip() or "AK_2035_extended"
+            default_extended = f"{settings.rail_network}_extended"
+            network = input(f"Network label [{default_extended}]: ").strip() or default_extended
             visualize_input = input("Generate visualizations? (y/n) [y]: ").strip().lower()
             visualize = visualize_input != 'n'
 
@@ -517,20 +542,21 @@ def main_interactive():
                 print("❌ ERROR: Development ID is required")
                 continue
 
-            base_network = input("Base network label [AK_2035_extended]: ").strip() or "AK_2035_extended"
+            default_base = f"{settings.rail_network}_extended"
+            base_network = input(f"Base network label [{default_base}]: ").strip() or default_base
             visualize_input = input("Generate visualizations? (y/n) [y]: ").strip().lower()
             visualize = visualize_input != 'n'
 
             return run_development_workflow(
-                base_network=base_network,
                 dev_id=dev_id,
+                base_network=base_network,
                 visualize=visualize
             )
 
         elif choice == '4':
             # Enhanced workflow (Phase 4)
             print("\n--- Enhanced Workflow (Phase 4) Configuration ---")
-            network = input("Base network label [AK_2035]: ").strip() or "AK_2035"
+            network = input(f"Base network label [{settings.rail_network}]: ").strip() or settings.rail_network
 
             threshold_input = input("Minimum available capacity threshold in tphpd [2.0]: ").strip()
             try:
@@ -587,8 +613,8 @@ Examples:
         )
         baseline_parser.add_argument(
             '--network',
-            default='AK_2035',
-            help='Network label (default: AK_2035)'
+            default=None,
+            help=f'Network label (default: {settings.rail_network})'
         )
         baseline_parser.add_argument(
             '--no-visualize',
@@ -603,8 +629,8 @@ Examples:
         )
         baseline_ext_parser.add_argument(
             '--network',
-            default='AK_2035_extended',
-            help='Network label (default: AK_2035_extended)'
+            default=None,
+            help=f'Network label (default: {settings.rail_network}_extended)'
         )
         baseline_ext_parser.add_argument(
             '--no-visualize',
@@ -624,8 +650,8 @@ Examples:
         )
         dev_parser.add_argument(
             '--base-network',
-            default='AK_2035_extended',
-            help='Base network label (default: AK_2035_extended)'
+            default=None,
+            help=f'Base network label (default: {settings.rail_network}_extended)'
         )
         dev_parser.add_argument(
             '--no-visualize',
@@ -640,8 +666,8 @@ Examples:
         )
         enhanced_parser.add_argument(
             '--network',
-            default='AK_2035',
-            help='Base network label (default: AK_2035)'
+            default=None,
+            help=f'Base network label (default: {settings.rail_network})'
         )
         enhanced_parser.add_argument(
             '--threshold',
@@ -673,8 +699,8 @@ Examples:
 
         elif args.workflow == 'development':
             exit_code = run_development_workflow(
-                base_network=args.base_network,
                 dev_id=args.dev_id,
+                base_network=args.base_network,
                 visualize=not args.no_visualize
             )
 

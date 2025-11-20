@@ -422,20 +422,21 @@ def apply_enrichment(
     segments_df: pd.DataFrame,
     baseline_prep: Path,
     edges_gdf: gpd.GeoDataFrame,
-    new_station_ids: Set[int] = None
+    new_station_ids: Set[int] = None,
+    enhanced_prep: Path = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Apply enrichment from baseline prep workbook to development network data.
 
-    Inherits infrastructure attributes from baseline for existing nodes/segments.
-    For NEW stations: sets tracks/platforms to NA (requires manual enrichment).
-    For NEW segments: calculates length from geometry, sets tracks/speed to NA.
+    Selectively inherits infrastructure from enhanced baseline for stations/segments
+    where services differ from baseline. Uses baseline for unchanged infrastructure.
 
     Args:
-        stations_df: Raw station metrics (tracks/platforms = NA)
-        segments_df: Raw segment metrics (tracks/speed/length = NA)
+        stations_df: Raw station metrics (tracks/platforms = NA, services populated)
+        segments_df: Raw segment metrics (tracks/speed/length = NA, services populated)
         baseline_prep: Path to manually enriched baseline workbook
         edges_gdf: Original edges GeoDataFrame for geometry lookups
         new_station_ids: Set of station IDs that are NEW (not in points.gpkg)
+        enhanced_prep: Optional path to enhanced baseline workbook for selective enrichment
 
     Returns:
         Enriched (stations_df, segments_df) with infrastructure attributes filled where possible.
@@ -450,13 +451,23 @@ def apply_enrichment(
     baseline_stations = pd.read_excel(baseline_prep, sheet_name="Stations")
     baseline_segments = pd.read_excel(baseline_prep, sheet_name="Segments")
 
-    # Create lookup maps for baseline data
+    # Load enhanced baseline if provided
+    enhanced_stations = None
+    enhanced_segments = None
+    if enhanced_prep is not None and enhanced_prep.exists():
+        enhanced_stations = pd.read_excel(enhanced_prep, sheet_name="Stations")
+        enhanced_segments = pd.read_excel(enhanced_prep, sheet_name="Segments")
+        print(f"[INFO] Enhanced baseline loaded for selective enrichment based on capacity demand increases")
+
+    # Create lookup maps for baseline data (including TPHPD for comparison)
     station_lookup = {}
     for _, row in baseline_stations.iterrows():
         node_id = int(row["NR"])
         station_lookup[node_id] = {
             "tracks": row.get("tracks"),
             "platforms": row.get("platforms"),
+            "stopping_tphpd": row.get("stopping_tphpd", 0.0),
+            "passing_tphpd": row.get("passing_tphpd", 0.0)
         }
 
     segment_lookup = {}
@@ -468,7 +479,33 @@ def apply_enrichment(
             "tracks": row.get("tracks"),
             "speed": row.get("speed"),
             "length_m": row.get("length_m"),
+            "travel_time_passing": row.get("travel_time_passing"),
+            "total_tphpd": row.get("total_tphpd", 0.0)
         }
+
+    # Create enhanced lookup maps if available
+    enhanced_station_lookup = {}
+    enhanced_segment_lookup = {}
+
+    if enhanced_stations is not None:
+        for _, row in enhanced_stations.iterrows():
+            node_id = int(row["NR"])
+            enhanced_station_lookup[node_id] = {
+                "tracks": row.get("tracks"),
+                "platforms": row.get("platforms")
+            }
+
+    if enhanced_segments is not None:
+        for _, row in enhanced_segments.iterrows():
+            from_node = int(row["from_node"])
+            to_node = int(row["to_node"])
+            pair = tuple(sorted((from_node, to_node)))
+            enhanced_segment_lookup[pair] = {
+                "tracks": row.get("tracks"),
+                "speed": row.get("speed"),
+                "length_m": row.get("length_m"),
+                "travel_time_passing": row.get("travel_time_passing")
+            }
 
     # Create geometry lookup for segments (need to calculate length)
     geometry_lookup = {}
@@ -483,30 +520,62 @@ def apply_enrichment(
     # Enrich stations
     enriched_stations = stations_df.copy()
     new_station_count = 0
+    enhanced_station_count = 0
 
     for idx, row in enriched_stations.iterrows():
         node_id = int(row["NR"])
         if node_id in station_lookup:
-            # Existing station: inherit from baseline
+            # Existing station - compare total TPHPD to determine if capacity increased
             baseline_data = station_lookup[node_id]
-            enriched_stations.at[idx, "tracks"] = baseline_data["tracks"]
-            enriched_stations.at[idx, "platforms"] = baseline_data["platforms"]
+
+            # Calculate total TPHPD for development
+            dev_stopping_tphpd = row.get("stopping_tphpd", 0.0)
+            dev_passing_tphpd = row.get("passing_tphpd", 0.0)
+            dev_total_tphpd = dev_stopping_tphpd + dev_passing_tphpd
+
+            # Get baseline total TPHPD
+            baseline_stopping_tphpd = baseline_data.get("stopping_tphpd", 0.0)
+            baseline_passing_tphpd = baseline_data.get("passing_tphpd", 0.0)
+            baseline_total_tphpd = baseline_stopping_tphpd + baseline_passing_tphpd
+
+            # Determine if capacity increased (Q3: equal/less uses baseline)
+            capacity_increased = dev_total_tphpd > baseline_total_tphpd
+
+            if capacity_increased and node_id in enhanced_station_lookup:
+                # Capacity increased - use enhanced baseline infrastructure
+                enhanced_data = enhanced_station_lookup[node_id]
+                enriched_stations.at[idx, "tracks"] = enhanced_data["tracks"]
+                enriched_stations.at[idx, "platforms"] = enhanced_data["platforms"]
+                enhanced_station_count += 1
+            elif capacity_increased and node_id not in enhanced_station_lookup:
+                # Capacity increased but no enhanced baseline - requires manual input (Q4)
+                enriched_stations.at[idx, "tracks"] = pd.NA
+                enriched_stations.at[idx, "platforms"] = pd.NA
+                new_station_count += 1
+            else:
+                # Capacity same/decreased - use regular baseline
+                enriched_stations.at[idx, "tracks"] = baseline_data["tracks"]
+                enriched_stations.at[idx, "platforms"] = baseline_data["platforms"]
         elif node_id in new_station_ids:
             # NEW station: set to NA (requires manual enrichment)
             enriched_stations.at[idx, "tracks"] = pd.NA
             enriched_stations.at[idx, "platforms"] = pd.NA
             new_station_count += 1
         else:
-            # Should not happen if logic is correct
+            # Not in baseline prep - treat as NEW (Q2: Option C)
             enriched_stations.at[idx, "tracks"] = pd.NA
             enriched_stations.at[idx, "platforms"] = pd.NA
+            new_station_count += 1
 
+    if enhanced_station_count > 0:
+        print(f"[INFO] {enhanced_station_count} stations with increased capacity demand - using enhanced baseline infrastructure")
     if new_station_count > 0:
-        print(f"[INFO] {new_station_count} NEW stations require manual enrichment (tracks/platforms = NA)")
+        print(f"[INFO] {new_station_count} NEW stations or stations requiring capacity increase without enhanced baseline - require manual enrichment (tracks/platforms = NA)")
 
     # Enrich segments
     enriched_segments = segments_df.copy()
     new_segment_count = 0
+    enhanced_segment_count = 0
 
     for idx, row in enriched_segments.iterrows():
         from_node = int(row["from_node"])
@@ -517,11 +586,39 @@ def apply_enrichment(
         has_new_endpoint = (from_node in new_station_ids) or (to_node in new_station_ids)
 
         if pair in segment_lookup and not has_new_endpoint:
-            # Existing segment with no new endpoints: inherit from baseline
+            # Existing segment with no new endpoints - compare total TPHPD
             baseline_data = segment_lookup[pair]
-            enriched_segments.at[idx, "tracks"] = baseline_data["tracks"]
-            enriched_segments.at[idx, "speed"] = baseline_data["speed"]
-            enriched_segments.at[idx, "length_m"] = baseline_data["length_m"]
+
+            # Get development total TPHPD
+            dev_total_tphpd = row.get("total_tphpd", 0.0)
+
+            # Get baseline total TPHPD
+            baseline_total_tphpd = baseline_data.get("total_tphpd", 0.0)
+
+            # Determine if capacity increased (Q3: equal/less uses baseline)
+            capacity_increased = dev_total_tphpd > baseline_total_tphpd
+
+            if capacity_increased and pair in enhanced_segment_lookup:
+                # Capacity increased - use enhanced baseline infrastructure
+                enhanced_data = enhanced_segment_lookup[pair]
+                enriched_segments.at[idx, "tracks"] = enhanced_data["tracks"]
+                enriched_segments.at[idx, "speed"] = enhanced_data["speed"]
+                enriched_segments.at[idx, "length_m"] = enhanced_data["length_m"]
+                enriched_segments.at[idx, "travel_time_passing"] = enhanced_data["travel_time_passing"]
+                enhanced_segment_count += 1
+            elif capacity_increased and pair not in enhanced_segment_lookup:
+                # Capacity increased but no enhanced baseline - requires manual input (Q4)
+                enriched_segments.at[idx, "tracks"] = pd.NA
+                enriched_segments.at[idx, "speed"] = pd.NA
+                enriched_segments.at[idx, "length_m"] = pd.NA
+                enriched_segments.at[idx, "travel_time_passing"] = pd.NA
+                new_segment_count += 1
+            else:
+                # Capacity same/decreased - use regular baseline
+                enriched_segments.at[idx, "tracks"] = baseline_data["tracks"]
+                enriched_segments.at[idx, "speed"] = baseline_data["speed"]
+                enriched_segments.at[idx, "length_m"] = baseline_data["length_m"]
+                enriched_segments.at[idx, "travel_time_passing"] = baseline_data["travel_time_passing"]
         else:
             # NEW segment or segment with new endpoint: set to NA, calculate length
             enriched_segments.at[idx, "tracks"] = pd.NA
@@ -539,8 +636,10 @@ def apply_enrichment(
                 else:
                     enriched_segments.at[idx, "length_m"] = pd.NA
 
+    if enhanced_segment_count > 0:
+        print(f"[INFO] {enhanced_segment_count} segments with increased capacity demand - using enhanced baseline infrastructure")
     if new_segment_count > 0:
-        print(f"[INFO] {new_segment_count} NEW or modified segments require manual enrichment (tracks/speed = NA)")
+        print(f"[INFO] {new_segment_count} NEW segments or segments requiring capacity increase without enhanced baseline - require manual enrichment (tracks/speed = NA)")
 
     return enriched_stations, enriched_segments
 
@@ -1185,23 +1284,32 @@ def build_capacity_tables(
     segment_metrics = segment_metrics[output_columns]
 
     # Apply enrichment if source provided (development workflow)
-    if enrichment_source is not None:
+    if enrichment_source is not None or not is_baseline:
+        # Determine enrichment source
+        baseline_enrichment = enrichment_source if enrichment_source is not None else _derive_baseline_prep_path()
+
+        # Auto-detect enhanced baseline path based on settings.rail_network
+        enhanced_enrichment = None
+        try:
+            from settings import rail_network
+            enhanced_network_name = f"{rail_network}_enhanced"
+            enhanced_enrichment = CAPACITY_ROOT / "Enhanced" / enhanced_network_name / f"capacity_{rail_network}_enhanced_network_prep.xlsx"
+
+            if not enhanced_enrichment.exists():
+                enhanced_enrichment = None
+                print(f"[INFO] Enhanced baseline not found, using baseline only for enrichment")
+        except Exception as e:
+            print(f"[INFO] Could not auto-detect enhanced baseline: {e}")
+            enhanced_enrichment = None
+
+        # Apply enrichment with selective enhanced baseline
         station_metrics, segment_metrics = apply_enrichment(
             station_metrics,
             segment_metrics,
-            enrichment_source,
+            baseline_enrichment,
             edges_gdf,
-            new_station_ids
-        )
-    elif not is_baseline:
-        # Development workflow without explicit enrichment_source: use auto-detected baseline prep
-        baseline_prep_path = _derive_baseline_prep_path()
-        station_metrics, segment_metrics = apply_enrichment(
-            station_metrics,
-            segment_metrics,
-            baseline_prep_path,
-            edges_gdf,
-            new_station_ids
+            new_station_ids,
+            enhanced_enrichment  # Pass enhanced baseline for selective enrichment
         )
 
     return station_metrics, segment_metrics
