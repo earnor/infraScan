@@ -113,6 +113,100 @@ def identify_capacity_constrained_sections(
     return constrained
 
 
+def _find_geometric_center_station(
+    segment_sequence: str,
+    segments_df: pd.DataFrame,
+    stations_df: pd.DataFrame
+) -> tuple[int, str]:
+    """
+    Find station closest to geometric center of section based on rail distance.
+
+    Args:
+        segment_sequence: Pipe-separated segment IDs (e.g., "8-10|10-12|12-15")
+        segments_df: Segments DataFrame with length_m column
+        stations_df: Stations DataFrame with CODE column
+
+    Returns:
+        Tuple of (station_id, selection_method):
+            - station_id: Node ID of selected station
+            - selection_method: "geometric_center" or "fallback_index"
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    segments = segment_sequence.split('|')
+
+    # Try geometric center calculation
+    try:
+        # Build list of (station_id, cumulative_distance)
+        stations_with_distances = []
+        cumulative_dist = 0.0
+
+        for seg in segments:
+            from_node, to_node = map(int, seg.split('-'))
+
+            # Add from_node at current cumulative distance (if not duplicate)
+            if not stations_with_distances or stations_with_distances[-1][0] != from_node:
+                stations_with_distances.append((from_node, cumulative_dist))
+
+            # Look up segment length
+            seg_row = segments_df[
+                (segments_df['from_node'] == from_node) &
+                (segments_df['to_node'] == to_node)
+            ]
+
+            if len(seg_row) == 0:
+                raise ValueError(f"Segment {seg} not found in segments_df")
+
+            length_m = seg_row.iloc[0]['length_m']
+
+            # Check if length is available (not NA/NaN)
+            if pd.isna(length_m):
+                raise ValueError(f"Segment {seg} has missing length_m")
+
+            cumulative_dist += float(length_m)
+
+        # Add final to_node
+        final_to = int(segments[-1].split('-')[1])
+        stations_with_distances.append((final_to, cumulative_dist))
+
+        # Find station closest to midpoint (tie-break: earlier station)
+        total_length = cumulative_dist
+        midpoint = total_length / 2.0
+
+        closest_station = min(
+            stations_with_distances,
+            key=lambda x: (abs(x[1] - midpoint), x[1])  # Sort by distance, then position
+        )
+
+        station_id = closest_station[0]
+        station_code = stations_df[stations_df['NR'] == station_id]['CODE'].values[0]
+
+        logger.info(
+            f"Geometric center: Section midpoint at {midpoint:.0f}m, "
+            f"selected station {station_code} (ID {station_id}) at {closest_station[1]:.0f}m"
+        )
+
+        return station_id, "geometric_center"
+
+    except (ValueError, KeyError, IndexError) as e:
+        # Fallback to index-based method
+        logger.warning(
+            f"⚠ Cannot calculate geometric center for section '{segment_sequence}': {e}"
+        )
+        logger.warning(
+            f"⚠ Falling back to middle segment index method. "
+            f"Please ensure segment lengths are enriched for accurate intervention placement."
+        )
+
+        # Use current index-based method
+        middle_index = len(segments) // 2
+        middle_segment = segments[middle_index]
+        station_id = int(middle_segment.split('-')[0])
+
+        return station_id, "fallback_index"
+
+
 def design_section_intervention(
     section: pd.Series,
     segments_df: pd.DataFrame,
@@ -124,13 +218,14 @@ def design_section_intervention(
     Design appropriate intervention for a capacity-constrained section.
 
     Logic:
-    - Multi-segment section (>1 segment): Add station track at middle station
+    - Multi-segment section (>1 segment): Add station track at geometric center station
+      (based on cumulative segment lengths; falls back to middle segment index if lengths unavailable)
     - Single-segment section (1 segment): Add passing siding to segment
 
     Args:
         section: Single section record
-        segments_df: Segments DataFrame
-        stations_df: Stations DataFrame
+        segments_df: Segments DataFrame with length_m column
+        stations_df: Stations DataFrame with CODE column
         intervention_counter: Counter for generating unique IDs
         iteration: Current iteration number
 
@@ -147,12 +242,12 @@ def design_section_intervention(
                 f"({len(segments)} segments)")
 
     if len(segments) > 1:
-        # Multi-segment section: Station track intervention at middle station
-        middle_index = len(segments) // 2
-        middle_segment = segments[middle_index]
-
-        # Parse segment ID (format: "from_node-to_node")
-        middle_station_id = int(middle_segment.split('-')[0])
+        # Multi-segment section: Station track intervention at geometric center
+        middle_station_id, selection_method = _find_geometric_center_station(
+            segment_sequence=segment_sequence,
+            segments_df=segments_df,
+            stations_df=stations_df
+        )
 
         intervention = CapacityIntervention(
             intervention_id=f"INT_ST_{intervention_counter:04d}",
@@ -394,6 +489,7 @@ def run_phase_four(
     original_stations_df: pd.DataFrame,
     prep_workbook_path: Path,
     output_dir: Path,
+    network_label: str,
     threshold_tphpd: float = 2.0,
     max_iterations: int = 10
 ) -> Tuple[List[CapacityIntervention], Path, pd.DataFrame]:
@@ -468,7 +564,7 @@ def run_phase_four(
         logger.info(f"  Annual maintenance: {total_maintenance:,.0f} CHF")
 
         # Step 4: Apply interventions to workbook
-        enhanced_prep_path = output_dir / f"capacity_AK_2035_enhanced_network_prep_iter{iteration}.xlsx"
+        enhanced_prep_path = output_dir / f"capacity_{network_label}_enhanced_network_prep_iter{iteration}.xlsx"
         apply_interventions_to_workbook(
             current_prep_path,
             iteration_interventions,
@@ -497,7 +593,7 @@ def run_phase_four(
     logger.info(f"Total annual maintenance: {total_maintenance:,.0f} CHF")
 
     # Save final enhanced prep (rename from last iteration)
-    final_prep_path = output_dir / "capacity_AK_2035_enhanced_network_prep.xlsx"
+    final_prep_path = output_dir / f"capacity_{network_label}_enhanced_network_prep.xlsx"
     if enhanced_prep_path.exists():
         import shutil
         shutil.copy(enhanced_prep_path, final_prep_path)
@@ -510,7 +606,7 @@ def run_phase_four(
     logger.info(f"Interventions catalog saved to: {catalog_path}")
 
     # Save final sections (with stations and segments for plotting)
-    final_sections_path = output_dir / "capacity_AK_2035_enhanced_network_sections.xlsx"
+    final_sections_path = output_dir / f"capacity_{network_label}_enhanced_network_sections.xlsx"
     with pd.ExcelWriter(final_sections_path, engine='openpyxl') as writer:
         original_stations_df.to_excel(writer, sheet_name='Stations', index=False)
         original_segments_df.to_excel(writer, sheet_name='Segments', index=False)
