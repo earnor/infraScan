@@ -928,8 +928,10 @@ def _station_colour(station_tracks: float, connected_tracks: List[float]) -> str
 
     if len(valid_segment_tracks) == 1:
         connected_equivalent = valid_segment_tracks[0]
+    elif len(valid_segment_tracks) == 2:
+        connected_equivalent = sum(valid_segment_tracks) / 2.0  # Through station
     else:
-        connected_equivalent = sum(valid_segment_tracks) / 2.0
+        connected_equivalent = sum(valid_segment_tracks)  # Junction (3+ segments)
     if station_tracks > connected_equivalent + 1e-6:
         return "#4caf50"  # Green - surplus capacity.
     if math.isclose(station_tracks, connected_equivalent, rel_tol=1e-6, abs_tol=1e-6):
@@ -1572,9 +1574,9 @@ def _add_network_legends(
 ) -> None:
     """Add station and segment legends to the plot."""
     station_definitions = {
-        "#4caf50": "Tracks exceed connections",
-        "#ffffff": "Tracks match connections",
-        "#d73027": "Tracks below connections",
+        "#4caf50": "Crossing & overtaking possible",
+        "#ffffff": "Crossing possible",
+        "#d73027": "No crossing/overtaking possible",
         "#d2b48c": "Isolated station",
         "#bdbdbd": "Unknown tracks",
     }

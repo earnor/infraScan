@@ -1745,12 +1745,22 @@ def _split_section_by_service_patterns(
         service_node_states[service] = states
 
     def _should_split(pattern_a: Tuple[str, ...], pattern_b: Tuple[str, ...]) -> bool:
-        """Return True when a service transitions from pass/absent to stop."""
+        """Return True when service patterns change significantly.
+
+        Splits occur when:
+        - A service starts stopping (absent/pass → stop): New capacity demand
+        - A service terminates (stop → absent): Capacity demand reduction
+        """
         for state_a, state_b in zip(pattern_a, pattern_b):
             if state_a == state_b:
                 continue
+            # Split when service starts stopping
             if state_b == "stop" and state_a != "stop":
                 return True
+            # Split when stopping service terminates
+            if state_a == "stop" and state_b == "absent":
+                return True
+            # Allow stop → pass without split
             if state_a == "stop" and state_b == "pass":
                 continue
         return False
