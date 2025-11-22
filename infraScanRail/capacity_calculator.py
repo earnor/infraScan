@@ -1801,6 +1801,302 @@ def _split_section_by_service_patterns(
     return refined_sections
 
 
+def _calculate_single_passing_track_capacity(
+    total_passing_time: float,
+    headway: float
+) -> float:
+    """Calculate capacity for single passing track.
+
+    Args:
+        total_passing_time: Total travel time for passing trains (minutes)
+        headway: Minimum headway between trains (minutes)
+
+    Returns:
+        Capacity in tphpd (trains per hour per direction)
+    """
+    if total_passing_time <= 0:
+        return float("nan")
+    raw_capacity = 60.0 / total_passing_time
+    return raw_capacity / 2.0  # Convert to per-direction
+
+
+def _calculate_double_track_good_capacity(
+    headway: float,
+    travel_time_penalty: float,
+    service_count: int,
+    n_stop: int,
+    n_pass: int
+) -> float:
+    """Calculate double-track capacity using 'good' strategy.
+
+    Args:
+        headway: Base headway (minutes)
+        travel_time_penalty: Additional time penalty for mixed traffic
+        service_count: Total number of distinct services
+        n_stop: Number of stopping services
+        n_pass: Number of passing services
+
+    Returns:
+        Capacity in tphpd
+    """
+    if service_count <= 0:
+        return float("nan")
+
+    # Calculate pattern changes for "good" strategy
+    def _strategy_pattern_changes(strategy: str, stops: int, passes: int) -> int:
+        if stops <= 0 or passes <= 0:
+            return 0
+        if strategy == "good":
+            return 1
+        return 0
+
+    pattern_changes = _strategy_pattern_changes("good", n_stop, n_pass)
+    feasible_changes = min(pattern_changes, max(service_count - 1, 0))
+    denominator = headway + (feasible_changes / service_count) * travel_time_penalty
+
+    if denominator <= 0:
+        return float("nan")
+
+    return 60.0 / denominator
+
+
+def _calculate_uniform_double_track_capacity(headway: float) -> float:
+    """Calculate double-track capacity for uniform traffic.
+
+    Args:
+        headway: Base headway (minutes)
+
+    Returns:
+        Capacity in tphpd
+    """
+    if headway <= 0:
+        return float("nan")
+    return 60.0 / headway
+
+
+def _calculate_3_track_capacity(
+    headway: float,
+    travel_time_penalty: float,
+    service_count: int,
+    n_stop: int,
+    n_pass: int,
+    total_passing_time: float,
+    has_stopping: bool,
+    has_passing: bool
+) -> float:
+    """Calculate 3-track capacity: 2-track (good) + 1 passing track.
+
+    Args:
+        headway: Base headway (minutes)
+        travel_time_penalty: Additional time for mixed traffic
+        service_count: Total number of services
+        n_stop: Number of stopping services
+        n_pass: Number of passing services
+        total_passing_time: Total passing travel time
+        has_stopping: Whether stopping services exist
+        has_passing: Whether passing services exist
+
+    Returns:
+        Capacity in tphpd
+    """
+    if has_stopping and has_passing:
+        # Mixed traffic: 2-track good + 1 passing
+        capacity_double = _calculate_double_track_good_capacity(
+            headway, travel_time_penalty, service_count, n_stop, n_pass
+        )
+        capacity_single = _calculate_single_passing_track_capacity(
+            total_passing_time, headway
+        )
+        return capacity_double + capacity_single
+    else:
+        # Uniform traffic: 1.5x double-track
+        return 1.5 * _calculate_uniform_double_track_capacity(headway)
+
+
+def _calculate_4_track_capacity(
+    section_id: int,
+    start_node: int,
+    end_node: int,
+    headway: float,
+    travel_time_penalty: float,
+    service_count: int,
+    n_stop: int,
+    n_pass: int,
+    stopping_tphpd: float,
+    passing_tphpd: float,
+    has_stopping: bool,
+    has_passing: bool
+) -> float:
+    """Calculate 4-track capacity: Separated pairs with overflow handling.
+
+    Logic:
+    - Try to separate stopping and passing onto dedicated pairs (2 tracks each)
+    - If one service overflows, prompt user for strategy selection
+    - If both overflow, keep homogeneous (indicates over-capacity)
+
+    Args:
+        section_id: Section identifier for user prompt
+        start_node: Starting node ID
+        end_node: Ending node ID
+        headway: Base headway (minutes)
+        travel_time_penalty: Additional time for mixed traffic
+        service_count: Total number of services
+        n_stop: Number of stopping services
+        n_pass: Number of passing services
+        stopping_tphpd: Current stopping train demand
+        passing_tphpd: Current passing train demand
+        has_stopping: Whether stopping services exist
+        has_passing: Whether passing services exist
+
+    Returns:
+        Capacity in tphpd
+    """
+    if has_stopping and has_passing:
+        # Calculate dedicated pair capacities (homogeneous)
+        capacity_per_pair = _calculate_uniform_double_track_capacity(headway)
+
+        stopping_overflow = stopping_tphpd > capacity_per_pair
+        passing_overflow = passing_tphpd > capacity_per_pair
+
+        if stopping_overflow and passing_overflow:
+            # Both overflow: Keep homogeneous (2 pairs, will show over-capacity)
+            return 2 * capacity_per_pair
+
+        elif stopping_overflow:
+            # Stopping overflows: Prompt user for strategy
+            print(f"\n[4-TRACK OVERFLOW] Section {section_id} ({start_node}->{end_node})")
+            print(f"  Stopping services: {stopping_tphpd:.1f} tphpd (exceeds {capacity_per_pair:.1f} tphpd capacity)")
+            print(f"  Passing services: {passing_tphpd:.1f} tphpd (within capacity)")
+            print("\nSelect track allocation strategy:")
+            print("  1) Stopping-Stopping + Mixed (overflow stopping + all passing on 2nd pair)")
+            print("  2) Keep homogeneous (2 stopping pairs, will show over-capacity)")
+
+            while True:
+                response = input("Enter choice (1-2): ").strip()
+                if response == "1":
+                    # Pair 1: Stopping at capacity, Pair 2: Mixed
+                    pair1_capacity = capacity_per_pair
+                    pair2_capacity = _calculate_double_track_good_capacity(
+                        headway, travel_time_penalty, service_count, n_stop, n_pass
+                    )
+                    return pair1_capacity + pair2_capacity
+                elif response == "2":
+                    # Keep homogeneous
+                    return 2 * capacity_per_pair
+                print("Invalid selection. Please enter 1 or 2.")
+
+        elif passing_overflow:
+            # Passing overflows: Prompt user for strategy
+            print(f"\n[4-TRACK OVERFLOW] Section {section_id} ({start_node}->{end_node})")
+            print(f"  Stopping services: {stopping_tphpd:.1f} tphpd (within capacity)")
+            print(f"  Passing services: {passing_tphpd:.1f} tphpd (exceeds {capacity_per_pair:.1f} tphpd capacity)")
+            print("\nSelect track allocation strategy:")
+            print("  1) Passing-Passing + Mixed (overflow passing + all stopping on 2nd pair)")
+            print("  2) Keep homogeneous (2 passing pairs, will show over-capacity)")
+
+            while True:
+                response = input("Enter choice (1-2): ").strip()
+                if response == "1":
+                    # Pair 1: Passing at capacity, Pair 2: Mixed
+                    pair1_capacity = capacity_per_pair
+                    pair2_capacity = _calculate_double_track_good_capacity(
+                        headway, travel_time_penalty, service_count, n_stop, n_pass
+                    )
+                    return pair1_capacity + pair2_capacity
+                elif response == "2":
+                    # Keep homogeneous
+                    return 2 * capacity_per_pair
+                print("Invalid selection. Please enter 1 or 2.")
+
+        else:
+            # No overflow: Perfect separation (2 homogeneous pairs)
+            return 2 * capacity_per_pair
+    else:
+        # Uniform traffic: 2x double-track
+        return 2.0 * _calculate_uniform_double_track_capacity(headway)
+
+
+def _calculate_multi_track_capacity(
+    section_id: int,
+    start_node: int,
+    end_node: int,
+    formula_track: int,
+    headway: float,
+    travel_time_penalty: float,
+    service_count: int,
+    n_stop: int,
+    n_pass: int,
+    total_passing_time: float,
+    stopping_tphpd: float,
+    passing_tphpd: float,
+    has_stopping: bool,
+    has_passing: bool
+) -> float:
+    """Calculate capacity for 5+ tracks using recursive building blocks.
+
+    Logic:
+    - Base: 4-track capacity
+    - Remaining tracks: Allocate based on count
+      - +1: Single passing track
+      - +2: Pair allocated to service with higher demand
+      - +3: Allocated pair + passing track
+      - +4+: Recursively add another 4-track block
+
+    Args:
+        section_id: Section identifier for user prompts
+        start_node: Starting node ID
+        end_node: Ending node ID
+        formula_track: Number of tracks (5+)
+        [other args same as helper functions]
+
+    Returns:
+        Capacity in tphpd
+    """
+    # Base: 4-track capacity
+    base_capacity = _calculate_4_track_capacity(
+        section_id, start_node, end_node,
+        headway, travel_time_penalty, service_count, n_stop, n_pass,
+        stopping_tphpd, passing_tphpd, has_stopping, has_passing
+    )
+
+    remaining_tracks = formula_track - 4
+
+    if remaining_tracks == 1:
+        # +1 passing track
+        additional = _calculate_single_passing_track_capacity(
+            total_passing_time, headway
+        )
+
+    elif remaining_tracks == 2:
+        # +1 pair allocated to service with higher demand
+        if has_stopping and has_passing:
+            # Allocate to whichever has more demand
+            additional = _calculate_uniform_double_track_capacity(headway)
+        else:
+            # Uniform traffic
+            additional = _calculate_uniform_double_track_capacity(headway)
+
+    elif remaining_tracks == 3:
+        # +1 allocated pair + 1 passing track
+        pair_capacity = _calculate_uniform_double_track_capacity(headway)
+        passing_capacity = _calculate_single_passing_track_capacity(
+            total_passing_time, headway
+        )
+        additional = pair_capacity + passing_capacity
+
+    else:  # remaining_tracks >= 4
+        # Recursively add another 4-track block
+        additional = _calculate_multi_track_capacity(
+            section_id, start_node, end_node,
+            remaining_tracks,
+            headway, travel_time_penalty, service_count, n_stop, n_pass,
+            total_passing_time, stopping_tphpd, passing_tphpd,
+            has_stopping, has_passing
+        )
+
+    return base_capacity + additional
+
+
 def _summarise_section(
     section_id: int,
     track: float,
@@ -1988,8 +2284,8 @@ def _summarise_section(
     strategy_metrics: List[Tuple[str, float, float]] = []
 
     # Fractional track support: .5 increments halve section travel times
-    is_fractional = (track % 1 == 0.5)  # True for 1.5, 2.5
-    base_track = math.floor(track)  # 1.5→1, 2.5→2
+    is_fractional = (track % 1 == 0.5)  # True for 1.5, 2.5, 3.5, 4.5, 5.5, etc.
+    base_track = math.floor(track)  # 1.5→1, 2.5→2, 3.5→3, 4.5→4, etc.
 
     if is_fractional:
         # Halve travel times to simulate section_length_m / 2
@@ -2045,6 +2341,10 @@ def _summarise_section(
     selected_capacity = float("nan")
     selected_utilization = float("nan")
 
+    # Helper variables for 3+ track calculations
+    has_stopping = bool(stopping_services)
+    has_passing = bool(passing_services_list)
+
     if formula_track == 1:
         selected_capacity = capacity_columns["capacity_single_track_tphpd"]
         selected_utilization = capacity_columns["utilization_single_track"]
@@ -2080,6 +2380,41 @@ def _summarise_section(
                             selected_utilization = util_value
                             break
                     print("Invalid selection. Please enter a listed number or press Enter to skip.")
+    elif formula_track == 3:
+        # THREE TRACKS: 2-track (good) + 1 passing track
+        capacity_value = _calculate_3_track_capacity(
+            headway, travel_time_penalty, service_count, n_stop, n_pass,
+            total_passing_time, has_stopping, has_passing
+        )
+        selected_capacity = _floor_capacity(capacity_value)
+        capacity_columns["capacity_good_tphpd"] = selected_capacity
+        selected_utilization = _utilization(selected_capacity, total_tphpd)
+        capacity_columns["utilization_good"] = selected_utilization
+    elif formula_track == 4:
+        # FOUR TRACKS: Separated pairs with overflow handling
+        capacity_value = _calculate_4_track_capacity(
+            section_id, start_node, end_node,
+            headway, travel_time_penalty, service_count, n_stop, n_pass,
+            stopping_tphpd_estimate, passing_tphpd_estimate,
+            has_stopping, has_passing
+        )
+        selected_capacity = _floor_capacity(capacity_value)
+        capacity_columns["capacity_good_tphpd"] = selected_capacity
+        selected_utilization = _utilization(selected_capacity, total_tphpd)
+        capacity_columns["utilization_good"] = selected_utilization
+    else:  # formula_track >= 5
+        # MULTI-TRACK: Recursive building blocks (4-track base + additions)
+        capacity_value = _calculate_multi_track_capacity(
+            section_id, start_node, end_node,
+            formula_track, headway, travel_time_penalty, service_count,
+            n_stop, n_pass, total_passing_time,
+            stopping_tphpd_estimate, passing_tphpd_estimate,
+            has_stopping, has_passing
+        )
+        selected_capacity = _floor_capacity(capacity_value)
+        capacity_columns["capacity_good_tphpd"] = selected_capacity
+        selected_utilization = _utilization(selected_capacity, total_tphpd)
+        capacity_columns["utilization_good"] = selected_utilization
 
     return {
         "section_id": section_id,
