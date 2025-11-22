@@ -43,6 +43,7 @@ class CapacityIntervention:
         construction_cost_chf: Construction cost
         maintenance_cost_annual_chf: Annual maintenance cost
         length_m: Segment length (for passing sidings)
+        current_tracks: Current track count before intervention (for cost scaling)
         iteration: Which iteration this intervention was applied in
     """
     intervention_id: str
@@ -55,7 +56,11 @@ class CapacityIntervention:
     construction_cost_chf: float
     maintenance_cost_annual_chf: float
     length_m: Optional[float]
+    current_tracks: float
     iteration: int = 1
+    current_platforms: Optional[float] = None
+    platforms_added: Optional[float] = None
+    platform_cost_chf: Optional[float] = None
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for DataFrame export."""
@@ -70,7 +75,11 @@ class CapacityIntervention:
             'construction_cost_chf': self.construction_cost_chf,
             'maintenance_cost_annual_chf': self.maintenance_cost_annual_chf,
             'length_m': self.length_m,
-            'iteration': self.iteration
+            'current_tracks': self.current_tracks,
+            'iteration': self.iteration,
+            'current_platforms': self.current_platforms,
+            'platforms_added': self.platforms_added,
+            'platform_cost_chf': self.platform_cost_chf
         }
 
 
@@ -249,6 +258,23 @@ def design_section_intervention(
             stations_df=stations_df
         )
 
+        # Extract current track count from station
+        station_row = stations_df[stations_df['NR'] == middle_station_id]
+        if len(station_row) == 0:
+            logger.warning(f"Station {middle_station_id} not found in stations_df")
+            current_tracks = 1.0  # Default fallback
+            current_platforms = None
+            platforms_added = None
+        else:
+            current_tracks = float(station_row.iloc[0]['tracks'])
+            # Check platform count
+            current_platforms = float(station_row.iloc[0]['platforms'])
+            # Add platform if fewer than 2 platforms exist
+            if current_platforms < 2:
+                platforms_added = 1.0
+            else:
+                platforms_added = None
+
         intervention = CapacityIntervention(
             intervention_id=f"INT_ST_{intervention_counter:04d}",
             section_id=str(section_id),
@@ -260,10 +286,16 @@ def design_section_intervention(
             construction_cost_chf=0.0,  # Filled by calculate_intervention_cost()
             maintenance_cost_annual_chf=0.0,
             length_m=None,
-            iteration=iteration
+            current_tracks=current_tracks,
+            iteration=iteration,
+            current_platforms=current_platforms,
+            platforms_added=platforms_added
         )
 
-        logger.debug(f"  → Station track at node {middle_station_id}")
+        if platforms_added:
+            logger.debug(f"  → Station track at node {middle_station_id} (+ platform)")
+        else:
+            logger.debug(f"  → Station track at node {middle_station_id}")
 
     else:
         # Single-segment section: Passing siding intervention
@@ -281,24 +313,45 @@ def design_section_intervention(
         if len(segment_row) == 0:
             logger.warning(f"Segment {segment_id} not found in segments_df")
             length_m = 0.0
+            current_tracks = 1.0  # Default fallback
         else:
             length_m = float(segment_row.iloc[0]['length_m'])
+            current_tracks = float(segment_row.iloc[0]['tracks'])
+
+        # Determine intervention type and tracks to add
+        # For short segments with fractional tracks, add full track to avoid negative costs
+        is_fractional = (current_tracks % 1 == 0.5)
+        is_short_segment = (length_m < 1000)
+
+        if is_fractional and is_short_segment:
+            # Short fractional segment: add +1.0 full track instead of +0.5 siding
+            tracks_added = 1.0
+            intervention_type = 'segment_passing_siding'
+            logger.debug(f"  → Short segment ({length_m:.0f}m < 1000m) with fractional tracks: adding +1.0 full track")
+        else:
+            # Standard case: add +0.5 passing siding
+            tracks_added = 0.5
+            intervention_type = 'segment_passing_siding'
 
         intervention = CapacityIntervention(
             intervention_id=f"INT_PS_{intervention_counter:04d}",
             section_id=str(section_id),
-            type='segment_passing_siding',
+            type=intervention_type,
             node_id=None,
             segment_id=segment_id,
-            tracks_added=0.5,
+            tracks_added=tracks_added,
             affected_segments=[segment_id],
             construction_cost_chf=0.0,
             maintenance_cost_annual_chf=0.0,
             length_m=length_m,
+            current_tracks=current_tracks,
             iteration=iteration
         )
 
-        logger.debug(f"  → Passing siding on segment {segment_id} ({length_m:.0f}m)")
+        if tracks_added == 1.0:
+            logger.debug(f"  → Full track on segment {segment_id} ({length_m:.0f}m)")
+        else:
+            logger.debug(f"  → Passing siding on segment {segment_id} ({length_m:.0f}m)")
 
     return intervention
 
@@ -310,25 +363,83 @@ def calculate_intervention_cost(
     """
     Calculate construction and maintenance costs for intervention.
 
+    Cost formulas (based on track_cost_per_meter):
+
+    Station track:
+    - Standard: track_cost_per_meter × 500m × floor(current_tracks)
+
+    Passing siding:
+    - Fractional → Whole (e.g., 1.5 → 2.0, length ≥ 1000m):
+      (segment_length_m × track_cost_per_meter) - (1000m × track_cost_per_meter × floor(current_tracks))
+    - Full track addition (tracks_added = 1.0):
+      segment_length_m × track_cost_per_meter × 1
+    - Standard siding (tracks_added = 0.5, not fractional → whole):
+      track_cost_per_meter × 1000m × floor(current_tracks)
+
     Args:
-        intervention: Intervention object
+        intervention: Intervention object with current_tracks populated
         maintenance_rate: Annual maintenance as fraction of construction cost
                          (default: uses cost_parameters.yearly_maintenance_to_construction_cost_factor)
 
     Returns:
         Updated CapacityIntervention with costs filled
     """
+    import math
+
     if maintenance_rate is None:
         maintenance_rate = cost_parameters.yearly_maintenance_to_construction_cost_factor
 
+    # Calculate base track count (floor of current tracks)
+    base_tracks = math.floor(intervention.current_tracks)
+
     if intervention.type == 'station_track':
-        construction_cost = cost_parameters.station_track_cost_chf
+        # Station track cost: track_cost_per_meter × 500m × base_tracks
+        construction_cost = (
+            cost_parameters.track_cost_per_meter *
+            cost_parameters.station_siding_length_m *
+            base_tracks
+        )
+
+        # Add platform costs if platforms need to be added
+        if intervention.platforms_added and intervention.platforms_added > 0:
+            platform_cost = (
+                cost_parameters.platform_cost_per_unit *
+                intervention.platforms_added
+            )
+            construction_cost += platform_cost
+            intervention.platform_cost_chf = platform_cost
 
     elif intervention.type == 'segment_passing_siding':
-        length_km = intervention.length_m / 1000
-        construction_cost = (
-            cost_parameters.passing_siding_cost_chf_per_km * length_km
-        )
+        # Detect fractional → whole transition
+        is_fractional = (intervention.current_tracks % 1 == 0.5)
+        is_completing_track = (intervention.tracks_added == 0.5)  # Adding 0.5 to fractional
+
+        if is_fractional and is_completing_track:
+            # Fractional → Whole: Reuse existing siding infrastructure
+            # Cost = (full segment × single track) - (siding already paid for)
+            segment_length_m = intervention.length_m  # Already stored from design phase
+
+            full_track_cost = segment_length_m * cost_parameters.track_cost_per_meter * 1
+            siding_cost_paid = (
+                cost_parameters.segment_siding_length_m *
+                cost_parameters.track_cost_per_meter *
+                base_tracks
+            )
+            construction_cost = full_track_cost - siding_cost_paid
+
+        elif intervention.tracks_added == 1.0:
+            # Full track addition (short segments with fractional tracks)
+            # Cost = full segment length × single track cost
+            segment_length_m = intervention.length_m
+            construction_cost = segment_length_m * cost_parameters.track_cost_per_meter * 1
+
+        else:
+            # Standard passing siding: track_cost_per_meter × 1000m × base_tracks
+            construction_cost = (
+                cost_parameters.track_cost_per_meter *
+                cost_parameters.segment_siding_length_m *
+                base_tracks
+            )
     else:
         raise ValueError(f"Unknown intervention type: {intervention.type}")
 
@@ -376,6 +487,14 @@ def apply_interventions_to_workbook(
                 station_changes[intervention.node_id] = (old_tracks, new_tracks)
                 logger.debug(f"  Station {intervention.node_id}: "
                            f"{old_tracks} → {new_tracks} tracks")
+
+                # Add platforms if specified
+                if intervention.platforms_added and intervention.platforms_added > 0:
+                    old_platforms = stations_df.loc[mask, 'platforms'].values[0]
+                    stations_df.loc[mask, 'platforms'] += intervention.platforms_added
+                    new_platforms = stations_df.loc[mask, 'platforms'].values[0]
+                    logger.debug(f"  Station {intervention.node_id}: "
+                               f"{old_platforms} → {new_platforms} platforms")
             else:
                 logger.warning(f"  Station {intervention.node_id} not found")
 

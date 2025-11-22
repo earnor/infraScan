@@ -73,7 +73,7 @@ class _DoubleTrackLegendHandle:
 
 
 class _DoubleTrackLegendHandler(HandlerBase):
-    """Custom legend handler that overlays a white divider onto a black line."""
+    """Custom legend handler that renders two parallel lines for double track."""
 
     def create_artists(
         self,
@@ -90,13 +90,61 @@ class _DoubleTrackLegendHandler(HandlerBase):
         x1 = xdescent + width
         y = ydescent + height / 2.0
 
-        base = Line2D([x0, x1], [y, y], color="black", linewidth=orig_handle.line_width, solid_capstyle="butt")
-        divider = Line2D([x0, x1], [y, y], color="white", linewidth=orig_handle.divider_width, solid_capstyle="butt")
+        # Use parallel line rendering for 2-track
+        track_count = 2
+        gap_factor = 0.4
+        individual_line_width = orig_handle.line_width / (track_count + (track_count - 1) * gap_factor)
+        line_spacing = individual_line_width * (1 + gap_factor)
 
-        base.set_transform(trans)
-        divider.set_transform(trans)
+        artists = []
+        for track_idx in range(track_count):
+            offset_y = y + (track_idx - 0.5) * line_spacing
+            line = Line2D([x0, x1], [offset_y, offset_y], color="black", linewidth=individual_line_width, solid_capstyle="round")
+            line.set_transform(trans)
+            artists.append(line)
 
-        return [base, divider]
+        return artists
+
+
+class _MultiTrackLegendHandle:
+    """Placeholder object for rendering multi-track (3+) legend entries."""
+
+    def __init__(self, total_width: float, track_count: int):
+        self.total_width = total_width
+        self.track_count = track_count
+
+
+class _MultiTrackLegendHandler(HandlerBase):
+    """Custom legend handler that renders multiple parallel lines for 3+ tracks."""
+
+    def create_artists(
+        self,
+        legend,
+        orig_handle: "_MultiTrackLegendHandle",
+        xdescent,
+        ydescent,
+        width,
+        height,
+        fontsize,
+        trans,
+    ):
+        x0 = xdescent
+        x1 = xdescent + width
+        y = ydescent + height / 2.0
+
+        track_count = orig_handle.track_count
+        gap_factor = 0.4
+        individual_line_width = orig_handle.total_width / (track_count + (track_count - 1) * gap_factor)
+        line_spacing = individual_line_width * (1 + gap_factor)
+
+        artists = []
+        for track_idx in range(track_count):
+            offset_y = y + (track_idx - (track_count - 1) / 2.0) * line_spacing
+            line = Line2D([x0, x1], [offset_y, offset_y], color="black", linewidth=individual_line_width, solid_capstyle="round")
+            line.set_transform(trans)
+            artists.append(line)
+
+        return artists
 
 
 CAPACITY_DIR = Path(paths.MAIN) / "data" / "Network" / "capacity"
@@ -1469,99 +1517,154 @@ def _draw_segments(
         is_fractional = (segment.tracks % 1 == 0.5) if not math.isnan(segment.tracks) else False
 
         if is_fractional:
-            # Fractional tracks (e.g., 1.5): Draw single track + partial double track in middle 30%
-            # Draw full single-track line
-            ax.plot(
-                xs,
-                ys,
-                color="black",
-                linewidth=_line_width(math.floor(segment.tracks)),  # Use base track width
-                zorder=2,
-            )
+            base_tracks = math.floor(segment.tracks)
 
-            # Draw partial double-track section in middle 30% of segment
-            line_geom = LineString(coords)
-            total_length = line_geom.length
-
-            if total_length > 0:
-                # Calculate middle 30% section (centered at 50%)
-                start_fraction = 0.35
-                end_fraction = 0.65
-
-                # Extract middle section coordinates
-                middle_start = line_geom.interpolate(start_fraction, normalized=True)
-                middle_end = line_geom.interpolate(end_fraction, normalized=True)
-
-                # Create LineString for middle section
-                middle_section = LineString([middle_start, middle_end])
-                middle_coords = list(middle_section.coords)
-                mx, my = zip(*middle_coords)
-
-                # Draw double-track width for passing siding section
-                double_line_width = _line_width(math.ceil(segment.tracks))  # Width for next integer track
-                ax.plot(
-                    mx,
-                    my,
-                    color="black",
-                    linewidth=double_line_width,
-                    zorder=2.1,
-                )
-
-                # Draw separator for passing siding section
-                separator_width = max(0.6, double_line_width * 0.18)
-                ax.plot(
-                    mx,
-                    my,
-                    color="white",
-                    linewidth=separator_width,
-                    zorder=2.5,
-                )
-                separators_used = True
-        else:
-            # Integer tracks: Draw normally
-            ax.plot(
-                xs,
-                ys,
-                color="black",
-                linewidth=line_width,
-                zorder=2,
-            )
-
-        separator_count = max(track_count - 1, 0) if not is_fractional else 0
-        if separator_count > 0:
-            separator_width = max(0.6, line_width * 0.18)
-            spacing = max(12.0, line_width * 5.0)
-            if separator_count == 1:
-                offsets = [0.0]
-            else:
-                center = track_count / 2.0
-                offsets = [((i + 1) - center) * spacing for i in range(separator_count)]
-
-            has_custom = False
-            for offset in offsets:
-                offset_coords = _offset_line(coords, offset)
-                if offset_coords is None:
-                    continue
-                has_custom = True
-                separators_used = True
-                ox, oy = zip(*offset_coords)
-                ax.plot(
-                    ox,
-                    oy,
-                    color="white",
-                    linewidth=separator_width,
-                    zorder=2.5,
-                )
-
-            if not has_custom:
-                separators_used = True
+            if base_tracks == 1:
+                # 1.5 tracks: Keep existing logic (looks good)
+                # Draw full single-track line
                 ax.plot(
                     xs,
                     ys,
-                    color="white",
-                    linewidth=separator_width,
-                    zorder=2.5,
+                    color="black",
+                    linewidth=_line_width(1),
+                    zorder=2,
                 )
+
+                # Draw partial double-track section in middle 30% of segment
+                line_geom = LineString(coords)
+                total_length = line_geom.length
+
+                if total_length > 0:
+                    # Calculate middle 30% section (centered at 50%)
+                    start_fraction = 0.35
+                    end_fraction = 0.65
+
+                    # Extract middle section coordinates
+                    middle_start = line_geom.interpolate(start_fraction, normalized=True)
+                    middle_end = line_geom.interpolate(end_fraction, normalized=True)
+
+                    # Create LineString for middle section
+                    middle_section = LineString([middle_start, middle_end])
+                    middle_coords = list(middle_section.coords)
+                    mx, my = zip(*middle_coords)
+
+                    # Draw double-track width for passing siding section
+                    double_line_width = _line_width(2)
+                    ax.plot(
+                        mx,
+                        my,
+                        color="black",
+                        linewidth=double_line_width,
+                        zorder=2.1,
+                    )
+
+                    # Draw separator for passing siding section
+                    separator_width = max(0.6, double_line_width * 0.18)
+                    ax.plot(
+                        mx,
+                        my,
+                        color="white",
+                        linewidth=separator_width,
+                        zorder=2.5,
+                    )
+                    separators_used = True
+            else:
+                # 2.5, 3.5, 4.5+ tracks: Use new parallel line approach
+                TRACK_OFFSET_SPACING = 60.0  # meters in LV95 coordinates
+                individual_line_width = line_width / (base_tracks * 1.3)
+
+                # Step 1: Draw base tracks (full length)
+                for track_idx in range(base_tracks):
+                    offset_distance = (track_idx - (base_tracks - 1) / 2.0) * TRACK_OFFSET_SPACING
+                    offset_coords = _offset_polyline_uniform(coords, offset_distance)
+
+                    if offset_coords:
+                        lx, ly = zip(*offset_coords)
+                        ax.plot(
+                            lx,
+                            ly,
+                            color="black",
+                            linewidth=individual_line_width,
+                            solid_capstyle="round",
+                            zorder=2,
+                        )
+
+                # Step 2: Add two extra tracks in middle 30% (one on each edge)
+                line_geom = LineString(coords)
+                total_length = line_geom.length
+
+                if total_length > 0:
+                    # Calculate middle 30% section
+                    start_fraction = 0.35
+                    end_fraction = 0.65
+
+                    middle_start = line_geom.interpolate(start_fraction, normalized=True)
+                    middle_end = line_geom.interpolate(end_fraction, normalized=True)
+                    middle_section = LineString([middle_start, middle_end])
+                    middle_coords = list(middle_section.coords)
+
+                    # Top edge extra track (skip one full spacing to avoid overlap)
+                    top_offset = ((base_tracks / 2.0) + 0.5) * TRACK_OFFSET_SPACING
+                    top_coords = _offset_polyline_uniform(middle_coords, top_offset)
+                    if top_coords:
+                        tx, ty = zip(*top_coords)
+                        ax.plot(
+                            tx,
+                            ty,
+                            color="black",
+                            linewidth=individual_line_width,
+                            solid_capstyle="round",
+                            zorder=2,
+                        )
+
+                    # Bottom edge extra track (skip one full spacing to avoid overlap)
+                    bottom_offset = -((base_tracks / 2.0) + 0.5) * TRACK_OFFSET_SPACING
+                    bottom_coords = _offset_polyline_uniform(middle_coords, bottom_offset)
+                    if bottom_coords:
+                        bx, by = zip(*bottom_coords)
+                        ax.plot(
+                            bx,
+                            by,
+                            color="black",
+                            linewidth=individual_line_width,
+                            solid_capstyle="round",
+                            zorder=2,
+                        )
+        else:
+            # Integer tracks: Draw as separate parallel lines
+            if track_count == 1:
+                # Single track: draw one line at center
+                ax.plot(
+                    xs,
+                    ys,
+                    color="black",
+                    linewidth=line_width,
+                    zorder=2,
+                )
+            else:
+                # Multiple tracks: draw N separate parallel lines with fixed spacing in data coordinates
+                TRACK_OFFSET_SPACING = 60.0  # meters in LV95 coordinates
+
+                # Individual line width for visual appearance (thinner than total for visual separation)
+                individual_line_width = line_width / (track_count * 1.3)
+
+                for track_idx in range(track_count):
+                    # Calculate offset in data coordinates (meters)
+                    offset_distance = (track_idx - (track_count - 1) / 2.0) * TRACK_OFFSET_SPACING
+
+                    # Use _offset_polyline_uniform (same as service plot)
+                    offset_coords = _offset_polyline_uniform(coords, offset_distance)
+
+                    if offset_coords:
+                        lx, ly = zip(*offset_coords)
+                        ax.plot(
+                            lx,
+                            ly,
+                            color="black",
+                            linewidth=individual_line_width,
+                            solid_capstyle="round",
+                            zorder=2,
+                        )
 
     return track_categories, separators_used
 
@@ -1612,10 +1715,14 @@ def _add_network_legends(
     for key, (label, width) in segment_definitions.items():
         if key not in segment_categories:
             continue
-        if key == "double" and separators_present:
-            divider_width = max(0.6, width * 0.18)
-            handle_obj = _DoubleTrackLegendHandle(width, divider_width)
+        if key == "double":
+            # Use parallel line rendering for double track
+            handle_obj = _DoubleTrackLegendHandle(width, 0)  # divider_width not used anymore
             handler_map[_DoubleTrackLegendHandle] = _DoubleTrackLegendHandler()
+        elif key == "multi":
+            # Use parallel line rendering for 3+ tracks
+            handle_obj = _MultiTrackLegendHandle(width, 3)  # Show 3 lines as example
+            handler_map[_MultiTrackLegendHandle] = _MultiTrackLegendHandler()
         else:
             handle_obj = Line2D([0], [0], color="black", linewidth=width)
         segment_handles.append(handle_obj)
@@ -1676,11 +1783,13 @@ def _draw_capacity_map(
             colour = cmap(norm(clipped))
             zorder = 3
 
+        # Cap line width at 2-track maximum for capacity plot
+        capped_track_count = min(section.track_count, 2.0) if not math.isnan(section.track_count) else section.track_count
         ax.plot(
             [start.x, end.x],
             [start.y, end.y],
             color=colour,
-            linewidth=_line_width(section.track_count),
+            linewidth=_line_width(capped_track_count),
             solid_capstyle="round",
             zorder=zorder,
         )
@@ -1867,11 +1976,13 @@ def _draw_speed_profile(
         else:
             colour = cmap(norm(speed_value))
 
+        # Cap line width at 2-track maximum for speed plot
+        capped_track_count = min(segment.tracks, 2.0) if not math.isnan(segment.tracks) else segment.tracks
         ax.plot(
             xs,
             ys,
             color=colour,
-            linewidth=_line_width(segment.tracks),
+            linewidth=_line_width(capped_track_count),
             solid_capstyle="round",
             zorder=2,
         )

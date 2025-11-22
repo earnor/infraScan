@@ -2,7 +2,7 @@ from shapely.geometry import Polygon
 import paths
 
 #Rail network: Choose either 'AK_2035','AK_2035_extended' or 'current' or '2024_extended'
-rail_network = '2024_extended'
+rail_network = 'current'
 
 #CACHE
 use_cache_network = False
@@ -17,7 +17,7 @@ use_cache_tts_calc = False
 # Infrastructure generation modules: Choose either 'EXTEND_LINES', 'NEW_DIRECT_CONNECTIONS' or 'ALL'
 infra_generation_modification_type = 'ALL' 
 # Rail services: Choose either 'RAIL_SERVICES_AK2035_PATH' or 'RAIL_SERVICES_AK2035_EXTENDED_PATH' or 'RAIL_SERVICES_2024_PATH' or 'RAIL_SERVICES_AK2024_EXTENDED_PATH'
-infra_generation_rail_network = paths.RAIL_SERVICES_AK2024_EXTENDED_PATH
+infra_generation_rail_network = paths.RAIL_SERVICES_2024_PATH
 
 OD_type = 'canton_ZH' #either 'canton_ZH' or 'pt_catchment_perimeter'
 only_demand_from_to_perimeter = True
