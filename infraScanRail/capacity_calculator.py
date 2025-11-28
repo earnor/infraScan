@@ -1583,11 +1583,26 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
         nodes = list(adjacency.keys())
         start_nodes = [node for node in nodes if len(adjacency[node]) != 2 or not node_valid(node)]
 
+        print(f"\n{'='*80}")
+        print(f"=== PROCESSING TRACK COUNT GROUP: {track} ===")
+        print(f"- Total edges in this group: {len(edges_dict)}")
+        print(f"- Total nodes: {len(adjacency)}")
+        print(f"- Start nodes (branch/terminal points): {start_nodes}")
+        print(f"{'='*80}\n")
+
         for start in start_nodes:
+            start_name = node_names.get(start, f"Node_{start}")
+            print(f"--- Starting path search from node {start} ({start_name}, track={track}) ---")
+            print(f"  Neighbors to explore: {list(adjacency[start])}")
+
             for neighbor in list(adjacency[start]):
                 edge_key = frozenset({start, neighbor})
                 if edge_key in visited_edges:
                     continue
+
+                neighbor_name = node_names.get(neighbor, f"Node_{neighbor}")
+                print(f"  Traversing edge: {start} ({start_name}) -> {neighbor} ({neighbor_name})")
+
                 path_nodes, edge_records, path_edge_keys = _traverse_path(
                     start,
                     neighbor,
@@ -1618,10 +1633,14 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
                         section_counter += 1
                     visited_edges.update(path_edge_keys)
 
+        print(f"\n--- Processing remaining unvisited edges (track={track}) ---")
         for edge_key, edge_info in edges_dict.items():
             if edge_key in visited_edges:
                 continue
             u, v = tuple(edge_key)
+            u_name = node_names.get(u, f"Node_{u}")
+            v_name = node_names.get(v, f"Node_{v}")
+            print(f"  Unvisited edge: {u} ({u_name}) <-> {v} ({v_name})")
             path_nodes, edge_records, path_edge_keys = _traverse_path(
                 u,
                 v,
@@ -1672,11 +1691,14 @@ def _traverse_path(
     local_edges: set[frozenset] = set()
 
     while True:
+        print(f"    Edge step: {current} -> {next_node}")
         edge_key = frozenset({current, next_node})
         if edge_key in visited_edges or edge_key in local_edges:
+            print(f"    STOP: Edge already visited/processed")
             break
         edge_info = edges_dict.get(edge_key)
         if edge_info is None:
+            print(f"    STOP: Edge not found in edges_dict")
             break
 
         local_edges.add(edge_key)
@@ -1685,30 +1707,40 @@ def _traverse_path(
         path_nodes.append(next_node)
 
         if not node_valid(next_node) or len(adjacency[next_node]) != 2:
+            node_track = edges_dict.get(edge_key, {}).get("track_count", "?")
+            print(f"    STOP: Terminal/branch point - node {next_node} (valid={node_valid(next_node)}, neighbors={len(adjacency[next_node])}, track={node_track})")
             break
 
         candidates = adjacency[next_node] - {current}
         if not candidates:
+            print(f"    STOP: No forward candidates from node {next_node}")
             break
         candidate = next(iter(candidates))
         candidate_edge = frozenset({next_node, candidate})
         if candidate_edge in visited_edges or candidate_edge in local_edges:
+            print(f"    STOP: Next edge {next_node} -> {candidate} already visited")
             break
 
         # Stop section if the next edge changes track or service patterns.
         current_edge_info = edges_dict.get(edge_key)
         candidate_edge_info = edges_dict.get(candidate_edge)
         if candidate_edge_info is None:
+            print(f"    STOP: Next edge {next_node} -> {candidate} not found in edges_dict")
             break
         if current_edge_info["track_count"] != candidate_edge_info["track_count"]:
+            print(f"    STOP: Track count change - current={current_edge_info['track_count']}, next={candidate_edge_info['track_count']}")
             break
         if current_edge_info["stopping_service_tokens"] != candidate_edge_info["stopping_service_tokens"]:
+            print(f"    STOP: Stopping services differ - current={current_edge_info['stopping_service_tokens']}, next={candidate_edge_info['stopping_service_tokens']}")
             break
         if current_edge_info["passing_service_tokens"] != candidate_edge_info["passing_service_tokens"]:
+            print(f"    STOP: Passing services differ - current={current_edge_info['passing_service_tokens']}, next={candidate_edge_info['passing_service_tokens']}")
             break
 
         current, next_node = next_node, candidate
 
+    print(f"    Path complete: {len(path_nodes)} nodes, {len(edge_records)} edges")
+    print(f"    Node sequence: {path_nodes}")
     return path_nodes, edge_records, path_edge_keys
 
 
@@ -1719,7 +1751,10 @@ def _split_section_by_service_patterns(
     node_pass_services: Dict[int, set[str]],
 ) -> List[Tuple[List[int], List[Tuple[int, int, Dict[str, float]]]]]:
     """Split an infrastructure section where service stop/pass patterns change."""
+    print(f"\n  === Analyzing service patterns for splitting ===")
+
     if len(path_nodes) <= 2 or not edge_records:
+        print(f"  Split check: Path too short ({len(path_nodes)} nodes), returning as-is")
         return [(path_nodes, edge_records)]
 
     candidate_services: set[str] = set()
@@ -1728,9 +1763,13 @@ def _split_section_by_service_patterns(
         candidate_services.update(node_pass_services.get(node, set()))
 
     if not candidate_services:
+        print(f"  Split check: No services found, returning as-is")
         return [(path_nodes, edge_records)]
 
     service_order = sorted(candidate_services)
+    print(f"  Analyzing service patterns for: {service_order}")
+    print(f"  Path nodes: {path_nodes}")
+
     service_node_states: Dict[str, List[str]] = {}
     for service in service_order:
         states: List[str] = []
@@ -1743,6 +1782,10 @@ def _split_section_by_service_patterns(
                 states.append("absent")
 
         service_node_states[service] = states
+
+    print(f"  Service state sequences:")
+    for service in service_order:
+        print(f"    {service}: {service_node_states[service]}")
 
     def _should_split(pattern_a: Tuple[str, ...], pattern_b: Tuple[str, ...]) -> bool:
         """Return True when service patterns change significantly.
@@ -1777,10 +1820,55 @@ def _split_section_by_service_patterns(
     idx = 1
     while idx < len(path_nodes):
         next_pattern = node_patterns[idx]
-        if not _should_split(current_pattern, next_pattern):
+        should_split_value = _should_split(current_pattern, next_pattern)
+
+        if should_split_value:
+            # Analyze the type of pattern change
+            has_terminations = False
+            has_starts = False
+            has_transitions = False
+
+            for i, service in enumerate(service_order):
+                if current_pattern[i] == next_pattern[i]:
+                    continue
+
+                if current_pattern[i] in ("stop", "pass") and next_pattern[i] == "absent":
+                    has_terminations = True
+                elif current_pattern[i] == "absent" and next_pattern[i] in ("stop", "pass"):
+                    has_starts = True
+                elif current_pattern[i] in ("stop", "pass") and next_pattern[i] in ("stop", "pass"):
+                    has_transitions = True
+
+            # RULE 1: Skip if only terminations (services don't reach this node)
+            if has_terminations and not has_starts and not has_transitions:
+                print(f"  SKIPPING split at node index {idx} (node {path_nodes[idx]}): Only terminations")
+                print(f"    Previous pattern: {current_pattern}")
+                print(f"    New pattern: {next_pattern}")
+                current_pattern = next_pattern
+                idx += 1
+                continue
+
+            # RULE 2: Skip at final node if only starts (services don't use incoming edge)
+            if idx == len(path_nodes) - 1 and has_starts and not has_terminations and not has_transitions:
+                print(f"  SKIPPING split at node index {idx} (node {path_nodes[idx]}): Only starts at final node")
+                print(f"    Previous pattern: {current_pattern}")
+                print(f"    New pattern: {next_pattern}")
+                current_pattern = next_pattern
+                idx += 1
+                continue
+
+        if not should_split_value:
             current_pattern = next_pattern
             idx += 1
             continue
+
+        # Split detected
+        print(f"  SPLIT at node index {idx} (node {path_nodes[idx]}):")
+        print(f"    Previous pattern: {current_pattern}")
+        print(f"    New pattern: {next_pattern}")
+        for i, service in enumerate(service_order):
+            if current_pattern[i] != next_pattern[i]:
+                print(f"    Reason: Service '{service}' changed from '{current_pattern[i]}' -> '{next_pattern[i]}'")
 
         split_edge = idx - 1
         sub_edges = edge_records[start_index : split_edge + 1]
@@ -1797,6 +1885,10 @@ def _split_section_by_service_patterns(
 
     if not refined_sections:
         return [(path_nodes, edge_records)]
+
+    print(f"  Split result: {len(refined_sections)} section(s) created")
+    for i, (nodes, edges) in enumerate(refined_sections):
+        print(f"    Section {i+1}: nodes {nodes[0]} -> {nodes[-1]}, {len(edges)} edge(s)")
 
     return refined_sections
 
@@ -2107,6 +2199,17 @@ def _summarise_section(
     node_pass_services: Dict[int, set[str]],
 ) -> Dict[str, object]:
     """Combine edge metrics into a section summary."""
+    start_node = path_nodes[0]
+    end_node = path_nodes[-1]
+    start_name = node_names.get(start_node, f"Node_{start_node}")
+    end_name = node_names.get(end_node, f"Node_{end_node}")
+
+    print(f"\n  === SUMMARIZING SECTION {section_id} ===")
+    print(f"  Track: {track}")
+    print(f"  Nodes: {path_nodes}")
+    print(f"  From: {start_node} ({start_name}) -> To: {end_node} ({end_name})")
+    print(f"  Edges: {len(edge_records)}")
+
     def _collect_unique_numeric(field: str) -> List[float]:
         unique: set[float] = set()
         for _, _, edge_info in edge_records:
@@ -2283,6 +2386,16 @@ def _summarise_section(
     service_count = len(all_services)
     strategy_metrics: List[Tuple[str, float, float]] = []
 
+    print(f"  Capacity calculation inputs:")
+    print(f"    Total length: {total_length}m")
+    print(f"    Stopping time: {total_stopping_time}min")
+    print(f"    Passing time: {total_passing_time}min")
+    print(f"    Headway: {headway}min")
+    print(f"    Service count: {service_count}")
+    print(f"    All services: {all_services}")
+    print(f"    Stopping services: {stopping_services}")
+    print(f"    Passing services: {passing_services_list}")
+
     # Fractional track support: .5 increments halve section travel times
     is_fractional = (track % 1 == 0.5)  # True for 1.5, 2.5, 3.5, 4.5, 5.5, etc.
     base_track = math.floor(track)  # 1.5→1, 2.5→2, 3.5→3, 4.5→4, etc.
@@ -2293,8 +2406,10 @@ def _summarise_section(
         total_passing_time = total_passing_time / 2.0
         travel_time_penalty = max(0.0, total_stopping_time - total_passing_time - headway)
         formula_track = base_track
+        print(f"    Fractional track ({track}): Using formula_track={formula_track}, times halved")
     else:
         formula_track = int(track)
+        print(f"    Track formula: formula_track={formula_track} (is_fractional={is_fractional})")
 
     if formula_track == 1:
         single_capacity = float("nan")
@@ -2415,6 +2530,11 @@ def _summarise_section(
         capacity_columns["capacity_good_tphpd"] = selected_capacity
         selected_utilization = _utilization(selected_capacity, total_tphpd)
         capacity_columns["utilization_good"] = selected_utilization
+
+    print(f"  Section {section_id} complete:")
+    print(f"    Route: {start_node} ({start_name}) -> {end_node} ({end_name})")
+    print(f"    Selected Capacity: {selected_capacity}")
+    print(f"    Selected Utilization: {selected_utilization}")
 
     return {
         "section_id": section_id,

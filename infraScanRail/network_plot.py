@@ -48,7 +48,11 @@ else:
 # Colour palette for service plot.
 SERVICE_COLOUR_STOP = "#2e7d32"
 SERVICE_COLOUR_PASS = "#0277bd"
-SERVICE_OFFSET_SPACING = 120.0
+SERVICE_OFFSET_SPACING = 60.0
+SERVICE_FREQUENCY_SPACING = 60.0  # Spacing between parallel frequency lines within a service
+SERVICE_OVERLAP_EXPANSION_FACTOR = 1.15  # Factor to expand spacing when collision detected
+SERVICE_SPACING_MAX_RECURSION = 10  # Max recursion depth for spacing calculation
+SERVICE_MIN_GAP = 60.0  # Minimum gap (in units) between adjacent service frequency bundles
 SERVICE_RECT_MARGIN = 40.0
 STATION_BASE_HALF_SIZE = 60.0
 STATION_PER_SERVICE_INCREMENT = 14.0
@@ -62,6 +66,102 @@ def _safe_make_valid(geometry):
         return make_valid(geometry)
     except Exception:
         return geometry
+
+
+def _calculate_required_spacing(service_map: Dict[str, float], spacing: float) -> Tuple[bool, float]:
+    """Check if services overlap with given spacing and return maximum offset needed.
+    
+    Enforces both collision-free overlaps and a minimum gap between services.
+    
+    Args:
+        service_map: Dictionary of service_name -> frequency (tphpd)
+        spacing: Current SERVICE_OFFSET_SPACING value to test
+    
+    Returns:
+        Tuple of (has_insufficient_gap: bool, max_offset: float) where:
+        - has_insufficient_gap: True if services violate overlap or minimum gap constraints
+        - max_offset: Maximum perpendicular distance needed from center line to contain all services
+    """
+    if len(service_map) <= 1:
+        # Single service - no inter-service collision possible
+        if service_map:
+            service_name, frequency = next(iter(service_map.items()))
+            int_freq = max(int(round(frequency)), 1)
+            max_freq_offset = (int_freq - 1) * SERVICE_FREQUENCY_SPACING / 2.0
+            return False, max_freq_offset
+        return False, 0.0
+    
+    service_count = len(service_map)
+    
+    # Calculate offset positions for each service (centered around 0)
+    service_positions = []
+    for idx in range(service_count):
+        service_offset = (idx - (service_count - 1) / 2.0) * spacing
+        service_positions.append(service_offset)
+    
+    # For each service, calculate its frequency bundle width
+    service_widths = []
+    for idx, (service_name, frequency) in enumerate(service_map.items()):
+        int_freq = max(int(round(frequency)), 1)
+        freq_bundle_half_width = (int_freq - 1) * SERVICE_FREQUENCY_SPACING / 2.0
+        service_center = service_positions[idx]
+        service_min = service_center - freq_bundle_half_width
+        service_max = service_center + freq_bundle_half_width
+        service_widths.append((service_min, service_max))
+    
+    # Check for overlaps and insufficient gaps between consecutive service frequency bundles
+    has_insufficient_gap = False
+    for i in range(len(service_widths) - 1):
+        min_i, max_i = service_widths[i]
+        min_j, max_j = service_widths[i + 1]
+        # Calculate gap between end of service i and start of service j
+        gap = min_j - max_i
+        # Insufficient gap if overlap (gap < 0) or gap smaller than minimum required
+        if gap < SERVICE_MIN_GAP:
+            has_insufficient_gap = True
+            break
+    
+    # Calculate maximum offset needed (half-width from center to outermost point)
+    all_points = [pt for min_pt, max_pt in service_widths for pt in (min_pt, max_pt)]
+    if all_points:
+        max_offset = max(abs(min(all_points)), abs(max(all_points)))
+    else:
+        max_offset = 0.0
+    
+    return has_insufficient_gap, max_offset
+
+
+def _find_optimal_spacing(
+    service_map: Dict[str, float],
+    initial_spacing: float = SERVICE_OFFSET_SPACING,
+    recursion_depth: int = 0,
+) -> float:
+    """Recursively find optimal SERVICE_OFFSET_SPACING to avoid service collisions.
+    
+    Tests current spacing for overlap. If overlap detected, expands spacing by
+    SERVICE_OVERLAP_EXPANSION_FACTOR and retries. Stops at max recursion depth.
+    
+    Args:
+        service_map: Dictionary of service_name -> frequency (tphpd)
+        initial_spacing: Starting spacing value to test
+        recursion_depth: Current recursion depth (incremented on each call)
+    
+    Returns:
+        Optimal spacing value that avoids collisions, or maximum reached spacing if limit hit.
+    """
+    has_overlap, _ = _calculate_required_spacing(service_map, initial_spacing)
+    
+    if not has_overlap:
+        # No overlap - this spacing is safe
+        return initial_spacing
+    
+    if recursion_depth >= SERVICE_SPACING_MAX_RECURSION:
+        # Hit recursion limit - return current spacing anyway
+        return initial_spacing
+    
+    # Expand spacing and retry
+    expanded_spacing = initial_spacing * SERVICE_OVERLAP_EXPANSION_FACTOR
+    return _find_optimal_spacing(service_map, expanded_spacing, recursion_depth + 1)
 
 
 class _DoubleTrackLegendHandle:
@@ -628,9 +728,14 @@ def _compute_station_shapes(
     stations: Dict[int, Station],
     segments: Sequence[Segment],
 ) -> Dict[int, StationShape]:
-    """Compute oriented station polygons sized to encompass service offsets."""
+    """Compute oriented station polygons sized to encompass service offsets.
+    
+    Accounts for dynamic SERVICE_OFFSET_SPACING that expands to prevent service collisions.
+    """
     direction_angles: Dict[int, List[float]] = defaultdict(list)
     max_service_counts: Dict[int, int] = defaultdict(lambda: 1)
+    max_frequencies: Dict[int, int] = defaultdict(lambda: 1)
+    adaptive_spacings: Dict[int, float] = defaultdict(lambda: SERVICE_OFFSET_SPACING)
 
     for segment in segments:
         start = stations.get(segment.from_node)
@@ -651,6 +756,17 @@ def _compute_station_shapes(
         if count > 0:
             max_service_counts[segment.from_node] = max(max_service_counts[segment.from_node], count)
             max_service_counts[segment.to_node] = max(max_service_counts[segment.to_node], count)
+            
+            # Calculate adaptive spacing for this service set
+            adaptive_spacing = _find_optimal_spacing(service_map)
+            adaptive_spacings[segment.from_node] = max(adaptive_spacings[segment.from_node], adaptive_spacing)
+            adaptive_spacings[segment.to_node] = max(adaptive_spacings[segment.to_node], adaptive_spacing)
+            
+            # Track maximum frequency at each station
+            for freq in service_map.values():
+                int_freq = max(int(round(freq)), 1)
+                max_frequencies[segment.from_node] = max(max_frequencies[segment.from_node], int_freq)
+                max_frequencies[segment.to_node] = max(max_frequencies[segment.to_node], int_freq)
 
     station_shapes: Dict[int, StationShape] = {}
     for node_id, station in stations.items():
@@ -673,8 +789,15 @@ def _compute_station_shapes(
         along_half = STATION_BASE_HALF_SIZE + STATION_PER_SERVICE_INCREMENT * (size_multiplier - 1)
 
         max_services = max_service_counts.get(node_id, 1)
+        max_freq = max_frequencies.get(node_id, 1)
+        adaptive_spacing = adaptive_spacings.get(node_id, SERVICE_OFFSET_SPACING)
+        
         if max_services > 1:
-            max_offset = SERVICE_OFFSET_SPACING * (max_services - 1) / 2.0
+            # Width from adaptive service spacing between different services
+            service_spacing_width = adaptive_spacing * (max_services - 1) / 2.0
+            # Additional width from frequency lines within the widest service
+            frequency_width = SERVICE_FREQUENCY_SPACING * (max_freq - 1) / 2.0
+            max_offset = service_spacing_width + frequency_width
         else:
             max_offset = 0.0
         across_half = max(along_half, STATION_BASE_HALF_SIZE + max_offset + SERVICE_RECT_MARGIN)
@@ -2152,6 +2275,9 @@ def _draw_service_map(
         )
         service_count = len(services_sorted)
 
+        # Calculate optimal spacing to avoid service collisions
+        adaptive_offset_spacing = _find_optimal_spacing(service_map)
+
         start_shape = station_shapes.get(segment.from_node) if station_shapes else None
         end_shape = station_shapes.get(segment.to_node) if station_shapes else None
 
@@ -2182,8 +2308,6 @@ def _draw_service_map(
                 base_sign = 1.0 if normal_y >= 0.0 else -1.0
 
         for index, (service_name, frequency) in enumerate(services_sorted):
-            width = _service_line_width(frequency)
-
             start_stops = service_name in start.stopping_services
             end_stops = service_name in end.stopping_services
             start_colour = SERVICE_COLOUR_STOP if start_stops else SERVICE_COLOUR_PASS
@@ -2192,7 +2316,7 @@ def _draw_service_map(
             if service_count <= 1:
                 offset_distance = 0.0
             else:
-                offset_distance = base_sign * (index - (service_count - 1) / 2.0) * SERVICE_OFFSET_SPACING
+                offset_distance = base_sign * (index - (service_count - 1) / 2.0) * adaptive_offset_spacing
 
             offset_coords = _offset_polyline_uniform(coords, offset_distance)
 
@@ -2204,81 +2328,82 @@ def _draw_service_map(
                         offset_coords[-1], offset_coords[-2], end, end_shape
                     )
 
-            xs_all = [pt[0] for pt in offset_coords]
-            ys_all = [pt[1] for pt in offset_coords]
-            extent_min_x = min(extent_min_x, min(xs_all))
-            extent_max_x = max(extent_max_x, max(xs_all))
-            extent_min_y = min(extent_min_y, min(ys_all))
-            extent_max_y = max(extent_max_y, max(ys_all))
-
             start_offset = offset_coords[0]
             end_offset = offset_coords[-1]
             mid_x = (start_offset[0] + end_offset[0]) / 2.0
             mid_y = (start_offset[1] + end_offset[1]) / 2.0
 
-            service_station_links[(service_name, segment.from_node)].append((start_offset, start_colour, width))
-            service_station_links[(service_name, segment.to_node)].append((end_offset, end_colour, width))
-
-            # Draw service line (scales with frequency) with white separators
+            # Round frequency to integer (1 service = 1 line, 2 services = 2 lines, etc.)
             int_frequency = max(int(round(frequency)), 1)
 
-            # Draw the main service line (width scales with frequency)
-            if start_colour == end_colour:
-                ox, oy = zip(*offset_coords)
-                ax.plot(ox, oy, color=start_colour, linewidth=width, zorder=2)
-            else:
-                ax.plot(
-                    [start_offset[0], mid_x],
-                    [start_offset[1], mid_y],
-                    color=start_colour,
-                    linewidth=width,
-                    zorder=2,
-                )
-                ax.plot(
-                    [mid_x, end_offset[0]],
-                    [mid_y, end_offset[1]],
-                    color=end_colour,
-                    linewidth=width,
-                    zorder=2,
-                )
+            # Fixed uniform line width for all service frequency lines
+            individual_line_width = 1.2
 
-            # Draw white separators to split the line based on frequency
-            if int_frequency >= 2:
-                separator_count = int_frequency - 1
+            # Draw parallel lines for each frequency unit
+            for freq_idx in range(int_frequency):
+                # Calculate offset for this frequency line relative to the service's base offset
+                freq_offset = (freq_idx - (int_frequency - 1) / 2.0) * SERVICE_FREQUENCY_SPACING
 
-                # Adjust separator width based on count
-                if separator_count == 1:
-                    # Single separator: standard thickness
-                    separator_width = max(0.4, width * 0.12)
+                # Apply frequency offset to the service's base offset coordinates
+                freq_coords = _offset_polyline_uniform(offset_coords, freq_offset)
+
+                # Project to station boundaries if needed
+                if station_shapes and len(freq_coords) >= 2:
+                    if start_shape:
+                        freq_coords[0] = _project_point_to_station_boundary(
+                            freq_coords[0], freq_coords[1], start, start_shape
+                        )
+                    if end_shape:
+                        freq_coords[-1] = _project_point_to_station_boundary(
+                            freq_coords[-1], freq_coords[-2], end, end_shape
+                        )
+
+                # Update extent tracking
+                xs_all = [pt[0] for pt in freq_coords]
+                ys_all = [pt[1] for pt in freq_coords]
+                extent_min_x = min(extent_min_x, min(xs_all))
+                extent_max_x = max(extent_max_x, max(xs_all))
+                extent_min_y = min(extent_min_y, min(ys_all))
+                extent_max_y = max(extent_max_y, max(ys_all))
+
+                # Draw this frequency line with uniform color or split coloring
+                freq_start = freq_coords[0]
+                freq_end = freq_coords[-1]
+                freq_mid_x = (freq_start[0] + freq_end[0]) / 2.0
+                freq_mid_y = (freq_start[1] + freq_end[1]) / 2.0
+
+                if start_colour == end_colour:
+                    # Uniform color for entire line
+                    fx, fy = zip(*freq_coords)
+                    ax.plot(
+                        fx, fy,
+                        color=start_colour,
+                        linewidth=individual_line_width,
+                        solid_capstyle="round",
+                        zorder=2
+                    )
                 else:
-                    # Multiple separators: reduce thickness by 50%
-                    separator_width = max(0.3, width * 0.06)
+                    # Split coloring at geometric midpoint
+                    ax.plot(
+                        [freq_start[0], freq_mid_x],
+                        [freq_start[1], freq_mid_y],
+                        color=start_colour,
+                        linewidth=individual_line_width,
+                        solid_capstyle="round",
+                        zorder=2
+                    )
+                    ax.plot(
+                        [freq_mid_x, freq_end[0]],
+                        [freq_mid_y, freq_end[1]],
+                        color=end_colour,
+                        linewidth=individual_line_width,
+                        solid_capstyle="round",
+                        zorder=2
+                    )
 
-                # Calculate separator positions perpendicular to the line
-                # For n trains, we need n-1 separators that divide the line width into n equal parts
-                # The offsets are perpendicular distances from the center of the service line
-                for i in range(separator_count):
-                    # Position separators to divide the line width into equal sections
-                    # For int_frequency sections, separators are at positions:
-                    # -width/2 + (i+1) * (width/int_frequency)
-                    # Which simplifies to positions that divide the width evenly
-                    separator_position = (i + 1 - int_frequency / 2.0) * (width / int_frequency)
-
-                    # Apply perpendicular offset to create the separator line
-                    separator_coords = _offset_polyline_uniform(coords, offset_distance + separator_position)
-
-                    if station_shapes and len(separator_coords) >= 2:
-                        if start_shape:
-                            separator_coords[0] = _project_point_to_station_boundary(
-                                separator_coords[0], separator_coords[1], start, start_shape
-                            )
-                        if end_shape:
-                            separator_coords[-1] = _project_point_to_station_boundary(
-                                separator_coords[-1], separator_coords[-2], end, end_shape
-                            )
-
-                    sep_x, sep_y = zip(*separator_coords)
-                    ax.plot(sep_x, sep_y, color="white", linewidth=separator_width, zorder=2.5)
+            # Store service station links for connector lines (using center offset and fixed width)
+            service_station_links[(service_name, segment.from_node)].append((start_offset, start_colour, 1.0))
+            service_station_links[(service_name, segment.to_node)].append((end_offset, end_colour, 1.0))
 
             label_candidates.append(
                 {
@@ -2293,7 +2418,7 @@ def _draw_service_map(
     for (service_name, station_id), endpoints in service_station_links.items():
         if len(endpoints) != 2:
             continue
-        (point_a, colour_a, width_a), (point_b, colour_b, width_b) = endpoints
+        (point_a, colour_a, _), (point_b, colour_b, _) = endpoints
         station = stations.get(station_id)
         if station is None:
             continue
@@ -2303,7 +2428,7 @@ def _draw_service_map(
             connector_colour = SERVICE_COLOUR_STOP
         else:
             connector_colour = SERVICE_COLOUR_PASS
-        connector_width = max(0.8, min(width_a, width_b) * 0.35)
+        connector_width = 1.0  # Fixed thin width matching service lines
         ax.plot(
             [point_a[0], point_b[0]],
             [point_a[1], point_b[1]],
@@ -2846,11 +2971,11 @@ def plot_service_network(
 
 
 if __name__ == "__main__":
-    network_output = network_current_map(show=True)
-    print(f"Network plot saved to {network_output}")
-    speed_output = plot_speed_profile_network(show=True)
-    print(f"Speed profile plot saved to {speed_output}")
+    # network_output = network_current_map(show=True)
+    # print(f"Network plot saved to {network_output}")
+    # speed_output = plot_speed_profile_network(show=True)
+    # print(f"Speed profile plot saved to {speed_output}")
     service_output = plot_service_network(show=True)
     print(f"Service plot saved to {service_output}")
-    capacity_output = plot_capacity_network(show=True, generate_network=False)
-    print(f"Capacity plot saved to {capacity_output}")
+    # capacity_output = plot_capacity_network(show=True, generate_network=False)
+    # print(f"Capacity plot saved to {capacity_output}")

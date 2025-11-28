@@ -2,7 +2,7 @@ from shapely.geometry import Polygon
 import paths
 
 #Rail network: Choose either 'AK_2035','AK_2035_extended' or 'current' or '2024_extended'
-rail_network = 'current'
+rail_network = 'AK_2035'
 
 #CACHE
 use_cache_network = False
@@ -17,7 +17,7 @@ use_cache_tts_calc = False
 # Infrastructure generation modules: Choose either 'EXTEND_LINES', 'NEW_DIRECT_CONNECTIONS' or 'ALL'
 infra_generation_modification_type = 'ALL' 
 # Rail services: Choose either 'RAIL_SERVICES_AK2035_PATH' or 'RAIL_SERVICES_AK2035_EXTENDED_PATH' or 'RAIL_SERVICES_2024_PATH' or 'RAIL_SERVICES_AK2024_EXTENDED_PATH'
-infra_generation_rail_network = paths.RAIL_SERVICES_2024_PATH
+infra_generation_rail_network = paths.RAIL_SERVICES_AK2035_PATH
 
 OD_type = 'canton_ZH' #either 'canton_ZH' or 'pt_catchment_perimeter'
 only_demand_from_to_perimeter = True
@@ -58,4 +58,18 @@ empl_scenarios = ["empl_urban", "empl_equal", "empl_rural",
 
 dev_id_start_extended_lines = 100000
 dev_id_start_new_direct_connections = 101000
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CAPACITY ANALYSIS SETTINGS (for main_cap.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Phase 3.2: Baseline Capacity
+capacity_threshold = 2.0  # Minimum available capacity (trains per hour per direction)
+visualize_capacity_analysis = True  # Create plots during capacity analysis
+
+# Phase 3.3: Baseline Enhancement
+max_enhancement_iterations = 10  # Max Phase 4 enhancement iterations
+
+# Internal (set dynamically in Phase 3.3)
+baseline_network_for_developments = None  # Will be set to enhanced network label (e.g., "2024_extended_enhanced")
 
