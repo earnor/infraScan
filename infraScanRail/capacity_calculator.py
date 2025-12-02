@@ -257,8 +257,8 @@ def extract_stations_from_edges(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame
     """
     from shapely.geometry import Point
 
-    # DEBUG: Print available columns in edges
-    print(f"\n[DEBUG] Edges columns available: {list(edges_gdf.columns)}")
+    # # DEBUG: Print available columns in edges
+    # print(f"\n[DEBUG] Edges columns available: {list(edges_gdf.columns)}")
 
     # Collect unique endpoints with their names and codes
     node_data: Dict[int, Dict[str, any]] = {}
@@ -267,11 +267,11 @@ def extract_stations_from_edges(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame
     name_columns = ["FromStation", "FromName", "From_Station", "From_Name", "from_station", "from_name"]
     code_columns = ["FromCode", "From_Code", "from_code", "FromStationCode", "from_station_code"]
 
-    # DEBUG: Check which name/code columns exist
-    existing_name_cols = [col for col in name_columns if col in edges_gdf.columns]
-    existing_code_cols = [col for col in code_columns if col in edges_gdf.columns]
-    print(f"[DEBUG] Found name columns: {existing_name_cols}")
-    print(f"[DEBUG] Found code columns: {existing_code_cols}")
+    # # DEBUG: Check which name/code columns exist
+    # existing_name_cols = [col for col in name_columns if col in edges_gdf.columns]
+    # existing_code_cols = [col for col in code_columns if col in edges_gdf.columns]
+    # print(f"[DEBUG] Found name columns: {existing_name_cols}")
+    # print(f"[DEBUG] Found code columns: {existing_code_cols}")
 
     for _, row in edges_gdf.iterrows():
         from_node = parse_int(row.get("FromNode", 0))
@@ -344,10 +344,10 @@ def extract_stations_from_edges(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame
         x_offset = x - LV95_E_OFFSET
         y_offset = y - LV95_N_OFFSET
 
-        # DEBUG: Print first 3 stations to verify extraction
-        if sample_count < 3:
-            print(f"[DEBUG] Station {node_id}: name='{data['name']}', code='{data['code']}'")
-            sample_count += 1
+        # # DEBUG: Print first 3 stations to verify extraction
+        # if sample_count < 3:
+        #     print(f"[DEBUG] Station {node_id}: name='{data['name']}', code='{data['code']}'")
+        #     sample_count += 1
 
         records.append({
             "ID_point": node_id,
@@ -359,7 +359,7 @@ def extract_stations_from_edges(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame
         })
 
     points_gdf = gpd.GeoDataFrame(records, crs=edges_gdf.crs)
-    print(f"[DEBUG] Extracted {len(points_gdf)} unique stations from edges\n")
+    # print(f"[DEBUG] Extracted {len(points_gdf)} unique stations from edges\n")
     return points_gdf
 
 
@@ -391,7 +391,7 @@ def load_service_links(edges_path: Path = None) -> pd.DataFrame:
         else:
             print(f"[INFO] Baseline standard mode: loaded {len(gdf)} edges from edges_in_corridor.gpkg")
 
-        print(f"[INFO] Total edges for baseline: {len(gdf)}")
+        # print(f"[INFO] Total edges for baseline: {len(gdf)}")
 
     # DEVELOPMENT MODE: Load from custom path
     else:
@@ -716,7 +716,7 @@ def load_corridor_nodes_from_master(
                 if via_node and via_node != -99:
                     node_ids.add(via_node)
 
-    print(f"[INFO] Extracted {len(node_ids)} unique node IDs from edges (FromNode, ToNode, Via)")
+    # print(f"[INFO] Extracted {len(node_ids)} unique node IDs from edges (FromNode, ToNode, Via)")
 
     # Load points file
     master_points = gpd.read_file(master_points_path)
@@ -732,7 +732,7 @@ def load_corridor_nodes_from_master(
     else:
         points_file_name = "points_corridor.gpkg"
 
-    print(f"[INFO] Loaded {len(master_points)} stations from {points_file_name}")
+    # print(f"[INFO] Loaded {len(master_points)} stations from {points_file_name}")
 
     # Ensure ID_point is integer for matching
     master_points["ID_point"] = master_points["ID_point"].apply(parse_int)
@@ -1173,12 +1173,12 @@ def build_capacity_tables(
     """
     is_baseline = edges_path is None
 
-    print(f"\n{'='*80}")
-    print(f"[INFO] build_capacity_tables - {'BASELINE' if is_baseline else 'DEVELOPMENT'} workflow")
-    print(f"  - edges_path: {edges_path if edges_path else 'Default (baseline)'}")
-    print(f"  - network_label: {network_label}")
-    print(f"  - enrichment_source: {enrichment_source}")
-    print(f"{'='*80}\n")
+    # print(f"\n{'='*80}")
+    # print(f"[INFO] build_capacity_tables - {'BASELINE' if is_baseline else 'DEVELOPMENT'} workflow")
+    # print(f"  - edges_path: {edges_path if edges_path else 'Default (baseline)'}")
+    # print(f"  - network_label: {network_label}")
+    # print(f"  - enrichment_source: {enrichment_source}")
+    # print(f"{'='*80}\n")
 
     # Load service links (handles baseline extended mode internally)
     service_links_full = load_service_links(edges_path=edges_path)
@@ -1583,25 +1583,23 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
         nodes = list(adjacency.keys())
         start_nodes = [node for node in nodes if len(adjacency[node]) != 2 or not node_valid(node)]
 
-        print(f"\n{'='*80}")
-        print(f"=== PROCESSING TRACK COUNT GROUP: {track} ===")
-        print(f"- Total edges in this group: {len(edges_dict)}")
-        print(f"- Total nodes: {len(adjacency)}")
-        print(f"- Start nodes (branch/terminal points): {start_nodes}")
-        print(f"{'='*80}\n")
+        # print(f"\n{'='*80}")
+        # print(f"=== PROCESSING TRACK COUNT GROUP: {track} ===")
+        # print(f"- Total edges in this group: {len(edges_dict)}")
+        # print(f"- Total nodes: {len(adjacency)}")
+        # print(f"- Start nodes (branch/terminal points): {start_nodes}")
+        # print(f"{'='*80}\n")
 
         for start in start_nodes:
             start_name = node_names.get(start, f"Node_{start}")
-            print(f"--- Starting path search from node {start} ({start_name}, track={track}) ---")
-            print(f"  Neighbors to explore: {list(adjacency[start])}")
+            # print(f"--- Starting path search from node {start} ({start_name}, track={track}) ---")
+            # print(f"  Neighbors to explore: {list(adjacency[start])}")
 
             for neighbor in list(adjacency[start]):
-                edge_key = frozenset({start, neighbor})
-                if edge_key in visited_edges:
-                    continue
+                # ...existing code...
 
                 neighbor_name = node_names.get(neighbor, f"Node_{neighbor}")
-                print(f"  Traversing edge: {start} ({start_name}) -> {neighbor} ({neighbor_name})")
+                # print(f"  Traversing edge: {start} ({start_name}) -> {neighbor} ({neighbor_name})")
 
                 path_nodes, edge_records, path_edge_keys = _traverse_path(
                     start,
@@ -1633,14 +1631,14 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
                         section_counter += 1
                     visited_edges.update(path_edge_keys)
 
-        print(f"\n--- Processing remaining unvisited edges (track={track}) ---")
+        # print(f"\n--- Processing remaining unvisited edges (track={track}) ---")
         for edge_key, edge_info in edges_dict.items():
             if edge_key in visited_edges:
                 continue
             u, v = tuple(edge_key)
             u_name = node_names.get(u, f"Node_{u}")
             v_name = node_names.get(v, f"Node_{v}")
-            print(f"  Unvisited edge: {u} ({u_name}) <-> {v} ({v_name})")
+            # print(f"  Unvisited edge: {u} ({u_name}) <-> {v} ({v_name})")
             path_nodes, edge_records, path_edge_keys = _traverse_path(
                 u,
                 v,
@@ -1691,14 +1689,14 @@ def _traverse_path(
     local_edges: set[frozenset] = set()
 
     while True:
-        print(f"    Edge step: {current} -> {next_node}")
+        # print(f"    Edge step: {current} -> {next_node}")
         edge_key = frozenset({current, next_node})
         if edge_key in visited_edges or edge_key in local_edges:
-            print(f"    STOP: Edge already visited/processed")
+            # print(f"    STOP: Edge already visited/processed")
             break
         edge_info = edges_dict.get(edge_key)
         if edge_info is None:
-            print(f"    STOP: Edge not found in edges_dict")
+            # print(f"    STOP: Edge not found in edges_dict")
             break
 
         local_edges.add(edge_key)
@@ -1708,39 +1706,39 @@ def _traverse_path(
 
         if not node_valid(next_node) or len(adjacency[next_node]) != 2:
             node_track = edges_dict.get(edge_key, {}).get("track_count", "?")
-            print(f"    STOP: Terminal/branch point - node {next_node} (valid={node_valid(next_node)}, neighbors={len(adjacency[next_node])}, track={node_track})")
+            # print(f"    STOP: Terminal/branch point - node {next_node} (valid={node_valid(next_node)}, neighbors={len(adjacency[next_node])}, track={node_track})")
             break
 
         candidates = adjacency[next_node] - {current}
         if not candidates:
-            print(f"    STOP: No forward candidates from node {next_node}")
+            # print(f"    STOP: No forward candidates from node {next_node}")
             break
         candidate = next(iter(candidates))
         candidate_edge = frozenset({next_node, candidate})
         if candidate_edge in visited_edges or candidate_edge in local_edges:
-            print(f"    STOP: Next edge {next_node} -> {candidate} already visited")
+            # print(f"    STOP: Next edge {next_node} -> {candidate} already visited")
             break
 
         # Stop section if the next edge changes track or service patterns.
         current_edge_info = edges_dict.get(edge_key)
         candidate_edge_info = edges_dict.get(candidate_edge)
         if candidate_edge_info is None:
-            print(f"    STOP: Next edge {next_node} -> {candidate} not found in edges_dict")
+            # print(f"    STOP: Next edge {next_node} -> {candidate} not found in edges_dict")
             break
         if current_edge_info["track_count"] != candidate_edge_info["track_count"]:
-            print(f"    STOP: Track count change - current={current_edge_info['track_count']}, next={candidate_edge_info['track_count']}")
+            # print(f"    STOP: Track count change - current={current_edge_info['track_count']}, next={candidate_edge_info['track_count']}")
             break
         if current_edge_info["stopping_service_tokens"] != candidate_edge_info["stopping_service_tokens"]:
-            print(f"    STOP: Stopping services differ - current={current_edge_info['stopping_service_tokens']}, next={candidate_edge_info['stopping_service_tokens']}")
+            # print(f"    STOP: Stopping services differ - current={current_edge_info['stopping_service_tokens']}, next={candidate_edge_info['stopping_service_tokens']}")
             break
         if current_edge_info["passing_service_tokens"] != candidate_edge_info["passing_service_tokens"]:
-            print(f"    STOP: Passing services differ - current={current_edge_info['passing_service_tokens']}, next={candidate_edge_info['passing_service_tokens']}")
+            # print(f"    STOP: Passing services differ - current={current_edge_info['passing_service_tokens']}, next={candidate_edge_info['passing_service_tokens']}")
             break
 
         current, next_node = next_node, candidate
 
-    print(f"    Path complete: {len(path_nodes)} nodes, {len(edge_records)} edges")
-    print(f"    Node sequence: {path_nodes}")
+    # print(f"    Path complete: {len(path_nodes)} nodes, {len(edge_records)} edges")
+    # print(f"    Node sequence: {path_nodes}")
     return path_nodes, edge_records, path_edge_keys
 
 
@@ -1751,10 +1749,10 @@ def _split_section_by_service_patterns(
     node_pass_services: Dict[int, set[str]],
 ) -> List[Tuple[List[int], List[Tuple[int, int, Dict[str, float]]]]]:
     """Split an infrastructure section where service stop/pass patterns change."""
-    print(f"\n  === Analyzing service patterns for splitting ===")
+    # print(f"\n  === Analyzing service patterns for splitting ===")
 
     if len(path_nodes) <= 2 or not edge_records:
-        print(f"  Split check: Path too short ({len(path_nodes)} nodes), returning as-is")
+        # print(f"  Split check: Path too short ({len(path_nodes)} nodes), returning as-is")
         return [(path_nodes, edge_records)]
 
     candidate_services: set[str] = set()
@@ -1763,12 +1761,12 @@ def _split_section_by_service_patterns(
         candidate_services.update(node_pass_services.get(node, set()))
 
     if not candidate_services:
-        print(f"  Split check: No services found, returning as-is")
+        # print(f"  Split check: No services found, returning as-is")
         return [(path_nodes, edge_records)]
 
     service_order = sorted(candidate_services)
-    print(f"  Analyzing service patterns for: {service_order}")
-    print(f"  Path nodes: {path_nodes}")
+    # print(f"  Analyzing service patterns for: {service_order}")
+    # print(f"  Path nodes: {path_nodes}")
 
     service_node_states: Dict[str, List[str]] = {}
     for service in service_order:
@@ -1783,9 +1781,9 @@ def _split_section_by_service_patterns(
 
         service_node_states[service] = states
 
-    print(f"  Service state sequences:")
-    for service in service_order:
-        print(f"    {service}: {service_node_states[service]}")
+    # print(f"  Service state sequences:")
+    # for service in service_order:
+    #     print(f"    {service}: {service_node_states[service]}")
 
     def _should_split(pattern_a: Tuple[str, ...], pattern_b: Tuple[str, ...]) -> bool:
         """Return True when service patterns change significantly.
@@ -1841,18 +1839,18 @@ def _split_section_by_service_patterns(
 
             # RULE 1: Skip if only terminations (services don't reach this node)
             if has_terminations and not has_starts and not has_transitions:
-                print(f"  SKIPPING split at node index {idx} (node {path_nodes[idx]}): Only terminations")
-                print(f"    Previous pattern: {current_pattern}")
-                print(f"    New pattern: {next_pattern}")
+                # print(f"  SKIPPING split at node index {idx} (node {path_nodes[idx]}): Only terminations")
+                # print(f"    Previous pattern: {current_pattern}")
+                # print(f"    New pattern: {next_pattern}")
                 current_pattern = next_pattern
                 idx += 1
                 continue
 
             # RULE 2: Skip at final node if only starts (services don't use incoming edge)
             if idx == len(path_nodes) - 1 and has_starts and not has_terminations and not has_transitions:
-                print(f"  SKIPPING split at node index {idx} (node {path_nodes[idx]}): Only starts at final node")
-                print(f"    Previous pattern: {current_pattern}")
-                print(f"    New pattern: {next_pattern}")
+                # print(f"  SKIPPING split at node index {idx} (node {path_nodes[idx]}): Only starts at final node")
+                # print(f"    Previous pattern: {current_pattern}")
+                # print(f"    New pattern: {next_pattern}")
                 current_pattern = next_pattern
                 idx += 1
                 continue
@@ -1863,12 +1861,12 @@ def _split_section_by_service_patterns(
             continue
 
         # Split detected
-        print(f"  SPLIT at node index {idx} (node {path_nodes[idx]}):")
-        print(f"    Previous pattern: {current_pattern}")
-        print(f"    New pattern: {next_pattern}")
-        for i, service in enumerate(service_order):
-            if current_pattern[i] != next_pattern[i]:
-                print(f"    Reason: Service '{service}' changed from '{current_pattern[i]}' -> '{next_pattern[i]}'")
+        # print(f"  SPLIT at node index {idx} (node {path_nodes[idx]}):")
+        # print(f"    Previous pattern: {current_pattern}")
+        # print(f"    New pattern: {next_pattern}")
+        # for i, service in enumerate(service_order):
+        #     if current_pattern[i] != next_pattern[i]:
+        #         print(f"    Reason: Service '{service}' changed from '{current_pattern[i]}' -> '{next_pattern[i]}'")
 
         split_edge = idx - 1
         sub_edges = edge_records[start_index : split_edge + 1]
@@ -1886,9 +1884,9 @@ def _split_section_by_service_patterns(
     if not refined_sections:
         return [(path_nodes, edge_records)]
 
-    print(f"  Split result: {len(refined_sections)} section(s) created")
-    for i, (nodes, edges) in enumerate(refined_sections):
-        print(f"    Section {i+1}: nodes {nodes[0]} -> {nodes[-1]}, {len(edges)} edge(s)")
+    # print(f"  Split result: {len(refined_sections)} section(s) created")
+    # for i, (nodes, edges) in enumerate(refined_sections):
+    #     print(f"    Section {i+1}: nodes {nodes[0]} -> {nodes[-1]}, {len(edges)} edge(s)")
 
     return refined_sections
 
@@ -2204,11 +2202,11 @@ def _summarise_section(
     start_name = node_names.get(start_node, f"Node_{start_node}")
     end_name = node_names.get(end_node, f"Node_{end_node}")
 
-    print(f"\n  === SUMMARIZING SECTION {section_id} ===")
-    print(f"  Track: {track}")
-    print(f"  Nodes: {path_nodes}")
-    print(f"  From: {start_node} ({start_name}) -> To: {end_node} ({end_name})")
-    print(f"  Edges: {len(edge_records)}")
+    # print(f"\n  === SUMMARIZING SECTION {section_id} ===")
+    # print(f"  Track: {track}")
+    # print(f"  Nodes: {path_nodes}")
+    # print(f"  From: {start_node} ({start_name}) -> To: {end_node} ({end_name})")
+    # print(f"  Edges: {len(edge_records)}")
 
     def _collect_unique_numeric(field: str) -> List[float]:
         unique: set[float] = set()
@@ -2386,15 +2384,15 @@ def _summarise_section(
     service_count = len(all_services)
     strategy_metrics: List[Tuple[str, float, float]] = []
 
-    print(f"  Capacity calculation inputs:")
-    print(f"    Total length: {total_length}m")
-    print(f"    Stopping time: {total_stopping_time}min")
-    print(f"    Passing time: {total_passing_time}min")
-    print(f"    Headway: {headway}min")
-    print(f"    Service count: {service_count}")
-    print(f"    All services: {all_services}")
-    print(f"    Stopping services: {stopping_services}")
-    print(f"    Passing services: {passing_services_list}")
+    # print(f"  Capacity calculation inputs:")
+    # print(f"    Total length: {total_length}m")
+    # print(f"    Stopping time: {total_stopping_time}min")
+    # print(f"    Passing time: {total_passing_time}min")
+    # print(f"    Headway: {headway}min")
+    # print(f"    Service count: {service_count}")
+    # print(f"    All services: {all_services}")
+    # print(f"    Stopping services: {stopping_services}")
+    # print(f"    Passing services: {passing_services_list}")
 
     # Fractional track support: .5 increments halve section travel times
     is_fractional = (track % 1 == 0.5)  # True for 1.5, 2.5, 3.5, 4.5, 5.5, etc.
@@ -2406,10 +2404,10 @@ def _summarise_section(
         total_passing_time = total_passing_time / 2.0
         travel_time_penalty = max(0.0, total_stopping_time - total_passing_time - headway)
         formula_track = base_track
-        print(f"    Fractional track ({track}): Using formula_track={formula_track}, times halved")
+        # print(f"    Fractional track ({track}): Using formula_track={formula_track}, times halved")
     else:
         formula_track = int(track)
-        print(f"    Track formula: formula_track={formula_track} (is_fractional={is_fractional})")
+        # print(f"    Track formula: formula_track={formula_track} (is_fractional={is_fractional})")
 
     if formula_track == 1:
         single_capacity = float("nan")
@@ -2531,10 +2529,10 @@ def _summarise_section(
         selected_utilization = _utilization(selected_capacity, total_tphpd)
         capacity_columns["utilization_good"] = selected_utilization
 
-    print(f"  Section {section_id} complete:")
-    print(f"    Route: {start_node} ({start_name}) -> {end_node} ({end_name})")
-    print(f"    Selected Capacity: {selected_capacity}")
-    print(f"    Selected Utilization: {selected_utilization}")
+    # print(f"  Section {section_id} complete:")
+    # print(f"    Route: {start_node} ({start_name}) -> {end_node} ({end_name})")
+    # print(f"    Selected Capacity: {selected_capacity}")
+    # print(f"    Selected Utilization: {selected_utilization}")
 
     return {
         "section_id": section_id,

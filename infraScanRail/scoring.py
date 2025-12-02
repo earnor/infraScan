@@ -1490,14 +1490,30 @@ def discounting(df, discount_rate, base_year=2018):
     return df_discounted
 
 
-def create_cost_and_benefit_df(scenario_start_year=2018, end_year=2100, start_valuation_period=2050):
+def create_cost_and_benefit_df(scenario_start_year=2018, end_year=2100, start_valuation_period=2050, cost_file_path=None):
+    """
+    Create combined cost-benefit DataFrame for all developments, scenarios, and years.
+
+    Args:
+        scenario_start_year: Start year for scenario timeline
+        end_year: End year for scenario timeline
+        start_valuation_period: Year construction begins (base year for discounting)
+        cost_file_path: Optional path to cost CSV (defaults to paths.CONSTRUCTION_COSTS)
+                       Use this to specify enhanced costs with interventions
+
+    Returns:
+        DataFrame with MultiIndex (development, scenario, year) and cost/benefit columns
+    """
     # Load cached data
     with open(paths.TTS_CACHE, "rb") as f_in:
         _, monetized_tt, _ = pickle.load(f_in)
 
     dev_list = monetized_tt['development'].unique()
     scenario_list = monetized_tt['scenario'].unique()
-    construction_and_maintenance_costs = pd.read_csv(paths.CONSTRUCTION_COSTS)
+
+    # Use specified cost file or default
+    costs_path = cost_file_path if cost_file_path is not None else paths.CONSTRUCTION_COSTS
+    construction_and_maintenance_costs = pd.read_csv(costs_path)
 
     # Build full index
     years = list(range(scenario_start_year, end_year + 1))
@@ -1515,8 +1531,10 @@ def create_cost_and_benefit_df(scenario_start_year=2018, end_year=2100, start_va
     # Broadcast cost values
     for _, row in tqdm(construction_and_maintenance_costs.iterrows(), desc="Processing costs and benefits"):
         dev_name = str(row["Development"])  # Ensure consistent typing
-        const_cost = row["TotalConstructionCost"]
-        maint_cost = row["YearlyMaintenanceCost"]
+
+        # Use intervention-enhanced costs if available, otherwise use base costs
+        const_cost = row.get("TotalConstructionCostWithInterventions", row["TotalConstructionCost"])
+        maint_cost = row.get("TotalMaintenanceAnnualWithInterventions", row["YearlyMaintenanceCost"])
         uncovered_op_cost = row["uncoveredOperatingCost"]
 
         # Construction costs: only in start_valuation_period

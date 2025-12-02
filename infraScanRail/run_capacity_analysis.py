@@ -458,11 +458,27 @@ def run_enhanced_workflow(
             max_iterations=max_iterations
         )
 
+        # Reload the ENHANCED stations and segments data from the enhanced prep workbook
+        print("\nReloading enhanced infrastructure data...")
+        enhanced_stations_df = pd.read_excel(enhanced_prep_path, sheet_name='Stations')
+        enhanced_segments_df = pd.read_excel(enhanced_prep_path, sheet_name='Segments')
+        print(f"  ✓ Loaded {len(enhanced_stations_df)} enhanced stations")
+        print(f"  ✓ Loaded {len(enhanced_segments_df)} enhanced segments")
+
+        # Update the sections workbook with enhanced data
+        enhanced_sections_path = output_dir / f"capacity_{network_label}_enhanced_network_sections.xlsx"
+        
+        print(f"\nUpdating sections workbook with enhanced infrastructure...")
+        with pd.ExcelWriter(enhanced_sections_path, engine='openpyxl') as writer:
+            enhanced_stations_df.to_excel(writer, sheet_name='Stations', index=False)
+            enhanced_segments_df.to_excel(writer, sheet_name='Segments', index=False)
+            final_sections_df.to_excel(writer, sheet_name='Sections', index=False)
+        
+        print(f"  ✓ Saved enhanced sections workbook: {enhanced_sections_path}")
+
         # Generate visualizations
         print("\n" + "-" * 70)
         print("Generating visualizations...")
-
-        enhanced_sections_path = output_dir / f"capacity_{network_label}_enhanced_network_sections.xlsx"
 
         infrastructure_plot, capacity_plot = visualize_enhanced_network(
             enhanced_prep_path=enhanced_prep_path,
