@@ -111,7 +111,8 @@ def  GetCatchmentold():
 def compute_TT():
 
     # Change working directory
-    os.chdir(r"C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail")
+    # Working directory is set by paths.MAIN in paths.py
+    # No need for hardcoded path changes
 
     # Directories containing CSV files (relative paths since the working directory is now set)
     directories = [

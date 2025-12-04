@@ -15,8 +15,7 @@ import matplotlib.pyplot as plt
 from scipy.sparse.csgraph import connected_components
 import data_import
 
-#os.chdir(r"C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail")
-os.chdir(r"C:\Users\phili\polybox\ETH_RE&IS\Master Thesis\06-Developments\01-Code\infraScanRail")
+
 ## INPUT TRAFFIC NETWORK
 #--- Options
 output_lab='Portugal'

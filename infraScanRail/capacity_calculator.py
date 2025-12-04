@@ -548,29 +548,29 @@ def apply_enrichment(
                 enriched_stations.at[idx, "platforms"] = enhanced_data["platforms"]
                 enhanced_station_count += 1
             elif capacity_increased and node_id not in enhanced_station_lookup:
-                # Capacity increased but no enhanced baseline - requires manual input (Q4)
-                enriched_stations.at[idx, "tracks"] = pd.NA
-                enriched_stations.at[idx, "platforms"] = pd.NA
+                # Capacity increased but no enhanced baseline - apply default values
+                enriched_stations.at[idx, "tracks"] = 2
+                enriched_stations.at[idx, "platforms"] = 2
                 new_station_count += 1
             else:
                 # Capacity same/decreased - use regular baseline
                 enriched_stations.at[idx, "tracks"] = baseline_data["tracks"]
                 enriched_stations.at[idx, "platforms"] = baseline_data["platforms"]
         elif node_id in new_station_ids:
-            # NEW station: set to NA (requires manual enrichment)
-            enriched_stations.at[idx, "tracks"] = pd.NA
-            enriched_stations.at[idx, "platforms"] = pd.NA
+            # NEW station: apply default values
+            enriched_stations.at[idx, "tracks"] = 2
+            enriched_stations.at[idx, "platforms"] = 2
             new_station_count += 1
         else:
-            # Not in baseline prep - treat as NEW (Q2: Option C)
-            enriched_stations.at[idx, "tracks"] = pd.NA
-            enriched_stations.at[idx, "platforms"] = pd.NA
+            # Not in baseline prep - treat as NEW, apply default values
+            enriched_stations.at[idx, "tracks"] = 2
+            enriched_stations.at[idx, "platforms"] = 2
             new_station_count += 1
 
     if enhanced_station_count > 0:
         print(f"[INFO] {enhanced_station_count} stations with increased capacity demand - using enhanced baseline infrastructure")
     if new_station_count > 0:
-        print(f"[INFO] {new_station_count} NEW stations or stations requiring capacity increase without enhanced baseline - require manual enrichment (tracks/platforms = NA)")
+        print(f"[INFO] {new_station_count} NEW stations or stations requiring capacity increase without enhanced baseline - using default values (tracks=2, platforms=2)")
 
     # Enrich segments
     enriched_segments = segments_df.copy()
@@ -607,11 +607,16 @@ def apply_enrichment(
                 enriched_segments.at[idx, "travel_time_passing"] = enhanced_data["travel_time_passing"]
                 enhanced_segment_count += 1
             elif capacity_increased and pair not in enhanced_segment_lookup:
-                # Capacity increased but no enhanced baseline - requires manual input (Q4)
-                enriched_segments.at[idx, "tracks"] = pd.NA
-                enriched_segments.at[idx, "speed"] = pd.NA
-                enriched_segments.at[idx, "length_m"] = pd.NA
-                enriched_segments.at[idx, "travel_time_passing"] = pd.NA
+                # Capacity increased but no enhanced baseline - apply default values
+                enriched_segments.at[idx, "tracks"] = 1
+                enriched_segments.at[idx, "speed"] = 80
+                # Keep length_m as is (already set from baseline or geometry)
+                # Calculate travel_time_passing from travel_time_stopping
+                tt_stopping = row.get("travel_time_stopping")
+                if pd.notna(tt_stopping):
+                    enriched_segments.at[idx, "travel_time_passing"] = max(0, tt_stopping - 2)
+                else:
+                    enriched_segments.at[idx, "travel_time_passing"] = pd.NA
                 new_segment_count += 1
             else:
                 # Capacity same/decreased - use regular baseline
@@ -620,9 +625,9 @@ def apply_enrichment(
                 enriched_segments.at[idx, "length_m"] = baseline_data["length_m"]
                 enriched_segments.at[idx, "travel_time_passing"] = baseline_data["travel_time_passing"]
         else:
-            # NEW segment or segment with new endpoint: set to NA, calculate length
-            enriched_segments.at[idx, "tracks"] = pd.NA
-            enriched_segments.at[idx, "speed"] = pd.NA
+            # NEW segment or segment with new endpoint: apply default values
+            enriched_segments.at[idx, "tracks"] = 1
+            enriched_segments.at[idx, "speed"] = 80
             new_segment_count += 1
 
             # Calculate length from geometry
@@ -636,10 +641,17 @@ def apply_enrichment(
                 else:
                     enriched_segments.at[idx, "length_m"] = pd.NA
 
+            # Calculate travel_time_passing from travel_time_stopping
+            tt_stopping = row.get("travel_time_stopping")
+            if pd.notna(tt_stopping):
+                enriched_segments.at[idx, "travel_time_passing"] = max(0, tt_stopping - 2)
+            else:
+                enriched_segments.at[idx, "travel_time_passing"] = pd.NA
+
     if enhanced_segment_count > 0:
         print(f"[INFO] {enhanced_segment_count} segments with increased capacity demand - using enhanced baseline infrastructure")
     if new_segment_count > 0:
-        print(f"[INFO] {new_segment_count} NEW segments or segments requiring capacity increase without enhanced baseline - require manual enrichment (tracks/speed = NA)")
+        print(f"[INFO] {new_segment_count} NEW segments or segments requiring capacity increase without enhanced baseline - using default values (tracks=1, speed=80 km/h, travel_time_passing=tt_stopping-2)")
 
     return enriched_stations, enriched_segments
 

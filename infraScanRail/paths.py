@@ -1,5 +1,8 @@
+import os
+from pathlib import Path
 
-MAIN = r"C:\Users\ETH\Documents\GitHub\infraScan\infraScanRail"
+# Use relative path from the script location
+MAIN = str(Path(__file__).parent.resolve())
 RAIL_SERVICES_AK2035_PATH= r'data\temp\railway_services_ak2035.gpkg'
 RAIL_SERVICES_AK2035_EXTENDED_PATH = r'data\temp\railway_services_ak2035_extended.gpkg'
 RAIL_SERVICES_2024_PATH= r'data/temp/network_railway-services.gpkg'

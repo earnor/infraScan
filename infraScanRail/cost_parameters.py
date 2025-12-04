@@ -25,8 +25,8 @@ average_train_change_time = 7.1 #Axhausen, 2014
 change_time_comfort_factor = 1.7
 comfort_weighted_change_time = int(np.round(average_train_change_time * change_time_comfort_factor))  # Comfort weighted change time in minutes
 
-# Phase 4: Capacity Enhancement Interventions
+# Capacity Enhancement Interventions
 # Siding lengths for cost calculations (based on track_cost_per_meter)
 segment_siding_length_m = 1000  # Passing siding length (meters)
 station_siding_length_m = 500   # Station track length (meters)
-platform_cost_per_unit = 50000  # CHF per platform (placeholder)
+platform_cost_per_unit = 50000  # CHF per platform

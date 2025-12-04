@@ -15,7 +15,7 @@ use_cache_scenarios = False
 use_cache_tts_calc = False
 
 # Infrastructure generation modules: Choose either 'EXTEND_LINES', 'NEW_DIRECT_CONNECTIONS' or 'ALL'
-infra_generation_modification_type = 'NEW_DIRECT_CONNECTIONS' 
+infra_generation_modification_type = 'ALL' 
 # Rail services: Choose either 'RAIL_SERVICES_AK2035_PATH' or 'RAIL_SERVICES_AK2035_EXTENDED_PATH' or 'RAIL_SERVICES_2024_PATH' or 'RAIL_SERVICES_AK2024_EXTENDED_PATH'
 infra_generation_rail_network = paths.RAIL_SERVICES_AK2035_PATH
 

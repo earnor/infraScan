@@ -16,7 +16,8 @@ def plot_tt_development_over_time(save_fig=False, output_dir=None, show_std_dev=
     - output_dir: Zielverzeichnis zum Speichern der Figur (falls save_fig=True)
     - show_std_dev: Boolean, ob die Standardabweichung als Fläche dargestellt werden soll
     """
-    data_dir = r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\network_performance_Ak2035 plot"
+    # Use relative path from repository root
+    data_dir = os.path.join(paths.MAIN, "data", "analysis", "network_performance_Ak2035")
     tt_savings2035_path = os.path.join(data_dir, "traveltime_savings_2035.csv")
     tt_savings2024_path = os.path.join(data_dir, "traveltime_savings_2024.csv")
 
@@ -113,10 +114,10 @@ def plot_tt_development_over_time(save_fig=False, output_dir=None, show_std_dev=
 
 
 def plot_scenarios():
-    directory = r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\szenario_plot"
-    with open(
-            r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\szenario_plot\scenario_data_for_plots.pkl",
-            'rb') as f:
+    # Use relative path from repository root
+    directory = os.path.join(paths.MAIN, "data", "analysis", "scenario_plot")
+    scenario_data_path = os.path.join(directory, "scenario_data_for_plots.pkl")
+    with open(scenario_data_path, 'rb') as f:
         components = pickle.load(f)
 
     # Extrahiere die einzelnen Komponenten
@@ -294,7 +295,7 @@ def plot_scenarios():
     # Plot für Distance per Person mit absoluten Werten (34.77-39.47 km)
     plot_scenarios_with_range(distance_per_person_scenarios, directory, 'distance_per_person',
                                   federal_2050_range=(34.77, 39.47))
-#fig_dir = r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\network_performance_Ak2035 plot"
+# fig_dir now uses paths.MAIN relative directory
 #plot_tt_development_over_time(save_fig=True, output_dir=fig_dir, show_std_dev=False)
 #plot_scenarios()
 
@@ -304,10 +305,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.colors as mcolors
 
-directory = r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\szenario_plot"
-with open(
-        r"C:\Users\Silvano Fuchs\OneDrive - ETH Zurich\MA\06-Developments\szenario_plot\scenario_data_for_plots.pkl",
-        'rb') as f:
+# Use relative path from repository root
+directory = os.path.join(paths.MAIN, "data", "analysis", "scenario_plot")
+scenario_data_path = os.path.join(directory, "scenario_data_for_plots.pkl")
+with open(scenario_data_path, 'rb') as f:
     components = pickle.load(f)
 
 # Extrahiere die einzelnen Komponenten
