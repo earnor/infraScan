@@ -12,7 +12,7 @@ from scoring import *
 from scoring import create_cost_and_benefit_df
 from traveltime_delay import *
 from random_scenarios import get_random_scenarios
-from plots import plot_cumulative_cost_distribution, plot_flow_graph
+from plots import *
 from run_capacity_analysis import (
     run_baseline_workflow,
     run_baseline_extended_workflow,
@@ -41,49 +41,20 @@ import pickle
 from pathlib import Path
 
 
-def infrascanrail_cap():
+# ================================================================================
+# PHASE FUNCTIONS - Modular Pipeline Components
+# ================================================================================
+
+def phase_1_initialization(runtimes: dict) -> tuple:
     """
-    Enhanced InfraScanRail main pipeline with integrated capacity analysis.
+    Phase 1: Initialize workspace and study area boundaries.
 
-    This version implements the full capacity-aware workflow:
-    - Phase 3.2: Establish Baseline Capacity
-    - Phase 3.3: Enhance Baseline Network (Phase 4 Interventions)
-    - Phase 3.5: Analyze Development Capacity
+    Args:
+        runtimes: Dictionary to track phase execution times
+
+    Returns:
+        tuple: (innerboundary, outerboundary) - Study area polygons
     """
-    os.chdir(paths.MAIN)
-    warnings.filterwarnings("ignore")  # TODO: No warnings should be ignored
-    runtimes = {}
-
-    # ============================================================================
-    # AUTO-RESPONSE SETUP: Automatically answer capacity grouping prompts with "1"
-    # ============================================================================
-    # Store original input function
-    if isinstance(__builtins__, dict):
-        _original_input = __builtins__['input']
-    else:
-        _original_input = __builtins__.input
-
-    def auto_input(prompt=""):
-        """
-        Automatically respond with "1" to capacity grouping prompts,
-        otherwise use normal input.
-        """
-        # Check if this is a capacity grouping prompt
-        if "Enter choice (1-2):" in prompt or "Select the strategy number" in prompt:
-            print(prompt + "1  [AUTO-SELECTED]")
-            return "1"
-        # For all other prompts, use original input
-        return _original_input(prompt)
-
-    # Replace built-in input with our auto-input function
-    if isinstance(__builtins__, dict):
-        __builtins__['input'] = auto_input
-    else:
-        __builtins__.input = auto_input
-
-    ##################################################################################
-    # PHASE 1: INITIALIZATION
-    ##################################################################################
     print("\n" + "="*80)
     print("PHASE 1: INITIALIZE VARIABLES")
     print("="*80 + "\n")
@@ -92,10 +63,20 @@ def infrascanrail_cap():
     innerboundary, outerboundary = create_focus_area()
 
     runtimes["Initialize variables"] = time.time() - st
+    return innerboundary, outerboundary
 
-    ##################################################################################
-    # PHASE 2: DATA IMPORT
-    ##################################################################################
+
+def phase_2_data_import(runtimes: dict) -> None:
+    """
+    Phase 2: Import raw geographic data (lakes, cities).
+
+    Args:
+        runtimes: Dictionary to track phase execution times
+
+    Side Effects:
+        - Writes lake_data_zh.gpkg
+        - Writes cities.shp
+    """
     print("\n" + "="*80)
     print("PHASE 2: IMPORT RAW DATA")
     print("="*80 + "\n")
@@ -107,11 +88,38 @@ def infrascanrail_cap():
     # Import the file containing the locations to be plotted
     import_cities()
 
+    # Define area that is protected for constructing railway links
+    #   get_protected_area(limits=limits_corridor)
+    #   get_unproductive_area(limits=limits_corridor)
+    #   landuse(limits=limits_corridor)
+
+    # Tif file of all unsuitable land cover and protected areas
+    # File is stored to 'data\\landuse_landcover\\processed\\zone_no_infra\\protected_area_{suffix}.tif'
+
+    # all_protected_area_to_raster(suffix="corridor")
+
     runtimes["Import land use and land cover data"] = time.time() - st
 
-    ##################################################################################
-    # PHASE 3: BASELINE CAPACITY ANALYSIS
-    ##################################################################################
+
+def phase_3_baseline_capacity_analysis(runtimes: dict) -> tuple:
+    """
+    Phase 3: Baseline capacity analysis (3 sub-steps).
+
+    Sub-steps:
+        3.1: Import and process base network
+        3.2: Establish baseline capacity
+        3.3: Enhance baseline network (Phase 4 interventions)
+
+    Args:
+        runtimes: Dictionary to track phase execution times
+
+    Returns:
+        tuple: (points, baseline_prep_path, baseline_sections_path, enhanced_network_label)
+            - points: Station points GeoDataFrame
+            - baseline_prep_path: Path to baseline prep workbook
+            - baseline_sections_path: Path to baseline sections workbook
+            - enhanced_network_label: Label for enhanced network
+    """
     print("\n" + "="*80)
     print("PHASE 3: BASELINE CAPACITY ANALYSIS")
     print("="*80 + "\n")
@@ -127,7 +135,7 @@ def infrascanrail_cap():
     runtimes["Preprocess the network"] = time.time() - st
 
     # ============================================================================
-    # STEP 3.2: ESTABLISH BASELINE CAPACITY ⭐ NEW
+    # STEP 3.2: ESTABLISH BASELINE CAPACITY 
     # ============================================================================
     print("\n--- Step 3.2: Establish Baseline Capacity ---\n")
     st = time.time()
@@ -175,7 +183,7 @@ def infrascanrail_cap():
     runtimes["Establish baseline capacity"] = time.time() - st
 
     # ============================================================================
-    # STEP 3.3: ENHANCE BASELINE NETWORK (PHASE 4 INTERVENTIONS) ⭐ NEW
+    # STEP 3.3: ENHANCE BASELINE NETWORK (PHASE 4 INTERVENTIONS) 
     # ============================================================================
     print("\n--- Step 3.3: Enhance Baseline Network (Phase 4) ---\n")
     st = time.time()
@@ -199,21 +207,43 @@ def infrascanrail_cap():
 
     # Determine enhanced network label
     enhanced_network_label = f"{settings.rail_network}_enhanced"
-    
+
     # NOTE: Development workflow uses the BASELINE network for enrichment
     # (run_capacity_analysis.py only looks in Baseline/ directory, not Enhanced/)
     # The enhanced baseline is for reference/validation purposes only
     settings.baseline_network_for_developments = settings.rail_network  # Use base, not enhanced
-    
+
     print(f"\n  ✓ Baseline enhancement complete")
     print(f"  Enhanced network: {enhanced_network_label}")
     print(f"  → Developments will use baseline network ({settings.rail_network}) for enrichment\n")
 
     runtimes["Enhance baseline network"] = time.time() - st
 
-    ##################################################################################
-    # PHASE 4: INFRASTRUCTURE DEVELOPMENTS
-    ##################################################################################
+    return points, baseline_prep_path, baseline_sections_path, enhanced_network_label
+
+
+def phase_4_infrastructure_developments(points: gpd.GeoDataFrame, runtimes: dict) -> tuple:
+    """
+    Phase 4: Infrastructure developments (4 sub-steps).
+
+    Sub-steps:
+        4.1: Generate infrastructure developments
+        4.2: Analyze development capacity requirements
+        4.3: Extract capacity intervention costs
+        4.4: Public transit catchment (optional)
+
+    Args:
+        points: Station points from Phase 3
+        runtimes: Dictionary to track phase execution times
+
+    Returns:
+        tuple: (dev_id_lookup, capacity_analysis_results)
+            - dev_id_lookup: Development ID lookup table DataFrame
+            - capacity_analysis_results: Dict with capacity analysis results for each development
+
+    Side Effects:
+        - Writes capacity_intervention_costs.csv to data/costs/
+    """
     print("\n" + "="*80)
     print("PHASE 4: INFRASTRUCTURE DEVELOPMENTS")
     print("="*80 + "\n")
@@ -236,80 +266,94 @@ def infrascanrail_cap():
     # ============================================================================
     # Via Column Modification for EXTEND_LINES Developments
     # ============================================================================
+    # COMMENTED OUT: Via column -99 modification disabled
     # For EXTEND_LINES developments (dev_id 100001-100999):
     # Check new_dev column and set Via = "-99" for new developments
     # This signals no intermediate stations, direct connection
-    print("\n  Applying Via column modifications for EXTEND_LINES developments...")
+    print("\n  Via column modifications DISABLED (code commented out)")
 
-    # Get list of development .gpkg files (same as used in Workflow 3 below)
-    dev_dir = Path(paths.DEVELOPMENT_DIRECTORY)
-    if dev_dir.exists() and dev_dir.is_dir():
-        # Get all .gpkg files in development directory
-        gpkg_files = [
-            os.path.join(paths.DEVELOPMENT_DIRECTORY, filename)
-            for filename in os.listdir(paths.DEVELOPMENT_DIRECTORY)
-            if filename.endswith(".gpkg")
-        ]
-        
-        if not gpkg_files:
-            print(f"  ⚠ No .gpkg files found in {paths.DEVELOPMENT_DIRECTORY}")
-        else:
-            total_modifications = 0
-            
-            for gpkg_file in gpkg_files:
-                try:
-                    developments_gdf = gpd.read_file(gpkg_file)
-                    
-                    # Check if new_dev column exists
-                    if 'new_dev' not in developments_gdf.columns:
-                        continue
-                    
-                    modifications_count = 0
-                    
-                    for idx, row in developments_gdf.iterrows():
-                        # Only process EXTEND_LINES developments (100001-100999)
-                        dev_id = row.get('dev_id', None)
-                        
-                        # Handle both string and numeric dev_id
-                        if dev_id is not None:
-                            # Convert to int if it's a float or string
-                            try:
-                                if isinstance(dev_id, str):
-                                    dev_id_num = int(dev_id)
-                                elif isinstance(dev_id, (int, float)):
-                                    dev_id_num = int(dev_id)
-                                else:
-                                    continue
-                            except (ValueError, TypeError):
-                                continue
-                            
-                            # Check if dev_id is in EXTEND_LINES range (100001-100999)
-                            if settings.dev_id_start_extended_lines <= dev_id_num < settings.dev_id_start_new_direct_connections:
-                                if row.get('new_dev') == 'Yes':
-                                    developments_gdf.at[idx, 'Via'] = '-99'
-                                    modifications_count += 1
-                    
-                    # Save modified geopackage if any modifications were made
-                    if modifications_count > 0:
-                        developments_gdf.to_file(gpkg_file, driver='GPKG')
-                        print(f"  ✓ Modified Via column for {modifications_count} records in {Path(gpkg_file).name}")
-                        total_modifications += modifications_count
-                        
-                except Exception as e:
-                    print(f"  ⚠ Error processing {Path(gpkg_file).name}: {e}")
-            
-            if total_modifications > 0:
-                print(f"\n  ✓ Total Via column modifications: {total_modifications}")
-            else:
-                print(f"\n  ⓘ No EXTEND_LINES developments with new_dev='Yes' found")
-    else:
-        print(f"  ⚠ Development directory not found or is not a directory: {paths.DEVELOPMENT_DIRECTORY}")
+    # # Get list of development .gpkg files (same as used in Workflow 3 below)
+    # dev_dir = Path(paths.DEVELOPMENT_DIRECTORY)
+    # if dev_dir.exists() and dev_dir.is_dir():
+    #     # Get all .gpkg files in development directory
+    #     gpkg_files = [
+    #         os.path.join(paths.DEVELOPMENT_DIRECTORY, filename)
+    #         for filename in os.listdir(paths.DEVELOPMENT_DIRECTORY)
+    #         if filename.endswith(".gpkg")
+    #     ]
+    #
+    #     if not gpkg_files:
+    #         print(f"  ⚠ No .gpkg files found in {paths.DEVELOPMENT_DIRECTORY}")
+    #     else:
+    #         total_modifications = 0
+    #
+    #         for gpkg_file in gpkg_files:
+    #             try:
+    #                 developments_gdf = gpd.read_file(gpkg_file)
+    #
+    #                 # Check if new_dev column exists
+    #                 if 'new_dev' not in developments_gdf.columns:
+    #                     continue
+    #
+    #                 modifications_count = 0
+    #
+    #                 for idx, row in developments_gdf.iterrows():
+    #                     # Only process EXTEND_LINES developments (100001-100999)
+    #                     dev_id = row.get('dev_id', None)
+    #
+    #                     # Handle both string and numeric dev_id
+    #                     if dev_id is not None:
+    #                         # Convert to int if it's a float or string
+    #                         try:
+    #                             if isinstance(dev_id, str):
+    #                                 dev_id_num = int(dev_id)
+    #                             elif isinstance(dev_id, (int, float)):
+    #                                 dev_id_num = int(dev_id)
+    #                             else:
+    #                                 continue
+    #                         except (ValueError, TypeError):
+    #                             continue
+    #
+    #                         # Check if dev_id is in EXTEND_LINES range (100001-100999)
+    #                         if settings.dev_id_start_extended_lines <= dev_id_num < settings.dev_id_start_new_direct_connections:
+    #                             if row.get('new_dev') == 'Yes':
+    #                                 developments_gdf.at[idx, 'Via'] = '-99'
+    #                                 modifications_count += 1
+    #
+    #                 # Save modified geopackage if any modifications were made
+    #                 if modifications_count > 0:
+    #                     developments_gdf.to_file(gpkg_file, driver='GPKG')
+    #                     print(f"  ✓ Modified Via column for {modifications_count} records in {Path(gpkg_file).name}")
+    #                     total_modifications += modifications_count
+    #
+    #             except Exception as e:
+    #                 print(f"  ⚠ Error processing {Path(gpkg_file).name}: {e}")
+    #
+    #         if total_modifications > 0:
+    #             print(f"\n  ✓ Total Via column modifications: {total_modifications}")
+    #         else:
+    #             print(f"\n  ⓘ No EXTEND_LINES developments with new_dev='Yes' found")
+    # else:
+    #     print(f"  ⚠ Development directory not found or is not a directory: {paths.DEVELOPMENT_DIRECTORY}")
     runtimes["Generate infrastructure developments"] = time.time() - st
 
     # ============================================================================
-    # STEP 4.2: ANALYZE DEVELOPMENT CAPACITY ⭐ NEW
+    # STEP 4.2: ANALYZE DEVELOPMENT CAPACITY
     # ============================================================================
     print("\n--- Step 4.2: Analyze Development Capacity (Workflow 3) ---\n")
+
+    # Ask user if they want to generate plots for all developments
+    print(f"Found {len(dev_id_lookup)} developments to analyze.")
+    print("Each development can generate capacity, speed profile, and service network plots.")
+    response = input("\nGenerate visualizations for all developments? (y/n) [y]: ").strip().lower()
+    generate_dev_plots = response != 'n'
+
+    if generate_dev_plots:
+        print("  → Visualizations will be generated for each development")
+    else:
+        print("  → Visualizations will be skipped for all developments")
+
+    print()
     st = time.time()
 
     capacity_analysis_results = {}
@@ -318,60 +362,60 @@ def infrascanrail_cap():
     for idx, row in dev_id_lookup.iterrows():
         dev_id = row['dev_id']
         print(f"\n  [{idx+1}/{len(dev_id_lookup)}] Analyzing development {dev_id}...")
-        
+
         try:
             # Run Workflow 3 (development capacity analysis with auto-enrichment)
             dev_exit_code = run_development_workflow(
                 dev_id=dev_id,
                 base_network=settings.baseline_network_for_developments,
-                visualize=settings.visualize_capacity_analysis
+                visualize=generate_dev_plots
             )
-            
+
             # Handle workflow failure
             if dev_exit_code != 0:
                 print(f"    ⚠ Capacity analysis workflow failed for {dev_id}")
                 print(f"    → Development will proceed with base infrastructure costs only")
-                
+
                 capacity_analysis_results[dev_id] = {
                     'status': 'workflow_failed',
                     'use_base_costs': True
                 }
                 failed_developments.append(dev_id)
                 continue
-            
+
             # Load capacity results
             # Development workflow creates network_label as f"{base_network}_dev_{dev_id}"
             # BUT: File system omits the .0 decimal suffix from dev_id
             # AND: Sections file uses underscore format: dev_XXXXX_Y_ instead of dev_XXXXX.Y_
-            
+
             # Remove .0 suffix from dev_id for file system paths
             dev_id_for_path = str(dev_id).replace('.0', '')
-            
+
             # Convert dev_id format for sections filename: 101025.0 -> 100001_0
             if '.' in str(dev_id):
                 dev_id_parts = str(dev_id).split('.')
                 dev_id_for_sections = f"{dev_id_parts[0]}_{dev_id_parts[1]}"
             else:
                 dev_id_for_sections = str(dev_id)
-            
+
             # Construct paths with corrected naming
             dev_capacity_dir = CAPACITY_ROOT / "Developments" / dev_id_for_path
             dev_network_label = f"{settings.baseline_network_for_developments}_dev_{dev_id_for_sections}"
             dev_sections_path = dev_capacity_dir / f"capacity_{dev_network_label}_network_sections.xlsx"
-            
+
             # DEBUG: Show what we're looking for
             print(f"    Looking for sections file: {dev_sections_path}")
-            
+
             # Validate output files exist
             if not dev_sections_path.exists():
                 print(f"    ⚠ Sections file not found: {dev_sections_path}")
-                
+
                 # Try alternate naming patterns
                 alternate_patterns = [
                     dev_capacity_dir / f"capacity_{settings.baseline_network_for_developments}_dev_{dev_id}_network_sections.xlsx",
                     dev_capacity_dir / f"capacity_{settings.baseline_network_for_developments}_dev_{dev_id_for_path}_network_sections.xlsx",
                 ]
-                
+
                 found = False
                 for alt_path in alternate_patterns:
                     if alt_path.exists():
@@ -379,21 +423,21 @@ def infrascanrail_cap():
                         dev_sections_path = alt_path
                         found = True
                         break
-                
+
                 if not found:
                     capacity_analysis_results[dev_id] = {'status': 'missing_sections'}
                     failed_developments.append(dev_id)
                     continue
-            
+
             # Store successful results
             capacity_analysis_results[dev_id] = {
                 'status': 'success',
                 'sections_path': str(dev_sections_path),
                 'base_network': settings.baseline_network_for_developments
             }
-            
+
             print(f"    ✓ Capacity analysis complete for {dev_id}")
-            
+
         except Exception as e:
             print(f"    ❌ Unexpected error analyzing {dev_id}: {e}")
             capacity_analysis_results[dev_id] = {'status': 'error', 'error': str(e)}
@@ -418,19 +462,63 @@ def infrascanrail_cap():
     runtimes["Analyze development capacity"] = time.time() - st
 
     # ============================================================================
-    # STEP 3.6: PUBLIC TRANSIT CATCHMENT (OPTIONAL)
+    # STEP 4.3: CAPACITY INTERVENTION COST EXTRACTION 
+    # ============================================================================
+    print("\n--- Step 4.3: Extract Capacity Intervention Costs ---\n")
+    st = time.time()
+
+    _ = extract_capacity_intervention_costs(
+        capacity_analysis_results=capacity_analysis_results,
+        baseline_network_label=settings.baseline_network_for_developments
+    )
+
+    # Manual verification checkpoint
+    output_csv_path = Path(paths.MAIN) / "data" / "costs" / "capacity_intervention_costs.csv"
+    print("\n" + "="*80)
+    print("MANUAL VERIFICATION CHECKPOINT")
+    print("="*80)
+    print(f"\nCapacity intervention costs have been extracted to:")
+    print(f"  {output_csv_path}")
+    print("\nPlease review the following:")
+    print("  1. Check that intervention costs are correctly matched to developments")
+    print("  2. Verify construction and maintenance costs are reasonable")
+    print("  3. Make any necessary corrections directly in the CSV file")
+    print("  4. Save the file and return here to continue")
+    print("="*80)
+
+    response = input("\nHave you reviewed and (if needed) corrected the intervention costs (y/n)? ").strip().lower()
+    if response not in {"y", "yes"}:
+        print("\nPipeline paused. Please review the intervention costs and re-run when ready.")
+        print("You can resume from this point by running the pipeline again.\n")
+        return dev_id_lookup, capacity_analysis_results
+
+    runtimes["Extract capacity intervention costs"] = time.time() - st
+
+    # ============================================================================
+    # STEP 4.4: PUBLIC TRANSIT CATCHMENT (OPTIONAL)
     # ============================================================================
     if settings.OD_type == 'pt_catchment_perimeter':
-        print("\n--- Step 3.6: Public Transit Catchment Analysis ---\n")
+        print("\n--- Step 4.4: Public Transit Catchment Analysis ---\n")
         st = time.time()
-        
+
         get_catchment(use_cache=settings.use_cache_pt_catchment)
-        
+
         runtimes["Public transit catchment"] = time.time() - st
 
-    ##################################################################################
-    # PHASE 5: DEMAND ANALYSIS (OD MATRIX)
-    ##################################################################################
+    return dev_id_lookup, capacity_analysis_results
+
+
+def phase_5_demand_analysis(points: gpd.GeoDataFrame, runtimes: dict) -> None:
+    """
+    Phase 5: Generate origin-destination demand matrix.
+
+    Args:
+        points: Station points from Phase 3
+        runtimes: Dictionary to track phase execution times
+
+    Side Effects:
+        - Writes OD matrix CSV to paths.OD_STATIONS_KT_ZH_PATH
+    """
     print("\n" + "="*80)
     print("PHASE 5: DEMAND ANALYSIS (OD MATRIX)")
     print("="*80 + "\n")
@@ -449,86 +537,137 @@ def infrascanrail_cap():
 
     runtimes["Generate OD matrix"] = time.time() - st
 
-    ##################################################################################
-    # PHASE 6: TRAVEL TIME COMPUTATION
-    ##################################################################################
+
+def phase_6_travel_time_computation(dev_id_lookup: pd.DataFrame, runtimes: dict) -> tuple:
+    """
+    Phase 6: Calculate baseline and development travel times.
+
+    Args:
+        dev_id_lookup: Development ID lookup table from Phase 4
+        runtimes: Dictionary to track phase execution times
+
+    Returns:
+        tuple: (od_times_dev, od_times_status_quo, G_status_quo, G_development)
+            - od_times_dev: OD times for all developments (Dict)
+            - od_times_status_quo: OD times for status quo (Dict)
+            - G_status_quo: NetworkX graph for status quo (List)
+            - G_development: List of NetworkX graphs for developments (List)
+    """
     print("\n" + "="*80)
     print("PHASE 6: TRAVEL TIME COMPUTATION")
     print("="*80 + "\n")
     st = time.time()
 
     od_times_dev, od_times_status_quo, G_status_quo, G_development = create_travel_time_graphs(
-        settings.rail_network, 
-        settings.use_cache_traveltime_graph, 
+        settings.rail_network,
+        settings.use_cache_traveltime_graph,
         dev_id_lookup
     )
-    
+
     runtimes["Calculate Traveltimes for all developments"] = time.time() - st
+    return od_times_dev, od_times_status_quo, G_status_quo, G_development
 
-    ##################################################################################
-    # PHASE 7: PASSENGER FLOW VISUALIZATION
-    ##################################################################################
-    if settings.plot_passenger_flow:
-        print("\n" + "="*80)
-        print("PHASE 7: PASSENGER FLOW VISUALIZATION")
-        print("="*80 + "\n")
-        st = time.time()
-        
-        plot_passenger_flows_on_network(G_development, G_status_quo, dev_id_lookup)
-        
-        runtimes["Compute and visualize passenger flows on network"] = time.time() - st
 
-    ##################################################################################
-    # PHASE 8: SCENARIO GENERATION
-    ##################################################################################
+def phase_7_passenger_flow_visualization(G_development: list, G_status_quo: list, dev_id_lookup: pd.DataFrame, runtimes: dict) -> None:
+    """
+    Phase 7: Visualize passenger flows (optional).
+
+    Args:
+        G_development: Development graphs from Phase 6
+        G_status_quo: Status quo graph from Phase 6
+        dev_id_lookup: Development ID lookup table from Phase 4
+        runtimes: Dictionary to track phase execution times
+
+    Side Effects:
+        - Writes passenger flow visualizations to plots/passenger_flows/
+    """
+    print("\n" + "="*80)
+    print("PHASE 7: PASSENGER FLOW VISUALIZATION")
+    print("="*80 + "\n")
+    st = time.time()
+
+    plot_passenger_flows_on_network(G_development, G_status_quo, dev_id_lookup)
+
+    runtimes["Compute and visualize passenger flows on network"] = time.time() - st
+
+
+def phase_8_scenario_generation(runtimes: dict) -> None:
+    """
+    Phase 8: Generate future demand scenarios.
+
+    Args:
+        runtimes: Dictionary to track phase execution times
+
+    Side Effects:
+        - Writes scenario cache files
+        - Writes scenario plots (if do_plot=True)
+    """
     print("\n" + "="*80)
     print("PHASE 8: SCENARIO GENERATION")
     print("="*80 + "\n")
     st = time.time()
 
-    if settings.OD_type == 'canton_ZH':
-        get_random_scenarios(
-            start_year=2018, 
-            end_year=2100, 
-            num_of_scenarios=settings.amount_of_scenarios,
-            use_cache=settings.use_cache_scenarios, 
-            do_plot=True
-        )
+    get_random_scenarios(
+        start_year=2018,
+        end_year=2100,
+        num_of_scenarios=settings.amount_of_scenarios,
+        use_cache=settings.use_cache_scenarios,
+        do_plot=True
+    )
 
     runtimes["Generate the scenarios"] = time.time() - st
 
-    ##################################################################################
-    # PHASE 9: TRAVEL TIME SAVINGS
-    ##################################################################################
+
+def phase_9_travel_time_savings(dev_id_lookup: pd.DataFrame, od_times_dev: dict, od_times_status_quo: dict, runtimes: dict) -> tuple:
+    """
+    Phase 9: Monetize travel time savings.
+
+    Args:
+        dev_id_lookup: Development ID lookup table from Phase 4
+        od_times_dev: OD times for developments from Phase 6
+        od_times_status_quo: OD times for status quo from Phase 6
+        runtimes: Dictionary to track phase execution times
+
+    Returns:
+        tuple: (dev_list, monetized_tt, scenario_list)
+            - dev_list: List of development IDs
+            - monetized_tt: Monetized travel time savings DataFrame
+            - scenario_list: List of scenarios
+    """
     print("\n" + "="*80)
     print("PHASE 9: TRAVEL TIME SAVINGS")
     print("="*80 + "\n")
     st = time.time()
 
     dev_list, monetized_tt, scenario_list = compute_tts(
-        dev_id_lookup=dev_id_lookup, 
+        dev_id_lookup=dev_id_lookup,
         od_times_dev=od_times_dev,
-        od_times_status_quo=od_times_status_quo, 
+        od_times_status_quo=od_times_status_quo,
         use_cache=settings.use_cache_tts_calc
     )
 
     runtimes["Calculate the TTT Savings"] = time.time() - st
+    return dev_list, monetized_tt, scenario_list
 
-    ##################################################################################
-    # PHASE 10: INFRASTRUCTURE COSTS WITH CAPACITY INTERVENTIONS
-    ##################################################################################
+
+def phase_10_construction_maintenance_costs(monetized_tt: pd.DataFrame, runtimes: dict) -> pd.DataFrame:
+    """
+    Phase 10: Calculate construction and maintenance costs.
+
+    Args:
+        monetized_tt: Monetized travel time savings from Phase 9
+        runtimes: Dictionary to track phase execution times
+
+    Returns:
+        construction_and_maintenance_costs: DataFrame with infrastructure costs
+    """
     print("\n" + "="*80)
-    print("PHASE 10: INFRASTRUCTURE COSTS WITH CAPACITY INTERVENTIONS")
+    print("PHASE 10: CONSTRUCTION & MAINTENANCE COSTS")
     print("="*80 + "\n")
     st = time.time()
 
-    # Step 10.1: Calculate base infrastructure costs
-    print("  Step 10.1: Calculate base infrastructure costs...")
+    # Compute construction costs
     file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
-    
-    # Import construction_costs from scoring module
-    from scoring import construction_costs
-    
     construction_and_maintenance_costs = construction_costs(
         file_path=file_path,
         cost_per_meter=cp.track_cost_per_meter,
@@ -539,150 +678,31 @@ def infrascanrail_cap():
         bridge_maintenance_cost=cp.bridge_maintenance_cost,
         duration=cp.duration
     )
-    
-    # DEBUG: Check what columns exist
-    print(f"  DEBUG: construction_and_maintenance_costs columns: {construction_and_maintenance_costs.columns.tolist()}")
-    print(f"  DEBUG: construction_and_maintenance_costs shape: {construction_and_maintenance_costs.shape}")
-    if len(construction_and_maintenance_costs) > 0:
-        print(f"  DEBUG: First row:\n{construction_and_maintenance_costs.iloc[0]}")
-    
-    # Identify or create dev_id column
-    if 'dev_id' not in construction_and_maintenance_costs.columns:
-        # Check for alternative column names
-        possible_dev_columns = ['Line', 'line', 'development', 'Development', 'filename', 'dev', 'id']
-        dev_col_found = None
-        
-        for col in possible_dev_columns:
-            if col in construction_and_maintenance_costs.columns:
-                print(f"  ⓘ Found development ID column: '{col}', renaming to 'dev_id'")
-                construction_and_maintenance_costs = construction_and_maintenance_costs.rename(columns={col: 'dev_id'})
-                dev_col_found = True
-                break
-        
-        if not dev_col_found:
-            # Check if index contains dev_ids
-            if construction_and_maintenance_costs.index.name in ['dev_id', 'Line', 'development']:
-                print(f"  ⓘ Using index '{construction_and_maintenance_costs.index.name}' as 'dev_id' column")
-                construction_and_maintenance_costs = construction_and_maintenance_costs.reset_index()
-                if construction_and_maintenance_costs.columns[0] != 'dev_id':
-                    construction_and_maintenance_costs = construction_and_maintenance_costs.rename(
-                        columns={construction_and_maintenance_costs.columns[0]: 'dev_id'}
-                    )
-            else:
-                # Last resort: use index as dev_id
-                print(f"  ⚠ No dev_id column found. Using index as dev_id.")
-                construction_and_maintenance_costs = construction_and_maintenance_costs.reset_index()
-                construction_and_maintenance_costs = construction_and_maintenance_costs.rename(
-                    columns={'index': 'dev_id'}
-                )
-    
-    print(f"  ✓ Base costs calculated for {len(construction_and_maintenance_costs)} developments\n")
 
-    # Step 10.2: Calculate capacity intervention costs
-    print("  Step 10.2: Calculate capacity intervention costs...")
-    from development_interventions import calculate_intervention_costs_per_development
+    runtimes["Compute construction costs"] = time.time() - st
+    return construction_and_maintenance_costs
 
-    # Path to Phase 3.3 baseline interventions (enhanced network)
-    enhanced_network_label = f"{settings.rail_network}_enhanced"
-    baseline_interventions_path = CAPACITY_ROOT / "Enhanced" / enhanced_network_label / "capacity_interventions.csv"
 
-    if baseline_interventions_path.exists():
-        print(f"    Using interventions from: {baseline_interventions_path}")
+def phase_11_cost_benefit_integration(construction_and_maintenance_costs: pd.DataFrame, runtimes: dict) -> pd.DataFrame:
+    """
+    Phase 11: Integrate costs with benefits and apply discounting.
 
-        # Use development_interventions module to match and calculate costs
-        intervention_costs_df = calculate_intervention_costs_per_development(
-            dev_id_lookup=dev_id_lookup,
-            baseline_interventions_path=str(baseline_interventions_path),
-            capacity_analysis_results=capacity_analysis_results,
-            development_directory=paths.DEVELOPMENT_DIRECTORY
-        )
-        
-        print(f"  ✓ Calculated intervention costs for {len(intervention_costs_df)} developments")
-        print(f"    Total intervention construction cost: CHF {intervention_costs_df['intervention_construction_cost'].sum():,.0f}")
-        print(f"    Total intervention maintenance (annual): CHF {intervention_costs_df['intervention_maintenance_annual'].sum():,.0f}\n")
+    Args:
+        construction_and_maintenance_costs: Construction costs from Phase 10
+        runtimes: Dictionary to track phase execution times
 
-        # Merge intervention costs with base infrastructure costs
-        # Ensure dev_id is the correct type for merging
-        print("  Merging intervention costs with base costs...")
-        construction_and_maintenance_costs['dev_id'] = construction_and_maintenance_costs['dev_id'].astype(str)
-        intervention_costs_df['dev_id'] = intervention_costs_df['dev_id'].astype(str)
-        
-        # DEBUG: Show sample dev_ids from both dataframes
-        print(f"  DEBUG: Sample dev_ids from base costs: {construction_and_maintenance_costs['dev_id'].head().tolist()}")
-        print(f"  DEBUG: Sample dev_ids from interventions: {intervention_costs_df['dev_id'].head().tolist()}")
-        
-        construction_and_maintenance_costs = construction_and_maintenance_costs.merge(
-            intervention_costs_df,
-            on='dev_id',
-            how='left'
-        )
-        
-        # Fill NaN values with 0 for developments without interventions
-        construction_and_maintenance_costs['intervention_construction_cost'] = \
-            construction_and_maintenance_costs['intervention_construction_cost'].fillna(0.0)
-        construction_and_maintenance_costs['intervention_maintenance_annual'] = \
-            construction_and_maintenance_costs['intervention_maintenance_annual'].fillna(0.0)
-        construction_and_maintenance_costs['intervention_count'] = \
-            construction_and_maintenance_costs['intervention_count'].fillna(0).astype(int)
-        construction_and_maintenance_costs['intervention_ids'] = \
-            construction_and_maintenance_costs['intervention_ids'].fillna('')
-        
-        # Add total costs (base + interventions)
-        construction_and_maintenance_costs['total_construction_cost'] = \
-            construction_and_maintenance_costs['TotalConstructionCost'] + \
-            construction_and_maintenance_costs['intervention_construction_cost']
-
-        construction_and_maintenance_costs['total_maintenance_cost'] = \
-            construction_and_maintenance_costs['YearlyMaintenanceCost'] + \
-            construction_and_maintenance_costs['intervention_maintenance_annual']
-        
-        print(f"  ✓ Intervention costs merged with base infrastructure costs\n")
-        
-    else:
-        print(f"  ⚠ Baseline interventions file not found: {baseline_interventions_path}")
-        print(f"    Proceeding with base infrastructure costs only\n")
-        
-        # Add zero-cost intervention columns for consistency
-        construction_and_maintenance_costs['intervention_construction_cost'] = 0.0
-        construction_and_maintenance_costs['intervention_maintenance_annual'] = 0.0
-        construction_and_maintenance_costs['intervention_count'] = 0
-        construction_and_maintenance_costs['intervention_ids'] = ''
-        construction_and_maintenance_costs['total_construction_cost'] = \
-            construction_and_maintenance_costs['TotalConstructionCost']
-        construction_and_maintenance_costs['total_maintenance_cost'] = \
-            construction_and_maintenance_costs['YearlyMaintenanceCost']
-
-    runtimes["Compute costs"] = time.time() - st
-
-    ##################################################################################
-    # PHASE 12: COST-BENEFIT INTEGRATION, AGGREGATION & VISUALIZATION
-    ##################################################################################
+    Returns:
+        costs_and_benefits_dev_discounted: Discounted cost-benefit DataFrame
+    """
     print("\n" + "="*80)
-    print("PHASE 12: COST-BENEFIT INTEGRATION, AGGREGATION & VISUALIZATION")
+    print("PHASE 11: COST-BENEFIT INTEGRATION")
     print("="*80 + "\n")
     st = time.time()
-
-    # Step 12.1: Cost-Benefit Integration
-    print("  Step 12.1: Cost-benefit integration...")
-    
-    # Save enhanced costs to temporary CSV for cost-benefit analysis
-    enhanced_costs_path = Path(paths.MAIN) / "data" / "costs" / "construction_costs_with_interventions.csv"
-    enhanced_costs_path.parent.mkdir(parents=True, exist_ok=True)
-    construction_and_maintenance_costs.to_csv(enhanced_costs_path, index=False)
-    
-    # Use enhanced costs if interventions were calculated, otherwise use base costs
-    if baseline_interventions_path.exists() and 'intervention_construction_cost' in construction_and_maintenance_costs.columns:
-        print("    Using intervention-enhanced costs for cost-benefit analysis...")
-        cost_file_for_cba = str(enhanced_costs_path)
-    else:
-        print("    Using base costs for cost-benefit analysis...")
-        cost_file_for_cba = None  # Will default to paths.CONSTRUCTION_COSTS
 
     cost_and_benefits_dev = create_cost_and_benefit_df(
         settings.start_year_scenario,
         settings.end_year_scenario,
-        settings.start_valuation_year,
-        cost_file_path=cost_file_for_cba
+        settings.start_valuation_year
     )
     costs_and_benefits_dev_discounted = discounting(
         cost_and_benefits_dev,
@@ -690,143 +710,171 @@ def infrascanrail_cap():
         base_year=settings.start_valuation_year
     )
     costs_and_benefits_dev_discounted.to_csv(paths.COST_AND_BENEFITS_DISCOUNTED)
-    
-    # Generate example cost-benefit plot if visualization function exists
-    try:
-        from display_results import plot_costs_benefit_example
-        plot_costs_benefit_example(costs_and_benefits_dev_discounted, line='101032.0')
-    except ImportError:
-        print("    ⓘ plot_costs_benefit_example not available, skipping example plot")
-    except Exception as e:
-        print(f"    ⚠ Could not generate cost-benefit example plot: {e}")
-    
-    print("    ✓ Cost-benefit integration complete\n")
+    plot_costs_benefits_example(costs_and_benefits_dev_discounted, line='101032.0')
 
     runtimes["Cost-benefit integration"] = time.time() - st
+    return costs_and_benefits_dev_discounted
 
-    ##################################################################################
-    # PHASE 11: VIABILITY ASSESSMENT
-    ##################################################################################
+
+def phase_12_cost_aggregation(costs_and_benefits_dev_discounted: pd.DataFrame, runtimes: dict) -> None:
+    """
+    Phase 12: Aggregate cost elements.
+
+    Args:
+        costs_and_benefits_dev_discounted: Discounted costs from Phase 11
+        runtimes: Dictionary to track phase execution times
+
+    Side Effects:
+        - Writes total_costs.gpkg
+        - Writes total_costs.csv
+        - Writes total_costs_with_geometry.gpkg
+    """
     print("\n" + "="*80)
-    print("PHASE 11: VIABILITY ASSESSMENT")
+    print("PHASE 12: COST AGGREGATION")
     print("="*80 + "\n")
     st = time.time()
 
-    # Calculate viability with and without capacity intervention costs
-    viability_results = {}
-    bcr_threshold = getattr(settings, 'bcr_threshold', 1.0)
+    rearange_costs(costs_and_benefits_dev_discounted)
 
-    print("  Calculating benefit-cost ratios with/without capacity interventions...\n")
+    runtimes["Aggregate costs"] = time.time() - st
 
-    # Extract benefits from cost_and_benefits dataframe
-    # Aggregate NPV benefits by development
-    benefits_by_dev = costs_and_benefits_dev_discounted.groupby('dev_id')['NPV_TT_Savings'].sum().to_dict()
 
-    for dev_id in dev_id_lookup['dev_id']:
-        # Get benefits
-        benefits = benefits_by_dev.get(dev_id, 0.0)
+def phase_13_results_visualization(runtimes: dict) -> None:
+    """
+    Phase 13: Generate all result visualizations.
 
-        # Get costs from construction_and_maintenance_costs
-        cost_row = construction_and_maintenance_costs[
-            construction_and_maintenance_costs['dev_id'] == dev_id
-        ]
+    Args:
+        runtimes: Dictionary to track phase execution times
 
-        if cost_row.empty:
-            continue
+    Side Effects:
+        - Writes multiple plot files to plots/
+        - Writes processed_costs.gpkg
+    """
+    print("\n" + "="*80)
+    print("PHASE 13: RESULTS VISUALIZATION")
+    print("="*80 + "\n")
+    st = time.time()
 
-        cost_row = cost_row.iloc[0]
+    visualize_results(clear_plot_directory=False)
 
-        # Costs WITHOUT capacity interventions
-        costs_without_capacity = (
-            cost_row['TotalConstructionCost'] +
-            cost_row['YearlyMaintenanceCost'] * cp.duration
+    runtimes["Visualize results"] = time.time() - st
+
+
+def infrascanrail_cap():
+    """
+    Enhanced InfraScanRail main pipeline with integrated capacity analysis.
+
+    This orchestrator sequentially calls all 13 phases of the capacity-enhanced pipeline.
+    Each phase is now encapsulated as a separate function for easier debugging and testing.
+    """
+    os.chdir(paths.MAIN)
+    warnings.filterwarnings("ignore")  # TODO: No warnings should be ignored
+    runtimes = {}
+
+    # ============================================================================
+    # AUTO-RESPONSE SETUP: Automatically answer capacity grouping prompts with "1"
+    # ============================================================================
+    # Store original input function
+    if isinstance(__builtins__, dict):
+        _original_input = __builtins__['input']
+    else:
+        _original_input = __builtins__.input
+
+    def auto_input(prompt=""):
+        """
+        Automatically respond with "1" to capacity grouping prompts,
+        otherwise use normal input.
+        """
+        # Check if this is a capacity grouping prompt
+        if "Enter choice (1-2):" in prompt or "Select the strategy number" in prompt:
+            print(prompt + "1  [AUTO-SELECTED]")
+            return "1"
+        # For all other prompts, use original input
+        return _original_input(prompt)
+
+    # Replace built-in input with our auto-input function
+    if isinstance(__builtins__, dict):
+        __builtins__['input'] = auto_input
+    else:
+        __builtins__.input = auto_input
+
+    ##################################################################################
+    # PHASE 1: INITIALIZATION
+    ##################################################################################
+    innerboundary, outerboundary = phase_1_initialization(runtimes)
+
+    ##################################################################################
+    # PHASE 2: DATA IMPORT
+    ##################################################################################
+    phase_2_data_import(runtimes)
+
+    ##################################################################################
+    # PHASE 3: BASELINE CAPACITY ANALYSIS
+    ##################################################################################
+    points, baseline_prep_path, baseline_sections_path, enhanced_network_label = \
+        phase_3_baseline_capacity_analysis(runtimes)
+ 
+    ##################################################################################
+    # PHASE 4: INFRASTRUCTURE DEVELOPMENTS
+    ##################################################################################
+    dev_id_lookup, capacity_analysis_results = \
+        phase_4_infrastructure_developments(points, runtimes)
+
+    """ ##################################################################################
+    # PHASE 5: DEMAND ANALYSIS (OD MATRIX)
+    ##################################################################################
+    phase_5_demand_analysis(points, runtimes)
+
+    ##################################################################################
+    # PHASE 6: TRAVEL TIME COMPUTATION
+    ##################################################################################
+    od_times_dev, od_times_status_quo, G_status_quo, G_development = \
+        phase_6_travel_time_computation(dev_id_lookup, runtimes)
+
+    ##################################################################################
+    # PHASE 7: PASSENGER FLOW VISUALIZATION
+    ##################################################################################
+    if settings.plot_passenger_flow:
+        phase_7_passenger_flow_visualization(
+            G_development, G_status_quo, dev_id_lookup, runtimes
         )
 
-        # Costs WITH capacity interventions
-        costs_with_capacity = cost_row['TotalCostWithInterventions']
-
-        # Calculate BCRs
-        bcr_without_capacity = benefits / costs_without_capacity if costs_without_capacity > 0 else 0.0
-        bcr_with_capacity = benefits / costs_with_capacity if costs_with_capacity > 0 else 0.0
-
-        # Viability checks
-        viable_without = bcr_without_capacity >= bcr_threshold
-        viable_with = bcr_with_capacity >= bcr_threshold
-
-        # Store results
-        viability_results[dev_id] = {
-            'benefits': benefits,
-            'costs_without_capacity': costs_without_capacity,
-            'costs_with_capacity': costs_with_capacity,
-            'bcr_without_capacity': bcr_without_capacity,
-            'bcr_with_capacity': bcr_with_capacity,
-            'viable_without_capacity': viable_without,
-            'viable_with_capacity': viable_with,
-            'capacity_impact_on_bcr': bcr_without_capacity - bcr_with_capacity
-        }
-
-    # Print viability assessment report
-    print("\n" + "="*80)
-    print("VIABILITY ASSESSMENT REPORT")
-    print("="*80 + "\n")
-
-    for dev_id in sorted(viability_results.keys()):
-        v = viability_results[dev_id]
-
-        print(f"Development: {dev_id}")
-        print(f"  Benefits (PV):                 CHF {v['benefits']/1e6:.1f} M")
-        print(f"  Costs WITHOUT Capacity (PV):   CHF {v['costs_without_capacity']/1e6:.1f} M")
-        print(f"  Costs WITH Capacity (PV):      CHF {v['costs_with_capacity']/1e6:.1f} M")
-        print(f"  ")
-        print(f"  BCR WITHOUT Capacity:          {v['bcr_without_capacity']:.2f}  {'✓ VIABLE' if v['viable_without_capacity'] else '✗ NOT VIABLE'}")
-        print(f"  BCR WITH Capacity:             {v['bcr_with_capacity']:.2f}  {'✓ VIABLE' if v['viable_with_capacity'] else '✗ NOT VIABLE'}")
-        print(f"  Capacity Impact on BCR:        {v['capacity_impact_on_bcr']:.2f}")
-        print("-"*80 + "\n")
-
-    # Summary statistics
-    total_developments = len(viability_results)
-    viable_without_count = sum([v['viable_without_capacity'] for v in viability_results.values()])
-    viable_with_count = sum([v['viable_with_capacity'] for v in viability_results.values()])
-
-    print(f"SUMMARY:")
-    print(f"  Total Developments:                    {total_developments}")
-    print(f"  Viable WITHOUT Capacity Costs:         {viable_without_count} ({viable_without_count/total_developments*100:.1f}%)")
-    print(f"  Viable WITH Capacity Costs:            {viable_with_count} ({viable_with_count/total_developments*100:.1f}%)")
-    print(f"  Developments Made Unviable by Capacity: {viable_without_count - viable_with_count}")
-    print("="*80 + "\n")
-
-    # Generate viability visualizations
-    print("  Generating viability visualizations...")
-    try:
-        plot_bcr_comparison_scatter(viability_results, bcr_threshold=bcr_threshold)
-        plot_bcr_by_development(viability_results, bcr_threshold=bcr_threshold)
-        export_viability_results(viability_results)
-        print(f"  ✓ Viability visualizations generated\n")
-    except Exception as e:
-        print(f"  ⚠ Error generating viability visualizations: {e}\n")
-
-    runtimes["Viability assessment"] = time.time() - st
+    ##################################################################################
+    # PHASE 8: SCENARIO GENERATION
+    ##################################################################################
+    if settings.OD_type == 'canton_ZH':
+        phase_8_scenario_generation(runtimes)
 
     ##################################################################################
-    # PHASE 12 CONTINUED: COST AGGREGATION & VISUALIZATION
+    # PHASE 9: TRAVEL TIME SAVINGS
     ##################################################################################
-    print("\n" + "="*80)
-    print("PHASE 12 CONTINUED: COST AGGREGATION & VISUALIZATION")
-    print("="*80 + "\n")
-    st = time.time()
+    dev_list, monetized_tt, scenario_list = \
+        phase_9_travel_time_savings(
+            dev_id_lookup, od_times_dev, od_times_status_quo, runtimes
+        )
 
-    # Step 12.2: Cost Aggregation
-    print("  Step 12.2: Cost aggregation...")
-    rearange_costs(costs_and_benefits_dev_discounted)
-    print("    ✓ Costs aggregated\n")
+    ##################################################################################
+    # PHASE 10: CONSTRUCTION & MAINTENANCE COSTS
+    ##################################################################################
+    construction_and_maintenance_costs = \
+        phase_10_construction_maintenance_costs(monetized_tt, runtimes)
 
-    # Step 12.3: Results Visualization
-    print("  Step 12.3: Results visualization...")
-    visualize_results(clear_plot_directory=False)
-    print("    ✓ Visualizations generated\n")
+    ##################################################################################
+    # PHASE 11: COST-BENEFIT INTEGRATION
+    ##################################################################################
+    costs_and_benefits_dev_discounted = \
+        phase_11_cost_benefit_integration(construction_and_maintenance_costs, runtimes)
 
-    runtimes["Cost aggregation & visualization"] = time.time() - st
+    ##################################################################################
+    # PHASE 12: COST AGGREGATION
+    ##################################################################################
+    phase_12_cost_aggregation(costs_and_benefits_dev_discounted, runtimes)
 
+    ##################################################################################
+    # PHASE 13: RESULTS VISUALIZATION
+    ##################################################################################
+    phase_13_results_visualization(runtimes) """
+ 
     ##################################################################################
     # SAVE RUNTIMES
     ##################################################################################
@@ -884,6 +932,216 @@ def create_dev_id_lookup_table():
     dev_ids = sorted(os.path.splitext(f)[0] for f in all_files)
     df = pd.DataFrame({'dev_id': dev_ids}, index=range(1, len(dev_ids) + 1))
     return df
+
+
+def extract_capacity_intervention_costs(
+    capacity_analysis_results: dict,
+    baseline_network_label: str
+) -> pd.DataFrame:
+    """
+    Extract capacity intervention costs for each development by comparing to baseline.
+
+    Compares development networks (Stations/Segments) to baseline network and identifies
+    capacity interventions (added tracks/platforms) that match the enhanced baseline
+    intervention catalog.
+
+    Args:
+        capacity_analysis_results: Dict from Phase 4.2 with development analysis results
+        baseline_network_label: Baseline network label (e.g., "2024_extended")
+
+    Returns:
+        DataFrame with columns: dev_id, int_id, construction_cost, maintenance_cost
+    """
+    print("\n  Extracting capacity intervention costs for developments...")
+
+    # Load baseline network (original, not enhanced)
+    baseline_capacity_dir = CAPACITY_ROOT / "Baseline" / baseline_network_label
+    baseline_prep_path = baseline_capacity_dir / f"capacity_{baseline_network_label}_network_prep.xlsx"
+
+    # Fallback to old structure
+    if not baseline_prep_path.exists():
+        baseline_capacity_dir = CAPACITY_ROOT / baseline_network_label
+        baseline_prep_path = baseline_capacity_dir / f"capacity_{baseline_network_label}_network_prep.xlsx"
+
+    if not baseline_prep_path.exists():
+        print(f"    ⚠ Baseline prep workbook not found: {baseline_prep_path}")
+        print(f"    → Skipping capacity intervention cost extraction")
+        return pd.DataFrame(columns=['dev_id', 'int_id', 'construction_cost', 'maintenance_cost'])
+
+    # Load enhanced baseline intervention catalog
+    enhanced_network_label = f"{baseline_network_label}_enhanced"
+    interventions_catalog_path = (
+        CAPACITY_ROOT / "Enhanced" / enhanced_network_label / "capacity_interventions.csv"
+    )
+
+    if not interventions_catalog_path.exists():
+        print(f"    ⚠ Interventions catalog not found: {interventions_catalog_path}")
+        print(f"    → Skipping capacity intervention cost extraction")
+        return pd.DataFrame(columns=['dev_id', 'int_id', 'construction_cost', 'maintenance_cost'])
+
+    # Load baseline network
+    print(f"    Loading baseline network: {baseline_prep_path}")
+    baseline_stations = pd.read_excel(baseline_prep_path, sheet_name='Stations')
+    baseline_segments = pd.read_excel(baseline_prep_path, sheet_name='Segments')
+
+    # Load intervention catalog
+    print(f"    Loading intervention catalog: {interventions_catalog_path}")
+    interventions_catalog = pd.read_csv(interventions_catalog_path)
+
+    # Results storage
+    results = []
+
+    # Process each development
+    for dev_id, dev_result in capacity_analysis_results.items():
+        if dev_result.get('status') != 'success':
+            # No successful capacity analysis - record zero costs
+            results.append({
+                'dev_id': dev_id,
+                'int_id': '',
+                'construction_cost': 0.0,
+                'maintenance_cost': 0.0
+            })
+            continue
+
+        # Load development sections workbook
+        dev_sections_path = Path(dev_result['sections_path'])
+
+        if not dev_sections_path.exists():
+            print(f"    ⚠ Development sections file not found: {dev_sections_path}")
+            results.append({
+                'dev_id': dev_id,
+                'int_id': '',
+                'construction_cost': 0.0,
+                'maintenance_cost': 0.0
+            })
+            continue
+
+        try:
+            dev_stations = pd.read_excel(dev_sections_path, sheet_name='Stations')
+            dev_segments = pd.read_excel(dev_sections_path, sheet_name='Segments')
+        except Exception as e:
+            print(f"    ⚠ Error loading development {dev_id} workbook: {e}")
+            results.append({
+                'dev_id': dev_id,
+                'int_id': '',
+                'construction_cost': 0.0,
+                'maintenance_cost': 0.0
+            })
+            continue
+
+        # Track matched interventions
+        matched_interventions = []
+        total_construction_cost = 0.0
+        total_maintenance_cost = 0.0
+
+        # Compare stations (tracks and platforms)
+        for _, dev_station in dev_stations.iterrows():
+            node_id = dev_station['NR']
+
+            # Find matching baseline station
+            baseline_station = baseline_stations[baseline_stations['NR'] == node_id]
+
+            if len(baseline_station) == 0:
+                # New station in development (not in baseline) - skip
+                continue
+
+            baseline_station = baseline_station.iloc[0]
+
+            # Check for track increases
+            dev_tracks = dev_station.get('tracks', 0)
+            baseline_tracks = baseline_station.get('tracks', 0)
+
+            # Check for platform increases
+            dev_platforms = dev_station.get('platforms', 0)
+            baseline_platforms = baseline_station.get('platforms', 0)
+
+            if dev_tracks > baseline_tracks or dev_platforms > baseline_platforms:
+                # Look for matching intervention in catalog
+                station_interventions = interventions_catalog[
+                    (interventions_catalog['type'] == 'station_track') &
+                    (interventions_catalog['node_id'] == node_id)
+                ]
+
+                if len(station_interventions) > 0:
+                    # Use first matching intervention
+                    intervention = station_interventions.iloc[0]
+                    matched_interventions.append(intervention['intervention_id'])
+                    total_construction_cost += intervention['construction_cost_chf']
+                    total_maintenance_cost += intervention['maintenance_cost_annual_chf']
+                else:
+                    print(f"    ⚠ Warning: Station {node_id} in dev {dev_id} has increased tracks/platforms but no matching intervention found")
+
+        # Compare segments (tracks only)
+        for _, dev_segment in dev_segments.iterrows():
+            from_node = dev_segment['from_node']
+            to_node = dev_segment['to_node']
+
+            # Find matching baseline segment
+            baseline_segment = baseline_segments[
+                (baseline_segments['from_node'] == from_node) &
+                (baseline_segments['to_node'] == to_node)
+            ]
+
+            if len(baseline_segment) == 0:
+                # New segment in development (not in baseline) - skip
+                continue
+
+            baseline_segment = baseline_segment.iloc[0]
+
+            # Check for track increases
+            dev_tracks = dev_segment.get('tracks', 0)
+            baseline_tracks = baseline_segment.get('tracks', 0)
+
+            if dev_tracks > baseline_tracks:
+                # Look for matching intervention in catalog
+                segment_id = f"{from_node}-{to_node}"
+                segment_interventions = interventions_catalog[
+                    (interventions_catalog['type'] == 'segment_passing_siding') &
+                    (interventions_catalog['segment_id'] == segment_id)
+                ]
+
+                if len(segment_interventions) > 0:
+                    # Use first matching intervention
+                    intervention = segment_interventions.iloc[0]
+                    matched_interventions.append(intervention['intervention_id'])
+                    total_construction_cost += intervention['construction_cost_chf']
+                    total_maintenance_cost += intervention['maintenance_cost_annual_chf']
+                else:
+                    print(f"    ⚠ Warning: Segment {segment_id} in dev {dev_id} has increased tracks but no matching intervention found")
+
+        # Record results for this development
+        if matched_interventions:
+            int_id_str = '|'.join(matched_interventions)
+        else:
+            int_id_str = ''
+
+        results.append({
+            'dev_id': dev_id,
+            'int_id': int_id_str,
+            'construction_cost': total_construction_cost,
+            'maintenance_cost': total_maintenance_cost
+        })
+
+        if matched_interventions:
+            print(f"    ✓ Dev {dev_id}: {len(matched_interventions)} interventions, "
+                  f"CHF {total_construction_cost:,.0f} construction, "
+                  f"CHF {total_maintenance_cost:,.0f} annual maintenance")
+
+    # Convert to DataFrame
+    results_df = pd.DataFrame(results)
+
+    # Save to CSV
+    output_path = Path(paths.MAIN) / "data" / "costs" / "capacity_intervention_costs.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    results_df.to_csv(output_path, index=False)
+
+    print(f"\n    ✓ Capacity intervention costs saved to: {output_path}")
+    print(f"    • Total developments processed: {len(results_df)}")
+    print(f"    • Developments with interventions: {(results_df['construction_cost'] > 0).sum()}")
+    print(f"    • Total construction cost: CHF {results_df['construction_cost'].sum():,.0f}")
+    print(f"    • Total annual maintenance: CHF {results_df['maintenance_cost'].sum():,.0f}\n")
+
+    return results_df
 
 
 def import_process_network(use_cache):
@@ -1165,8 +1423,10 @@ def compute_tts(dev_id_lookup, od_times_dev, od_times_status_quo, use_cache=Fals
 def generate_infra_development(use_cache, mod_type):
     """Generate infrastructure development scenarios."""
     if use_cache:
-        print("use cache for developments")
+        print("  ⚠ Using cached developments - skipping generation and plotting")
         return
+
+    print(f"  → Generating infrastructure developments (mod_type='{mod_type}')")
 
     if mod_type in ('ALL', 'EXTEND_LINES'):
         # Identifies railway service endpoints, creates a buffer around them, and selects nearby stations
@@ -1178,6 +1438,7 @@ def generate_infra_development(use_cache, mod_type):
         calculate_new_service_time()
 
     if mod_type in ('ALL', 'NEW_DIRECT_CONNECTIONS'):
+        print(f"\n  ✓ Generating NEW_DIRECT_CONNECTIONS (mod_type={mod_type})")
         df_network = gpd.read_file(settings.infra_generation_rail_network)
         df_points = gpd.read_file(r'data\Network\processed\points.gpkg')
         G, pos = prepare_Graph(df_network, df_points)
@@ -1187,9 +1448,11 @@ def generate_infra_development(use_cache, mod_type):
         print("Identifying missing connections...")
         missing_connections = get_missing_connections(G, pos, print_results=True,
                                                       polygon=settings.perimeter_infra_generation)
-        plot_graph(G, pos, highlight_centers=True, missing_links=missing_connections, 
+        print(f"  → Plotting graph to {paths.PLOT_DIRECTORY}")
+        plot_graph(G, pos, highlight_centers=True, missing_links=missing_connections,
                    directory=paths.PLOT_DIRECTORY,
                    polygon=settings.perimeter_infra_generation)
+        print(f"  ✓ Graph plot complete")
 
         # Generate potential new railway lines
         print("\n=== GENERATING NEW RAILWAY LINES ===")
@@ -1208,8 +1471,10 @@ def generate_infra_development(use_cache, mod_type):
         print("Creating visualization of the network with highlighted missing connections...")
 
         plots_dir = "plots/missing_connections"
+        print(f"  → Creating individual plots in {plots_dir}/")
         plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir)
-        add_railway_lines_to_new_links(paths.NEW_RAILWAY_LINES_PATH, mod_type, 
+        print(f"  ✓ Individual plots complete")
+        add_railway_lines_to_new_links(paths.NEW_RAILWAY_LINES_PATH, mod_type,
                                        paths.NEW_LINKS_UPDATED_PATH, settings.rail_network)
 
     combined_gdf = update_network_with_new_links(settings.rail_network, paths.NEW_LINKS_UPDATED_PATH)

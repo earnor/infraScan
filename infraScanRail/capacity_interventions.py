@@ -366,15 +366,16 @@ def calculate_intervention_cost(
     Cost formulas (based on track_cost_per_meter):
 
     Station track:
-    - Standard: track_cost_per_meter × 500m × floor(current_tracks)
+    - Standard: track_cost_per_meter × station_siding_length_m × floor(current_tracks)
+    - Platform: platform_cost_per_unit × platforms_added (if platforms < 2)
 
     Passing siding:
-    - Fractional → Whole (e.g., 1.5 → 2.0, length ≥ 1000m):
-      (segment_length_m × track_cost_per_meter) - (1000m × track_cost_per_meter × floor(current_tracks))
+    - Fractional → Whole (e.g., 1.5 → 2.0):
+      (segment_length_m × track_cost_per_meter) - (segment_siding_length_m × track_cost_per_meter × floor(current_tracks))
     - Full track addition (tracks_added = 1.0):
       segment_length_m × track_cost_per_meter × 1
     - Standard siding (tracks_added = 0.5, not fractional → whole):
-      track_cost_per_meter × 1000m × floor(current_tracks)
+      track_cost_per_meter × segment_siding_length_m × floor(current_tracks)
 
     Args:
         intervention: Intervention object with current_tracks populated
@@ -393,7 +394,7 @@ def calculate_intervention_cost(
     base_tracks = math.floor(intervention.current_tracks)
 
     if intervention.type == 'station_track':
-        # Station track cost: track_cost_per_meter × 500m × base_tracks
+        # Station track cost: track_cost_per_meter × station_siding_length_m × base_tracks
         construction_cost = (
             cost_parameters.track_cost_per_meter *
             cost_parameters.station_siding_length_m *
@@ -434,7 +435,7 @@ def calculate_intervention_cost(
             construction_cost = segment_length_m * cost_parameters.track_cost_per_meter * 1
 
         else:
-            # Standard passing siding: track_cost_per_meter × 1000m × base_tracks
+            # Standard passing siding: track_cost_per_meter × segment_siding_length_m × base_tracks
             construction_cost = (
                 cost_parameters.track_cost_per_meter *
                 cost_parameters.segment_siding_length_m *

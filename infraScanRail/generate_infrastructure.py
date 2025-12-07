@@ -539,8 +539,10 @@ def get_via(new_connections):
         # Find the shortest path based on TravelTime
         try:
             path = nx.shortest_path(G, source=from_node, target=to_node, weight='weight')
-            # Convert path to a string
-            path_str = ",".join(map(str, path))  # Convert list to comma-separated string
+            # Extract only intermediate nodes (exclude first and last)
+            intermediate_nodes = path[1:-1]  # Removes from_node and to_node
+            # Convert to string with brackets without spaces, or -99 if no intermediate nodes
+            path_str = "[" + ",".join(map(str, intermediate_nodes)) + "]" if intermediate_nodes else -99
         except nx.NetworkXNoPath:
             path_str = -99  # No path exists
 
@@ -615,7 +617,7 @@ def update_network_with_new_links(rail_network_selection, new_links_updated_path
 
     # Ensure all Via values are strings or -99 for empty paths
     new_links_updated['Via'] = new_links_updated['Via'].apply(
-        lambda x: '-99' if pd.isna(x) or x == [-99] else ','.join(map(str, x))
+        lambda x: '-99' if pd.isna(x) else str(x)
     )
 
     # Identify and report missing node mappings
@@ -634,6 +636,25 @@ def update_network_with_new_links(rail_network_selection, new_links_updated_path
     direction_A["Direction"] = "A"
     direction_A["FromNode"], direction_A["ToNode"] = direction_A["ToNode"], direction_A["FromNode"]
     direction_A["FromStation"], direction_A["ToStation"] = direction_A["ToStation"], direction_A["FromStation"]
+
+    # Reverse the Via sequence for Direction A
+    def reverse_via(via_str):
+        if pd.isna(via_str) or via_str == '-99' or via_str == -99:
+            return via_str
+        # Parse the Via string (format: "[1234,191,5678]")
+        try:
+            if via_str.startswith('[') and via_str.endswith(']'):
+                # Extract nodes from bracket format
+                nodes_str = via_str[1:-1]  # Remove brackets
+                if nodes_str:  # If not empty
+                    nodes = nodes_str.split(',')
+                    reversed_nodes = nodes[::-1]  # Reverse the list
+                    return '[' + ','.join(reversed_nodes) + ']'
+            return via_str
+        except:
+            return via_str
+
+    direction_A["Via"] = direction_A["Via"].apply(reverse_via)
 
     # Combine A and B directions, preserving the same dev_id
     combined_new_links = pd.concat([new_links_updated, direction_A], ignore_index=True)

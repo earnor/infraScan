@@ -6,6 +6,5 @@
 /infraScanRail-deprec
 /infraScanRail/plots/
 infraScanRail/__pycache__
-inspect_*.py
-inspect*.py
+infraScanRail/_unused_files
 /infraScanRail/markdowns
