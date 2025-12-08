@@ -3,14 +3,21 @@ INFRASCANRAIL CAPACITY-ENHANCED PIPELINE RUNTIMES
 ================================================================================
 
 Initialize variables.............................. 0m 0s (0.08s)
-Import land use and land cover data............... 0m 0s (0.07s)
-Preprocess the network............................ 0m 1s (1.09s)
-Establish baseline capacity....................... 0m 26s (26.64s)
-Enhance baseline network.......................... 0m 12s (12.96s)
-Generate infrastructure developments.............. 0m 26s (26.33s)
-Analyze development capacity...................... 0m 7s (7.50s)
-Extract capacity intervention costs............... 0m 3s (3.91s)
+Import land use and land cover data............... 0m 0s (0.08s)
+Preprocess the network............................ 0m 1s (1.11s)
+Establish baseline capacity....................... 0m 10s (10.75s)
+Enhance baseline network.......................... 0m 22s (22.32s)
+Generate infrastructure developments.............. 0m 26s (26.18s)
+Analyze development capacity...................... 0m 6s (6.90s)
+Extract capacity intervention costs............... 0m 15s (15.48s)
+Generate OD matrix................................ 0m 15s (15.48s)
+Calculate Traveltimes for all developments........ 0m 10s (10.34s)
+Generate the scenarios............................ 0m 19s (19.01s)
+Calculate the TTT Savings......................... 0m 12s (12.82s)
+Compute construction costs........................ 0m 0s (0.78s)
+Cost-benefit integration.......................... 0m 8s (8.31s)
+Aggregate costs................................... 0m 0s (0.57s)
 
 ================================================================================
-TOTAL TIME........................................ 1m 18s (78.59s)
+TOTAL TIME........................................ 2m 30s (150.20s)
 ================================================================================

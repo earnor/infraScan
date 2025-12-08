@@ -363,19 +363,19 @@ def calculate_intervention_cost(
     """
     Calculate construction and maintenance costs for intervention.
 
-    Cost formulas (based on track_cost_per_meter):
+    Cost formulas (using fixed-price parameters from cost_parameters.py):
 
     Station track:
-    - Standard: track_cost_per_meter × station_siding_length_m × floor(current_tracks)
-    - Platform: platform_cost_per_unit × platforms_added (if platforms < 2)
+    - Base cost: station_siding_costs × floor(current_tracks)
+    - Platform: platform_cost_per_unit × platforms_added (if platforms need to be added)
 
     Passing siding:
     - Fractional → Whole (e.g., 1.5 → 2.0):
-      (segment_length_m × track_cost_per_meter) - (segment_siding_length_m × track_cost_per_meter × floor(current_tracks))
+      (segment_length_m × track_cost_per_meter) - (segment_siding_costs × floor(current_tracks))
     - Full track addition (tracks_added = 1.0):
       segment_length_m × track_cost_per_meter × 1
     - Standard siding (tracks_added = 0.5, not fractional → whole):
-      track_cost_per_meter × segment_siding_length_m × floor(current_tracks)
+      segment_siding_costs × floor(current_tracks)
 
     Args:
         intervention: Intervention object with current_tracks populated
@@ -394,12 +394,8 @@ def calculate_intervention_cost(
     base_tracks = math.floor(intervention.current_tracks)
 
     if intervention.type == 'station_track':
-        # Station track cost: track_cost_per_meter × station_siding_length_m × base_tracks
-        construction_cost = (
-            cost_parameters.track_cost_per_meter *
-            cost_parameters.station_siding_length_m *
-            base_tracks
-        )
+        # Station track cost: station_siding_costs × floor(current_tracks)
+        construction_cost = cost_parameters.station_siding_costs * base_tracks
 
         # Add platform costs if platforms need to be added
         if intervention.platforms_added and intervention.platforms_added > 0:
@@ -421,11 +417,7 @@ def calculate_intervention_cost(
             segment_length_m = intervention.length_m  # Already stored from design phase
 
             full_track_cost = segment_length_m * cost_parameters.track_cost_per_meter * 1
-            siding_cost_paid = (
-                cost_parameters.segment_siding_length_m *
-                cost_parameters.track_cost_per_meter *
-                base_tracks
-            )
+            siding_cost_paid = cost_parameters.segment_siding_costs * base_tracks
             construction_cost = full_track_cost - siding_cost_paid
 
         elif intervention.tracks_added == 1.0:
@@ -435,12 +427,8 @@ def calculate_intervention_cost(
             construction_cost = segment_length_m * cost_parameters.track_cost_per_meter * 1
 
         else:
-            # Standard passing siding: track_cost_per_meter × segment_siding_length_m × base_tracks
-            construction_cost = (
-                cost_parameters.track_cost_per_meter *
-                cost_parameters.segment_siding_length_m *
-                base_tracks
-            )
+            # Standard passing siding: segment_siding_costs × floor(current_tracks)
+            construction_cost = cost_parameters.segment_siding_costs * base_tracks
     else:
         raise ValueError(f"Unknown intervention type: {intervention.type}")
 

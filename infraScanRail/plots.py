@@ -2532,7 +2532,7 @@ def plot_catchment_and_distributions(
     print(f"Plots saved to {output_path}")
 
 
-def plot_costs_benefits_example(cost_benefit_df, line=None):
+def plot_costs_benefits(cost_benefit_df, line=None, output_dir="plots"):
     """
     Erstellt ein wissenschaftlich aussehendes Balkendiagramm von Kosten und Nutzen über die Jahre
     für die Entwicklung mit dem höchsten Nutzen im Jahr 1.
@@ -2642,10 +2642,10 @@ def plot_costs_benefits_example(cost_benefit_df, line=None):
     plt.tight_layout()
 
     # Stelle sicher, dass das Verzeichnis existiert
-    os.makedirs('plots', exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     # Dateiname mit Entwicklungsname erstellen
-    filename = f'plots/kosten_nutzen_{line}.png'
+    filename = os.path.join(output_dir, f'kosten_nutzen_{line}.png')
 
     # Lösche die Datei, wenn sie bereits existiert
     if os.path.exists(filename):

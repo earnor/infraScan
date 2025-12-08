@@ -183,20 +183,52 @@ def phase_3_baseline_capacity_analysis(runtimes: dict) -> tuple:
     runtimes["Establish baseline capacity"] = time.time() - st
 
     # ============================================================================
-    # STEP 3.3: ENHANCE BASELINE NETWORK (PHASE 4 INTERVENTIONS) 
+    # STEP 3.3: ENHANCE BASELINE NETWORK (PHASE 4 INTERVENTIONS)
     # ============================================================================
     print("\n--- Step 3.3: Enhance Baseline Network (Phase 4) ---\n")
     st = time.time()
 
+    # Prompt user for capacity enhancement parameters
+    print(f"  Network to enhance: {settings.rail_network}")
+    print(f"\n  Configure capacity enhancement parameters:")
+    print(f"  Default threshold: {settings.capacity_threshold} tphpd")
+    print(f"  Default max iterations: {settings.max_enhancement_iterations}")
+
+    # Get threshold from user
+    threshold_input = input(f"\n  Enter capacity threshold (tphpd) or press Enter for default [{settings.capacity_threshold}]: ").strip()
+    if threshold_input:
+        try:
+            capacity_threshold = float(threshold_input)
+            print(f"  → Using threshold: {capacity_threshold} tphpd")
+        except ValueError:
+            print(f"  ⚠ Invalid input. Using default: {settings.capacity_threshold} tphpd")
+            capacity_threshold = settings.capacity_threshold
+    else:
+        capacity_threshold = settings.capacity_threshold
+        print(f"  → Using default threshold: {capacity_threshold} tphpd")
+
+    # Get max iterations from user
+    iterations_input = input(f"  Enter max iterations or press Enter for default [{settings.max_enhancement_iterations}]: ").strip()
+    if iterations_input:
+        try:
+            max_iterations = int(iterations_input)
+            print(f"  → Using max iterations: {max_iterations}")
+        except ValueError:
+            print(f"  ⚠ Invalid input. Using default: {settings.max_enhancement_iterations}")
+            max_iterations = settings.max_enhancement_iterations
+    else:
+        max_iterations = settings.max_enhancement_iterations
+        print(f"  → Using default max iterations: {max_iterations}")
+
     # Run Phase 4 iterative capacity enhancement
-    print(f"  Running Phase 4 enhancement workflow for {settings.rail_network}...")
-    print(f"  Threshold: {settings.capacity_threshold} tphpd")
-    print(f"  Max iterations: {settings.max_enhancement_iterations}\n")
+    print(f"\n  Running Phase 4 enhancement workflow for {settings.rail_network}...")
+    print(f"  Threshold: {capacity_threshold} tphpd")
+    print(f"  Max iterations: {max_iterations}\n")
 
     enhanced_exit_code = run_enhanced_workflow(
         network_label=settings.rail_network,
-        threshold=settings.capacity_threshold,
-        max_iterations=settings.max_enhancement_iterations
+        threshold=capacity_threshold,
+        max_iterations=max_iterations
     )
 
     if enhanced_exit_code != 0:
@@ -262,79 +294,6 @@ def phase_4_infrastructure_developments(points: gpd.GeoDataFrame, runtimes: dict
     # Create lookup table for developments
     dev_id_lookup = create_dev_id_lookup_table()
     print(f"  ✓ Generated {len(dev_id_lookup)} infrastructure developments")
-
-    # ============================================================================
-    # Via Column Modification for EXTEND_LINES Developments
-    # ============================================================================
-    # COMMENTED OUT: Via column -99 modification disabled
-    # For EXTEND_LINES developments (dev_id 100001-100999):
-    # Check new_dev column and set Via = "-99" for new developments
-    # This signals no intermediate stations, direct connection
-    print("\n  Via column modifications DISABLED (code commented out)")
-
-    # # Get list of development .gpkg files (same as used in Workflow 3 below)
-    # dev_dir = Path(paths.DEVELOPMENT_DIRECTORY)
-    # if dev_dir.exists() and dev_dir.is_dir():
-    #     # Get all .gpkg files in development directory
-    #     gpkg_files = [
-    #         os.path.join(paths.DEVELOPMENT_DIRECTORY, filename)
-    #         for filename in os.listdir(paths.DEVELOPMENT_DIRECTORY)
-    #         if filename.endswith(".gpkg")
-    #     ]
-    #
-    #     if not gpkg_files:
-    #         print(f"  ⚠ No .gpkg files found in {paths.DEVELOPMENT_DIRECTORY}")
-    #     else:
-    #         total_modifications = 0
-    #
-    #         for gpkg_file in gpkg_files:
-    #             try:
-    #                 developments_gdf = gpd.read_file(gpkg_file)
-    #
-    #                 # Check if new_dev column exists
-    #                 if 'new_dev' not in developments_gdf.columns:
-    #                     continue
-    #
-    #                 modifications_count = 0
-    #
-    #                 for idx, row in developments_gdf.iterrows():
-    #                     # Only process EXTEND_LINES developments (100001-100999)
-    #                     dev_id = row.get('dev_id', None)
-    #
-    #                     # Handle both string and numeric dev_id
-    #                     if dev_id is not None:
-    #                         # Convert to int if it's a float or string
-    #                         try:
-    #                             if isinstance(dev_id, str):
-    #                                 dev_id_num = int(dev_id)
-    #                             elif isinstance(dev_id, (int, float)):
-    #                                 dev_id_num = int(dev_id)
-    #                             else:
-    #                                 continue
-    #                         except (ValueError, TypeError):
-    #                             continue
-    #
-    #                         # Check if dev_id is in EXTEND_LINES range (100001-100999)
-    #                         if settings.dev_id_start_extended_lines <= dev_id_num < settings.dev_id_start_new_direct_connections:
-    #                             if row.get('new_dev') == 'Yes':
-    #                                 developments_gdf.at[idx, 'Via'] = '-99'
-    #                                 modifications_count += 1
-    #
-    #                 # Save modified geopackage if any modifications were made
-    #                 if modifications_count > 0:
-    #                     developments_gdf.to_file(gpkg_file, driver='GPKG')
-    #                     print(f"  ✓ Modified Via column for {modifications_count} records in {Path(gpkg_file).name}")
-    #                     total_modifications += modifications_count
-    #
-    #             except Exception as e:
-    #                 print(f"  ⚠ Error processing {Path(gpkg_file).name}: {e}")
-    #
-    #         if total_modifications > 0:
-    #             print(f"\n  ✓ Total Via column modifications: {total_modifications}")
-    #         else:
-    #             print(f"\n  ⓘ No EXTEND_LINES developments with new_dev='Yes' found")
-    # else:
-    #     print(f"  ⚠ Development directory not found or is not a directory: {paths.DEVELOPMENT_DIRECTORY}")
     runtimes["Generate infrastructure developments"] = time.time() - st
 
     # ============================================================================
@@ -683,58 +642,117 @@ def phase_10_construction_maintenance_costs(monetized_tt: pd.DataFrame, runtimes
     return construction_and_maintenance_costs
 
 
-def phase_11_cost_benefit_integration(construction_and_maintenance_costs: pd.DataFrame, runtimes: dict) -> pd.DataFrame:
+def phase_11_cost_benefit_integration(construction_and_maintenance_costs: pd.DataFrame, runtimes: dict) -> tuple:
     """
     Phase 11: Integrate costs with benefits and apply discounting.
+
+    Creates TWO versions:
+    1. Old (WITHOUT capacity interventions)
+    2. Current (WITH capacity interventions)
 
     Args:
         construction_and_maintenance_costs: Construction costs from Phase 10
         runtimes: Dictionary to track phase execution times
 
     Returns:
-        costs_and_benefits_dev_discounted: Discounted cost-benefit DataFrame
+        tuple: (costs_and_benefits_old_discounted, costs_and_benefits_discounted)
     """
     print("\n" + "="*80)
     print("PHASE 11: COST-BENEFIT INTEGRATION")
     print("="*80 + "\n")
     st = time.time()
 
-    cost_and_benefits_dev = create_cost_and_benefit_df(
+    # Create both versions of cost-benefit dataframes
+    costs_and_benefits_old, costs_and_benefits = create_cost_and_benefit_df(
         settings.start_year_scenario,
         settings.end_year_scenario,
         settings.start_valuation_year
     )
-    costs_and_benefits_dev_discounted = discounting(
-        cost_and_benefits_dev,
+
+    # Apply discounting to OLD version (WITHOUT capacity interventions)
+    print("\n  Applying discounting to costs WITHOUT capacity interventions...")
+    costs_and_benefits_old_discounted = discounting(
+        costs_and_benefits_old,
         discount_rate=cp.discount_rate,
         base_year=settings.start_valuation_year
     )
-    costs_and_benefits_dev_discounted.to_csv(paths.COST_AND_BENEFITS_DISCOUNTED)
-    plot_costs_benefits_example(costs_and_benefits_dev_discounted, line='101032.0')
+    old_discounted_path = "data/costs/costs_and_benefits_old_discounted.csv"
+    costs_and_benefits_old_discounted.to_csv(old_discounted_path)
+    print(f"  ✓ Saved to: {old_discounted_path}")
+
+    # Apply discounting to current version (WITH capacity interventions)
+    print("\n  Applying discounting to costs WITH capacity interventions...")
+    costs_and_benefits_discounted = discounting(
+        costs_and_benefits,
+        discount_rate=cp.discount_rate,
+        base_year=settings.start_valuation_year
+    )
+    discounted_path = "data/costs/costs_and_benefits_discounted.csv"
+    costs_and_benefits_discounted.to_csv(discounted_path)
+    print(f"  ✓ Saved to: {discounted_path}")
+
+    # Ask user if they want visualizations
+    print("\n" + "="*80)
+    print("VISUALIZATION OPTION")
+    print("="*80)
+    response = input("\nGenerate cost-benefit plots for all developments? (y/n) [n]: ").strip().lower()
+
+    if response == 'y':
+        print("\n  Generating plots for all developments...")
+        output_dir = os.path.join("plots", "Discounted Costs")
+
+        # Get all unique development IDs from the discounted dataframe
+        dev_ids = costs_and_benefits_discounted.index.get_level_values('development').unique()
+
+        for i, dev_id in enumerate(dev_ids, 1):
+            print(f"    [{i}/{len(dev_ids)}] Plotting development {dev_id}...")
+            plot_costs_benefits(costs_and_benefits_discounted, line=dev_id, output_dir=output_dir)
+
+        print(f"\n  ✓ All plots saved to: {output_dir}")
+    else:
+        print("  → Skipping visualizations")
 
     runtimes["Cost-benefit integration"] = time.time() - st
-    return costs_and_benefits_dev_discounted
+    return costs_and_benefits_old_discounted, costs_and_benefits_discounted
 
 
-def phase_12_cost_aggregation(costs_and_benefits_dev_discounted: pd.DataFrame, runtimes: dict) -> None:
+def phase_12_cost_aggregation(runtimes: dict) -> None:
     """
     Phase 12: Aggregate cost elements.
 
+    Processes both old (without capacity) and new (with capacity) cost-benefit files.
+
     Args:
-        costs_and_benefits_dev_discounted: Discounted costs from Phase 11
         runtimes: Dictionary to track phase execution times
 
     Side Effects:
-        - Writes total_costs.gpkg
-        - Writes total_costs.csv
-        - Writes total_costs_with_geometry.gpkg
+        - Writes total_costs.gpkg (with capacity)
+        - Writes total_costs.csv (with capacity)
+        - Writes total_costs_with_geometry.gpkg (with capacity)
+        - Writes total_costs_old.csv (without capacity)
     """
     print("\n" + "="*80)
     print("PHASE 12: COST AGGREGATION")
     print("="*80 + "\n")
     st = time.time()
 
-    rearange_costs(costs_and_benefits_dev_discounted)
+    # Load the discounted cost-benefit dataframes from Phase 11
+    costs_path = "data/costs/costs_and_benefits_discounted.csv"
+    costs_old_path = "data/costs/costs_and_benefits_old_discounted.csv"
+
+    print(f"  Loading WITH capacity interventions: {costs_path}")
+    costs_and_benefits_discounted = pd.read_csv(costs_path)
+
+    print(f"  Loading WITHOUT capacity interventions: {costs_old_path}")
+    costs_and_benefits_old_discounted = pd.read_csv(costs_old_path)
+
+    # Process new version (WITH capacity) - full outputs
+    print("\n  → Processing costs WITH capacity interventions (full outputs)...")
+    rearange_costs(costs_and_benefits_discounted, output_prefix="")
+
+    # Process old version (WITHOUT capacity) - CSV only
+    print("\n  → Processing costs WITHOUT capacity interventions (CSV only)...")
+    rearange_costs(costs_and_benefits_old_discounted, output_prefix="_old", csv_only=True)
 
     runtimes["Aggregate costs"] = time.time() - st
 
@@ -820,7 +838,7 @@ def infrascanrail_cap():
     dev_id_lookup, capacity_analysis_results = \
         phase_4_infrastructure_developments(points, runtimes)
 
-    """ ##################################################################################
+    ##################################################################################
     # PHASE 5: DEMAND ANALYSIS (OD MATRIX)
     ##################################################################################
     phase_5_demand_analysis(points, runtimes)
@@ -862,18 +880,18 @@ def infrascanrail_cap():
     ##################################################################################
     # PHASE 11: COST-BENEFIT INTEGRATION
     ##################################################################################
-    costs_and_benefits_dev_discounted = \
+    costs_and_benefits_old_discounted, costs_and_benefits_discounted = \
         phase_11_cost_benefit_integration(construction_and_maintenance_costs, runtimes)
 
     ##################################################################################
     # PHASE 12: COST AGGREGATION
     ##################################################################################
-    phase_12_cost_aggregation(costs_and_benefits_dev_discounted, runtimes)
+    phase_12_cost_aggregation(runtimes)
 
     ##################################################################################
     # PHASE 13: RESULTS VISUALIZATION
     ##################################################################################
-    phase_13_results_visualization(runtimes) """
+    # phase_13_results_visualization(runtimes)
  
     ##################################################################################
     # SAVE RUNTIMES
@@ -1482,15 +1500,31 @@ def generate_infra_development(use_cache, mod_type):
     create_network_foreach_dev()
 
 
-def rearange_costs(cost_and_benefits):
+def rearange_costs(cost_and_benefits, output_prefix="", csv_only=False):
     """
-    Aggregate the single cost elements to one dataframe.
-    New dataframe is stored in "data/costs/total_costs.gpkg" and "data/costs/total_costs.csv"
+    Aggregate the single cost elements to one dataframe and create summary.
+
+    Args:
+        cost_and_benefits: DataFrame with cost and benefit data
+        output_prefix: Prefix for output files (e.g., "_old" for old version)
+        csv_only: If True, only generate CSV output (skip .gpkg files)
+
+    Outputs:
+        - "data/costs/total_costs_raw{output_prefix}.csv" (without redundant columns)
+        - "data/costs/total_costs{output_prefix}.csv"
+        - "data/costs/total_costs{output_prefix}_with_geometry.gpkg" (unless csv_only=True)
+        - "data/costs/total_costs_summary{output_prefix}.csv" (new summary file)
+
     Convert all costs in million CHF
     """
-    print(" -> Aggregate costs")
-    aggregate_costs(cost_and_benefits, cp.tts_valuation_period)
-    transform_and_reshape_cost_df()
+    print(f" -> Aggregate costs (output_prefix='{output_prefix}', csv_only={csv_only})")
+    aggregate_costs(cost_and_benefits, cp.tts_valuation_period, output_prefix=output_prefix, csv_only=csv_only)
+    transform_and_reshape_cost_df(output_prefix=output_prefix, csv_only=csv_only)
+    
+    # Create standalone summary CSV
+    print(f"\n -> Creating cost summary{output_prefix}...")
+    include_geometry = not csv_only  # Include geometry only for full version
+    create_cost_summary(output_prefix=output_prefix, include_geometry=include_geometry)
 
 
 def visualize_results(clear_plot_directory=False):

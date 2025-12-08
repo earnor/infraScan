@@ -1,11 +1,10 @@
-
 import pandas
 
 import cost_parameters as cp
 import paths
 
 from data_import import *
-from plots import plot_costs_benefits_example
+from plots import plot_costs_benefits
 import os
 import pandas as pd
 
@@ -212,9 +211,13 @@ def process_via_column(df):
 def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_cost_per_meter,
                        track_maintenance_cost, tunnel_maintenance_cost, bridge_maintenance_cost, duration):
     """
-    Process the rail network data to calculate construction and maintenance costs for each segment.
-    Includes checks for capacity adequacy, considers both directions (A and B) using the same tracks,
-    and calculates costs for building additional tracks and maintaining them.
+    Calculate construction and maintenance costs for each development.
+
+    For EXTEND_LINES developments (Type A): Only calculates operating costs. Construction and
+    maintenance costs are handled by capacity intervention analysis in Phase 4.
+
+    For NEW_DIRECT_CONNECTIONS developments (Type B): Calculates full infrastructure costs
+    (construction, maintenance, operating) based on connection curve lookup data.
 
     Parameters:
         file_path (str): Path to the CSV file containing the rail network data.
@@ -227,7 +230,7 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
         duration (int): The duration (in years) for which maintenance costs are calculated.
 
     Returns:
-        pd.DataFrame: Summary DataFrame containing total construction and maintenance costs for each development.
+        pd.DataFrame: Summary DataFrame with development costs and capacity intervention costs.
     """
     try:
         # Load the base construction cost data
@@ -239,91 +242,32 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
 
     development_costs = []  # To store costs for each development
     developments = read_development_files()
-    #Process the Via column in a DataFrame.
-    #Converts strings in the Via column to lists of integers
-    #If no Via nodes are present, replaces it with -99.
+
+    # Process the Via column in a DataFrame.
+    # Converts strings in the Via column to lists of integers
+    # If no Via nodes are present, replaces it with -99.
     developments = [process_via_column(df) for df in developments]
 
     for i, dev_df in enumerate(developments):
+        dev_id = dev_df["dev_id"].iloc[0]
 
-        if dev_df["dev_id"].iloc[0] < settings.dev_id_start_new_direct_connections:
+        if dev_id < settings.dev_id_start_new_direct_connections:
+            # ================================================================
+            # TYPE A: EXTEND_LINES DEVELOPMENTS
+            # ================================================================
+            # Construction and maintenance costs are zero (handled by capacity interventions in Phase 4)
+            # Only calculate operating costs
 
-            # Add the development lines to the construction cost data
-            combined_df = pd.concat([df_construction_cost, dev_df], ignore_index=True)
+            dev_construction_cost = 0.0
+            dev_maintenance_cost = 0.0
+            uncovered_operating_cost = dev_df['geometry'].length.sum() / 2 * cp.operating_cost_s_bahn_per_meter * (1 - cp.general_KDG)
 
-            # Split the lines with a Via column
-            df_split = split_via_nodes(combined_df)
-            df_split = merge_lines(df_split)
-            df_split = df_split.dropna(subset=['NumOfTracks'])
+        elif dev_id >= settings.dev_id_start_new_direct_connections:
+            # ================================================================
+            # TYPE B: NEW_DIRECT_CONNECTIONS DEVELOPMENTS
+            # ================================================================
+            # Calculate full infrastructure costs from connection curve lookup
 
-            # Calculate MinTrack as the smallest digit from the NumOfTracks column
-            df_split['NumOfTracks'] = df_split['NumOfTracks'].astype(int)
-            df_split['MinTrack'] = df_split['NumOfTracks'].apply(lambda x: int(min(str(x))))
-
-            # Calculate ServicesPerTrack
-            df_split['ServicesPerTrack'] = df_split['TotalFrequency'] / df_split['MinTrack']
-
-            # Add a new column 'enoughCap' based on ServicesPerTrack < 8
-            df_split['enoughCap'] = df_split['ServicesPerTrack'].apply(lambda x: 'Yes' if x < 8 else 'No')
-
-            # Calculate costs for connections with insufficient capacity
-            insufficient_capacity = df_split[df_split['enoughCap'] == 'No'].copy()
-
-            # Generate line segments from development DataFrame
-            def get_development_segments(dev_df):
-                segments = []
-                for _, row in dev_df.iterrows():
-                    from_node = row['FromNode']
-                    to_node = row['ToNode']
-                    via_nodes = row['Via'] if isinstance(row['Via'], list) else []
-
-                    # Create segments from FromNode -> Via -> ToNode
-                    prev_node = from_node
-                    for via_node in via_nodes:
-                        segments.append((prev_node, via_node))
-                        prev_node = via_node
-                    segments.append((prev_node, to_node))
-                return segments
-
-            # Generate segments for the current development
-            development_segments = get_development_segments(dev_df)
-
-            # Filter insufficient_capacity to include only lines in the current development
-            def is_in_development(row, segments):
-                return (row['FromNode'], row['ToNode']) in segments
-
-            insufficient_capacity = insufficient_capacity[
-                insufficient_capacity.apply(lambda row: is_in_development(row, development_segments), axis=1)
-            ]
-
-            # Initialize cost columns
-            insufficient_capacity['NewTrackCost'] = insufficient_capacity['length of 1'] * cost_per_meter
-            insufficient_capacity['NewTunnelCost'] = (
-                insufficient_capacity['Tunnel m'] * (tunnel_cost_per_meter)
-            )
-            insufficient_capacity['NewBridgeCost'] = (
-                insufficient_capacity['Bridges m'] * (bridge_cost_per_meter)
-            )
-
-            # Calculate total construction cost
-            insufficient_capacity['construction_cost'] = (
-                insufficient_capacity['NewTrackCost'] +
-                insufficient_capacity['NewTunnelCost'] +
-                insufficient_capacity['NewBridgeCost']
-            )
-
-            # Calculate maintenance cost for each segment
-            insufficient_capacity['maintenance_cost'] = duration * (
-                insufficient_capacity['length of 1'] * track_maintenance_cost +
-                insufficient_capacity['Tunnel m'] * tunnel_maintenance_cost +
-                insufficient_capacity['Bridges m'] * bridge_maintenance_cost
-            )
-
-            # Summarize total construction and maintenance costs for the current development
-            total_construction_cost = insufficient_capacity['construction_cost'].sum()
-            total_maintenance_cost = insufficient_capacity['maintenance_cost'].sum() * 0.65  # 65% of the total maintenance cost is considered as the annualized cost, the rest is covered in operating cost of Abgeltungen
-            uncovered_operating_cost = dev_df['geometry'].length.sum() / 2 * cp.operating_cost_s_bahn_per_meter*(1-cp.general_KDG)  # Assuming the geometry length is in meters and divided by 2 for both directions
-        elif dev_df["dev_id"].iloc[0] >= settings.dev_id_start_new_direct_connections:
             connection_curve_lookup = pd.read_excel(paths.COSTS_CONNECTION_CURVES, sheet_name="Input_for_code")
             railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
             service_id = dev_df["Sline"].iloc[0]
@@ -344,39 +288,113 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
             bridge_cost = bridge_length * bridge_cost_per_meter
 
             # Total construction cost
-            total_construction_cost = track_cost + tunnel_cost + bridge_cost
+            dev_construction_cost = track_cost + tunnel_cost + bridge_cost
 
             # Calculate maintenance costs
             yearly_maintenance = (
-                                         track_length * track_maintenance_cost +
-                                         tunnel_length * tunnel_maintenance_cost +
-                                         bridge_length * bridge_maintenance_cost
-                                 ) * 0.65  # 65% of the total maintenance cost is considered as the annualized cost, the rest is covered in operating cost of Abgeltungen
+                track_length * track_maintenance_cost +
+                tunnel_length * tunnel_maintenance_cost +
+                bridge_length * bridge_maintenance_cost
+            ) * 0.65  # 65% of the total maintenance cost is considered as the annualized cost, the rest is covered in operating cost of Abgeltungen
 
-            total_maintenance_cost = yearly_maintenance * duration
+            dev_maintenance_cost = yearly_maintenance * duration
 
+            # Operating costs
+            uncovered_operating_cost = dev_df['geometry'].length.sum() / 2 * cp.detour_factor_tracks * cp.operating_cost_s_bahn_per_meter * (1 - cp.general_KDG)
 
-            uncovered_operating_cost = dev_df['geometry'].length.sum() / 2 * cp.detour_factor_tracks * cp.operating_cost_s_bahn_per_meter * (
-                        1 - cp.general_KDG)  # Assuming the geometry length is in meters and divided by 2 for both directions
+        # Store development costs
         development_costs.append({
-            "Development": dev_df["dev_id"].iloc[0],
-            "TotalConstructionCost": total_construction_cost,
-            "TotalMaintenanceCost": total_maintenance_cost,
-            "YearlyMaintenanceCost": total_maintenance_cost / duration,
+            "Development": dev_id,
+            "Dev_ConstructionCost": dev_construction_cost,
+            "Dev_MaintenanceCost": dev_maintenance_cost,
             "uncoveredOperatingCost": uncovered_operating_cost
         })
 
-        # Update the base construction cost data for the next iteration
-        df_construction_cost = pd.concat([df_construction_cost, dev_df], ignore_index=True)
-
-    # Create a summary DataFrame for development costs
+    # Create DataFrame from development costs
     development_costs_df = pd.DataFrame(development_costs)
-    development_costs_df.to_csv("data/costs/construction_cost.csv", index=False)
 
-    return development_costs_df
+    # ================================================================
+    # LOAD AND MERGE CAPACITY INTERVENTION COSTS
+    # ================================================================
+    capacity_intervention_costs_path = "data/costs/capacity_intervention_costs.csv"
+
+    try:
+        cap_int_costs_df = pd.read_csv(capacity_intervention_costs_path)
+
+        # Group by dev_id to sum costs (in case multiple interventions per development)
+        cap_int_summary = cap_int_costs_df.groupby('dev_id').agg({
+            'construction_cost': 'sum',
+            'maintenance_cost': 'sum'
+        }).reset_index()
+
+        # Rename columns for clarity
+        cap_int_summary.rename(columns={
+            'dev_id': 'Development',
+            'construction_cost': 'CapInt_ConstructionCost',
+            'maintenance_cost': 'CapInt_MaintenanceCost_Annual'
+        }, inplace=True)
+
+        # Convert annual maintenance to total over duration
+        cap_int_summary['CapInt_MaintenanceCost'] = cap_int_summary['CapInt_MaintenanceCost_Annual'] * duration
+        cap_int_summary.drop(columns=['CapInt_MaintenanceCost_Annual'], inplace=True)
+
+        # Merge with development costs
+        combined_costs_df = development_costs_df.merge(
+            cap_int_summary,
+            on='Development',
+            how='left'
+        )
+
+        # Fill NaN with 0 for developments without capacity interventions
+        combined_costs_df['CapInt_ConstructionCost'].fillna(0.0, inplace=True)
+        combined_costs_df['CapInt_MaintenanceCost'].fillna(0.0, inplace=True)
+
+    except FileNotFoundError:
+        print(f"Warning: Capacity intervention costs file not found at {capacity_intervention_costs_path}")
+        print("Setting capacity intervention costs to 0 for all developments.")
+        combined_costs_df = development_costs_df.copy()
+        combined_costs_df['CapInt_ConstructionCost'] = 0.0
+        combined_costs_df['CapInt_MaintenanceCost'] = 0.0
+
+    # ================================================================
+    # CALCULATE TOTAL COSTS
+    # ================================================================
+    combined_costs_df['TotalConstructionCost'] = (
+        combined_costs_df['Dev_ConstructionCost'] +
+        combined_costs_df['CapInt_ConstructionCost']
+    )
+
+    combined_costs_df['TotalMaintenanceCost'] = (
+        combined_costs_df['Dev_MaintenanceCost'] +
+        combined_costs_df['CapInt_MaintenanceCost']
+    )
+
+    combined_costs_df['YearlyMaintenanceCost'] = (
+        combined_costs_df['TotalMaintenanceCost'] / duration
+    )
+
+    # Reorder columns for output
+    output_columns = [
+        'Development',
+        'Dev_ConstructionCost',
+        'Dev_MaintenanceCost',
+        'CapInt_ConstructionCost',
+        'CapInt_MaintenanceCost',
+        'TotalConstructionCost',
+        'TotalMaintenanceCost',
+        'YearlyMaintenanceCost',
+        'uncoveredOperatingCost'
+    ]
+
+    combined_costs_df = combined_costs_df[output_columns]
+
+    # Save to CSV
+    combined_costs_df.to_csv("data/costs/construction_cost.csv", index=False)
+
+    return combined_costs_df
 
 
-def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100)):
+def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100), output_prefix="", csv_only=False):
     """
     Aggregate and calculate total costs for each development and scenario.
     Uses the cost_and_benefits DataFrame to sum up construction costs,
@@ -385,6 +403,9 @@ def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100)):
     Parameters:
         cost_and_benefits (pd.DataFrame): DataFrame with costs and benefits for each development,
                                           scenario, and year, with MultiIndex (development, scenario, year).
+        valuation_period (tuple): Start and end year for valuation period
+        output_prefix (str): Prefix for output files (e.g., "_old" for old version)
+        csv_only (bool): If True, only generate CSV output (skip .gpkg files)
     """
 
     # Wenn cost_and_benefits einen MultiIndex hat, diesen zurücksetzen
@@ -408,7 +429,7 @@ def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100)):
     total_costs = c_travel_time[c_travel_time['year'].between(valuation_period[0], valuation_period[1])]
     # Initialize total costs DataFrame with the existing structure
     # but using the aggregated values from cost_and_benefits
-    
+
     # Initialize columns with zeros
     total_costs["construction_cost"] = 0
     total_costs["maintenance_cost"] = 0
@@ -455,17 +476,20 @@ def aggregate_costs(cost_and_benefits, valuation_period=(2050, 2100)):
     total_costs["TotalMaintenanceCost"] = total_costs["maintenance_cost"]
     total_costs["TotalUncoveredOperatingCost"] = total_costs["uncovered_op_cost"]
 
+    # DO NOT create redundant Total* columns - they will be removed
+    # (These were: TotalConstructionCost, TotalMaintenanceCost, TotalUncoveredOperatingCost)
+
     columns_to_drop = ['status_quo_tt', 'development_tt']
-    #columns_to_drop += [col for col in total_costs.columns if 'total_scenario_' in col]
     total_costs = total_costs.drop(columns=columns_to_drop, errors='ignore')
 
-    # Save results to CSV
-    total_costs.to_csv(paths.TOTAL_COST_RAW, index=False)
+    # Save results to CSV with appropriate filename
+    output_path = f"data/costs/total_costs_raw{output_prefix}.csv"
+    total_costs.to_csv(output_path, index=False)
 
-    print(f"Total costs raw saved to {paths.TOTAL_COST_RAW}")
+    print(f"Total costs raw saved to {output_path}")
 
 
-def transform_and_reshape_cost_df():
+def transform_and_reshape_cost_df(output_prefix="", csv_only=False):
     """
     Transform, reshape, and enhance the dataframe:
     - Drop specific columns.
@@ -474,11 +498,16 @@ def transform_and_reshape_cost_df():
     - Add geometry and additional information for each development.
     - Save results as both CSV and GeoPackage.
 
+    Parameters:
+        output_prefix (str): Prefix for output files (e.g., "_old" for old version)
+        csv_only (bool): If True, only generate CSV output (skip .gpkg files)
+
     Returns:
-        gpd.GeoDataFrame: Transformed GeoDataFrame with geometry column.
+        gpd.GeoDataFrame: Transformed GeoDataFrame with geometry column (or None if csv_only=True and no geometry needed)
     """
     # Load the dataframe
-    df = pd.read_csv(paths.TOTAL_COST_RAW)
+    input_path = f"data/costs/total_costs_raw{output_prefix}.csv"
+    df = pd.read_csv(input_path)
 
     # Reshaping the dataframe
     reshaped_df = df.pivot_table(
@@ -542,37 +571,39 @@ def transform_and_reshape_cost_df():
     # Temporär die 'development' zu Integer umwandeln für das Merging
     reshaped_df['dev_id'] = reshaped_df['development'].astype(int)
 
-    # Lade die Geometrie und zusätzliche Daten
-    geometry_data = gpd.read_file("data/Network/processed/updated_new_links.gpkg")[['dev_id', 'geometry', 'Sline']]
-    geometry_data['dev_id'] = geometry_data['dev_id']
+    # Only load geometry if not csv_only
+    if not csv_only:
+        # Lade die Geometrie und zusätzliche Daten
+        geometry_data = gpd.read_file("data/Network/processed/updated_new_links.gpkg")[['dev_id', 'geometry', 'Sline']]
+        geometry_data['dev_id'] = geometry_data['dev_id']
 
-    # 2. Gruppiere nach dev_id, fasse alle Liniengeometrien zusammen,
-    # und übertrage Sline (sie sind ohnehin alle gleich)
-    def merge_grouped_lines(geoms):
-        u = unary_union(geoms)
-        # Falls unary_union genau eine LineString zurückgab, gib sie einfach zurück
-        if isinstance(u, LineString):
-            return u
-        # Andernfalls (MultiLineString usw.) verbinde sie zu einer oder mehreren durchgehenden Linien
-        return linemerge(u)
+        # 2. Gruppiere nach dev_id, fasse alle Liniengeometrien zusammen,
+        # und übertrage Sline (sie sind ohnehin alle gleich)
+        def merge_grouped_lines(geoms):
+            u = unary_union(geoms)
+            # Falls unary_union genau eine LineString zurückgab, gib sie einfach zurück
+            if isinstance(u, LineString):
+                return u
+            # Andernfalls (MultiLineString usw.) verbinde sie zu einer oder mehreren durchgehenden Linien
+            return linemerge(u)
 
-    merged = (
-        geometry_data
-        .groupby('dev_id')
-        .agg({
-            # Fasse alle Liniensegmente zu einer (Multi)LineString zusammen
-            'geometry': merge_grouped_lines,
-            # Nimm einfach die erste Sline in jeder dev_id - sie sind garantiert identisch
-            'Sline': 'first'
-        })
-        .reset_index()
-    )
+        merged = (
+            geometry_data
+            .groupby('dev_id')
+            .agg({
+                # Fasse alle Liniensegmente zu einer (Multi)LineString zusammen
+                'geometry': merge_grouped_lines,
+                # Nimm einfach die erste Sline in jeder dev_id - sie sind garantiert identisch
+                'Sline': 'first'
+            })
+            .reset_index()
+        )
 
-    # 3. Verpacke als GeoDataFrame (unter Beibehaltung des ursprünglichen CRS)
-    geometry_data = gpd.GeoDataFrame(merged, geometry='geometry', crs=geometry_data.crs)
+        # 3. Verpacke als GeoDataFrame (unter Beibehaltung des ursprünglichen CRS)
+        geometry_data = gpd.GeoDataFrame(merged, geometry='geometry', crs=geometry_data.crs)
 
-    # Füge Geometrie und zusätzliche Informationen in reshaped_df ein
-    reshaped_df = reshaped_df.merge(geometry_data, on='dev_id', how='left')
+        # Füge Geometrie und zusätzliche Informationen in reshaped_df ein
+        reshaped_df = reshaped_df.merge(geometry_data, on='dev_id', how='left')
 
     # Stelle das 'Development_' Präfix im Entwicklungsspalte für CSV wieder her
     reshaped_df['development'] = 'Development_' + reshaped_df['dev_id'].astype(str)
@@ -592,33 +623,50 @@ def transform_and_reshape_cost_df():
     reshaped_df[cba_ratio_columns] = reshaped_df[cba_ratio_columns].round(2)
 
     # Ordne Spalten neu
-    columns_order = (
-            ['development', 'Sline', 'Construction Cost [in Mio. CHF]', 'Maintenance Costs [in Mio. CHF]',
-             'Uncovered Operating Costs [in Mio. CHF]'] +
-            [col for col in reshaped_df.columns if "Monetized Savings" in col] +
-            [col for col in reshaped_df.columns if "Net Benefit" in col] +
-            [col for col in reshaped_df.columns if "cba_ratio" in col]
-    )
-
-    # Stelle sicher, dass 'geometry' ganz am Ende steht
-    columns_order += [col for col in reshaped_df.columns if col not in columns_order and col != 'geometry']
-    columns_order.append('geometry')
+    if csv_only:
+        # For csv_only mode, don't include Sline or geometry columns
+        columns_order = (
+                ['development', 'Construction Cost [in Mio. CHF]', 'Maintenance Costs [in Mio. CHF]',
+                 'Uncovered Operating Costs [in Mio. CHF]'] +
+                [col for col in reshaped_df.columns if "Monetized Savings" in col] +
+                [col for col in reshaped_df.columns if "Net Benefit" in col] +
+                [col for col in reshaped_df.columns if "cba_ratio" in col]
+        )
+        # Add remaining columns (except geometry if present)
+        columns_order += [col for col in reshaped_df.columns if col not in columns_order and col != 'geometry']
+    else:
+        # Full mode with geometry
+        columns_order = (
+                ['development', 'Sline', 'Construction Cost [in Mio. CHF]', 'Maintenance Costs [in Mio. CHF]',
+                 'Uncovered Operating Costs [in Mio. CHF]'] +
+                [col for col in reshaped_df.columns if "Monetized Savings" in col] +
+                [col for col in reshaped_df.columns if "Net Benefit" in col] +
+                [col for col in reshaped_df.columns if "cba_ratio" in col]
+        )
+        # Stelle sicher, dass 'geometry' ganz am Ende steht
+        columns_order += [col for col in reshaped_df.columns if col not in columns_order and col != 'geometry']
+        columns_order.append('geometry')
 
     # Ordne den DataFrame neu
     reshaped_df = reshaped_df[columns_order]
 
-    # Konvertiere zu GeoDataFrame
-    gdf = gpd.GeoDataFrame(reshaped_df, geometry='geometry', crs=geometry_data.crs)
+    # Save outputs based on csv_only flag
+    csv_output_path = f"data/costs/total_costs{output_prefix}.csv"
+    reshaped_df.to_csv(csv_output_path, index=False)
+    print(f"Transformed dataframe saved to CSV: '{csv_output_path}'")
 
-    # Speichere Ergebnisse als CSV und GeoPackage
-    reshaped_df.to_csv(paths.TOTAL_COST_WITH_GEOMETRY, index=False)
-    gdf.to_file("data/costs/total_costs_with_geometry.gpkg", driver="GPKG")
+    if not csv_only:
+        # Konvertiere zu GeoDataFrame
+        gdf = gpd.GeoDataFrame(reshaped_df, geometry='geometry', crs=geometry_data.crs)
 
-    print("Transformed dataframe saved to:")
-    print(f"- CSV: '{paths.TOTAL_COST_WITH_GEOMETRY}'")
-    print("- GeoPackage: 'data/costs/total_costs_with_geometry.gpkg'")
+        # Speichere GeoPackage
+        gpkg_output_path = f"data/costs/total_costs{output_prefix}_with_geometry.gpkg"
+        gdf.to_file(gpkg_output_path, driver="GPKG")
+        print(f"Transformed dataframe saved to GeoPackage: '{gpkg_output_path}'")
 
-    return gdf
+        return gdf
+    else:
+        return None
 
 
 
@@ -1082,8 +1130,6 @@ def GetCatchmentOD(use_cache = False):
 
     # Check for scenario based on column names in pop_empl
     # Sceanrio are defined like pop_XX and empl_XX get a list of all these endings (only XX)
-    # Get the column names of pop_empl
-    # Get the column names that end with XX
     '''
     pop_empl_scenarios = [col.split("_")[1] for col in pop_empl_columns if col.startswith("pop_")]
     print(pop_empl_scenarios)
@@ -1492,18 +1538,24 @@ def discounting(df, discount_rate, base_year=2018):
 
 def create_cost_and_benefit_df(scenario_start_year=2018, end_year=2100, start_valuation_period=2050, cost_file_path=None):
     """
-    Create combined cost-benefit DataFrame for all developments, scenarios, and years.
+    Create combined cost-benefit DataFrames for all developments, scenarios, and years.
+
+    Creates TWO versions:
+    1. Baseline (WITHOUT capacity interventions) -> costs_and_benefits_dev.csv
+    2. With capacity interventions -> costs_and_benefits_flat.csv
 
     Args:
         scenario_start_year: Start year for scenario timeline
         end_year: End year for scenario timeline
         start_valuation_period: Year construction begins (base year for discounting)
         cost_file_path: Optional path to cost CSV (defaults to paths.CONSTRUCTION_COSTS)
-                       Use this to specify enhanced costs with interventions
 
     Returns:
-        DataFrame with MultiIndex (development, scenario, year) and cost/benefit columns
+        tuple: (costs_and_benefits_baseline, costs_and_benefits_with_interventions)
+            Both DataFrames have MultiIndex (development, scenario, year) and cost/benefit columns
     """
+    import cost_parameters as cp
+
     # Load cached data
     with open(paths.TTS_CACHE, "rb") as f_in:
         _, monetized_tt, _ = pickle.load(f_in)
@@ -1520,50 +1572,73 @@ def create_cost_and_benefit_df(scenario_start_year=2018, end_year=2100, start_va
     full_index = pd.MultiIndex.from_product([dev_list, scenario_list, years],
                                             names=["development", "scenario", "year"])
 
-    # Initialize dataframe with zeros
-    costs_and_benefits_dev = pd.DataFrame(0, index=full_index,
-                                          columns=["const_cost", "maint_cost", "uncovered_op_cost", "benefit"])
+    # Initialize BOTH dataframes with zeros
+    costs_and_benefits_baseline = pd.DataFrame(0, index=full_index,
+                                               columns=["const_cost", "maint_cost", "uncovered_op_cost", "benefit"])
 
-    # Add benefits directly
+    costs_and_benefits_with_interventions = pd.DataFrame(0, index=full_index,
+                                                         columns=["const_cost", "maint_cost", "uncovered_op_cost", "benefit"])
+
+    # Add benefits directly (same for both versions)
     benefit_data = monetized_tt.set_index(["development", "scenario", "year"])["monetized_savings_yearly"]
-    costs_and_benefits_dev.loc[benefit_data.index, "benefit"] = benefit_data
+    costs_and_benefits_baseline.loc[benefit_data.index, "benefit"] = benefit_data
+    costs_and_benefits_with_interventions.loc[benefit_data.index, "benefit"] = benefit_data
 
     # Broadcast cost values
     for _, row in tqdm(construction_and_maintenance_costs.iterrows(), desc="Processing costs and benefits"):
         dev_name = str(row["Development"])  # Ensure consistent typing
 
-        # Use intervention-enhanced costs if available, otherwise use base costs
-        const_cost = row.get("TotalConstructionCostWithInterventions", row["TotalConstructionCost"])
-        maint_cost = row.get("TotalMaintenanceAnnualWithInterventions", row["YearlyMaintenanceCost"])
+        # ================================================================
+        # VERSION 1: BASELINE (WITHOUT capacity interventions)
+        # ================================================================
+        const_cost_baseline = row["Dev_ConstructionCost"]
+        maint_cost_baseline = row["Dev_MaintenanceCost"] / cp.duration  # Convert total to annual
         uncovered_op_cost = row["uncoveredOperatingCost"]
 
         # Construction costs: only in start_valuation_period
         const_idx = pd.MultiIndex.from_product([[dev_name], scenario_list, [start_valuation_period]],
                                                names=["development", "scenario", "year"])
-        costs_and_benefits_dev.loc[const_idx, "const_cost"] = const_cost
+        costs_and_benefits_baseline.loc[const_idx, "const_cost"] = const_cost_baseline
 
         # Maintenance and uncovered op costs: from start_year + 1 to end_year
         maint_years = list(range(start_valuation_period + 1, end_year + 1))
         maint_idx = pd.MultiIndex.from_product([[dev_name], scenario_list, maint_years],
                                                names=["development", "scenario", "year"])
-        costs_and_benefits_dev.loc[maint_idx, "maint_cost"] = maint_cost
-        costs_and_benefits_dev.loc[maint_idx, "uncovered_op_cost"] = uncovered_op_cost
+        costs_and_benefits_baseline.loc[maint_idx, "maint_cost"] = maint_cost_baseline
+        costs_and_benefits_baseline.loc[maint_idx, "uncovered_op_cost"] = uncovered_op_cost
 
-    # Nur Daten behalten, die nach oder im start_valuation_period liegen
-    costs_and_benefits_dev = costs_and_benefits_dev[
-        costs_and_benefits_dev.index.get_level_values('year') >= start_valuation_period
+        # ================================================================
+        # VERSION 2: WITH CAPACITY INTERVENTIONS
+        # ================================================================
+        const_cost_with_int = row["TotalConstructionCost"]
+        maint_cost_with_int = row["YearlyMaintenanceCost"]
+
+        # Construction costs: only in start_valuation_period
+        costs_and_benefits_with_interventions.loc[const_idx, "const_cost"] = const_cost_with_int
+
+        # Maintenance and uncovered op costs: from start_year + 1 to end_year
+        costs_and_benefits_with_interventions.loc[maint_idx, "maint_cost"] = maint_cost_with_int
+        costs_and_benefits_with_interventions.loc[maint_idx, "uncovered_op_cost"] = uncovered_op_cost
+
+    # Filter data: only keep years >= start_valuation_period
+    costs_and_benefits_baseline = costs_and_benefits_baseline[
+        costs_and_benefits_baseline.index.get_level_values('year') >= start_valuation_period
+    ]
+    costs_and_benefits_with_interventions = costs_and_benefits_with_interventions[
+        costs_and_benefits_with_interventions.index.get_level_values('year') >= start_valuation_period
     ]
 
-    # Save results
-    costs_benefits_csv_path = "data/costs/costs_and_benefits_dev.csv"
-    print(f"Saving costs and benefits to {costs_benefits_csv_path}")
-    costs_and_benefits_dev.to_csv(costs_benefits_csv_path)
+    # Save OLD version (WITHOUT capacity interventions)
+    costs_benefits_old_path = "data/costs/costs_and_benefits_old.csv"
+    print(f"Saving costs and benefits (WITHOUT capacity interventions) to {costs_benefits_old_path}")
+    costs_and_benefits_baseline.to_csv(costs_benefits_old_path)
 
-    costs_benefits_flat_csv_path = "data/costs/costs_and_benefits_flat.csv"
-    costs_and_benefits_dev.reset_index().to_csv(costs_benefits_flat_csv_path, index=False)
-    print(f"Saving flattened version to {costs_benefits_flat_csv_path}")
+    # Save current version (WITH capacity interventions)
+    costs_benefits_path = "data/costs/costs_and_benefits.csv"
+    print(f"Saving costs and benefits (WITH capacity interventions) to {costs_benefits_path}")
+    costs_and_benefits_with_interventions.reset_index().to_csv(costs_benefits_path, index=False)
 
-    return costs_and_benefits_dev
+    return costs_and_benefits_baseline, costs_and_benefits_with_interventions
 
 
 def aggregate_commune_od_to_station_od(commune_od_df, commune_station_df):
@@ -1627,3 +1702,149 @@ def filter_od_matrix_by_stations(railway_station_OD, stations_in_perimeter):
     print(f"Anzahl der Stationen im Perimeter: {len(station_ids)}")
 
     return filtered_od
+
+def create_cost_summary(output_prefix="", include_geometry=True):
+    """
+    Create a standalone summary CSV with aggregated cost-benefit metrics.
+    
+    Parameters:
+        output_prefix (str): Prefix for output files (e.g., "_old" for old version)
+        include_geometry (bool): Whether to include geometry column (False for _old version)
+    
+    Returns:
+        pd.DataFrame or gpd.GeoDataFrame: Summary dataframe
+    """
+    from shapely.ops import unary_union, linemerge
+    from shapely.geometry import LineString
+    
+    # Load the full total_costs file
+    input_path = f"data/costs/total_costs{output_prefix}.csv"
+    df = pd.read_csv(input_path)
+    
+    # Extract development ID for merging with geometry
+    df['dev_id'] = df['development'].str.replace('Development_', '').astype(int)
+    
+    # Identify scenario columns dynamically
+    savings_columns = [col for col in df.columns if col.startswith("monetized_savings_total_scenario_")]
+    
+    # Calculate summary statistics across scenarios (in CHF, not millions)
+    # Extract raw values by multiplying back
+    scenario_values = df[savings_columns]
+    
+    summary_df = pd.DataFrame()
+    summary_df['development'] = df['development']
+    summary_df['dev_id'] = df['dev_id']
+    
+    # Add Sline if geometry is included
+    if include_geometry:
+        # Load geometry data
+        geometry_data = gpd.read_file("data/Network/processed/updated_new_links.gpkg")[['dev_id', 'geometry', 'Sline']]
+        
+        # Merge and group geometries
+        def merge_grouped_lines(geoms):
+            u = unary_union(geoms)
+            if isinstance(u, LineString):
+                return u
+            return linemerge(u)
+        
+        merged = (
+            geometry_data
+            .groupby('dev_id')
+            .agg({
+                'geometry': merge_grouped_lines,
+                'Sline': 'first'
+            })
+            .reset_index()
+        )
+        
+        geometry_data = gpd.GeoDataFrame(merged, geometry='geometry', crs=geometry_data.crs)
+        
+        # Merge with summary
+        summary_df = summary_df.merge(geometry_data[['dev_id', 'Sline', 'geometry']], on='dev_id', how='left')
+    
+    # Add cost columns (already in millions from total_costs.csv)
+    summary_df['Construction Cost [in Mio. CHF]'] = df['Construction Cost [in Mio. CHF]']
+    summary_df['Maintenance Costs [in Mio. CHF]'] = df['Maintenance Costs [in Mio. CHF]']
+    summary_df['Uncovered Operating Costs [in Mio. CHF]'] = df['Uncovered Operating Costs [in Mio. CHF]']
+    
+    # Calculate total costs
+    summary_df['Total Costs [in Mio. CHF]'] = (
+        summary_df['Construction Cost [in Mio. CHF]'] + 
+        summary_df['Maintenance Costs [in Mio. CHF]'] + 
+        summary_df['Uncovered Operating Costs [in Mio. CHF]']
+    )
+    
+    # Calculate monetized savings statistics (convert to millions)
+    summary_df['Monetized Savings Mean [in Mio. CHF]'] = scenario_values.mean(axis=1) / 1_000_000
+    summary_df['Monetized Savings Min [in Mio. CHF]'] = scenario_values.min(axis=1) / 1_000_000
+    summary_df['Monetized Savings Max [in Mio. CHF]'] = scenario_values.max(axis=1) / 1_000_000
+    summary_df['Monetized Savings Std [in Mio. CHF]'] = scenario_values.std(axis=1) / 1_000_000
+    
+    # Calculate net benefit (using mean savings)
+    summary_df['Net Benefit [in Mio. CHF]'] = (
+        summary_df['Monetized Savings Mean [in Mio. CHF]'] - 
+        summary_df['Total Costs [in Mio. CHF]']
+    )
+    
+    # Calculate CBA ratio (using mean savings)
+    summary_df['CBA Ratio'] = (
+        summary_df['Monetized Savings Mean [in Mio. CHF]'] / 
+        summary_df['Total Costs [in Mio. CHF]']
+    )
+    
+    # Round numeric columns
+    numeric_cols = [col for col in summary_df.columns if '[in Mio. CHF]' in col or col == 'CBA Ratio']
+    for col in numeric_cols:
+        if col in summary_df.columns:
+            summary_df[col] = summary_df[col].round(2)
+    
+    # Drop temporary dev_id column
+    summary_df = summary_df.drop(columns=['dev_id'])
+    
+    # Reorder columns
+    if include_geometry:
+        column_order = [
+            'development',
+            'Sline',
+            'Construction Cost [in Mio. CHF]',
+            'Maintenance Costs [in Mio. CHF]',
+            'Uncovered Operating Costs [in Mio. CHF]',
+            'Total Costs [in Mio. CHF]',
+            'Monetized Savings Mean [in Mio. CHF]',
+            'Monetized Savings Min [in Mio. CHF]',
+            'Monetized Savings Max [in Mio. CHF]',
+            'Monetized Savings Std [in Mio. CHF]',
+            'Net Benefit [in Mio. CHF]',
+            'CBA Ratio',
+            'geometry'
+        ]
+    else:
+        column_order = [
+            'development',
+            'Construction Cost [in Mio. CHF]',
+            'Maintenance Costs [in Mio. CHF]',
+            'Uncovered Operating Costs [in Mio. CHF]',
+            'Total Costs [in Mio. CHF]',
+            'Monetized Savings Mean [in Mio. CHF]',
+            'Monetized Savings Min [in Mio. CHF]',
+            'Monetized Savings Max [in Mio. CHF]',
+            'Monetized Savings Std [in Mio. CHF]',
+            'Net Benefit [in Mio. CHF]',
+            'CBA Ratio'
+        ]
+    
+    summary_df = summary_df[column_order]
+    
+    # Save to CSV
+    output_path = f"data/costs/total_costs_summary{output_prefix}.csv"
+    
+    if include_geometry:
+        # Convert to GeoDataFrame and save
+        summary_gdf = gpd.GeoDataFrame(summary_df, geometry='geometry', crs=geometry_data.crs)
+        summary_gdf.to_csv(output_path, index=False)
+        print(f"Cost summary (with geometry) saved to: '{output_path}'")
+        return summary_gdf
+    else:
+        summary_df.to_csv(output_path, index=False)
+        print(f"Cost summary (without geometry) saved to: '{output_path}'")
+        return summary_df
