@@ -176,7 +176,7 @@ def infrascanrail():
     cost_and_benefits_dev = create_cost_and_benefit_df(settings.start_year_scenario, settings.end_year_scenario, settings.start_valuation_year)
     costs_and_benefits_dev_discounted = discounting(cost_and_benefits_dev, discount_rate=cp.discount_rate, base_year=settings.start_valuation_year)
     costs_and_benefits_dev_discounted.to_csv(paths.COST_AND_BENEFITS_DISCOUNTED)
-    plot_costs_benefits_example(costs_and_benefits_dev_discounted, line='101032.0')  # only plots cost&benefits for the dev with highest tts
+    plot_costs_benefits(costs_and_benefits_dev_discounted, line='101032.0')  # only plots cost&benefits for the dev with highest tts
 
     runtimes["Compute costs"] = time.time() - st
     st = time.time()

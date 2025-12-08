@@ -368,7 +368,7 @@ def plot_scenarios_with_range(
         year_stats["min"],
         year_stats["max"],
         color='grey', alpha=0.3,
-        label="Gesamter Bereich"
+        label="Total Range"
     )
 
     # +/- 1.65 Std. Abw. Linien (90% Konfidenzintervall)
@@ -376,14 +376,14 @@ def plot_scenarios_with_range(
         year_stats["year"],
         year_stats["mean_plus_1_65std"],
         color='red', linestyle='-', alpha=0.7,
-        label="+1,65σ (95%)"
+        label="+1.65σ (95th percentile)"
     )
 
     ax.plot(
         year_stats["year"],
         year_stats["mean_minus_1_65std"],
         color='red', linestyle='-', alpha=0.7,
-        label="-1,65σ (5%)"
+        label="-1.65σ (5th percentile)"
     )
 
     # mean line
@@ -391,7 +391,7 @@ def plot_scenarios_with_range(
         year_stats["year"],
         year_stats["mean"],
         color='grey', linestyle='--', alpha=0.8,
-        label="Mittelwert"
+        label="Mean"
     )
 
     # pick a random scenario to highlight
@@ -401,7 +401,7 @@ def plot_scenarios_with_range(
         sample_df["year"],
         sample_df[value_col],
         color='blue', linewidth=2,
-        label=f"Beispielszenario {sample_id}"
+        label=f"Sample Scenario {sample_id}"
     )
 
     # apply automatic SI‐prefix scaling on the Y axis
@@ -409,9 +409,8 @@ def plot_scenarios_with_range(
 
     # labels & styling
     col_title = value_col.replace('_', ' ').title()
-    ax.set_xlabel("Jahr")
-    ax.set_ylabel(col_title)
-    ax.set_title(f"{col_title}-Szenarien: Bereich, Mittelwert und 90% Konfidenzintervall")
+    ax.set_xlabel("Year")
+    ax.set_title(f"{col_title} Scenarios: Range, Mean and 90% Confidence Interval")
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
@@ -420,7 +419,7 @@ def plot_scenarios_with_range(
     filename = f"{value_col.lower().replace(' ', '_')}_scenarios.png"
     full_path = os.path.join(save_path, filename)
     plt.savefig(full_path)
-    plt.show()
+    # plt.show()
     plt.close(fig)
 
 

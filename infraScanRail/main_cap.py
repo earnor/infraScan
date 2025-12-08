@@ -459,9 +459,15 @@ def phase_4_infrastructure_developments(points: gpd.GeoDataFrame, runtimes: dict
     if settings.OD_type == 'pt_catchment_perimeter':
         print("\n--- Step 4.4: Public Transit Catchment Analysis ---\n")
         st = time.time()
-
+        
         get_catchment(use_cache=settings.use_cache_pt_catchment)
-
+        
+        # Ask user if they want catchment plots
+        response = input("\nGenerate catchment visualization plots? (y/n) [n]: ").strip().lower()
+        if response in {'y', 'yes'}:
+            create_plot_catchement()
+            create_catchement_plot_time()
+        
         runtimes["Public transit catchment"] = time.time() - st
 
     return dev_id_lookup, capacity_analysis_results
@@ -528,21 +534,20 @@ def phase_6_travel_time_computation(dev_id_lookup: pd.DataFrame, runtimes: dict)
 
 
 def phase_7_passenger_flow_visualization(G_development: list, G_status_quo: list, dev_id_lookup: pd.DataFrame, runtimes: dict) -> None:
-    """
-    Phase 7: Visualize passenger flows (optional).
-
-    Args:
-        G_development: Development graphs from Phase 6
-        G_status_quo: Status quo graph from Phase 6
-        dev_id_lookup: Development ID lookup table from Phase 4
-        runtimes: Dictionary to track phase execution times
-
-    Side Effects:
-        - Writes passenger flow visualizations to plots/passenger_flows/
-    """
+    """Phase 7: Visualize passenger flows (optional)."""
     print("\n" + "="*80)
     print("PHASE 7: PASSENGER FLOW VISUALIZATION")
     print("="*80 + "\n")
+    
+    # Ask user if they want to generate passenger flow plots
+    print(f"Found {len(G_development)} developments for passenger flow visualization.")
+    response = input("\nGenerate passenger flow plots? (y/n) [n]: ").strip().lower()
+    
+    if response not in {'y', 'yes'}:
+        print("  → Skipping passenger flow visualization")
+        return
+    
+    print("  → Generating passenger flow plots for all developments...")
     st = time.time()
 
     plot_passenger_flows_on_network(G_development, G_status_quo, dev_id_lookup)
@@ -773,7 +778,26 @@ def phase_13_results_visualization(runtimes: dict) -> None:
     print("="*80 + "\n")
     st = time.time()
 
-    visualize_results(clear_plot_directory=False)
+    # User prompts for benefit plot categories
+    print("Select which benefit plot categories to generate:")
+    print("─" * 60)
+    
+    plot_small_developments = input("  Generate plots for small developments (Expand 1 Stop)? (y/n): ").strip().lower() == 'y'
+    plot_grouped_by_connection = input("  Generate plots grouped by missing connection? (y/n): ").strip().lower() == 'y'
+    plot_ranked_groups = input("  Generate ranked group plots (by net benefit)? (y/n): ").strip().lower() == 'y'
+    plot_combined_with_maps = input("  Generate combined plots (charts + network maps)? (y/n): ").strip().lower() == 'y'
+    
+    print("─" * 60)
+    
+    # Store plot preferences in a dictionary to pass to visualization function
+    plot_preferences = {
+        'small_developments': plot_small_developments,
+        'grouped_by_connection': plot_grouped_by_connection,
+        'ranked_groups': plot_ranked_groups,
+        'combined_with_maps': plot_combined_with_maps
+    }
+
+    visualize_results(clear_plot_directory=False, plot_preferences=plot_preferences)
 
     runtimes["Visualize results"] = time.time() - st
 
@@ -1527,7 +1551,7 @@ def rearange_costs(cost_and_benefits, output_prefix="", csv_only=False):
     create_cost_summary(output_prefix=output_prefix, include_geometry=include_geometry)
 
 
-def visualize_results(clear_plot_directory=False):
+def visualize_results(clear_plot_directory=False, plot_preferences=None):
     """Generate all result visualizations."""
     # Define the plot directory
     plot_dir = "plots"
