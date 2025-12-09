@@ -1957,8 +1957,39 @@ def plot_selected_lines(selected_lines, color_dict = None):
         G, pos, filtered_lines_dict, output_file_name, color_dict=color_dict, selected_stations=pp.selected_stations
     )
 
-def create_and_save_plots(df, railway_lines, plot_directory="plots"):
-    os.makedirs(plot_directory, exist_ok=True)
+def create_and_save_plots(df, railway_lines, plot_directory="plots", plot_preferences=None):
+    """
+    Create and save benefit plots for infrastructure developments.
+    
+    Args:
+        df: DataFrame with cost/benefit data
+        railway_lines: GeoDataFrame with railway line geometries
+        plot_directory: Base directory for plots (default: "plots")
+        plot_preferences: Dict with keys:
+            - 'small_developments': bool
+            - 'grouped_by_connection': bool
+            - 'ranked_groups': bool
+            - 'combined_with_maps': bool
+    """
+    # Default preferences: generate all plots if not specified
+    if plot_preferences is None:
+        plot_preferences = {
+            'small_developments': True,
+            'grouped_by_connection': True,
+            'ranked_groups': True,
+            'combined_with_maps': True
+        }
+    
+    # Create subdirectories for new structure
+    benefits_dir = os.path.join(plot_directory, "Benefits")
+    benefits_combined_dir = os.path.join(plot_directory, "Benefits_Combined")
+    benefits_ranked_dir = os.path.join(plot_directory, "Benefits_Ranked")
+    benefits_ranked_combined_dir = os.path.join(benefits_ranked_dir, "combined")
+    
+    os.makedirs(benefits_dir, exist_ok=True)
+    if plot_preferences['combined_with_maps']:
+        os.makedirs(benefits_combined_dir, exist_ok=True)
+        os.makedirs(benefits_ranked_combined_dir, exist_ok=True)
 
     # ZVV-Farbpalette definieren
     zvv_colors = pp.zvv_colors
@@ -1972,7 +2003,7 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
 
     # Mapping: df['development'] (float) → railway_lines['name'] (string)
     dev_to_conn = railway_lines.set_index('name')['missing_connection'].to_dict()
-    df['missing_connection'] = df['development'].map(lambda x: dev_to_conn.get(f"X{int(x) - 101000}", "unbekannt"))
+    df['missing_connection'] = df['development'].map(lambda x: dev_to_conn.get(f"X{int(x) - 101000}", "unknown"))
 
     df['line_name'] = None  # Initialisierung
 
@@ -2007,15 +2038,14 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
         }
 
         # --- Boxplot Einsparungen ---
-        plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
-        # Eine Farbpalette aus den ausgewählten Farben erstellen
+        plt.figure(figsize=(7, 5), dpi=300)
         colors = [line_colors[line] for line in order]
         ax = sns.boxplot(
             data=data,
             x='line_name',
             y=data['monetized_savings_total'] / 1e6,
             order=order,
-            palette=colors,  # Hier die eigenen Farben verwenden
+            palette=colors,
             width=0.4,
             linewidth=0.8,
             showmeans=True,
@@ -2024,80 +2054,74 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
             showfliers=True
         )
         ax.set_xlim(-0.5, n_lines - 0.5)
-        plt.xlabel('Linie', fontsize=12)
-        plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
+        plt.xlabel('Line', fontsize=12)
+        plt.ylabel('Monetised travel time savings in million CHF', fontsize=12)
         plt.xticks(rotation=90)
         plt.grid(axis='y', linestyle='--', alpha=0.7)
 
-        # Vereinfachte Legende mit nur einem repräsentativen Farbelement und dem Mittelwert-Marker
         legend_handles = [
-            mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5),
-            mpatches.Patch(color=colors[0], label='Linienfarbe')
+            mlines.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=5),
+            mpatches.Patch(color=colors[0], label='Line Colour')
         ]
         plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.01, 1), frameon=False)
 
         plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_einsparungen.png"),
-                    dpi=600)  # Höhere Auflösung
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_savings.png"), dpi=600)
         plt.close()
 
         # --- Violinplot Einsparungen mit Datenpunkten ---
-        plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+        plt.figure(figsize=(7, 5), dpi=300)
         ax = sns.violinplot(
             data=data,
             x='line_name',
             y=data['monetized_savings_total'] / 1e6,
             order=order,
-            palette=colors,  # Verwende die gleichen Farben wie bei den Boxplots
+            palette=colors,
             width=0.7,
-            inner=None,  # Kein Boxplot innerhalb der Violinen
+            inner=None,
             linewidth=0.8,
-            cut=0,  # Keine Extrapolation über die Daten hinaus
-            scale='width'  # Alle Violinen haben die gleiche Breite
+            cut=0,
+            scale='width'
         )
 
-        # Für jede Linie nur einzigartige Werte nach Szenario darstellen
         unique_data = data.drop_duplicates(subset=['line_name', 'scenario', 'monetized_savings_total'])
 
-        # Datenpunkte mit Jitter hinzufügen - nur einzigartige Werte, aber dunkler
         sns.stripplot(
             data=unique_data,
             x='line_name',
             y=unique_data['monetized_savings_total'] / 1e6,
             order=order,
             color='black',
-            alpha=0.4,  # Erhöhte Sichtbarkeit der Punkte (vorher 0.15)
-            jitter=True,  # Jitter-Effekt aktivieren
-            size=2,  # Kleinere Punktgröße
-            dodge=False  # Keine zusätzliche Verschiebung
+            alpha=0.4,
+            jitter=True,
+            size=2,
+            dodge=False
         )
         ax.set_xlim(-0.5, n_lines - 0.5)
-        plt.xlabel('Linie', fontsize=12)
-        plt.ylabel('Monetarisierte Reisezeitersparnisse in Mio. CHF', fontsize=12)
+        plt.xlabel('Line', fontsize=12)
+        plt.ylabel('Monetised travel time savings in million CHF', fontsize=12)
         plt.xticks(rotation=90)
         plt.grid(axis='y', linestyle='--', alpha=0.7)
 
-        # Vereinfachte Legende mit nur einem repräsentativen Farbelement und den Einzelwerten
         legend_handles = [
             mlines.Line2D([], [], marker='o', color='black', alpha=0.4, linestyle='None', markersize=3,
-                          label='Einzelwerte'),
-            mpatches.Patch(color=colors[0], label='Linienfarbe')
+                          label='Individual Values'),
+            mpatches.Patch(color=colors[0], label='Line Colour')
         ]
         plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.01, 1), frameon=False)
 
         plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_violinplot_einsparungen.png"),
-                    dpi=600)  # Höhere Auflösung
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_violinplot_savings.png"), dpi=600)
         plt.close()
 
         # --- Boxplot Nettonutzen ---
-        plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+        plt.figure(figsize=(7, 5), dpi=300)
         ax = sns.boxplot(
             data=data,
             x='line_name',
             y=data['total_net_benefit'] / 1e6,
             order=order,
-            palette=colors,  # Hier die eigenen Farben verwenden
+            palette=colors,
             width=0.4,
             linewidth=0.8,
             showmeans=True,
@@ -2106,32 +2130,30 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
             showfliers=True
         )
         ax.set_xlim(-0.5, n_lines - 0.5)
-        plt.xlabel('Linie', fontsize=12)
-        plt.ylabel('Nettonutzen in Mio. CHF', fontsize=12)
+        plt.xlabel('Line', fontsize=12)
+        plt.ylabel('Net benefit in CHF million', fontsize=12)
         plt.axhline(y=0, color='red', linestyle='-', alpha=0.5)
         plt.xticks(rotation=90)
         plt.grid(axis='y', linestyle='--', alpha=0.7)
 
-        # Vereinfachte Legende mit nur einem repräsentativen Farbelement und dem Mittelwert-Marker
         legend_handles = [
-            mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5),
-            mpatches.Patch(color=colors[0], label='Linienfarbe')
+            mlines.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=5),
+            mpatches.Patch(color=colors[0], label='Line Colour')
         ]
         plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.01, 1), frameon=False)
 
         plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_nettonutzen.png"),
-                    dpi=600)  # Höhere Auflösung
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_net_benefit.png"), dpi=600)
         plt.close()
 
         # --- Boxplot CBA ---
-        plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+        plt.figure(figsize=(7, 5), dpi=300)
         ax = sns.boxplot(
             data=data,
             x='line_name',
             y='cba_ratio',
             order=order,
-            palette=colors,  # Hier die eigenen Farben verwenden
+            palette=colors,
             width=0.4,
             linewidth=0.8,
             showmeans=True,
@@ -2140,21 +2162,20 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
             showfliers=True
         )
         ax.set_xlim(-0.5, n_lines - 0.5)
-        plt.xlabel('Linie', fontsize=12)
-        plt.ylabel('Kosten-Nutzen-Faktor', fontsize=12)
+        plt.xlabel('Line', fontsize=12)
+        plt.ylabel('Cost-benefit ratio', fontsize=12)
         plt.axhline(y=1, color='red', linestyle='-', alpha=0.5)
         plt.xticks(rotation=90)
         plt.grid(axis='y', linestyle='--', alpha=0.7)
 
-        # Vereinfachte Legende mit nur einem repräsentativen Farbelement und dem Mittelwert-Marker
         legend_handles = [
-            mlines.Line2D([0], [0], marker='o', color='black', label='Mittelwert', markersize=5),
-            mpatches.Patch(color=colors[0], label='Linienfarbe')
+            mlines.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=5),
+            mpatches.Patch(color=colors[0], label='Line Colour')
         ]
         plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.01, 1), frameon=False)
 
         plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_cba.png"), dpi=600)  # Höhere Auflösung
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_boxplot_cba.png"), dpi=600)
         plt.close()
 
         # --- Gestapeltes Balkendiagramm ---
@@ -2167,260 +2188,250 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots"):
 
         x_pos = np.arange(n_lines)
         bar_width = 0.6
-        plt.figure(figsize=(7, 5), dpi=300)  # Höhere Auflösung
+        plt.figure(figsize=(7, 5), dpi=300)
 
-        # Für das gestapelte Balkendiagramm verwenden wir die Linienfarbpalette für die Einsparungen
-        # und die bestehende Farbpalette für die Kosten
         plt.bar(x_pos, -summary['TotalConstructionCost'] / 1e6, width=bar_width,
                 color=kosten_farben['TotalConstructionCost'],
-                label='Baukosten')
+                label='Construction costs')
         plt.bar(x_pos, -summary['TotalMaintenanceCost'] / 1e6, width=bar_width,
                 bottom=-summary['TotalConstructionCost'] / 1e6, color=kosten_farben['TotalMaintenanceCost'],
-                label='ungedeckte Unterhaltskosten')
+                label='Uncovered maintenance costs')
         plt.bar(x_pos, -summary['TotalUncoveredOperatingCost'] / 1e6, width=bar_width,
                 bottom=-(summary['TotalConstructionCost'] + summary['TotalMaintenanceCost']) / 1e6,
-                color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten')
-        # Hier die individuellen Farben pro Linie für die Einsparungen verwenden
+                color=kosten_farben['TotalUncoveredOperatingCost'], label='Uncovered operating costs')
+        
         for i, line_name in enumerate(order):
             plt.bar(x_pos[i], summary[summary['line_name'] == line_name]['monetized_savings_total'].values[0] / 1e6,
                     width=bar_width, color=line_colors[line_name], hatch='////', edgecolor='black')
 
         plt.axhline(y=0, color='black', linestyle='-')
         plt.xticks(x_pos, summary['line_name'], rotation=90)
-        plt.xlabel('Linie', fontsize=12)
-        plt.ylabel('Wert in Mio. CHF', fontsize=12)
-        plt.title('Kosten und Nutzen je Modifikation', fontsize=14)
+        plt.xlabel('Line', fontsize=12)
+        plt.ylabel('Value in CHF million', fontsize=12)
+        plt.title('Costs and benefits per modification', fontsize=14)
         plt.grid(axis='y', linestyle='--', alpha=0.7)
 
-        # Legende für Kosten
         kosten_handles = [
-            mpatches.Patch(color=kosten_farben['TotalConstructionCost'], label='Baukosten'),
-            mpatches.Patch(color=kosten_farben['TotalMaintenanceCost'], label='ungedeckte Unterhaltskosten'),
-            mpatches.Patch(color=kosten_farben['TotalUncoveredOperatingCost'], label='ungedeckte Betriebskosten'),
-            mpatches.Patch(facecolor="none", hatch='////', edgecolor='black', label='Reisezeitersparnisse'),
+            mpatches.Patch(color=kosten_farben['TotalConstructionCost'], label='Construction costs'),
+            mpatches.Patch(color=kosten_farben['TotalMaintenanceCost'], label='Uncovered maintenance costs'),
+            mpatches.Patch(color=kosten_farben['TotalUncoveredOperatingCost'], label='Uncovered operating costs'),
+            mpatches.Patch(facecolor="none", hatch='////', edgecolor='black', label='Travel time savings'),
         ]
 
-        # Legende für Einsparungen mit linienspezifischen Farben
-        nutzen_handles = [mpatches.Patch(color=line_colors[line], label=f'Einsparungen {line}') for line in order]
-
-        # Nur die Kostenlegende anzeigen, um die Darstellung sauber zu halten
         plt.legend(handles=kosten_handles, bbox_to_anchor=(1.01, 1))
 
         plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_kosten_einsparungen.png"),
-                    dpi=600)  # Höhere Auflösung
+        plt.savefig(os.path.join(plot_directory, f"{filename_prefix}_cost_savings.png"), dpi=600)
         plt.close()
 
         # NEU: Kumulatives Verteilungsdiagramm für diese Datengruppe
-        data_copy = data.copy()  # Um Änderungen am Original zu vermeiden
+        data_copy = data.copy()
         data_copy = data_copy.drop(columns=['development']).rename(columns={'line_name': 'development'})
-        cumulative_output_path = os.path.join(plot_directory, f"{filename_prefix}_kumulative_kostenverteilung.png")
+        cumulative_output_path = os.path.join(plot_directory, f"{filename_prefix}_cumulative_cost_distribution.png")
         plot_cumulative_cost_distribution(data_copy, cumulative_output_path,
                                           color_dict={dev: line_colors[dev] for dev in
                                                       data_copy['development'].unique()})
 
-        # Farben zurückgeben für die Verwendung in der Kartenvisualisierung
         return line_colors
 
-    # Kleine Entwicklungen plotten
+    # ============================================================================
+    # SMALL DEVELOPMENTS (Expand 1 Stop)
+    # ============================================================================
     line_colors_small = None
-    if not small_dev_data.empty:
+    if plot_preferences['small_developments'] and not small_dev_data.empty:
+        print("  → Generating plots for small developments (Expand 1 Stop)...")
         order = small_dev_data.groupby('line_name')['total_net_benefit'].mean().sort_values(ascending=False).index.tolist()
         line_colors_small = {line_name: 'none' for line_name in order}
-        line_colors_small = plot_basic_charts(small_dev_data, "Expand_1_Stop", plot_directory=plot_directory, line_colors=line_colors_small)
+        line_colors_small = plot_basic_charts(small_dev_data, "Expand_1_Stop", plot_directory=benefits_dir, line_colors=line_colors_small)
 
-    # Große Entwicklungen gruppieren und plotten
+    # ============================================================================
+    # GROUPED BY MISSING CONNECTION
+    # ============================================================================
     df['plot_nr'] = None
     large_dev_data = df[df['development'] >= settings.dev_id_start_new_direct_connections]
 
-    df_network = gpd.read_file(settings.infra_generation_rail_network)
-    df_points = gpd.read_file(r'data\Network\processed\points.gpkg')
-    generate_infrastructure = importlib.import_module('generate_infrastructure')
-    G, pos = generate_infrastructure.prepare_Graph(df_network, df_points)
+    if plot_preferences['grouped_by_connection'] and not large_dev_data.empty:
+        print("  → Generating plots grouped by missing connection...")
+        
+        df_network = gpd.read_file(settings.infra_generation_rail_network)
+        df_points = gpd.read_file(r'data\Network\processed\points.gpkg')
+        generate_infrastructure = importlib.import_module('generate_infrastructure')
+        G, pos = generate_infrastructure.prepare_Graph(df_network, df_points)
 
-    for conn in large_dev_data['missing_connection'].dropna().unique():
-        sub_df = large_dev_data[large_dev_data['missing_connection'] == conn].copy()
+        for conn in large_dev_data['missing_connection'].dropna().unique():
+            sub_df = large_dev_data[large_dev_data['missing_connection'] == conn].copy()
 
-        # Mittelwert des Nettonutzens je Entwicklung
-        mean_benefit = sub_df.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
-        unique_devs = mean_benefit.index.tolist()  # Sortierte Liste der Developments
+            mean_benefit = sub_df.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
+            unique_devs = mean_benefit.index.tolist()
 
-        num_plots = len(unique_devs) // 6 + int(len(unique_devs) % 6 > 0)
+            num_plots = len(unique_devs) // 6 + int(len(unique_devs) % 6 > 0)
 
-        for i in range(num_plots):
-            devs_in_plot = unique_devs[i * 6: (i + 1) * 6]
-            selected = sub_df[sub_df['development'].isin(devs_in_plot)]
-            df.loc[selected.index, 'plot_nr'] = f"{conn}_{i + 1}"
-            filename_prefix = f"{conn}_gruppe_{i + 1}"
-            filename_prefix = filename_prefix.replace(" - ", "_").replace(" ", "_")
+            for i in range(num_plots):
+                devs_in_plot = unique_devs[i * 6: (i + 1) * 6]
+                selected = sub_df[sub_df['development'].isin(devs_in_plot)]
+                df.loc[selected.index, 'plot_nr'] = f"{conn}_{i + 1}"
+                filename_prefix = f"{conn}_group_{i + 1}"
+                filename_prefix = filename_prefix.replace(" - ", "_").replace(" ", "_")
 
-            # Hier werden die Diagramme geplottet und Farbzuordnung zurückgegeben
-            line_colors = plot_basic_charts(selected, filename_prefix,plot_directory=plot_directory)
+                # Generate chart plots
+                line_colors = plot_basic_charts(selected, filename_prefix, plot_directory=benefits_dir)
 
-            # Liniennamen extrahieren und Subset erzeugen
-            line_names = selected['line_name'].unique()
-            filtered_lines = railway_lines[railway_lines["name"].isin(line_names)]
-            filtered_lines['path'] = filtered_lines['path'].str.split(',')
-            filtered_lines = filtered_lines.rename(columns={"missing_connection": "original_missing_connection"})
+                # Generate network map (if combined plots requested)
+                if plot_preferences['combined_with_maps']:
+                    line_names = selected['line_name'].unique()
+                    filtered_lines = railway_lines[railway_lines["name"].isin(line_names)]
+                    filtered_lines['path'] = filtered_lines['path'].str.split(',')
+                    filtered_lines = filtered_lines.rename(columns={"missing_connection": "original_missing_connection"})
 
-            # Linienfarben in filtered_lines hinzufügen
-            filtered_lines_dict = filtered_lines.to_dict(orient='records')
-            for record in filtered_lines_dict:
-                line_name = record["name"]
-                if line_name in line_colors:
-                    record["color"] = line_colors[line_name]
+                    filtered_lines_dict = filtered_lines.to_dict(orient='records')
+                    for record in filtered_lines_dict:
+                        line_name = record["name"]
+                        if line_name in line_colors:
+                            record["color"] = line_colors[line_name]
 
-            # Netzgrafik erzeugen
-            filename = f"railway_lines_{filename_prefix}.png"
-            output_file_name = os.path.join("plots", filename)
+                    # Network map saved to plots/ (root level, as per Q4)
+                    filename = f"railway_lines_{filename_prefix}.png"
+                    output_file_name = os.path.join("plots", filename)
 
-            # Die Funktion plot_railway_lines_only muss angepasst werden, um die Farben zu berücksichtigen
-            plot_railway_lines_only(
-                G, pos, filtered_lines_dict, output_file_name, color_dict=line_colors, selected_stations=pp.selected_stations
-            )
+                    plot_railway_lines_only(
+                        G, pos, filtered_lines_dict, output_file_name, 
+                        color_dict=line_colors, selected_stations=pp.selected_stations
+                    )
 
-            # Beide Bilder kombinieren
-            for suffix in [
-                "boxplot_einsparungen",
-                "violinplot_einsparungen",
-                "boxplot_nettonutzen",
-                "boxplot_cba",
-                "kosten_einsparungen",
-                "kumulative_kostenverteilung"
-            ]:
-                chart_path = os.path.join(plot_directory, f"{filename_prefix}_{suffix}.png")
-                map_path = os.path.join(plot_directory, f"railway_lines_{filename_prefix}.png")
+                    # Combine images
+                    for suffix in [
+                        "boxplot_savings",
+                        "violinplot_savings",
+                        "boxplot_net_benefit",
+                        "boxplot_cba",
+                        "cost_savings",
+                        "cumulative_cost_distribution"
+                    ]:
+                        chart_path = os.path.join(benefits_dir, f"{filename_prefix}_{suffix}.png")
+                        map_path = os.path.join("plots", f"railway_lines_{filename_prefix}.png")
+                        combined_path = os.path.join(benefits_combined_dir, f"{filename_prefix}_{suffix}_combined.png")
 
-                # Zielverzeichnis für kombinierte Plots
-                combined_dir = os.path.join(plot_directory, "combined")
-                os.makedirs(combined_dir, exist_ok=True)
+                        try:
+                            if not os.path.exists(chart_path):
+                                raise FileNotFoundError(f"Chart not found: {chart_path}")
+                            if not os.path.exists(map_path):
+                                raise FileNotFoundError(f"Map not found: {map_path}")
 
-                combined_path = os.path.join(combined_dir, f"{filename_prefix}_{suffix}_kombiniert.png")
+                            map_image = Image.open(map_path)
+                            chart_image = Image.open(chart_path)
 
-                try:
-                    if not os.path.exists(chart_path):
-                        raise FileNotFoundError(f"Diagrammbild nicht gefunden: {chart_path}")
-                    if not os.path.exists(map_path):
-                        raise FileNotFoundError(f"Kartenbild nicht gefunden: {map_path}")
+                            target_height = max(map_image.height, chart_image.height)
 
-                    map_image = Image.open(map_path)
-                    chart_image = Image.open(chart_path)
+                            def resize_to_height(img, target_h):
+                                w, h = img.size
+                                new_w = int(w * (target_h / h))
+                                return img.resize((new_w, target_h), Image.LANCZOS)
 
-                    # Zielhöhe: maximale Höhe beider Bilder
-                    target_height = max(map_image.height, chart_image.height)
+                            map_image_resized = resize_to_height(map_image, target_height)
+                            chart_image_resized = resize_to_height(chart_image, target_height)
 
-                    # Skalierungsfaktor berechnen
-                    def resize_to_height(img, target_h):
-                        w, h = img.size
-                        new_w = int(w * (target_h / h))
-                        return img.resize((new_w, target_h), Image.LANCZOS)
+                            total_width = map_image_resized.width + chart_image_resized.width
+                            combined = Image.new("RGB", (total_width, target_height), (255, 255, 255))
+                            combined.paste(map_image_resized, (0, 0))
+                            combined.paste(chart_image_resized, (map_image_resized.width, 0))
+                            combined.save(combined_path)
 
-                    map_image_resized = resize_to_height(map_image, target_height)
-                    chart_image_resized = resize_to_height(chart_image, target_height)
+                        except Exception as e:
+                            print(f"Error combining images for {filename_prefix}_{suffix}: {e}")
 
-                    # Kombinieren
-                    total_width = map_image_resized.width + chart_image_resized.width
-                    combined = Image.new("RGB", (total_width, target_height), (255, 255, 255))
-                    combined.paste(map_image_resized, (0, 0))
-                    combined.paste(chart_image_resized, (map_image_resized.width, 0))
-                    combined.save(combined_path)
+    # ============================================================================
+    # RANKED GROUPS (Global ranking)
+    # ============================================================================
+    if plot_preferences['ranked_groups'] and not large_dev_data.empty:
+        print("  → Generating ranked group plots...")
+        
+        os.makedirs(benefits_ranked_dir, exist_ok=True)
+        
+        # Load network data if not already loaded (might be loaded from grouped section)
+        if not plot_preferences['grouped_by_connection']:
+            df_network = gpd.read_file(settings.infra_generation_rail_network)
+            df_points = gpd.read_file(r'data\Network\processed\points.gpkg')
+            generate_infrastructure = importlib.import_module('generate_infrastructure')
+            G, pos = generate_infrastructure.prepare_Graph(df_network, df_points)
 
-                except Exception as e:
-                    print(f"Fehler beim Kombinieren der Bilder für {filename_prefix}_{suffix}: {e}")
+        global_mean_benefit = large_dev_data.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
+        global_unique_devs = global_mean_benefit.index.tolist()
 
-    # Verzeichnis für die Rankings erstellen
-    ranked_dir = os.path.join(plot_directory, "ranked")
-    os.makedirs(ranked_dir, exist_ok=True)
-    ranked_combined_dir = os.path.join(ranked_dir, "combined")
-    os.makedirs(ranked_combined_dir, exist_ok=True)
+        num_global_plots = len(global_unique_devs) // 6 + int(len(global_unique_devs) % 6 > 0)
 
-    # Globaler Mittelwert des Nettonutzens je Entwicklung über alle missing_connections
-    global_mean_benefit = large_dev_data.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
-    global_unique_devs = global_mean_benefit.index.tolist()  # Sortierte Liste aller Developments
+        for i in range(num_global_plots):
+            devs_in_plot = global_unique_devs[i * 6: (i + 1) * 6]
+            global_selected = large_dev_data[large_dev_data['development'].isin(devs_in_plot)]
 
-    # Anzahl der 8er-Pakete berechnen
-    num_global_plots = len(global_unique_devs) // 6 + int(len(global_unique_devs) % 6 > 0)
+            global_filename_prefix = f"ranked_group_{i + 1}"
 
-    for i in range(num_global_plots):
-        # 8 Developments pro Plot auswählen
-        devs_in_plot = global_unique_devs[i * 6: (i + 1) * 6]
-        global_selected = large_dev_data[large_dev_data['development'].isin(devs_in_plot)]
+            # Generate chart plots
+            global_line_colors = plot_basic_charts(global_selected, global_filename_prefix,
+                                                   plot_directory=benefits_ranked_dir)
 
-        # Filename definieren
-        global_filename_prefix = f"ranked_gruppe_{i + 1}"
+            # Generate network map (if combined plots requested)
+            if plot_preferences['combined_with_maps']:
+                global_line_names = global_selected['line_name'].unique()
+                global_filtered_lines = railway_lines[railway_lines["name"].isin(global_line_names)]
+                global_filtered_lines['path'] = global_filtered_lines['path'].str.split(',')
+                global_filtered_lines = global_filtered_lines.rename(
+                    columns={"missing_connection": "original_missing_connection"})
 
-        # Diagramme plotten und Farbzuordnung zurückgeben
-        global_line_colors = plot_basic_charts(global_selected, global_filename_prefix,
-                                               plot_directory=ranked_dir)
+                global_filtered_lines_dict = global_filtered_lines.to_dict(orient='records')
+                for record in global_filtered_lines_dict:
+                    line_name = record["name"]
+                    if line_name in global_line_colors:
+                        record["color"] = global_line_colors[line_name]
 
-        # Liniennamen extrahieren und Subset erzeugen
-        global_line_names = global_selected['line_name'].unique()
-        global_filtered_lines = railway_lines[railway_lines["name"].isin(global_line_names)]
-        global_filtered_lines['path'] = global_filtered_lines['path'].str.split(',')
-        global_filtered_lines = global_filtered_lines.rename(
-            columns={"missing_connection": "original_missing_connection"})
+                # Network map saved to plots/ (root level)
+                global_filename = f"railway_lines_{global_filename_prefix}.png"
+                global_output_file_name = os.path.join("plots", global_filename)
 
-        # Linienfarben in global_filtered_lines hinzufügen
-        global_filtered_lines_dict = global_filtered_lines.to_dict(orient='records')
-        for record in global_filtered_lines_dict:
-            line_name = record["name"]
-            if line_name in global_line_colors:
-                record["color"] = global_line_colors[line_name]
+                plot_railway_lines_only(
+                    G, pos, global_filtered_lines_dict, global_output_file_name,
+                    color_dict=global_line_colors, selected_stations=pp.selected_stations
+                )
 
-        # Netzgrafik erzeugen
-        global_filename = f"railway_lines_{global_filename_prefix}.png"
-        global_output_file_name = os.path.join(ranked_dir, global_filename)
+                # Combine images
+                for suffix in [
+                    "boxplot_savings",
+                    "violinplot_savings",
+                    "boxplot_net_benefit",
+                    "boxplot_cba",
+                    "cost_savings",
+                    "cumulative_cost_distribution"
+                ]:
+                    chart_path = os.path.join(benefits_ranked_dir, f"{global_filename_prefix}_{suffix}.png")
+                    map_path = os.path.join("plots", f"railway_lines_{global_filename_prefix}.png")
+                    combined_path = os.path.join(benefits_ranked_combined_dir, f"{global_filename_prefix}_{suffix}_combined.png")
 
-        # Gleiche plot_railway_lines_only Funktion auch für die globalen Rankings verwenden
-        plot_railway_lines_only(
-            G, pos, global_filtered_lines_dict, global_output_file_name,
-            color_dict=global_line_colors, selected_stations=pp.selected_stations
-        )
+                    try:
+                        if not os.path.exists(chart_path):
+                            raise FileNotFoundError(f"Chart not found: {chart_path}")
+                        if not os.path.exists(map_path):
+                            raise FileNotFoundError(f"Map not found: {map_path}")
 
-        # Auch hier Bilder kombinieren
-        for suffix in [
-            "boxplot_einsparungen",
-            "violinplot_einsparungen",
-            "boxplot_nettonutzen",
-            "boxplot_cba",
-            "kosten_einsparungen",
-            "kumulative_kostenverteilung"
-        ]:
-            chart_path = os.path.join(ranked_dir, f"{global_filename_prefix}_{suffix}.png")
-            map_path = os.path.join(ranked_dir, f"railway_lines_{global_filename_prefix}.png")
+                        map_image = Image.open(map_path)
+                        chart_image = Image.open(chart_path)
 
-            combined_path = os.path.join(ranked_combined_dir, f"{global_filename_prefix}_{suffix}_kombiniert.png")
+                        target_height = max(map_image.height, chart_image.height)
 
-            try:
-                if not os.path.exists(chart_path):
-                    raise FileNotFoundError(f"Diagrammbild nicht gefunden: {chart_path}")
-                if not os.path.exists(map_path):
-                    raise FileNotFoundError(f"Kartenbild nicht gefunden: {map_path}")
+                        def resize_to_height(img, target_h):
+                            w, h = img.size
+                            new_w = int(w * (target_h / h))
+                            return img.resize((new_w, target_h), Image.LANCZOS)
 
-                map_image = Image.open(map_path)
-                chart_image = Image.open(chart_path)
+                        map_image_resized = resize_to_height(map_image, target_height)
+                        chart_image_resized = resize_to_height(chart_image, target_height)
 
-                # Zielhöhe: maximale Höhe beider Bilder
-                target_height = max(map_image.height, chart_image.height)
+                        total_width = map_image_resized.width + chart_image_resized.width
+                        combined = Image.new("RGB", (total_width, target_height), (255, 255, 255))
+                        combined.paste(map_image_resized, (0, 0))
+                        combined.paste(chart_image_resized, (map_image_resized.width, 0))
+                        combined.save(combined_path)
 
-                # Skalierungsfaktor berechnen
-                def resize_to_height(img, target_h):
-                    w, h = img.size
-                    new_w = int(w * (target_h / h))
-                    return img.resize((new_w, target_h), Image.LANCZOS)
-
-                map_image_resized = resize_to_height(map_image, target_height)
-                chart_image_resized = resize_to_height(chart_image, target_height)
-
-                # Kombinieren
-                total_width = map_image_resized.width + chart_image_resized.width
-                combined = Image.new("RGB", (total_width, target_height), (255, 255, 255))
-                combined.paste(map_image_resized, (0, 0))
-                combined.paste(chart_image_resized, (map_image_resized.width, 0))
-                combined.save(combined_path)
-
-            except Exception as e:
-                print(f"Fehler beim Kombinieren der Bilder für {global_filename_prefix}_{suffix}: {e}")
+                    except Exception as e:
+                        print(f"Error combining images for {global_filename_prefix}_{suffix}: {e}")
 
     return df, railway_lines
 
@@ -2586,23 +2597,23 @@ def plot_costs_benefits(cost_benefit_df, line=None, output_dir="plots"):
 
     # Gestapelte Balken für negative Kosten (nach unten)
     costs_bars1 = ax.bar(plot_data.index, plot_data['const_cost_neg'], width,
-                         label='Baukosten', color=kosten_farben['const_cost'], alpha=0.8)
+                         label='Construction costs', color=kosten_farben['const_cost'], alpha=0.8)
     costs_bars2 = ax.bar(plot_data.index, plot_data['maint_cost_neg'], width,
-                         bottom=plot_data['const_cost_neg'], label='Unterhaltskosten',
+                         bottom=plot_data['const_cost_neg'], label='Maintenance costs',
                          color=kosten_farben['maint_cost'], alpha=0.8)
     sum_prev_costs = plot_data['const_cost_neg'] + plot_data['maint_cost_neg']
     costs_bars3 = ax.bar(plot_data.index, plot_data['uncovered_op_neg'], width,
-                         bottom=sum_prev_costs, label='Betriebskosten',
+                         bottom=sum_prev_costs, label='Operating costs',
                          color=kosten_farben['uncovered_op_cost'], alpha=0.8)
 
     # Balken für Reisezeitersparnisse (nach oben)
     benefit_bars = ax.bar(plot_data.index, plot_data['benefit'], width,
-                          label='Reisezeitersparnisse', color='#2ca02c', alpha=0.8)
+                          label='Travel time savings', color='#2ca02c', alpha=0.8)
 
     # Diagramm anpassen
-    ax.set_xlabel('Jahr', fontsize=12)
-    ax.set_ylabel('Werte in Mio. CHF', fontsize=12)
-    ax.set_title(f'Diskontierte Kosten und Nutzen im Zeitverlauf\nEntwicklung: {line}',
+    ax.set_xlabel('Year', fontsize=12)
+    ax.set_ylabel('Values in CHF million', fontsize=12)
+    ax.set_title(f'Discounted costs and benefits over time\nDevelopment: {line}',
                  fontsize=14, pad=20)
     ax.legend(loc='lower right', frameon=True, edgecolor='black')
     ax.grid(True, which="both", ls="-", alpha=0.2)
@@ -2645,7 +2656,7 @@ def plot_costs_benefits(cost_benefit_df, line=None, output_dir="plots"):
     os.makedirs(output_dir, exist_ok=True)
 
     # Dateiname mit Entwicklungsname erstellen
-    filename = os.path.join(output_dir, f'kosten_nutzen_{line}.png')
+    filename = os.path.join(output_dir, f'cost_benefit_{line}.png')
 
     # Lösche die Datei, wenn sie bereits existiert
     if os.path.exists(filename):
@@ -2853,21 +2864,21 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
     if highlight_centers:
         from matplotlib.lines import Line2D
         legend_elements = [
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=10, label='Center Nodes'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', markersize=10, label='Border Nodes'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=10, label='End Station'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=10, label='Zentrumsknoten'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', markersize=10, label='Grenzknoten'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=10, label='Endstation'),
             Line2D([0], [0], marker='o', color='w', markerfacecolor='lightblue', markersize=10, label='Station')
         ]
         # Polygon zur Legende hinzufügen, falls vorhanden
         if polygon:
             legend_elements.append(
-                Line2D([0], [0], color='blue', linewidth=5, alpha=0.4, label='Case Study Corridor'))
+                Line2D([0], [0], color='blue', linewidth=5, alpha=0.4, label='Fallstudienkorridor'))
         if missing_links:
             legend_elements.append(
-                Line2D([0], [0], color='r', linestyle=':', linewidth=3, label='Missing Direct Connection'))
+                Line2D([0], [0], color='r', linestyle=':', linewidth=3, label='Fehlende Direktverbindung'))
         plt.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1))
 
-    plt.title("Missing Direct Connections of Corridors")
+    plt.title("Fehlende Direktverbindungen von Korridoren")
     plt.axis('on')
     plt.grid(True)
     plt.tight_layout()
@@ -3006,7 +3017,11 @@ def plot_railway_lines_with_offset(G, pos, new_railway_lines, output_file='propo
     plt.tight_layout()
 
     # Save the figure
-    plt.savefig(output_file, dpi=300, bbox_inches='tight', pad_inches=0.2, format='png')
+    plt.savefig(output_file,
+                dpi=300,
+                bbox_inches='tight',
+                pad_inches=0.2,
+                format='png')
     plt.close()
 
 
@@ -3061,14 +3076,13 @@ def plot_missing_connection_lines(G, pos, new_railway_lines, connection_nodes, o
             node_colors.append('green')
             node_sizes.append(100)
             node_labels[node] = station_name
-        elif any(int(node) in [int(n) for n in line.get('path', [])] for line in connection_lines):
+        elif any(node in line['path'] for line in connection_lines):  # Nodes in the new lines
             node_colors.append('blue')
             node_sizes.append(80)
             node_labels[node] = station_name
         else:
             node_colors.append('lightgray')
             node_sizes.append(30)
-            node_labels[node] = station_name
 
     # Draw nodes
     nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, alpha=0.7)
@@ -3108,55 +3122,63 @@ def plot_missing_connection_lines(G, pos, new_railway_lines, connection_nodes, o
 
         # Draw the path segments with offsets to prevent overlapping
         for j in range(len(path) - 1):
-            node_a, node_b = path[j], path[j + 1]
-            if node_a not in pos or node_b not in pos:
-                continue
+            if path[j] in pos and path[j + 1] in pos:
+                start_pos = pos[path[j]]
+                end_pos = pos[path[j + 1]]
 
-            start_pos = pos[node_a]
-            end_pos = pos[node_b]
+                # Calculate perpendicular offset
+                dx = end_pos[0] - start_pos[0]
+                dy = end_pos[1] - start_pos[1]
+                length = np.sqrt(dx * dx + dy * dy)
 
-            dx = end_pos[0] - start_pos[0]
-            dy = end_pos[1] - start_pos[1]
-            length = np.hypot(dx, dy)
-            if length == 0:
-                continue
+                if length > 0:
+                    # Calculate perpendicular vector
+                    perpx = -dy / length
+                    perpy = dx / length
 
-            perpx = -dy / length
-            perpy = dx / length
-            edge = tuple(sorted([node_a, node_b]))
-            total_lines = edge_count[edge]
+                    # Determine offset based on line index and total lines for this edge
+                    edge = tuple(sorted([path[j], path[j + 1]]))
+                    total_lines = edge_count[edge]
 
-            line_position = 0
-            for k, other_line in enumerate(connection_lines):
-                if k >= i:
-                    break
-                other_path = [int(n) for n in other_line['path']]
-                for l in range(len(other_path) - 1):
-                    if tuple(sorted([other_path[l], other_path[l + 1]])) == edge:
-                        line_position += 1
-                        break
+                    # Determine this line's position among those using this edge
+                    # Find position of current line among all lines using this edge
+                    line_position = 0
+                    for k, other_line in enumerate(connection_lines):
+                        if k == i:  # Found our line
+                            break
+                        # Check if other line uses this edge
+                        other_path = other_line['path']
+                        for m in range(len(other_path) - 1):
+                            if tuple(sorted([other_path[m], other_path[m + 1]])) == edge:
+                                line_position += 1
+                                break
 
-            offset = (line_position - (total_lines - 1) / 2) * 150  # Increased spacing
+                    # Calculate offset - distribute lines evenly
+                    if total_lines > 1:
+                        offset = (line_position - (total_lines - 1) / 2) * 150  # Increased spacing
+                    else:
+                        offset = 0
 
-            start_offset = (
-                start_pos[0] + perpx * offset,
-                start_pos[1] + perpy * offset
-            )
-            end_offset = (
-                end_pos[0] + perpx * offset,
-                end_pos[1] + perpy * offset
-            )
+                    # Apply offset to coordinates
+                    start_offset = (
+                        start_pos[0] + perpx * offset,
+                        start_pos[1] + perpy * offset
+                    )
+                    end_offset = (
+                        end_pos[0] + perpx * offset,
+                        end_pos[1] + perpy * offset
+                    )
 
-            # Draw the offset line segment
-            segment, = plt.plot(
-                [start_offset[0], end_offset[0]],
-                [start_offset[1], end_offset[1]],
-                color=color,
-                linewidth=3,
-                label="_nolegend_"  # Don't add individual segments to legend
-            )
+                    # Draw the offset line segment
+                    line_segment, = plt.plot(
+                        [start_offset[0], end_offset[0]],
+                        [start_offset[1], end_offset[1]],
+                        color=color,
+                        linewidth=3,
+                        label="_nolegend_"  # Don't add individual segments to legend
+                    )
 
-            line_segments.append(segment)
+                    line_segments.append(line_segment)
 
         # Add a legend entry for this line
         if line_segments:
@@ -3405,7 +3427,7 @@ def plot_railway_lines_only(G, pos, railway_lines, output_file, color_dict=None,
             plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.02, 1),
                        fontsize=12, framealpha=0.8)
 
-            plt.title("Generierte S-Bahn Linien", fontsize=14, pad=20)
+            plt.title("Generated S-Bahn lines", fontsize=14, pad=20)
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
             plt.xlabel('X-Koordinate', fontsize=10)
@@ -3485,7 +3507,7 @@ def plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir)
         plot_missing_connection_lines(G, pos, new_railway_lines, connection, filename)
 
 
-def plot_cumulative_cost_distribution(df, output_path="plot/kumulative_kostenverteilung.png", color_dict=None):
+def plot_cumulative_cost_distribution(df, output_path="plot/cumulative_cost_distribution.png", color_dict=None):
     """
     Erstellt eine kumulative Wahrscheinlichkeitsverteilung des Nettonutzens
     für alle im DataFrame enthaltenen Entwicklungen.
@@ -3519,7 +3541,7 @@ def plot_cumulative_cost_distribution(df, output_path="plot/kumulative_kostenver
 
         # Legendenlabel
         mean_value = values.mean()
-        label = f"Linie {dev_id}: {mean_value:.1f} Mio. CHF"
+        label = f"Line {dev_id}: {mean_value:.1f} Mio. CHF"
 
         # Linie zeichnen
         color = color_dict.get(dev_id, f"C{i % 10}")  # Fallback zu matplotlib-Standardfarben
@@ -3529,11 +3551,11 @@ def plot_cumulative_cost_distribution(df, output_path="plot/kumulative_kostenver
     plt.axvline(x=0, color='lightgray', linestyle='-', linewidth=1)
 
     # Beschriftungen und Formatierung
-    plt.xlabel('Monetarisierte Reisezeitersparnisse [Mio. CHF]', fontsize=12)
-    plt.ylabel('Kumulative Wahrscheinlichkeit', fontsize=12)
-    plt.title('Kumulative Wahrscheinlichkeitsverteilung des Nettonutzens\naller betrachteten Entwicklungen', fontsize=14)
+    plt.xlabel('Monetised travel time savings [CHF million]', fontsize=12)
+    plt.ylabel('Cumulative probability', fontsize=12)
+    plt.title('Cumulative probability distribution of the net benefit \nof all developments considered', fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(title='Linien mit mittlerem Nutzen', fontsize=9, title_fontsize=10, loc='center left', bbox_to_anchor=(1, 0.5))
+    plt.legend(title='Lines with moderate utility', fontsize=9, title_fontsize=10, loc='center left', bbox_to_anchor=(1, 0.5))
 
     # Y-Achse 0–1
     plt.ylim(0, 1.05)
@@ -3631,7 +3653,7 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
     if style == 'absolute':
         cmap = plt.cm.viridis_r
         norm = Normalize(vmin=min_flow, vmax=max_flow)
-        cbar_label = 'Kombinierter Passagierfluss'
+        cbar_label = 'Combined passenger flow'
     else:  # 'difference' style
         # Erstelle eine eigene Rot-Grau-Grün Farbskala für Differenzwerte
         colors = [(0.8, 0.0, 0.0), (0.85, 0.85, 0.85), (0.0, 0.6, 0.0)]  # rot, grau, grün
@@ -3649,199 +3671,271 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
                            alpha=0.7,
                            ax=ax)
 
-    # Process large developments (grouped and ranked)
-    large_dev_data = df[df['development'] >= settings.dev_id_start_new_direct_connections]
-    
-    if len(large_dev_data) > 0:
-        df_network = gpd.read_file(settings.infra_generation_rail_network)
-        df_points = gpd.read_file(r'data\Network\processed\points.gpkg')
-        generate_infrastructure = importlib.import_module('generate_infrastructure')
-        G, pos = generate_infrastructure.prepare_Graph(df_network, df_points)
+    # Wenn style=='difference', sammle alle Flows > 200 und zeige nur die größten an
+    if style == 'difference':
+        # Sammle alle Kanten mit Flows >= 200
+        edges_with_flows = [(edge_key, total_flow) for edge_key, total_flow in combined_flows.items()
+                            if abs(total_flow) >= 200]
 
-        # Grouped by connection
-        if plot_preferences.get('grouped_by_connection', False):
-            print("\n  → Generating plots grouped by missing connection...")
-            for conn in large_dev_data['missing_connection'].dropna().unique():
-                sub_df = large_dev_data[large_dev_data['missing_connection'] == conn].copy()
-                mean_benefit = sub_df.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
-                unique_devs = mean_benefit.index.tolist()
-                num_plots = len(unique_devs) // 6 + int(len(unique_devs) % 6 > 0)
+        # Sortiere nach absolutem Flow-Wert (absteigend)
+        edges_with_flows.sort(key=lambda x: abs(x[1]), reverse=True)
 
-                for i in range(num_plots):
-                    devs_in_plot = unique_devs[i * 6: (i + 1) * 6]
-                    selected = sub_df[sub_df['development'].isin(devs_in_plot)]
-                    filename_prefix = f"{conn}_group_{i + 1}".replace(" - ", "_").replace(" ", "_")
+        # Bereite Speicher für bereits belegte Positionen vor
+        label_positions = []
 
-                    line_colors = plot_basic_charts(selected, filename_prefix, 
-                                                    plot_directory=base_dirs['regular'])
+        # Minimale Distanz zwischen Beschriftungen, um Überlappungen zu vermeiden
+        min_distance = 800  # Anpassbar je nach Skalierung
 
-                    # Generate network map
-                    if plot_preferences.get('combined_with_maps', False):
-                        line_names = selected['line_name'].unique()
-                        filtered_lines = railway_lines[railway_lines["name"].isin(line_names)]
-                        filtered_lines['path'] = filtered_lines['path'].str.split(',')
-                        filtered_lines = filtered_lines.rename(columns={"missing_connection": "original_missing_connection"})
-                        filtered_lines_dict = filtered_lines.to_dict(orient='records')
-                        
-                        for record in filtered_lines_dict:
-                            line_name = record["name"]
-                            if line_name in line_colors:
-                                record["color"] = line_colors[line_name]
+    # Zeichne die Kanten
+    for edge_key, total_flow in combined_flows.items():
+        source, target = edge_key
+        # Die Liniendicke basiert auf dem Absolutwert (in beiden Modi)
+        abs_flow = abs(total_flow)
+        width = max(0.5, min(10, abs_flow * edge_scale))
 
-                        map_filename = f"railway_lines_{filename_prefix}.png"
-                        map_output = os.path.join(base_dirs['regular'], map_filename)
-                        
-                        plot_railway_lines_only(G, pos, filtered_lines_dict, map_output, 
-                                              color_dict=line_colors, selected_stations=pp.selected_stations)
+        # Die Farbe basiert auf dem Stil
+        edge_color = cmap(norm(total_flow))
 
-                        # Combine charts with maps
-                        combine_chart_and_map_images(filename_prefix, base_dirs['regular'], 
-                                                     base_dirs['combined'])
+        nx.draw_networkx_edges(flow_graph, pos,
+                               edgelist=[(source, target)],
+                               width=width,
+                               edge_color=[edge_color],
+                               alpha=0.7,
+                               arrows=False,
+                               ax=ax)
 
-        # Ranked groups
-        if plot_preferences.get('ranked_groups', False):
-            print("\n  → Generating ranked group plots...")
-            global_mean_benefit = large_dev_data.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
-            global_unique_devs = global_mean_benefit.index.tolist()
-            num_global_plots = len(global_unique_devs) // 6 + int(len(global_unique_devs) % 6 > 0)
+    # Wenn style=='difference', zeige Werte auf den Kanten
+    if style == 'difference':
+        for edge_key, total_flow in edges_with_flows:
+            source, target = edge_key
+            # Mittelpunkt der Kante berechnen
+            x1, y1 = pos[source]
+            x2, y2 = pos[target]
+            x_mid = (x1 + x2) / 2
+            y_mid = (y1 + y2) / 2
 
-            for i in range(num_global_plots):
-                devs_in_plot = global_unique_devs[i * 6: (i + 1) * 6]
-                global_selected = large_dev_data[large_dev_data['development'].isin(devs_in_plot)]
-                global_filename_prefix = f"ranked_group_{i + 1}"
+            # Prüfen, ob Position zu nah an bereits vorhandenen Labels ist
+            too_close = False
+            for x_pos, y_pos in label_positions:
+                if ((x_mid - x_pos) ** 2 + (y_mid - y_pos) ** 2) < min_distance ** 2:
+                    too_close = True
+                    break
 
-                global_line_colors = plot_basic_charts(global_selected, global_filename_prefix,
-                                                       plot_directory=base_dirs['ranked'], 
-                                                       is_ranked=True)
+            # Nur zeichnen, wenn genügend Abstand zu anderen Labels
+            if not too_close:
+                ax.text(x_mid, y_mid, f"{int(total_flow)}", fontsize=8, ha='center', va='center',
+                        bbox=dict(facecolor='white', alpha=0.7, pad=0.1, boxstyle='round', edgecolor='none'),
+                        zorder=5)
+                # Position merken
+                label_positions.append((x_mid, y_mid))
 
-                # Generate network map for ranked plots
-                if plot_preferences.get('combined_with_maps', False):
-                    global_line_names = global_selected['line_name'].unique()
-                    global_filtered_lines = railway_lines[railway_lines["name"].isin(global_line_names)]
-                    global_filtered_lines['path'] = global_filtered_lines['path'].str.split(',')
-                    global_filtered_lines = global_filtered_lines.rename(
-                        columns={"missing_connection": "original_missing_connection"})
-                    global_filtered_lines_dict = global_filtered_lines.to_dict(orient='records')
-                    
-                    for record in global_filtered_lines_dict:
-                        line_name = record["name"]
-                        if line_name in global_line_colors:
-                            record["color"] = global_line_colors[line_name]
+    # Knotennamen anzeigen, mit leichtem weißem Hintergrund ohne Rahmen
+    if selected_stations:
+        labels = {node: node for node in flow_graph.nodes if node in selected_stations}
+        # Verschiebe die Beschriftung nach unten links
+        label_offset = (-1000, -600)  # x- und y-Verschiebung
 
-                    global_map_filename = f"railway_lines_{global_filename_prefix}.png"
-                    global_map_output = os.path.join(base_dirs['ranked'], global_map_filename)
-                    
-                    plot_railway_lines_only(G, pos, global_filtered_lines_dict, global_map_output,
-                                          color_dict=global_line_colors, selected_stations=pp.selected_stations)
+        for node, label in labels.items():
+            x, y = pos[node][0] + label_offset[0], pos[node][1] + label_offset[1]
+            ax.text(x, y, label, fontsize=12, ha='center', va='center',
+                    bbox=dict(facecolor='white', alpha=0.7, pad=0.1, boxstyle='round', edgecolor='none'),
+                    zorder=10)
+    else:
+        # Für alle Knoten einen leichten weißen Hintergrund hinzufügen
+        for node in flow_graph.nodes():
+            x, y = pos[node]
+            ax.text(x, y, node, fontsize=8, ha='center', va='center',
+                    bbox=dict(facecolor='white', alpha=0.7, pad=0.1, boxstyle='round', edgecolor='none'),
+                    zorder=10)
 
-                    # Combine ranked charts with maps
-                    combine_chart_and_map_images(global_filename_prefix, base_dirs['ranked'], 
-                                                 base_dirs['ranked_combined'])
+    # Kleinere Legende + 5k Tickformat
+    sm = ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    # Manuell positionierte, kürzere Farbskala (gleich breit)
+    cbar_ax = fig.add_axes([0.92, 0.25, 0.07, 0.3])  # [left, bottom, width, height]
+    cbar = plt.colorbar(sm, cax=cbar_ax)
+    cbar.set_label(cbar_label, fontsize=10)
+    ticks = cbar.get_ticks()
+    cbar.set_ticks(ticks)
+    cbar.ax.set_yticklabels([f'{int(t / 1000)}k' for t in ticks])
 
-    return df, railway_lines
+    total_flow = sum(flows)
+    if style == 'absolute':
+        text_info = (f"Gesamtfluss: {total_flow:.0f} Passagiere\n"
+                     f"Max. Fluss: {max_flow:.0f}\n"
+                     f"Min. Fluss: {min_flow:.0f}\n"
+                     f"Anzahl Kanten: {len(combined_flows)}")
+    else:
+        pos_sum = sum(flow for flow in flows if flow > 0)
+        neg_sum = sum(flow for flow in flows if flow < 0)
+        text_info = (f"Gesamtänderung: {total_flow:.0f} Passagiere\n"
+                     f"Positive Änderung: +{pos_sum:.0f}\n"
+                     f"Negative Änderung: {neg_sum:.0f}\n"
+                     f"Anzahl Kanten: {len(combined_flows)}")
 
+    plt.figtext(0.01, 0.01, text_info, fontsize=10,
+                bbox=dict(facecolor='white', alpha=0.7, boxstyle='round'))
 
-def combine_chart_and_map_images(filename_prefix, chart_dir, output_dir):
-    """
-    Combine chart and map images into a single image.
-    
-    Args:
-        filename_prefix: Prefix of the files to combine
-        chart_dir: Directory containing the chart images
-        output_dir: Directory to save combined images
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    chart_suffixes = [
-        "boxplot_savings",
-        "violinplot_savings",
-        "boxplot_net_benefit",
-        "boxplot_cba",
-        "costs_benefits",
-        "cumulative_cost_distribution"
-    ]
-    
-    for suffix in chart_suffixes:
-        chart_path = os.path.join(chart_dir, f"{filename_prefix}_{suffix}.png")
-        map_path = os.path.join(chart_dir, f"railway_lines_{filename_prefix}.png")
-        combined_path = os.path.join(output_dir, f"{filename_prefix}_{suffix}_combined.png")
-
-        try:
-            if not os.path.exists(chart_path):
-                continue
-            if not os.path.exists(map_path):
-                continue
-
-            map_image = Image.open(map_path)
-            chart_image = Image.open(chart_path)
-
-            target_height = max(map_image.height, chart_image.height)
-
-            def resize_to_height(img, target_h):
-                w, h = img.size
-                new_w = int(w * (target_h / h))
-                return img.resize((new_w, target_h), Image.LANCZOS)
-
-            map_image_resized = resize_to_height(map_image, target_height)
-            chart_image_resized = resize_to_height(chart_image, target_height)
-
-            total_width = map_image_resized.width + chart_image_resized.width
-            combined = Image.new("RGB", (total_width, target_height), (255, 255, 255))
-            combined.paste(map_image_resized, (0, 0))
-            combined.paste(chart_image_resized, (map_image_resized.width, 0))
-            combined.save(combined_path)
-
-        except Exception as e:
-            print(f"  ⚠ Error combining images for {filename_prefix}_{suffix}: {e}")
-
-
-def plot_cumulative_cost_distribution(df, output_path="plots/Benefits/cumulative_cost_distribution.png", color_dict=None):
-    """
-    Creates a cumulative probability distribution of net benefit for all developments.
-    Now with English labels.
-    """
-    mean_by_dev = df.groupby('development')['monetized_savings_total'].mean().reset_index()
-    sorted_devs = mean_by_dev.sort_values(by='monetized_savings_total', ascending=False)
-    dev_ids_sorted = sorted_devs['development'].tolist()
-
-    plt.figure(figsize=(10, 6))
-
-    if color_dict is None:
-        cmap = plt.get_cmap('tab20')
-        colors = [cmap(i % 20) for i in range(len(dev_ids_sorted))]
-        color_dict = {dev_id: colors[i] for i, dev_id in enumerate(dev_ids_sorted)}
-
-    for i, dev_id in enumerate(dev_ids_sorted):
-        dev_data = df[df['development'] == dev_id]
-        values = dev_data['monetized_savings_total'].dropna().values / 1_000_000
-        values = np.sort(values)
-        y_values = np.arange(1, len(values) + 1) / len(values)
-
-        mean_value = values.mean()
-        label = f"Line {dev_id}: {mean_value:.1f} Mio. CHF"
-
-        color = color_dict.get(dev_id, f"C{i % 10}")
-        plt.plot(values, y_values, '-', color=color, linewidth=2, label=label)
-
-    plt.axvline(x=0, color='lightgray', linestyle='-', linewidth=1)
-
-    plt.xlabel('Monetized Travel Time Savings [Mio. CHF]', fontsize=12)
-    plt.ylabel('Cumulative Probability', fontsize=12)
-    plt.title('Cumulative Probability Distribution of Net Benefit\nfor All Developments', fontsize=14)
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(title='Lines with Mean Benefit', fontsize=9, title_fontsize=10, loc='center left', bbox_to_anchor=(1, 0.5))
-
-    plt.ylim(0, 1.05)
-
-    x_min = df['monetized_savings_total'].min() / 1_000_000
-    x_max = df['monetized_savings_total'].max() / 1_000_000
-    plt.xlim(x_min - 5, x_max + 5)
-
-    for q in [0.25, 0.5, 0.75]:
-        plt.axhline(y=q, color='darkgray', linestyle=':', alpha=0.7)
-        plt.text(x_max + 3, q, f'{int(q * 100)}%', va='center', fontsize=9, color='darkgray')
-
+    ax.set_title(title, fontsize=16)
+    ax.set_aspect('equal')  # ← wichtige Zeile für unverzerrte Darstellung
+    ax.axis('off')
     plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Grafik wurde gespeichert unter: {output_path}")
+    else:
+        plt.show()
+
+    return fig
+
+def plot_line_flows(line_flow_graph, s_bahn_geopackage_path, output_path):
+    """
+    Erstellt für jede S-Bahn-Linie einen separaten Barplot, der den Fluss zwischen
+    aufeinanderfolgenden Stationspaaren in der richtigen Reihenfolge anzeigt.
+
+    Parameters:
+        line_flow_graph (nx.DiGraph): Der linienbasierte Graph mit Flussattributen
+        s_bahn_geopackage_path (str): Pfad zum GeoPackage mit den S-Bahn-Linien
+        output_path (str): Pfad zum Speichern der Ausgabedatei
+    """
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+    import os
+
+    # Lade das GeoPackage mit den S-Bahn-Linien
+    s_bahn_lines = gpd.read_file(s_bahn_geopackage_path)
+
+    # Dictionary zur Sammlung der kombinierten Flüsse pro Linie und Stationspaar
+    flows = {}
+
+    # Sammle alle gerichteten Flüsse aus dem Graph
+    for source, target, data in line_flow_graph.edges(data=True):
+        if 'service' in data and 'flow' in data:
+            service = data['service']
+            flow = data['flow']
+
+            # Erstelle einen eindeutigen Schlüssel für dieses Stationspaar
+            key = (service, source, target)
+
+            # Speichere den Fluss
+            if key not in flows:
+                flows[key] = flow
+            else:
+                flows[key] += flow
+
+    # Dictionary für die Linien und ihre geordneten Stationen
+    lines_data = {}
+
+    # Verarbeite die S-Bahn-Linien aus dem GeoPackage
+    for service in s_bahn_lines['Service'].unique():
+        # Filtere nur Einträge für diese Linie mit Direction "A"
+        line_segments = s_bahn_lines[(s_bahn_lines['Service'] == service) &
+                                     (s_bahn_lines['Direction'] == 'A')]
+
+        if len(line_segments) == 0:
+            continue
+
+        # Finde den Startpunkt (FromEnd = '1')
+        start_segment = line_segments[line_segments['FromEnd'] == '1']
+
+        if len(start_segment) == 0:
+            # Falls kein expliziter Startpunkt, nimm einfach den ersten Eintrag
+            ordered_segments = [line_segments.iloc[0]]
+        else:
+            ordered_segments = [start_segment.iloc[0]]
+
+        # Baue die Sequenz der Segmente auf
+        current_station = ordered_segments[0]['ToStation']
+        remaining_segments = line_segments[~line_segments.index.isin([ordered_segments[0].name])]
+
+        while len(remaining_segments) > 0:
+            # Finde das nächste Segment, das mit der aktuellen Station beginnt
+            next_segment = remaining_segments[remaining_segments['FromStation'] == current_station]
+
+            if len(next_segment) == 0:
+                # Kein weiteres Segment gefunden
+                break
+
+            # Füge das nächste Segment hinzu
+            ordered_segments.append(next_segment.iloc[0])
+
+            # Aktualisiere die aktuelle Station und entferne das verarbeitete Segment
+            current_station = ordered_segments[-1]['ToStation']
+            remaining_segments = remaining_segments[~remaining_segments.index.isin([ordered_segments[-1].name])]
+
+        # Erstelle eine Liste von Kanten für diese Linie in der richtigen Reihenfolge
+        edges = []
+        for segment in ordered_segments:
+            source = segment['FromStation']
+            target = segment['ToStation']
+
+            # Kombiniere die Flüsse in beide Richtungen
+            flow_forward = flows.get((service, source, target), 0)
+            flow_backward = flows.get((service, target, source), 0)
+            total_flow = flow_forward + flow_backward
+
+            edges.append({
+                'source': source,
+                'target': target,
+                'flow': total_flow
+            })
+
+        lines_data[service] = edges
+
+    # Anzahl der S-Bahn-Linien bestimmen
+    n_lines = len(lines_data)
+    if n_lines == 0:
+        print("Keine S-Bahn-Linien im Graph gefunden.")
+        return
+
+    # Figurgröße basierend auf Anzahl der Linien anpassen
+    fig, axes = plt.subplots(n_lines, 1, figsize=(12, 4 * n_lines))
+    if n_lines == 1:
+        axes = [axes]  # Für konsistente Indexierung bei nur einer Linie
+
+    # Sortierte Liste der Linien (S1, S2, S3, ...)
+    sorted_lines = sorted(lines_data.keys())
+
+    # Für jede Linie einen Barplot erstellen
+    for i, service in enumerate(sorted_lines):
+        edges = lines_data[service]
+
+        # Edge-Labels und Flows extrahieren
+        edge_labels = [f"{edge['source']} → {edge['target']}" for edge in edges]
+        flows = [edge['flow'] / 1000 for edge in edges]  # Werte in Tausend
+
+        # Plot für diese Linie erstellen
+        ax = axes[i]
+        bars = ax.bar(edge_labels, flows, color='steelblue')
+
+        # Achsenbeschriftung
+        ax.set_xlabel('Station connection', fontsize=10)
+        ax.set_ylabel('Utilisation (in thousands)', fontsize=10)
+        ax.set_title(f'Line utilisation {service}', fontsize=12)
+
+        # Werte über den Balken anzeigen
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f'{height:.1f}k',
+                        xy=(bar.get_x() + bar.get_width() / 2, height),
+                        xytext=(0, 3),
+                        textcoords="offset points",
+                        ha='center', va='bottom', fontsize=8)
+
+        # X-Achsenbeschriftungen rotieren für bessere Lesbarkeit
+        plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=8)
+
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Layout optimieren
+    plt.tight_layout()
+
+    # Sicherstellen, dass das Verzeichnis existiert
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    # Plot speichern
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    print(f"Linienauslastungs-Plots gespeichert unter: {output_path}")
+
+    return fig

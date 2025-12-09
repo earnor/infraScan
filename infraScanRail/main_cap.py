@@ -2,6 +2,7 @@
 import paths
 import scoring
 import settings
+import re
 from TT_Delay import *
 from catchment_pt import *
 from display_results import *
@@ -20,15 +21,6 @@ from run_capacity_analysis import (
     run_development_workflow,
     CAPACITY_ROOT
 )
-from visualization_costs import (
-    plot_infrastructure_costs_with_capacity,
-    plot_capacity_surplus_by_development,
-    export_intervention_details,
-    export_cost_breakdown_table,
-    plot_bcr_comparison_scatter,
-    plot_bcr_by_development,
-    export_viability_results
-)
 import geopandas as gpd
 import pandas as pd
 import os
@@ -42,12 +34,92 @@ from pathlib import Path
 
 
 # ================================================================================
+# GLOBAL PIPELINE CONFIGURATION
+# ================================================================================
+
+class PipelineConfig:
+    """Global configuration for pipeline execution."""
+    
+    def __init__(self):
+        self.visualization_mode = None  # 'manual', 'none', 'all'
+        self.grouping_strategy = None   # 'manual', 'conservative', 'baseline', 'optimal'
+        self._original_input = None
+    
+    def should_generate_plots(self, default_yes: bool = False) -> bool:
+        """
+        Determine if plots should be generated based on global setting.
+        
+        Args:
+            default_yes: Default answer if mode is manual
+        
+        Returns:
+            bool: True if plots should be generated, None if should prompt
+        """
+        if self.visualization_mode == 'all':
+            return True
+        elif self.visualization_mode == 'none':
+            return False
+        else:  # manual
+            return None  # Signal to prompt user
+    
+    def get_grouping_choice(self, prompt: str) -> str:
+        """
+        Get grouping strategy choice based on global setting.
+        
+        Detects available choices from the prompt and selects appropriately.
+        
+        Args:
+            prompt: The original prompt text
+        
+        Returns:
+            str: The choice to make
+        """
+        if self.grouping_strategy == 'manual':
+            # Use original input
+            return self._original_input(prompt)
+        
+        # Detect available choices from prompt
+        # Look for patterns like "(1-2)" or "(1-3)" in the prompt      
+        choice_match = re.search(r'\(1-(\d+)\)', prompt)
+        if choice_match:
+            max_choice = int(choice_match.group(1))
+            available_choices = [str(i) for i in range(1, max_choice + 1)]
+        else:
+            # Fallback: assume 1-2 if we can't detect
+            available_choices = ['1', '2']
+        
+        # Select based on strategy
+        if self.grouping_strategy == 'conservative':
+            # Always choose lowest option (1)
+            choice = '1'
+            print(prompt + f"{choice}  [AUTO-SELECTED: Conservative]")
+        elif self.grouping_strategy == 'baseline':
+            # Always choose option 2 if available, otherwise lowest
+            choice = '2' if '2' in available_choices else '1'
+            print(prompt + f"{choice}  [AUTO-SELECTED: Baseline]")
+        elif self.grouping_strategy == 'optimal':
+            # Always choose highest option
+            choice = max(available_choices, key=int)
+            print(prompt + f"{choice}  [AUTO-SELECTED: Optimal]")
+        else:
+            # Fallback to manual
+            return self._original_input(prompt)
+        
+        return choice
+
+
+# Global configuration instance
+PIPELINE_CONFIG = PipelineConfig()
+
+
+# ================================================================================
 # PHASE FUNCTIONS - Modular Pipeline Components
 # ================================================================================
 
 def phase_1_initialization(runtimes: dict) -> tuple:
     """
     Phase 1: Initialize workspace and study area boundaries.
+    Also configures global pipeline settings.
 
     Args:
         runtimes: Dictionary to track phase execution times
@@ -56,10 +128,58 @@ def phase_1_initialization(runtimes: dict) -> tuple:
         tuple: (innerboundary, outerboundary) - Study area polygons
     """
     print("\n" + "="*80)
-    print("PHASE 1: INITIALIZE VARIABLES")
+    print("PHASE 1: INITIALIZE VARIABLES & PIPELINE CONFIGURATION")
     print("="*80 + "\n")
     st = time.time()
 
+    # ============================================================================
+    # GLOBAL CONFIGURATION PROMPTS
+    # ============================================================================
+    print("PIPELINE CONFIGURATION")
+    print("-" * 80)
+    
+    # A. Visualization Strategy
+    print("\nA. VISUALIZATION STRATEGY")
+    print("   How should the pipeline handle optional plot generation?")
+    print("   1) Manual  - Prompt for each visualization decision (default)")
+    print("   2) None    - Skip all optional visualizations")
+    print("   3) All     - Generate all optional visualizations")
+    
+    while True:
+        viz_choice = input("\n   Select visualization mode (1-3) [1]: ").strip() or "1"
+
+        if viz_choice in ['1', '2', '3']:
+            break
+        print("   Invalid selection. Please enter 1, 2, or 3.")
+    
+    viz_modes = {'1': 'manual', '2': 'none', '3': 'all'}
+    PIPELINE_CONFIG.visualization_mode = viz_modes[viz_choice]
+    print(f"   → Visualization mode: {PIPELINE_CONFIG.visualization_mode.upper()}")
+    
+    # B. Grouping Strategy
+    print("\nB. CAPACITY GROUPING STRATEGY")
+    print("   How should capacity grouping decisions be made?")
+    print("   1) Manual       - Prompt for each grouping decision (default)")
+    print("   2) Conservative - Always choose lowest capacity option")
+    print("   3) Baseline     - Always choose middle option (2)")
+    print("   4) Optimal      - Always choose highest capacity option")
+    
+    while True:
+        group_choice = input("\n   Select grouping strategy (1-4) [1]: ").strip() or "1"
+        if group_choice in ['1', '2', '3', '4']:
+            break
+        print("   Invalid selection. Please enter 1, 2, 3, or 4.")
+    
+    group_modes = {'1': 'manual', '2': 'conservative', '3': 'baseline', '4': 'optimal'}
+    PIPELINE_CONFIG.grouping_strategy = group_modes[group_choice]
+    print(f"   → Grouping strategy: {PIPELINE_CONFIG.grouping_strategy.upper()}")
+    
+    print("-" * 80)
+    print("✓ Pipeline configuration complete\n")
+
+    # ============================================================================
+    # WORKSPACE INITIALIZATION
+    # ============================================================================
     innerboundary, outerboundary = create_focus_area()
 
     runtimes["Initialize variables"] = time.time() - st
@@ -140,18 +260,29 @@ def phase_3_baseline_capacity_analysis(runtimes: dict) -> tuple:
     print("\n--- Step 3.2: Establish Baseline Capacity ---\n")
     st = time.time()
 
+    # Determine visualization setting
+    visualize_baseline = PIPELINE_CONFIG.should_generate_plots(default_yes=True)
+    if visualize_baseline is None:  # Manual mode
+        response = input("Generate baseline capacity visualizations? (y/n) [y]: ").strip().lower()
+        visualize_baseline = response != 'n'
+    
+    if visualize_baseline:
+        print("  → Baseline visualizations will be generated")
+    else:
+        print("  → Skipping baseline visualizations")
+
     # Auto-select workflow based on network label
     if '_extended' in settings.rail_network:
         print(f"  Using Baseline Extended workflow (all stations) for {settings.rail_network}")
         baseline_exit_code = run_baseline_extended_workflow(
             network_label=settings.rail_network,
-            visualize=settings.visualize_capacity_analysis
+            visualize=visualize_baseline
         )
     else:
         print(f"  Using Baseline workflow (corridor-filtered) for {settings.rail_network}")
         baseline_exit_code = run_baseline_workflow(
             network_label=settings.rail_network,
-            visualize=settings.visualize_capacity_analysis
+            visualize=visualize_baseline
         )
 
     if baseline_exit_code != 0:
@@ -220,6 +351,17 @@ def phase_3_baseline_capacity_analysis(runtimes: dict) -> tuple:
         max_iterations = settings.max_enhancement_iterations
         print(f"  → Using default max iterations: {max_iterations}")
 
+    # Determine visualization setting for enhanced network
+    visualize_enhanced = PIPELINE_CONFIG.should_generate_plots(default_yes=True)
+    if visualize_enhanced is None:  # Manual mode
+        response = input("Generate enhanced network visualizations? (y/n) [y]: ").strip().lower()
+        visualize_enhanced = response != 'n'
+    
+    if visualize_enhanced:
+        print("  → Enhanced network visualizations will be generated")
+    else:
+        print("  → Skipping enhanced network visualizations")
+
     # Run Phase 4 iterative capacity enhancement
     print(f"\n  Running Phase 4 enhancement workflow for {settings.rail_network}...")
     print(f"  Threshold: {capacity_threshold} tphpd")
@@ -228,7 +370,7 @@ def phase_3_baseline_capacity_analysis(runtimes: dict) -> tuple:
     enhanced_exit_code = run_enhanced_workflow(
         network_label=settings.rail_network,
         threshold=capacity_threshold,
-        max_iterations=max_iterations
+        max_iterations=max_iterations,
     )
 
     if enhanced_exit_code != 0:
@@ -301,12 +443,14 @@ def phase_4_infrastructure_developments(points: gpd.GeoDataFrame, runtimes: dict
     # ============================================================================
     print("\n--- Step 4.2: Analyze Development Capacity (Workflow 3) ---\n")
 
-    # Ask user if they want to generate plots for all developments
-    print(f"Found {len(dev_id_lookup)} developments to analyze.")
-    print("Each development can generate capacity, speed profile, and service network plots.")
-    response = input("\nGenerate visualizations for all developments? (y/n) [y]: ").strip().lower()
-    generate_dev_plots = response != 'n'
-
+    # STEP 4.2: Determine if development visualizations should be generated
+    generate_dev_plots = PIPELINE_CONFIG.should_generate_plots(default_yes=True)
+    if generate_dev_plots is None:  # Manual mode
+        print(f"Found {len(dev_id_lookup)} developments to analyze.")
+        print("Each development can generate capacity, speed profile, and service network plots.")
+        response = input("\nGenerate visualizations for all developments? (y/n) [y]: ").strip().lower()
+        generate_dev_plots = response != 'n'
+    
     if generate_dev_plots:
         print("  → Visualizations will be generated for each development")
     else:
@@ -462,9 +606,13 @@ def phase_4_infrastructure_developments(points: gpd.GeoDataFrame, runtimes: dict
         
         get_catchment(use_cache=settings.use_cache_pt_catchment)
         
-        # Ask user if they want catchment plots
-        response = input("\nGenerate catchment visualization plots? (y/n) [n]: ").strip().lower()
-        if response in {'y', 'yes'}:
+        # Use global visualization setting
+        generate_catchment_plots = PIPELINE_CONFIG.should_generate_plots(default_yes=False)
+        if generate_catchment_plots is None:  # Manual mode
+            response = input("\nGenerate catchment visualization plots? (y/n) [n]: ").strip().lower()
+            generate_catchment_plots = response in {'y', 'yes'}
+        
+        if generate_catchment_plots:
             create_plot_catchement()
             create_catchement_plot_time()
         
@@ -539,11 +687,14 @@ def phase_7_passenger_flow_visualization(G_development: list, G_status_quo: list
     print("PHASE 7: PASSENGER FLOW VISUALIZATION")
     print("="*80 + "\n")
     
-    # Ask user if they want to generate passenger flow plots
-    print(f"Found {len(G_development)} developments for passenger flow visualization.")
-    response = input("\nGenerate passenger flow plots? (y/n) [n]: ").strip().lower()
+    # Use global visualization setting
+    generate_flow_plots = PIPELINE_CONFIG.should_generate_plots(default_yes=False)
+    if generate_flow_plots is None:  # Manual mode
+        print(f"Found {len(G_development)} developments for passenger flow visualization.")
+        response = input("\nGenerate passenger flow plots? (y/n) [n]: ").strip().lower()
+        generate_flow_plots = response in {'y', 'yes'}
     
-    if response not in {'y', 'yes'}:
+    if not generate_flow_plots:
         print("  → Skipping passenger flow visualization")
         return
     
@@ -696,13 +847,15 @@ def phase_11_cost_benefit_integration(construction_and_maintenance_costs: pd.Dat
     costs_and_benefits_discounted.to_csv(discounted_path)
     print(f"  ✓ Saved to: {discounted_path}")
 
-    # Ask user if they want visualizations
-    print("\n" + "="*80)
-    print("VISUALIZATION OPTION")
-    print("="*80)
-    response = input("\nGenerate cost-benefit plots for all developments? (y/n) [n]: ").strip().lower()
+    generate_cb_plots = PIPELINE_CONFIG.should_generate_plots(default_yes=False)
+    if generate_cb_plots is None:  # Manual mode
+        print("\n" + "="*80)
+        print("VISUALIZATION OPTION")
+        print("="*80)
+        response = input("\nGenerate cost-benefit plots for all developments? (y/n) [n]: ").strip().lower()
+        generate_cb_plots = response == 'y'
 
-    if response == 'y':
+    if generate_cb_plots:
         print("\n  Generating plots for all developments...")
         output_dir = os.path.join("plots", "Discounted Costs")
 
@@ -763,39 +916,48 @@ def phase_12_cost_aggregation(runtimes: dict) -> None:
 
 
 def phase_13_results_visualization(runtimes: dict) -> None:
-    """
-    Phase 13: Generate all result visualizations.
-
-    Args:
-        runtimes: Dictionary to track phase execution times
-
-    Side Effects:
-        - Writes multiple plot files to plots/
-        - Writes processed_costs.gpkg
-    """
+    """Phase 13: Generate all result visualizations."""
     print("\n" + "="*80)
     print("PHASE 13: RESULTS VISUALIZATION")
     print("="*80 + "\n")
     st = time.time()
 
-    # User prompts for benefit plot categories
-    print("Select which benefit plot categories to generate:")
-    print("─" * 60)
+    # Use global visualization setting
+    generate_result_plots = PIPELINE_CONFIG.should_generate_plots(default_yes=True)
     
-    plot_small_developments = input("  Generate plots for small developments (Expand 1 Stop)? (y/n): ").strip().lower() == 'y'
-    plot_grouped_by_connection = input("  Generate plots grouped by missing connection? (y/n): ").strip().lower() == 'y'
-    plot_ranked_groups = input("  Generate ranked group plots (by net benefit)? (y/n): ").strip().lower() == 'y'
-    plot_combined_with_maps = input("  Generate combined plots (charts + network maps)? (y/n): ").strip().lower() == 'y'
-    
-    print("─" * 60)
-    
-    # Store plot preferences in a dictionary to pass to visualization function
-    plot_preferences = {
-        'small_developments': plot_small_developments,
-        'grouped_by_connection': plot_grouped_by_connection,
-        'ranked_groups': plot_ranked_groups,
-        'combined_with_maps': plot_combined_with_maps
-    }
+    if generate_result_plots is None:  # Manual mode - show detailed prompts
+        print("Select which benefit plot categories to generate:")
+        print("─" * 60)
+        
+        plot_small_developments = input("  Generate plots for small developments (Expand 1 Stop)? (y/n): ").strip().lower() == 'y'
+        plot_grouped_by_connection = input("  Generate plots grouped by missing connection? (y/n): ").strip().lower() == 'y'
+        plot_ranked_groups = input("  Generate ranked group plots (by net benefit)? (y/n): ").strip().lower() == 'y'
+        plot_combined_with_maps = input("  Generate combined plots (charts + network maps)? (y/n): ").strip().lower() == 'y'
+        
+        print("─" * 60)
+        
+        plot_preferences = {
+            'small_developments': plot_small_developments,
+            'grouped_by_connection': plot_grouped_by_connection,
+            'ranked_groups': plot_ranked_groups,
+            'combined_with_maps': plot_combined_with_maps
+        }
+    elif generate_result_plots:  # All mode
+        print("  → Generating all result visualizations")
+        plot_preferences = {
+            'small_developments': True,
+            'grouped_by_connection': True,
+            'ranked_groups': True,
+            'combined_with_maps': True
+        }
+    else:  # None mode
+        print("  → Skipping result visualizations")
+        plot_preferences = {
+            'small_developments': False,
+            'grouped_by_connection': False,
+            'ranked_groups': False,
+            'combined_with_maps': False
+        }
 
     visualize_results(clear_plot_directory=False, plot_preferences=plot_preferences)
 
@@ -814,34 +976,41 @@ def infrascanrail_cap():
     runtimes = {}
 
     # ============================================================================
-    # AUTO-RESPONSE SETUP: Automatically answer capacity grouping prompts with "1"
+    # CONFIGURABLE AUTO-RESPONSE SETUP
     # ============================================================================
     # Store original input function
     if isinstance(__builtins__, dict):
         _original_input = __builtins__['input']
     else:
         _original_input = __builtins__.input
+    
+    # Store in config for later use
+    PIPELINE_CONFIG._original_input = _original_input
 
-    def auto_input(prompt=""):
+    def smart_input(prompt=""):
         """
-        Automatically respond with "1" to capacity grouping prompts,
-        otherwise use normal input.
+        Intelligently handle input based on global configuration.
+        - Capacity grouping prompts: Use grouping strategy
+        - Visualization prompts: Use visualization strategy
+        - All other prompts: Use original input
         """
         # Check if this is a capacity grouping prompt
-        if "Enter choice (1-2):" in prompt or "Select the strategy number" in prompt:
-            print(prompt + "1  [AUTO-SELECTED]")
-            return "1"
+        if ("Enter choice (1-" in prompt or 
+            "Select the strategy number" in prompt or
+            "Select track allocation strategy" in prompt):
+            return PIPELINE_CONFIG.get_grouping_choice(prompt)
+        
         # For all other prompts, use original input
         return _original_input(prompt)
 
-    # Replace built-in input with our auto-input function
+    # Replace built-in input with our smart input function
     if isinstance(__builtins__, dict):
-        __builtins__['input'] = auto_input
+        __builtins__['input'] = smart_input
     else:
-        __builtins__.input = auto_input
+        __builtins__.input = smart_input
 
     ##################################################################################
-    # PHASE 1: INITIALIZATION
+    # PHASE 1: INITIALIZATION & CONFIGURATION
     ##################################################################################
     innerboundary, outerboundary = phase_1_initialization(runtimes)
 
@@ -915,7 +1084,7 @@ def infrascanrail_cap():
     ##################################################################################
     # PHASE 13: RESULTS VISUALIZATION
     ##################################################################################
-    # phase_13_results_visualization(runtimes)
+    phase_13_results_visualization(runtimes)
  
     ##################################################################################
     # SAVE RUNTIMES
@@ -1577,10 +1746,10 @@ def visualize_results(clear_plot_directory=False, plot_preferences=None):
     # Make a plot of the developments
     plot_developments_expand_by_one_station()
     
-    # Load the dataset and generate plots
+    # Load the dataset and generate plots with user preferences
     results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
     railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
-    create_and_save_plots(df=results_raw, railway_lines=railway_lines)
+    create_and_save_plots(df=results_raw, railway_lines=railway_lines, plot_preferences=plot_preferences)
     
     # Plot cumulative cost distribution
     plot_cumulative_cost_distribution(results_raw, "plots/cumulative_cost_distribution.png")
