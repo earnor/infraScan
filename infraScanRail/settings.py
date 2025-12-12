@@ -24,7 +24,7 @@ only_demand_from_to_perimeter = True
 
 # Scenario settings: Choose either 'GENERATED' or 'STATIC_9' or 'dummy'
 scenario_type = 'GENERATED' 
-amount_of_scenarios = 10
+amount_of_scenarios = 100
 start_year_scenario = 2018
 end_year_scenario = 2100
 start_valuation_year = 2050

@@ -428,9 +428,21 @@ def phase_4_infrastructure_developments(points: gpd.GeoDataFrame, runtimes: dict
     print("\n--- Step 4.1: Generate Infrastructure Developments ---\n")
     st = time.time()
 
+    # Determine if infrastructure generation plots should be created
+    generate_infra_plots = PIPELINE_CONFIG.should_generate_plots(default_yes=False)
+    if generate_infra_plots is None:  # Manual mode
+        response = input("Generate infrastructure development plots (network graphs, missing connections)? (y/n) [n]: ").strip().lower()
+        generate_infra_plots = response in {'y', 'yes'}
+
+    if generate_infra_plots:
+        print("  → Infrastructure development plots will be generated")
+    else:
+        print("  → Skipping infrastructure development plots")
+
     generate_infra_development(
         use_cache=settings.use_cache_developments,
-        mod_type=settings.infra_generation_modification_type
+        mod_type=settings.infra_generation_modification_type,
+        generate_plots=generate_infra_plots
     )
 
     # Create lookup table for developments
@@ -722,12 +734,23 @@ def phase_8_scenario_generation(runtimes: dict) -> None:
     print("="*80 + "\n")
     st = time.time()
 
+    # Determine if scenario plots should be generated
+    generate_scenario_plots = PIPELINE_CONFIG.should_generate_plots(default_yes=False)
+    if generate_scenario_plots is None:  # Manual mode
+        response = input("Generate scenario visualization plots? (y/n) [n]: ").strip().lower()
+        generate_scenario_plots = response in {'y', 'yes'}
+
+    if generate_scenario_plots:
+        print("  → Scenario plots will be generated")
+    else:
+        print("  → Skipping scenario plots")
+
     get_random_scenarios(
         start_year=2018,
         end_year=2100,
         num_of_scenarios=settings.amount_of_scenarios,
         use_cache=settings.use_cache_scenarios,
-        do_plot=True
+        do_plot=generate_scenario_plots
     )
 
     runtimes["Generate the scenarios"] = time.time() - st
@@ -765,25 +788,28 @@ def phase_9_travel_time_savings(dev_id_lookup: pd.DataFrame, od_times_dev: dict,
     return dev_list, monetized_tt, scenario_list
 
 
-def phase_10_construction_maintenance_costs(monetized_tt: pd.DataFrame, runtimes: dict) -> pd.DataFrame:
+def phase_10_old_construction_maintenance_costs(monetized_tt: pd.DataFrame, runtimes: dict) -> pd.DataFrame:
     """
-    Phase 10: Calculate construction and maintenance costs.
+    Phase 10 OLD: Calculate construction and maintenance costs using OLD method.
+
+    Uses 8 trains/track capacity check for EXTEND_LINES.
+    Outputs: construction_cost_old.csv
 
     Args:
         monetized_tt: Monetized travel time savings from Phase 9
         runtimes: Dictionary to track phase execution times
 
     Returns:
-        construction_and_maintenance_costs: DataFrame with infrastructure costs
+        pd.DataFrame: Construction and maintenance costs with old capacity logic
     """
     print("\n" + "="*80)
-    print("PHASE 10: CONSTRUCTION & MAINTENANCE COSTS")
+    print("PHASE 10 OLD: CONSTRUCTION & MAINTENANCE COSTS (8 trains/track)")
     print("="*80 + "\n")
     st = time.time()
 
-    # Compute construction costs
     file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
-    construction_and_maintenance_costs = construction_costs(
+
+    construction_and_maintenance_costs_old = construction_costs(
         file_path=file_path,
         cost_per_meter=cp.track_cost_per_meter,
         tunnel_cost_per_meter=cp.tunnel_cost_per_meter,
@@ -791,62 +817,136 @@ def phase_10_construction_maintenance_costs(monetized_tt: pd.DataFrame, runtimes
         track_maintenance_cost=cp.track_maintenance_cost,
         tunnel_maintenance_cost=cp.tunnel_maintenance_cost,
         bridge_maintenance_cost=cp.bridge_maintenance_cost,
-        duration=cp.duration
+        duration=cp.duration,
+        use_old_capacity_logic=True,
+        output_suffix="_old"
     )
 
-    runtimes["Compute construction costs"] = time.time() - st
-    return construction_and_maintenance_costs
+    runtimes["Compute construction costs (OLD)"] = time.time() - st
+    return construction_and_maintenance_costs_old
 
 
-def phase_11_cost_benefit_integration(construction_and_maintenance_costs: pd.DataFrame, runtimes: dict) -> tuple:
+def phase_10_new_construction_maintenance_costs(monetized_tt: pd.DataFrame, runtimes: dict) -> pd.DataFrame:
     """
-    Phase 11: Integrate costs with benefits and apply discounting.
+    Phase 10 NEW: Calculate construction and maintenance costs using NEW method.
 
-    Creates TWO versions:
-    1. Old (WITHOUT capacity interventions)
-    2. Current (WITH capacity interventions)
+    Uses capacity interventions from Phase 4 for EXTEND_LINES.
+    Outputs: construction_cost.csv
 
     Args:
-        construction_and_maintenance_costs: Construction costs from Phase 10
+        monetized_tt: Monetized travel time savings from Phase 9
         runtimes: Dictionary to track phase execution times
 
     Returns:
-        tuple: (costs_and_benefits_old_discounted, costs_and_benefits_discounted)
+        pd.DataFrame: Construction and maintenance costs with capacity interventions
     """
     print("\n" + "="*80)
-    print("PHASE 11: COST-BENEFIT INTEGRATION")
+    print("PHASE 10 NEW: CONSTRUCTION & MAINTENANCE COSTS (Capacity Interventions)")
     print("="*80 + "\n")
     st = time.time()
 
-    # Create both versions of cost-benefit dataframes
-    costs_and_benefits_old, costs_and_benefits = create_cost_and_benefit_df(
-        settings.start_year_scenario,
-        settings.end_year_scenario,
-        settings.start_valuation_year
+    file_path = "data/Network/Rail-Service_Link_construction_cost.csv"
+
+    construction_and_maintenance_costs_new = construction_costs(
+        file_path=file_path,
+        cost_per_meter=cp.track_cost_per_meter,
+        tunnel_cost_per_meter=cp.tunnel_cost_per_meter,
+        bridge_cost_per_meter=cp.bridge_cost_per_meter,
+        track_maintenance_cost=cp.track_maintenance_cost,
+        tunnel_maintenance_cost=cp.tunnel_maintenance_cost,
+        bridge_maintenance_cost=cp.bridge_maintenance_cost,
+        duration=cp.duration,
+        use_old_capacity_logic=False,
+        output_suffix=""
     )
 
-    # Apply discounting to OLD version (WITHOUT capacity interventions)
-    print("\n  Applying discounting to costs WITHOUT capacity interventions...")
+    runtimes["Compute construction costs (NEW)"] = time.time() - st
+    return construction_and_maintenance_costs_new
+
+
+def phase_11_old_cost_benefit_integration(runtimes: dict) -> pd.DataFrame:
+    """
+    Phase 11 OLD: Integrate costs with benefits and apply discounting (OLD method).
+
+    Loads: construction_cost_old.csv
+    Outputs: costs_and_benefits_old_discounted.csv
+
+    Args:
+        runtimes: Dictionary to track phase execution times
+
+    Returns:
+        pd.DataFrame: Discounted costs and benefits (OLD method)
+    """
+    print("\n" + "="*80)
+    print("PHASE 11 OLD: COST-BENEFIT INTEGRATION (8 trains/track)")
+    print("="*80 + "\n")
+    st = time.time()
+
+    # Create cost-benefit dataframe
+    print("  → Creating cost-benefit dataframe for OLD method...")
+    costs_and_benefits_old, _ = create_cost_and_benefit_df(
+        settings.start_year_scenario,
+        settings.end_year_scenario,
+        settings.start_valuation_year,
+        cost_file_path="data/costs/construction_cost_old.csv"
+    )
+
+    # Apply discounting
+    print("  → Applying discounting to OLD method costs...")
     costs_and_benefits_old_discounted = discounting(
         costs_and_benefits_old,
         discount_rate=cp.discount_rate,
         base_year=settings.start_valuation_year
     )
+
     old_discounted_path = "data/costs/costs_and_benefits_old_discounted.csv"
     costs_and_benefits_old_discounted.to_csv(old_discounted_path)
     print(f"  ✓ Saved to: {old_discounted_path}")
 
-    # Apply discounting to current version (WITH capacity interventions)
-    print("\n  Applying discounting to costs WITH capacity interventions...")
+    runtimes["Cost-benefit integration (OLD)"] = time.time() - st
+    return costs_and_benefits_old_discounted
+
+
+def phase_11_new_cost_benefit_integration(runtimes: dict) -> pd.DataFrame:
+    """
+    Phase 11 NEW: Integrate costs with benefits and apply discounting (NEW method).
+
+    Loads: construction_cost.csv
+    Outputs: costs_and_benefits_discounted.csv
+
+    Args:
+        runtimes: Dictionary to track phase execution times
+
+    Returns:
+        pd.DataFrame: Discounted costs and benefits (NEW method)
+    """
+    print("\n" + "="*80)
+    print("PHASE 11 NEW: COST-BENEFIT INTEGRATION (Capacity Interventions)")
+    print("="*80 + "\n")
+    st = time.time()
+
+    # Create cost-benefit dataframe
+    print("  → Creating cost-benefit dataframe for NEW method...")
+    _, costs_and_benefits = create_cost_and_benefit_df(
+        settings.start_year_scenario,
+        settings.end_year_scenario,
+        settings.start_valuation_year,
+        cost_file_path="data/costs/construction_cost.csv"
+    )
+
+    # Apply discounting
+    print("  → Applying discounting to NEW method costs...")
     costs_and_benefits_discounted = discounting(
         costs_and_benefits,
         discount_rate=cp.discount_rate,
         base_year=settings.start_valuation_year
     )
+
     discounted_path = "data/costs/costs_and_benefits_discounted.csv"
     costs_and_benefits_discounted.to_csv(discounted_path)
     print(f"  ✓ Saved to: {discounted_path}")
 
+    # Optional: Generate plots
     generate_cb_plots = PIPELINE_CONFIG.should_generate_plots(default_yes=False)
     if generate_cb_plots is None:  # Manual mode
         print("\n" + "="*80)
@@ -870,49 +970,62 @@ def phase_11_cost_benefit_integration(construction_and_maintenance_costs: pd.Dat
     else:
         print("  → Skipping visualizations")
 
-    runtimes["Cost-benefit integration"] = time.time() - st
-    return costs_and_benefits_old_discounted, costs_and_benefits_discounted
+    runtimes["Cost-benefit integration (NEW)"] = time.time() - st
+    return costs_and_benefits_discounted
 
 
-def phase_12_cost_aggregation(runtimes: dict) -> None:
+def phase_12_old_cost_aggregation(runtimes: dict) -> None:
     """
-    Phase 12: Aggregate cost elements.
+    Phase 12 OLD: Aggregate cost elements (OLD method).
 
-    Processes both old (without capacity) and new (with capacity) cost-benefit files.
+    Loads: costs_and_benefits_old_discounted.csv
+    Outputs: total_costs_old.csv, total_costs_summary_old.csv (CSV only, no geometry)
 
     Args:
         runtimes: Dictionary to track phase execution times
-
-    Side Effects:
-        - Writes total_costs.gpkg (with capacity)
-        - Writes total_costs.csv (with capacity)
-        - Writes total_costs_with_geometry.gpkg (with capacity)
-        - Writes total_costs_old.csv (without capacity)
     """
     print("\n" + "="*80)
-    print("PHASE 12: COST AGGREGATION")
+    print("PHASE 12 OLD: COST AGGREGATION (8 trains/track)")
     print("="*80 + "\n")
     st = time.time()
 
-    # Load the discounted cost-benefit dataframes from Phase 11
-    costs_path = "data/costs/costs_and_benefits_discounted.csv"
+    # Load the discounted cost-benefit dataframe from Phase 11 OLD
     costs_old_path = "data/costs/costs_and_benefits_old_discounted.csv"
-
-    print(f"  Loading WITH capacity interventions: {costs_path}")
-    costs_and_benefits_discounted = pd.read_csv(costs_path)
-
-    print(f"  Loading WITHOUT capacity interventions: {costs_old_path}")
+    print(f"  Loading OLD method costs: {costs_old_path}")
     costs_and_benefits_old_discounted = pd.read_csv(costs_old_path)
 
-    # Process new version (WITH capacity) - full outputs
-    print("\n  → Processing costs WITH capacity interventions (full outputs)...")
-    rearange_costs(costs_and_benefits_discounted, output_prefix="")
-
-    # Process old version (WITHOUT capacity) - CSV only
-    print("\n  → Processing costs WITHOUT capacity interventions (CSV only)...")
+    # Process old version - CSV only
+    print("  → Processing OLD method costs (CSV only)...")
     rearange_costs(costs_and_benefits_old_discounted, output_prefix="_old", csv_only=True)
 
-    runtimes["Aggregate costs"] = time.time() - st
+    runtimes["Aggregate costs (OLD)"] = time.time() - st
+
+
+def phase_12_new_cost_aggregation(runtimes: dict) -> None:
+    """
+    Phase 12 NEW: Aggregate cost elements (NEW method).
+
+    Loads: costs_and_benefits_discounted.csv
+    Outputs: total_costs.csv, total_costs_with_geometry.gpkg, total_costs_summary.csv
+
+    Args:
+        runtimes: Dictionary to track phase execution times
+    """
+    print("\n" + "="*80)
+    print("PHASE 12 NEW: COST AGGREGATION (Capacity Interventions)")
+    print("="*80 + "\n")
+    st = time.time()
+
+    # Load the discounted cost-benefit dataframe from Phase 11 NEW
+    costs_path = "data/costs/costs_and_benefits_discounted.csv"
+    print(f"  Loading NEW method costs: {costs_path}")
+    costs_and_benefits_discounted = pd.read_csv(costs_path)
+
+    # Process new version - full outputs with geometry
+    print("  → Processing NEW method costs (full outputs with geometry)...")
+    rearange_costs(costs_and_benefits_discounted, output_prefix="")
+
+    runtimes["Aggregate costs (NEW)"] = time.time() - st
 
 
 def phase_13_results_visualization(runtimes: dict) -> None:
@@ -928,19 +1041,21 @@ def phase_13_results_visualization(runtimes: dict) -> None:
     if generate_result_plots is None:  # Manual mode - show detailed prompts
         print("Select which benefit plot categories to generate:")
         print("─" * 60)
-        
+
         plot_small_developments = input("  Generate plots for small developments (Expand 1 Stop)? (y/n): ").strip().lower() == 'y'
         plot_grouped_by_connection = input("  Generate plots grouped by missing connection? (y/n): ").strip().lower() == 'y'
         plot_ranked_groups = input("  Generate ranked group plots (by net benefit)? (y/n): ").strip().lower() == 'y'
         plot_combined_with_maps = input("  Generate combined plots (charts + network maps)? (y/n): ").strip().lower() == 'y'
-        
+        plot_pipeline_comparison = input("  Generate pipeline comparison plots (Old vs New)? (y/n): ").strip().lower() == 'y'
+
         print("─" * 60)
-        
+
         plot_preferences = {
             'small_developments': plot_small_developments,
             'grouped_by_connection': plot_grouped_by_connection,
             'ranked_groups': plot_ranked_groups,
-            'combined_with_maps': plot_combined_with_maps
+            'combined_with_maps': plot_combined_with_maps,
+            'pipeline_comparison': plot_pipeline_comparison
         }
     elif generate_result_plots:  # All mode
         print("  → Generating all result visualizations")
@@ -948,7 +1063,8 @@ def phase_13_results_visualization(runtimes: dict) -> None:
             'small_developments': True,
             'grouped_by_connection': True,
             'ranked_groups': True,
-            'combined_with_maps': True
+            'combined_with_maps': True,
+            'pipeline_comparison': True
         }
     else:  # None mode
         print("  → Skipping result visualizations")
@@ -956,10 +1072,16 @@ def phase_13_results_visualization(runtimes: dict) -> None:
             'small_developments': False,
             'grouped_by_connection': False,
             'ranked_groups': False,
-            'combined_with_maps': False
+            'combined_with_maps': False,
+            'pipeline_comparison': False
         }
 
     visualize_results(clear_plot_directory=False, plot_preferences=plot_preferences)
+
+    # Generate pipeline comparison plots (Old vs New)
+    if plot_preferences.get('pipeline_comparison', False):
+        create_ranked_pipeline_comparison_plots(plot_directory="plots", top_n_list=[5, 10])
+        create_all_developments_pipeline_comparison_plots(plot_directory="plots")
 
     runtimes["Visualize results"] = time.time() - st
 
@@ -1065,27 +1187,40 @@ def infrascanrail_cap():
         )
 
     ##################################################################################
-    # PHASE 10: CONSTRUCTION & MAINTENANCE COSTS
+    # PHASE 10 OLD: CONSTRUCTION & MAINTENANCE COSTS (8 trains/track)
     ##################################################################################
-    construction_and_maintenance_costs = \
-        phase_10_construction_maintenance_costs(monetized_tt, runtimes)
+    phase_10_old_construction_maintenance_costs(monetized_tt, runtimes)
 
     ##################################################################################
-    # PHASE 11: COST-BENEFIT INTEGRATION
+    # PHASE 11 OLD: COST-BENEFIT INTEGRATION (8 trains/track)
     ##################################################################################
-    costs_and_benefits_old_discounted, costs_and_benefits_discounted = \
-        phase_11_cost_benefit_integration(construction_and_maintenance_costs, runtimes)
+    phase_11_old_cost_benefit_integration(runtimes)
 
     ##################################################################################
-    # PHASE 12: COST AGGREGATION
+    # PHASE 12 OLD: COST AGGREGATION (8 trains/track)
     ##################################################################################
-    phase_12_cost_aggregation(runtimes)
+    phase_12_old_cost_aggregation(runtimes)
+
+    ##################################################################################
+    # PHASE 10 NEW: CONSTRUCTION & MAINTENANCE COSTS (Capacity Interventions)
+    ##################################################################################
+    phase_10_new_construction_maintenance_costs(monetized_tt, runtimes)
+
+    ##################################################################################
+    # PHASE 11 NEW: COST-BENEFIT INTEGRATION (Capacity Interventions)
+    ##################################################################################
+    phase_11_new_cost_benefit_integration(runtimes)
+
+    ##################################################################################
+    # PHASE 12 NEW: COST AGGREGATION (Capacity Interventions)
+    ##################################################################################
+    phase_12_new_cost_aggregation(runtimes)
 
     ##################################################################################
     # PHASE 13: RESULTS VISUALIZATION
     ##################################################################################
     phase_13_results_visualization(runtimes)
- 
+  
     ##################################################################################
     # SAVE RUNTIMES
     ##################################################################################
@@ -1390,7 +1525,8 @@ def add_construction_info_to_network():
             'tot length m', 'length of 1', 'length of 2 ', 'length of 3 and more']
     df_railway_network = gpd.read_file(paths.RAIL_SERVICES_AK2035_PATH)
     df_const_costs = pd.read_csv(const_cost_path, sep=";", decimal=",")
-    df_const_costs_grouped = df_const_costs.groupby(['FromNode', 'ToNode'], as_index=False)[rows].sum()
+    # In add_construction_info_to_network(), line 1496:
+    df_const_costs_grouped = df_const_costs.groupby(['FromNode', 'ToNode'], as_index=False)[rows].mean()
     new_columns = [col for col in rows if col not in df_railway_network.columns]
     if new_columns:
         df_railway_network[new_columns] = 0
@@ -1631,7 +1767,7 @@ def compute_tts(dev_id_lookup, od_times_dev, od_times_status_quo, use_cache=Fals
     return dev_list, monetized_tt, scenario_list
 
 
-def generate_infra_development(use_cache, mod_type):
+def generate_infra_development(use_cache, mod_type, generate_plots=True):
     """Generate infrastructure development scenarios."""
     if use_cache:
         print("  ⚠ Using cached developments - skipping generation and plotting")
@@ -1659,11 +1795,16 @@ def generate_infra_development(use_cache, mod_type):
         print("Identifying missing connections...")
         missing_connections = get_missing_connections(G, pos, print_results=True,
                                                       polygon=settings.perimeter_infra_generation)
-        print(f"  → Plotting graph to {paths.PLOT_DIRECTORY}")
-        plot_graph(G, pos, highlight_centers=True, missing_links=missing_connections,
-                   directory=paths.PLOT_DIRECTORY,
-                   polygon=settings.perimeter_infra_generation)
-        print(f"  ✓ Graph plot complete")
+
+        # Conditional plotting based on global visualization config
+        if generate_plots:
+            print(f"  → Plotting graph to {paths.PLOT_DIRECTORY}")
+            plot_graph(G, pos, highlight_centers=True, missing_links=missing_connections,
+                       directory=paths.PLOT_DIRECTORY,
+                       polygon=settings.perimeter_infra_generation)
+            print(f"  ✓ Graph plot complete")
+        else:
+            print(f"  → Skipping graph plot (visualization disabled)")
 
         # Generate potential new railway lines
         print("\n=== GENERATING NEW RAILWAY LINES ===")
@@ -1677,14 +1818,18 @@ def generate_infra_development(use_cache, mod_type):
         export_new_railway_lines(new_railway_lines, pos, paths.NEW_RAILWAY_LINES_PATH)
         print("\nNew railway lines exported to paths.NEW_RAILWAY_LINES_PATH")
 
-        # Visualize the new railway lines
-        print("\n=== VISUALIZATION ===")
-        print("Creating visualization of the network with highlighted missing connections...")
+        # Conditional visualization based on global config
+        if generate_plots:
+            print("\n=== VISUALIZATION ===")
+            print("Creating visualization of the network with highlighted missing connections...")
 
-        plots_dir = "plots/missing_connections"
-        print(f"  → Creating individual plots in {plots_dir}/")
-        plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir)
-        print(f"  ✓ Individual plots complete")
+            plots_dir = "plots/missing_connections"
+            print(f"  → Creating individual plots in {plots_dir}/")
+            plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir)
+            print(f"  ✓ Individual plots complete")
+        else:
+            print("\n  → Skipping missing connections visualization (visualization disabled)")
+
         add_railway_lines_to_new_links(paths.NEW_RAILWAY_LINES_PATH, mod_type,
                                        paths.NEW_LINKS_UPDATED_PATH, settings.rail_network)
 
@@ -1738,21 +1883,32 @@ def visualize_results(clear_plot_directory=False, plot_preferences=None):
             except Exception as e:
                 print(f"Error while clearing {file_path}: {e}")
 
-    # Generate all visualizations
-    plotting(input_file="data/costs/total_costs_with_geometry.gpkg",
-             output_file="data/costs/processed_costs.gpkg",
-             node_file="data/Network/Rail_Node.xlsx")
-    
-    # Make a plot of the developments
-    plot_developments_expand_by_one_station()
-    
-    # Load the dataset and generate plots with user preferences
-    results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
-    railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
-    create_and_save_plots(df=results_raw, railway_lines=railway_lines, plot_preferences=plot_preferences)
-    
-    # Plot cumulative cost distribution
-    plot_cumulative_cost_distribution(results_raw, "plots/cumulative_cost_distribution.png")
+    # Check if any plots should be generated at all
+    if plot_preferences is None:
+        plot_preferences = {}
+
+    any_plots_enabled = any(plot_preferences.values()) if plot_preferences else False
+
+    # Generate core visualizations if any plot type is enabled
+    if any_plots_enabled:
+        # Generate all visualizations (data processing + plotting)
+        plotting(input_file="data/costs/total_costs_with_geometry.gpkg",
+                 output_file="data/costs/processed_costs.gpkg",
+                 node_file="data/Network/Rail_Node.xlsx")
+
+        # Make a plot of the developments
+        if plot_preferences.get('small_developments', False):
+            plot_developments_expand_by_one_station()
+
+        # Load the dataset and generate plots with user preferences
+        results_raw = pd.read_csv("data/costs/total_costs_raw.csv")
+        railway_lines = gpd.read_file(paths.NEW_RAILWAY_LINES_PATH)
+        create_and_save_plots(df=results_raw, railway_lines=railway_lines, plot_preferences=plot_preferences)
+
+        # Plot cumulative cost distribution (always include if any plots enabled)
+        plot_cumulative_cost_distribution(results_raw, "plots/cumulative_cost_distribution.png")
+    else:
+        print("  → Skipping all result visualizations (no plot types selected)")
 
 
 # ================================================================================

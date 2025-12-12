@@ -425,14 +425,6 @@ def run_enhanced_workflow(
         print("\nPlease complete Phase 3 (sections calculation) first.")
         return 1
 
-    # User confirmation
-    response = input("Proceed with Phase 4 execution? (y/n): ")
-    if response.lower() not in ['y', 'yes']:
-        print("Aborted by user.")
-        return 0
-
-    print()
-
     try:
         # Load Phase 3 outputs
         print("Loading Phase 3 outputs...")

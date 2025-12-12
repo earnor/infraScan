@@ -2005,12 +2005,35 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots", plot_prefer
     dev_to_conn = railway_lines.set_index('name')['missing_connection'].to_dict()
     df['missing_connection'] = df['development'].map(lambda x: dev_to_conn.get(f"X{int(x) - 101000}", "unknown"))
 
+    # Load Sline data if not already present in df
+    if 'Sline' not in df.columns:
+        try:
+            # Load Sline from updated_new_links.gpkg
+            sline_data = gpd.read_file("data/Network/processed/updated_new_links.gpkg")[['dev_id', 'Sline']]
+            # Get unique Sline per dev_id (they should all be the same for each dev_id)
+            sline_data = sline_data.groupby('dev_id')['Sline'].first().reset_index()
+            # Merge into df
+            df = df.merge(sline_data, left_on='development', right_on='dev_id', how='left')
+            # Drop the dev_id column if it was created
+            if 'dev_id' in df.columns:
+                df = df.drop(columns=['dev_id'])
+            print("  → Sline data loaded from updated_new_links.gpkg")
+        except Exception as e:
+            print(f"  ⚠ Warning: Could not load Sline data: {e}")
+
     df['line_name'] = None  # Initialisierung
 
-    # Für IDs, die mit 100... beginnen → ohne X
-    df.loc[df['development'] < 101000, 'line_name'] = \
-        df['development'].loc[df['development'] < 101000].map(
-            lambda x: str(int(x - 100000)))
+    # Für IDs, die mit 100... beginnen → ohne X, aber mit Sline suffix (e.g., "2_G")
+    # Check if Sline column exists for small developments
+    if 'Sline' in df.columns:
+        df.loc[df['development'] < 101000, 'line_name'] = \
+            df.loc[df['development'] < 101000].apply(
+                lambda row: f"{int(row['development'] - 100000)}_{row['Sline']}", axis=1)
+    else:
+        # Fallback if Sline is not available
+        df.loc[df['development'] < 101000, 'line_name'] = \
+            df['development'].loc[df['development'] < 101000].map(
+                lambda x: str(int(x - 100000)))
 
     # Für IDs, die mit 101... beginnen → mit X
     df.loc[df['development'] >= 101000, 'line_name'] = \
@@ -2225,12 +2248,11 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots", plot_prefer
         plt.close()
 
         # NEU: Kumulatives Verteilungsdiagramm für diese Datengruppe
-        data_copy = data.copy()
-        data_copy = data_copy.drop(columns=['development']).rename(columns={'line_name': 'development'})
+        # Use line_name directly as the grouping column
         cumulative_output_path = os.path.join(plot_directory, f"{filename_prefix}_cumulative_cost_distribution.png")
-        plot_cumulative_cost_distribution(data_copy, cumulative_output_path,
-                                          color_dict={dev: line_colors[dev] for dev in
-                                                      data_copy['development'].unique()})
+        plot_cumulative_cost_distribution(data, cumulative_output_path,
+                                          color_dict=line_colors,
+                                          group_by='line_name')
 
         return line_colors
 
@@ -2241,8 +2263,139 @@ def create_and_save_plots(df, railway_lines, plot_directory="plots", plot_prefer
     if plot_preferences['small_developments'] and not small_dev_data.empty:
         print("  → Generating plots for small developments (Expand 1 Stop)...")
         order = small_dev_data.groupby('line_name')['total_net_benefit'].mean().sort_values(ascending=False).index.tolist()
-        line_colors_small = {line_name: 'none' for line_name in order}
+        # Apply ZVV color palette to small developments
+        line_colors_small = {line_name: zvv_colors[i % len(zvv_colors)] for i, line_name in enumerate(order)}
         line_colors_small = plot_basic_charts(small_dev_data, "Expand_1_Stop", plot_directory=benefits_dir, line_colors=line_colors_small)
+
+    # ============================================================================
+    # RANKED GROUPS - EXPAND LINES ONLY
+    # ============================================================================
+    if plot_preferences['ranked_groups'] and not small_dev_data.empty:
+        print("  → Generating ranked plot for expand lines...")
+
+        # Use existing Benefits_Ranked directory
+        os.makedirs(benefits_ranked_dir, exist_ok=True)
+        os.makedirs(benefits_ranked_combined_dir, exist_ok=True)
+
+        # Rank all small developments by mean net benefit (all in one plot named "ranked_group_expand")
+        ranked_small_dev = small_dev_data.groupby('line_name')['total_net_benefit'].mean().sort_values(ascending=False)
+        ranked_line_names = ranked_small_dev.index.tolist()
+
+        # Use all expand lines in a single plot
+        ranked_filename_prefix = "ranked_group_expand"
+
+        # Generate chart plots with consistent colors (preserve ranking order)
+        ranked_line_colors = {line_name: zvv_colors[i % len(zvv_colors)]
+                             for i, line_name in enumerate(ranked_line_names)}
+
+        plot_basic_charts(small_dev_data, ranked_filename_prefix,
+                         plot_directory=benefits_ranked_dir,
+                         line_colors=ranked_line_colors)
+
+        # Generate network maps and combined plots if requested
+        if plot_preferences['combined_with_maps']:
+
+            # Load network data if not already loaded
+            if 'G' not in locals() or 'pos' not in locals():
+                df_network = gpd.read_file(settings.infra_generation_rail_network)
+                df_points = gpd.read_file(r'data\Network\processed\points.gpkg')
+                generate_infrastructure = importlib.import_module('generate_infrastructure')
+                G, pos = generate_infrastructure.prepare_Graph(df_network, df_points)
+
+            # Get all line names for expand developments
+            expand_line_names = small_dev_data['line_name'].unique()
+
+            # Filter railway_lines to get geometries for expand developments
+            # For expand lines, railway_lines["name"] should match the base development number
+            # e.g., development 100002 → railway_lines name "2"
+            # Extract just the base numbers from line_name (e.g., "2_G" → "2")
+            expand_base_numbers = list(set([line_name.split('_')[0] for line_name in expand_line_names]))
+
+            # Filter railway_lines by these base numbers
+            filtered_lines = railway_lines[railway_lines["name"].isin(expand_base_numbers)]
+
+            print(f"    → Expand base numbers: {expand_base_numbers}")
+            print(f"    → Found {len(filtered_lines)} railway lines matching expand developments")
+
+            if not filtered_lines.empty:
+                filtered_lines = filtered_lines.copy()
+                filtered_lines['path'] = filtered_lines['path'].str.split(',')
+
+                # Create records dict with colors
+                filtered_lines_dict = filtered_lines.to_dict(orient='records')
+
+                # Map colors: railway_lines uses "name" (e.g., "2"), but we need to map to "line_name" (e.g., "2_G")
+                # Create a mapping from base line number to line_name with Sline
+                line_num_to_full_name = {}
+                for line_name in expand_line_names:
+                    # Extract base number from line_name (e.g., "2_G" → "2")
+                    base_num = line_name.split('_')[0]
+                    if base_num not in line_num_to_full_name:
+                        line_num_to_full_name[base_num] = []
+                    line_num_to_full_name[base_num].append(line_name)
+
+                # Assign colors to records based on the first matching line_name
+                for record in filtered_lines_dict:
+                    base_line_name = record["name"]
+                    if base_line_name in line_num_to_full_name:
+                        # Use the first full line_name for this base number
+                        full_line_name = line_num_to_full_name[base_line_name][0]
+                        if full_line_name in ranked_line_colors:
+                            record["color"] = ranked_line_colors[full_line_name]
+
+                # Generate network map
+                map_filename = f"railway_lines_{ranked_filename_prefix}.png"
+                map_output_path = os.path.join("plots", map_filename)
+
+                plot_railway_lines_only(
+                    G, pos, filtered_lines_dict, map_output_path,
+                    color_dict=ranked_line_colors, selected_stations=pp.selected_stations
+                )
+
+                # Combine images for each chart type
+                for suffix in [
+                    "boxplot_savings",
+                    "violinplot_savings",
+                    "boxplot_net_benefit",
+                    "boxplot_cba",
+                    "cost_savings",
+                    "cumulative_cost_distribution"
+                ]:
+                    chart_path = os.path.join(benefits_ranked_dir, f"{ranked_filename_prefix}_{suffix}.png")
+                    map_path = os.path.join("plots", f"railway_lines_{ranked_filename_prefix}.png")
+                    combined_path = os.path.join(benefits_ranked_combined_dir, f"{ranked_filename_prefix}_{suffix}_combined.png")
+
+                    try:
+                        if not os.path.exists(chart_path):
+                            print(f"    ⚠ Chart not found: {chart_path}")
+                            continue
+                        if not os.path.exists(map_path):
+                            print(f"    ⚠ Map not found: {map_path}")
+                            continue
+
+                        map_image = Image.open(map_path)
+                        chart_image = Image.open(chart_path)
+
+                        target_height = max(map_image.height, chart_image.height)
+
+                        def resize_to_height(img, target_h):
+                            w, h = img.size
+                            new_w = int(w * (target_h / h))
+                            return img.resize((new_w, target_h), Image.LANCZOS)
+
+                        map_image_resized = resize_to_height(map_image, target_height)
+                        chart_image_resized = resize_to_height(chart_image, target_height)
+
+                        total_width = map_image_resized.width + chart_image_resized.width
+                        combined = Image.new("RGB", (total_width, target_height), (255, 255, 255))
+                        combined.paste(map_image_resized, (0, 0))
+                        combined.paste(chart_image_resized, (map_image_resized.width, 0))
+                        combined.save(combined_path)
+
+                    except Exception as e:
+                        print(f"    ⚠ Error combining images for {ranked_filename_prefix}_{suffix}: {e}")
+            else:
+                print(f"    ⚠ No railway lines found for expand developments")
 
     # ============================================================================
     # GROUPED BY MISSING CONNECTION
@@ -2558,7 +2711,7 @@ def plot_costs_benefits(cost_benefit_df, line=None, output_dir="plots"):
             dev_data = cost_benefit_df.xs(line, level='development')
         except KeyError:
             # Falls der angegebene Wert nicht existiert, verwende die Entwicklung mit dem höchsten Nutzen
-            print(f"Entwicklung {line} nicht gefunden. Verwende Entwicklung mit höchstem Nutzen.")
+            print(f"Development {line} not found. Use development with the highest benefit.")
             year1_benefits = cost_benefit_df.xs(min_year, level='year')
             max_benefit_dev = year1_benefits.groupby('development')['benefit'].mean().idxmax()
             dev_data = cost_benefit_df.xs(max_benefit_dev, level='development')
@@ -2667,7 +2820,7 @@ def plot_costs_benefits(cost_benefit_df, line=None, output_dir="plots"):
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close()
 
-    print(f"Diagramm für Entwicklung {line} als {filename} gespeichert.")
+    print(f"Plot for development {line} saved as {filename}")
 
 
 def plot_lines_to_network(points_gdf,lines_gdf):
@@ -3507,7 +3660,7 @@ def plot_lines_for_each_missing_connection(new_railway_lines, G, pos, plots_dir)
         plot_missing_connection_lines(G, pos, new_railway_lines, connection, filename)
 
 
-def plot_cumulative_cost_distribution(df, output_path="plot/cumulative_cost_distribution.png", color_dict=None):
+def plot_cumulative_cost_distribution(df, output_path="plot/cumulative_cost_distribution.png", color_dict=None, group_by='development'):
     """
     Erstellt eine kumulative Wahrscheinlichkeitsverteilung des Nettonutzens
     für alle im DataFrame enthaltenen Entwicklungen.
@@ -3515,13 +3668,15 @@ def plot_cumulative_cost_distribution(df, output_path="plot/cumulative_cost_dist
     Args:
         df: DataFrame mit den Kostendaten (monetized_savings_total)
         output_path: Pfad zum Speichern der Abbildung
+        color_dict: Optional color dictionary for developments/lines
+        group_by: Column to group by ('development' or 'line_name')
     """
-    # Mittelwert für jede Entwicklung berechnen
-    mean_by_dev = df.groupby('development')['monetized_savings_total'].mean().reset_index()
+    # Mittelwert für jede Entwicklung/Linie berechnen
+    mean_by_dev = df.groupby(group_by)['monetized_savings_total'].mean().reset_index()
 
     # Sortieren nach Mittelwert für konsistente Farben/Legende
     sorted_devs = mean_by_dev.sort_values(by='monetized_savings_total', ascending=False)
-    dev_ids_sorted = sorted_devs['development'].tolist()
+    dev_ids_sorted = sorted_devs[group_by].tolist()
 
     # Erstellen einer Figur
     plt.figure(figsize=(10, 6))
@@ -3534,7 +3689,7 @@ def plot_cumulative_cost_distribution(df, output_path="plot/cumulative_cost_dist
 
     # Kumulative Verteilungen plotten
     for i, dev_id in enumerate(dev_ids_sorted):
-        dev_data = df[df['development'] == dev_id]
+        dev_data = df[df[group_by] == dev_id]
         values = dev_data['monetized_savings_total'].dropna().values / 1_000_000  # in Mio. CHF
         values = np.sort(values)
         y_values = np.arange(1, len(values) + 1) / len(values)
@@ -3580,7 +3735,7 @@ def plot_cumulative_cost_distribution(df, output_path="plot/cumulative_cost_dist
     plt.close()
 
 
-def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bahnnetz",
+def plot_flow_graph(flow_graph, output_path=None, title="Passenger flows on the rail network",
                     node_size=100, node_color='skyblue', edge_scale=0.001, figsize=(20, 16),
                     selected_stations=None, plot_perimeter=False, style='absolute'):
     """
@@ -3644,7 +3799,7 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
 
     flows = list(combined_flows.values())
     if not flows:
-        raise ValueError("Keine Flüsse im Graphen gefunden")
+        raise ValueError("No passenger flows were found in the graph")
 
     min_flow = min(flows)
     max_flow = max(flows)
@@ -3662,7 +3817,7 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
         # Finde das Maximum der absoluten Differenzwerte für symmetrische Skala
         max_abs_flow = max(abs(min_flow), abs(max_flow))
         norm = Normalize(vmin=-max_abs_flow, vmax=max_abs_flow)
-        cbar_label = 'Flussänderung (Differenz)'
+        cbar_label = 'Flow change (difference)'
 
     nx.draw_networkx_nodes(flow_graph, pos,
                            node_size=node_size,
@@ -3761,17 +3916,17 @@ def plot_flow_graph(flow_graph, output_path=None, title="Passagierflüsse im Bah
 
     total_flow = sum(flows)
     if style == 'absolute':
-        text_info = (f"Gesamtfluss: {total_flow:.0f} Passagiere\n"
-                     f"Max. Fluss: {max_flow:.0f}\n"
-                     f"Min. Fluss: {min_flow:.0f}\n"
-                     f"Anzahl Kanten: {len(combined_flows)}")
+        text_info = (f"Total flow: {total_flow:.0f} passengers\n"
+                     f"Max. flow: {max_flow:.0f}\n"
+                     f"Min. flow: {min_flow:.0f}\n"
+                     f"Number of edges: {len(combined_flows)}")
     else:
         pos_sum = sum(flow for flow in flows if flow > 0)
         neg_sum = sum(flow for flow in flows if flow < 0)
-        text_info = (f"Gesamtänderung: {total_flow:.0f} Passagiere\n"
-                     f"Positive Änderung: +{pos_sum:.0f}\n"
-                     f"Negative Änderung: {neg_sum:.0f}\n"
-                     f"Anzahl Kanten: {len(combined_flows)}")
+        text_info = (f"Net change: {total_flow:.0f} passengers\n"
+                     f"Positive change: +{pos_sum:.0f}\n"
+                     f"Negative change: {neg_sum:.0f}\n"
+                     f"Number of edges: {len(combined_flows)}")
 
     plt.figtext(0.01, 0.01, text_info, fontsize=10,
                 bbox=dict(facecolor='white', alpha=0.7, boxstyle='round'))
@@ -3939,3 +4094,1136 @@ def plot_line_flows(line_flow_graph, s_bahn_geopackage_path, output_path):
     print(f"Linienauslastungs-Plots gespeichert unter: {output_path}")
 
     return fig
+
+
+# ================================================================================
+# PIPELINE COMPARISON PLOTTING (OLD vs NEW)
+# ================================================================================
+
+def create_ranked_pipeline_comparison_plots(
+    plot_directory="plots",
+    top_n_list=[5, 10]
+):
+    """
+    Create comparison plots showing top N developments ranked by net benefit,
+    comparing old pipeline (8 trains/track) vs new pipeline (capacity interventions).
+
+    Args:
+        plot_directory: Base directory for plots (default: "plots")
+        top_n_list: List of top N values to generate plots for (default: [5, 10])
+
+    Outputs:
+        For each N in top_n_list, generates 3 plot types in plots/Benefits_Pipeline_Comparison/:
+        - ranked_topN_boxplot_cba_comparison.png
+        - ranked_topN_boxplot_net_benefit_comparison.png
+        - ranked_topN_cost_savings_comparison.png
+    """
+    print("\n" + "="*80)
+    print("GENERATING PIPELINE COMPARISON PLOTS (OLD vs NEW)")
+    print("="*80 + "\n")
+
+    # Create output directory
+    comparison_dir = os.path.join(plot_directory, "Benefits_Pipeline_Comparison")
+    os.makedirs(comparison_dir, exist_ok=True)
+
+    # Load data from both pipelines
+    new_data_path = "data/costs/total_costs_raw.csv"
+    old_data_path = "data/costs/total_costs_raw_old.csv"
+
+    if not os.path.exists(new_data_path):
+        print(f"  ⚠ New pipeline data not found: {new_data_path}")
+        print(f"  → Skipping pipeline comparison plots")
+        return
+
+    if not os.path.exists(old_data_path):
+        print(f"  ⚠ Old pipeline data not found: {old_data_path}")
+        print(f"  → Skipping pipeline comparison plots")
+        return
+
+    print(f"  Loading new pipeline data: {new_data_path}")
+    print(f"  Loading old pipeline data: {old_data_path}")
+
+    # Load and prepare both datasets
+    df_new = _prepare_pipeline_data(new_data_path, pipeline='new')
+    df_old = _prepare_pipeline_data(old_data_path, pipeline='old')
+
+    # Rank developments by NEW pipeline mean net benefit
+    print(f"\n  Ranking developments by new pipeline mean net benefit...")
+    rankings = df_new.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
+
+    print(f"  Total developments: {len(rankings)}")
+    print(f"  Top development: {rankings.index[0]} (mean net benefit: {rankings.iloc[0]/1e6:.2f} M CHF)")
+
+    # Get ZVV colors
+    zvv_colors = pp.zvv_colors
+
+    # Generate plots for each top N
+    for N in top_n_list:
+        print(f"\n  {'='*70}")
+        print(f"  Generating plots for TOP {N} developments")
+        print(f"  {'='*70}")
+
+        # Get top N development IDs
+        top_dev_ids = rankings.head(N).index.tolist()
+
+        print(f"  Top {N} developments: {top_dev_ids}")
+
+        # Filter both datasets to top N
+        df_new_top = df_new[df_new['development'].isin(top_dev_ids)].copy()
+        df_old_top = df_old[df_old['development'].isin(top_dev_ids)].copy()
+
+        # Check for missing developments in old pipeline
+        new_devs = set(df_new_top['development'].unique())
+        old_devs = set(df_old_top['development'].unique())
+        missing_in_old = new_devs - old_devs
+
+        if missing_in_old:
+            print(f"  ⚠ Warning: {len(missing_in_old)} developments in new pipeline not found in old pipeline")
+            print(f"    Missing: {missing_in_old}")
+            print(f"    These will be skipped in comparison plots")
+            # Filter out missing developments
+            top_dev_ids = [dev for dev in top_dev_ids if dev in old_devs]
+            df_new_top = df_new_top[df_new_top['development'].isin(top_dev_ids)]
+
+        # Combine datasets
+        df_combined = pd.concat([df_new_top, df_old_top], ignore_index=True)
+
+        # Assign colors to developments (consistent across both pipelines)
+        color_map = {dev: zvv_colors[i % len(zvv_colors)]
+                     for i, dev in enumerate(top_dev_ids)}
+
+        # Generate each plot type
+        print(f"\n  Generating boxplot CBA comparison...")
+        _plot_boxplot_cba_comparison(df_combined, color_map, top_dev_ids, N, comparison_dir)
+
+        print(f"  Generating boxplot net benefit comparison...")
+        _plot_boxplot_net_benefit_comparison(df_combined, color_map, top_dev_ids, N, comparison_dir)
+
+        print(f"  Generating cost savings comparison...")
+        _plot_cost_savings_comparison(df_combined, color_map, top_dev_ids, N, comparison_dir)
+
+    print(f"\n  {'='*70}")
+    print(f"  ✓ All pipeline comparison plots saved to: {comparison_dir}")
+    print(f"  {'='*70}\n")
+
+
+def _prepare_pipeline_data(file_path, pipeline='new'):
+    """
+    Load and prepare pipeline data with consistent structure.
+
+    Args:
+        file_path: Path to CSV file
+        pipeline: 'new' or 'old' to label the data source
+
+    Returns:
+        DataFrame with columns: development, line_name, scenario, pipeline,
+                                monetized_savings_total, total_costs, total_net_benefit, cba_ratio
+    """
+    df = pd.read_csv(file_path)
+
+    # Rename columns to match expected format
+    if 'ID_new' in df.columns:
+        df.rename(columns={'ID_new': 'scenario'}, inplace=True)
+
+    # Calculate derived metrics
+    df['monetized_savings_total'] = df['monetized_savings_total'].abs()
+    df['total_costs'] = (df['TotalConstructionCost'] +
+                         df['TotalMaintenanceCost'] +
+                         df['TotalUncoveredOperatingCost'])
+    df['total_net_benefit'] = df['monetized_savings_total'] - df['total_costs']
+    df['cba_ratio'] = df['monetized_savings_total'] / df['total_costs']
+
+    # Add pipeline identifier
+    df['pipeline'] = pipeline
+
+    # Load Sline data for line_name generation
+    try:
+        sline_data = gpd.read_file("data/Network/processed/updated_new_links.gpkg")[['dev_id', 'Sline']]
+        sline_data = sline_data.groupby('dev_id')['Sline'].first().reset_index()
+        df = df.merge(sline_data, left_on='development', right_on='dev_id', how='left')
+        if 'dev_id' in df.columns:
+            df = df.drop(columns=['dev_id'])
+    except Exception as e:
+        print(f"    ⚠ Warning: Could not load Sline data: {e}")
+
+    # Generate line_name
+    df['line_name'] = None
+
+    # Small developments (100xxx): format as "N_Sline"
+    if 'Sline' in df.columns:
+        df.loc[df['development'] < 101000, 'line_name'] = \
+            df.loc[df['development'] < 101000].apply(
+                lambda row: f"{int(row['development'] - 100000)}_{row['Sline']}"
+                if pd.notna(row['Sline']) else str(int(row['development'] - 100000)),
+                axis=1)
+    else:
+        df.loc[df['development'] < 101000, 'line_name'] = \
+            df['development'].loc[df['development'] < 101000].map(
+                lambda x: str(int(x - 100000)))
+
+    # Large developments (101xxx): format as "XN"
+    df.loc[df['development'] >= 101000, 'line_name'] = \
+        df['development'].loc[df['development'] >= 101000].map(
+            lambda x: f"X{int(x - 101000)}")
+
+    return df
+
+
+def _plot_boxplot_cba_comparison(df_combined, color_map, dev_order, N, output_dir):
+    """Generate boxplot comparing CBA ratios between old and new pipelines."""
+
+    # Prepare data for plotting
+    plot_data = []
+    for dev_id in dev_order:
+        dev_data = df_combined[df_combined['development'] == dev_id]
+        line_name = dev_data['line_name'].iloc[0]
+
+        # New pipeline data
+        new_data = dev_data[dev_data['pipeline'] == 'new']
+        for _, row in new_data.iterrows():
+            plot_data.append({
+                'development': dev_id,
+                'line_name': line_name,
+                'cba_ratio': row['cba_ratio'],
+                'pipeline': 'New',
+                'position': dev_order.index(dev_id) * 2  # Even positions
+            })
+
+        # Old pipeline data
+        old_data = dev_data[dev_data['pipeline'] == 'old']
+        for _, row in old_data.iterrows():
+            plot_data.append({
+                'development': dev_id,
+                'line_name': line_name,
+                'cba_ratio': row['cba_ratio'],
+                'pipeline': 'Old',
+                'position': dev_order.index(dev_id) * 2 + 0.5  # Odd positions (offset)
+            })
+
+    plot_df = pd.DataFrame(plot_data)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(max(7, N * 1.2), 5), dpi=300)
+
+    # Plot boxes for each development
+    for i, dev_id in enumerate(dev_order):
+        dev_subset = plot_df[plot_df['development'] == dev_id]
+        line_name = dev_subset['line_name'].iloc[0]
+        color = color_map[dev_id]
+
+        # New pipeline box
+        new_subset = dev_subset[dev_subset['pipeline'] == 'New']
+        if not new_subset.empty:
+            bp_new = ax.boxplot(
+                [new_subset['cba_ratio'].values],
+                positions=[i * 2.5],
+                widths=0.4,
+                patch_artist=True,
+                showmeans=True,
+                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+                flierprops={"markersize": 3},
+                boxprops={"facecolor": color, "alpha": 1.0, "edgecolor": "black", "linewidth": 0.8},
+                medianprops={"color": "black", "linewidth": 1.5},
+                whiskerprops={"color": "black", "linewidth": 0.8},
+                capprops={"color": "black", "linewidth": 0.8}
+            )
+
+        # Old pipeline box
+        old_subset = dev_subset[dev_subset['pipeline'] == 'Old']
+        if not old_subset.empty:
+            bp_old = ax.boxplot(
+                [old_subset['cba_ratio'].values],
+                positions=[i * 2.5 + 0.6],
+                widths=0.4,
+                patch_artist=True,
+                showmeans=True,
+                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+                flierprops={"markersize": 3},
+                boxprops={"facecolor": color, "alpha": 0.4, "edgecolor": "black", "linewidth": 0.8},
+                medianprops={"color": "black", "linewidth": 1.5},
+                whiskerprops={"color": "black", "linewidth": 0.8},
+                capprops={"color": "black", "linewidth": 0.8}
+            )
+
+    # Set x-axis labels
+    line_names = [plot_df[plot_df['development'] == dev]['line_name'].iloc[0] for dev in dev_order]
+    ax.set_xticks([i * 2.5 + 0.3 for i in range(len(dev_order))])
+    ax.set_xticklabels(line_names, rotation=90)
+
+    # Labels and formatting
+    ax.set_xlabel('Development', fontsize=12)
+    ax.set_ylabel('Cost-benefit ratio', fontsize=12)
+    ax.axhline(y=1, color='red', linestyle='-', alpha=0.5, label='Break-even (CBA = 1)')
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Legend
+    legend_handles = [
+        mpatches.Patch(facecolor='gray', alpha=1.0, edgecolor='black', label='New Pipeline'),
+        mpatches.Patch(facecolor='gray', alpha=0.4, edgecolor='black', label='Old Pipeline'),
+        mlines.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=5, linestyle='None'),
+        mlines.Line2D([0], [0], color='red', linestyle='-', alpha=0.5, label='Break-even (CBA = 1)')
+    ]
+    ax.legend(handles=legend_handles, loc='best', frameon=True, fontsize=10, fancybox=True, shadow=True)
+
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, f"ranked_top{N}_boxplot_cba_comparison.png")
+    plt.savefig(output_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+    print(f"    ✓ Saved: {output_path}")
+
+
+def _plot_boxplot_net_benefit_comparison(df_combined, color_map, dev_order, N, output_dir):
+    """Generate boxplot comparing net benefits between old and new pipelines."""
+
+    # Prepare data for plotting
+    plot_data = []
+    for dev_id in dev_order:
+        dev_data = df_combined[df_combined['development'] == dev_id]
+        line_name = dev_data['line_name'].iloc[0]
+
+        # New pipeline data
+        new_data = dev_data[dev_data['pipeline'] == 'new']
+        for _, row in new_data.iterrows():
+            plot_data.append({
+                'development': dev_id,
+                'line_name': line_name,
+                'net_benefit': row['total_net_benefit'] / 1e6,  # Convert to millions
+                'pipeline': 'New'
+            })
+
+        # Old pipeline data
+        old_data = dev_data[dev_data['pipeline'] == 'old']
+        for _, row in old_data.iterrows():
+            plot_data.append({
+                'development': dev_id,
+                'line_name': line_name,
+                'net_benefit': row['total_net_benefit'] / 1e6,  # Convert to millions
+                'pipeline': 'Old'
+            })
+
+    plot_df = pd.DataFrame(plot_data)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(max(7, N * 1.2), 5), dpi=300)
+
+    # Plot boxes for each development
+    for i, dev_id in enumerate(dev_order):
+        dev_subset = plot_df[plot_df['development'] == dev_id]
+        color = color_map[dev_id]
+
+        # New pipeline box
+        new_subset = dev_subset[dev_subset['pipeline'] == 'New']
+        if not new_subset.empty:
+            bp_new = ax.boxplot(
+                [new_subset['net_benefit'].values],
+                positions=[i * 2.5],
+                widths=0.4,
+                patch_artist=True,
+                showmeans=True,
+                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+                flierprops={"markersize": 3},
+                boxprops={"facecolor": color, "alpha": 1.0, "edgecolor": "black", "linewidth": 0.8},
+                medianprops={"color": "black", "linewidth": 1.5},
+                whiskerprops={"color": "black", "linewidth": 0.8},
+                capprops={"color": "black", "linewidth": 0.8}
+            )
+
+        # Old pipeline box
+        old_subset = dev_subset[dev_subset['pipeline'] == 'Old']
+        if not old_subset.empty:
+            bp_old = ax.boxplot(
+                [old_subset['net_benefit'].values],
+                positions=[i * 2.5 + 0.6],
+                widths=0.4,
+                patch_artist=True,
+                showmeans=True,
+                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+                flierprops={"markersize": 3},
+                boxprops={"facecolor": color, "alpha": 0.4, "edgecolor": "black", "linewidth": 0.8},
+                medianprops={"color": "black", "linewidth": 1.5},
+                whiskerprops={"color": "black", "linewidth": 0.8},
+                capprops={"color": "black", "linewidth": 0.8}
+            )
+
+    # Set x-axis labels
+    line_names = [plot_df[plot_df['development'] == dev]['line_name'].iloc[0] for dev in dev_order]
+    ax.set_xticks([i * 2.5 + 0.3 for i in range(len(dev_order))])
+    ax.set_xticklabels(line_names, rotation=90)
+
+    # Labels and formatting
+    ax.set_xlabel('Development', fontsize=12)
+    ax.set_ylabel('Net benefit in CHF million', fontsize=12)
+    ax.axhline(y=0, color='red', linestyle='-', alpha=0.5, label='Break-even (Net benefit = 0)')
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Legend
+    legend_handles = [
+        mpatches.Patch(facecolor='gray', alpha=1.0, edgecolor='black', label='New Pipeline'),
+        mpatches.Patch(facecolor='gray', alpha=0.4, edgecolor='black', label='Old Pipeline'),
+        mlines.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=5, linestyle='None'),
+        mlines.Line2D([0], [0], color='red', linestyle='-', alpha=0.5, label='Break-even')
+    ]
+    ax.legend(handles=legend_handles, loc='best', frameon=True, fontsize=10, fancybox=True, shadow=True)
+
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, f"ranked_top{N}_boxplot_net_benefit_comparison.png")
+    plt.savefig(output_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+    print(f"    ✓ Saved: {output_path}")
+
+
+def _plot_boxplot_savings_comparison(df_combined, color_map, dev_order, N, output_dir):
+    """Generate boxplot comparing travel time savings between old and new pipelines."""
+
+    # Prepare data for plotting
+    plot_data = []
+    for dev_id in dev_order:
+        dev_data = df_combined[df_combined['development'] == dev_id]
+        line_name = dev_data['line_name'].iloc[0]
+
+        # New pipeline data
+        new_data = dev_data[dev_data['pipeline'] == 'new']
+        for _, row in new_data.iterrows():
+            plot_data.append({
+                'development': dev_id,
+                'line_name': line_name,
+                'savings': row['monetized_savings_total'] / 1e6,  # Convert to millions
+                'pipeline': 'New'
+            })
+
+        # Old pipeline data
+        old_data = dev_data[dev_data['pipeline'] == 'old']
+        for _, row in old_data.iterrows():
+            plot_data.append({
+                'development': dev_id,
+                'line_name': line_name,
+                'savings': row['monetized_savings_total'] / 1e6,  # Convert to millions
+                'pipeline': 'Old'
+            })
+
+    plot_df = pd.DataFrame(plot_data)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(max(7, N * 1.2), 5), dpi=300)
+
+    # Plot boxes for each development
+    for i, dev_id in enumerate(dev_order):
+        dev_subset = plot_df[plot_df['development'] == dev_id]
+        color = color_map[dev_id]
+
+        # New pipeline box
+        new_subset = dev_subset[dev_subset['pipeline'] == 'New']
+        if not new_subset.empty:
+            bp_new = ax.boxplot(
+                [new_subset['savings'].values],
+                positions=[i * 2.5],
+                widths=0.4,
+                patch_artist=True,
+                showmeans=True,
+                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+                flierprops={"markersize": 3},
+                boxprops={"facecolor": color, "alpha": 1.0, "edgecolor": "black", "linewidth": 0.8},
+                medianprops={"color": "black", "linewidth": 1.5},
+                whiskerprops={"color": "black", "linewidth": 0.8},
+                capprops={"color": "black", "linewidth": 0.8}
+            )
+
+        # Old pipeline box
+        old_subset = dev_subset[dev_subset['pipeline'] == 'Old']
+        if not old_subset.empty:
+            bp_old = ax.boxplot(
+                [old_subset['savings'].values],
+                positions=[i * 2.5 + 0.6],
+                widths=0.4,
+                patch_artist=True,
+                showmeans=True,
+                meanprops={"marker": "o", "markerfacecolor": "black", "markeredgecolor": "black", "markersize": 5},
+                flierprops={"markersize": 3},
+                boxprops={"facecolor": color, "alpha": 0.4, "edgecolor": "black", "linewidth": 0.8},
+                medianprops={"color": "black", "linewidth": 1.5},
+                whiskerprops={"color": "black", "linewidth": 0.8},
+                capprops={"color": "black", "linewidth": 0.8}
+            )
+
+    # Set x-axis labels
+    line_names = [plot_df[plot_df['development'] == dev]['line_name'].iloc[0] for dev in dev_order]
+    ax.set_xticks([i * 2.5 + 0.3 for i in range(len(dev_order))])
+    ax.set_xticklabels(line_names, rotation=90)
+
+    # Labels and formatting
+    ax.set_xlabel('Development', fontsize=12)
+    ax.set_ylabel('Monetised travel time savings in million CHF', fontsize=12)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Legend
+    legend_handles = [
+        mpatches.Patch(facecolor='gray', alpha=1.0, edgecolor='black', label='New Pipeline (Capacity Interventions)'),
+        mpatches.Patch(facecolor='gray', alpha=0.4, edgecolor='black', label='Old Pipeline (8 trains/track)'),
+        mlines.Line2D([0], [0], marker='o', color='black', label='Mean', markersize=5, linestyle='None')
+    ]
+    ax.legend(handles=legend_handles, loc='upper right', frameon=False, fontsize=10)
+
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, f"ranked_top{N}_boxplot_savings_comparison.png")
+    plt.savefig(output_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+    print(f"    ✓ Saved: {output_path}")
+
+
+def _plot_violinplot_savings_comparison(df_combined, color_map, dev_order, N, output_dir):
+    """Generate violinplot comparing travel time savings between old and new pipelines."""
+
+    # Prepare data for plotting
+    plot_data = []
+    for dev_id in dev_order:
+        dev_data = df_combined[df_combined['development'] == dev_id]
+        line_name = dev_data['line_name'].iloc[0]
+
+        # New pipeline data
+        new_data = dev_data[dev_data['pipeline'] == 'new']
+        for _, row in new_data.iterrows():
+            plot_data.append({
+                'development': dev_id,
+                'line_name': line_name,
+                'savings': row['monetized_savings_total'] / 1e6,
+                'pipeline': 'New',
+                'scenario': row['scenario']
+            })
+
+        # Old pipeline data
+        old_data = dev_data[dev_data['pipeline'] == 'old']
+        for _, row in old_data.iterrows():
+            plot_data.append({
+                'development': dev_id,
+                'line_name': line_name,
+                'savings': row['monetized_savings_total'] / 1e6,
+                'pipeline': 'Old',
+                'scenario': row['scenario']
+            })
+
+    plot_df = pd.DataFrame(plot_data)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(max(7, N * 1.2), 5), dpi=300)
+
+    # Plot violins for each development
+    for i, dev_id in enumerate(dev_order):
+        dev_subset = plot_df[plot_df['development'] == dev_id]
+        color = color_map[dev_id]
+
+        # New pipeline violin
+        new_subset = dev_subset[dev_subset['pipeline'] == 'New']
+        if not new_subset.empty:
+            parts_new = ax.violinplot(
+                [new_subset['savings'].values],
+                positions=[i * 2.5],
+                widths=0.5,
+                showmeans=False,
+                showmedians=False,
+                showextrema=False
+            )
+            for pc in parts_new['bodies']:
+                pc.set_facecolor(color)
+                pc.set_alpha(1.0)
+                pc.set_edgecolor('black')
+                pc.set_linewidth(0.8)
+
+        # Old pipeline violin
+        old_subset = dev_subset[dev_subset['pipeline'] == 'Old']
+        if not old_subset.empty:
+            parts_old = ax.violinplot(
+                [old_subset['savings'].values],
+                positions=[i * 2.5 + 0.6],
+                widths=0.5,
+                showmeans=False,
+                showmedians=False,
+                showextrema=False
+            )
+            for pc in parts_old['bodies']:
+                pc.set_facecolor(color)
+                pc.set_alpha(0.4)
+                pc.set_edgecolor('black')
+                pc.set_linewidth(0.8)
+
+        # Add stripplot for individual points
+        # New pipeline points
+        if not new_subset.empty:
+            unique_new = new_subset.drop_duplicates(subset=['scenario'])
+            ax.scatter(
+                [i * 2.5] * len(unique_new),
+                unique_new['savings'].values,
+                color='black',
+                alpha=0.4,
+                s=10,
+                zorder=3
+            )
+
+        # Old pipeline points
+        if not old_subset.empty:
+            unique_old = old_subset.drop_duplicates(subset=['scenario'])
+            ax.scatter(
+                [i * 2.5 + 0.6] * len(unique_old),
+                unique_old['savings'].values,
+                color='black',
+                alpha=0.4,
+                s=10,
+                zorder=3
+            )
+
+    # Set x-axis labels
+    line_names = [plot_df[plot_df['development'] == dev]['line_name'].iloc[0] for dev in dev_order]
+    ax.set_xticks([i * 2.5 + 0.3 for i in range(len(dev_order))])
+    ax.set_xticklabels(line_names, rotation=90)
+
+    # Labels and formatting
+    ax.set_xlabel('Development', fontsize=12)
+    ax.set_ylabel('Monetised travel time savings in million CHF', fontsize=12)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Legend
+    legend_handles = [
+        mpatches.Patch(facecolor='gray', alpha=1.0, edgecolor='black', label='New Pipeline (Capacity Interventions)'),
+        mpatches.Patch(facecolor='gray', alpha=0.4, edgecolor='black', label='Old Pipeline (8 trains/track)'),
+        mlines.Line2D([], [], marker='o', color='black', alpha=0.4, linestyle='None', markersize=4, label='Individual Values')
+    ]
+    ax.legend(handles=legend_handles, loc='upper right', frameon=False, fontsize=10)
+
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, f"ranked_top{N}_violinplot_savings_comparison.png")
+    plt.savefig(output_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+    print(f"    ✓ Saved: {output_path}")
+
+
+def _plot_cost_savings_comparison(df_combined, color_map, dev_order, N, output_dir):
+    """Generate stacked bar chart comparing costs and savings between old and new pipelines."""
+
+    # Color scheme for cost components
+    kosten_farben = {
+        'TotalConstructionCost': '#a6bddb',
+        'TotalMaintenanceCost': '#3690c0',
+        'TotalUncoveredOperatingCost': '#034e7b',
+        'monetized_savings_total': '#31a354'
+    }
+
+    # Aggregate data by development and pipeline
+    summary_data = []
+    for dev_id in dev_order:
+        dev_data = df_combined[df_combined['development'] == dev_id]
+        line_name = dev_data['line_name'].iloc[0]
+
+        # New pipeline summary
+        new_data = dev_data[dev_data['pipeline'] == 'new']
+        if not new_data.empty:
+            summary_data.append({
+                'development': dev_id,
+                'line_name': line_name,
+                'pipeline': 'New',
+                'TotalConstructionCost': new_data['TotalConstructionCost'].mean(),
+                'TotalMaintenanceCost': new_data['TotalMaintenanceCost'].mean(),
+                'TotalUncoveredOperatingCost': new_data['TotalUncoveredOperatingCost'].mean(),
+                'monetized_savings_total': new_data['monetized_savings_total'].mean()
+            })
+
+        # Old pipeline summary
+        old_data = dev_data[dev_data['pipeline'] == 'old']
+        if not old_data.empty:
+            summary_data.append({
+                'development': dev_id,
+                'line_name': line_name,
+                'pipeline': 'Old',
+                'TotalConstructionCost': old_data['TotalConstructionCost'].mean(),
+                'TotalMaintenanceCost': old_data['TotalMaintenanceCost'].mean(),
+                'TotalUncoveredOperatingCost': old_data['TotalUncoveredOperatingCost'].mean(),
+                'monetized_savings_total': old_data['monetized_savings_total'].mean()
+            })
+
+    summary_df = pd.DataFrame(summary_data)
+
+    # Create figure
+    n_devs = len(dev_order)
+    fig, ax = plt.subplots(figsize=(max(7, n_devs * 1.2), 5), dpi=300)
+
+    bar_width = 0.4
+    x_positions = []
+
+    # Plot bars for each development
+    for i, dev_id in enumerate(dev_order):
+        dev_subset = summary_df[summary_df['development'] == dev_id]
+        color = color_map[dev_id]
+
+        # New pipeline bar (left)
+        new_subset = dev_subset[dev_subset['pipeline'] == 'New']
+        if not new_subset.empty:
+            row = new_subset.iloc[0]
+            x_pos = i * 2.5
+            x_positions.append(x_pos)
+
+            # Costs (negative)
+            construction = -row['TotalConstructionCost'] / 1e6
+            maintenance = -row['TotalMaintenanceCost'] / 1e6
+            operating = -row['TotalUncoveredOperatingCost'] / 1e6
+
+            ax.bar(x_pos, construction, width=bar_width,
+                   color=kosten_farben['TotalConstructionCost'], edgecolor='black', linewidth=0.5)
+            ax.bar(x_pos, maintenance, width=bar_width, bottom=construction,
+                   color=kosten_farben['TotalMaintenanceCost'], edgecolor='black', linewidth=0.5)
+            ax.bar(x_pos, operating, width=bar_width, bottom=construction + maintenance,
+                   color=kosten_farben['TotalUncoveredOperatingCost'], edgecolor='black', linewidth=0.5)
+
+            # Savings (positive) - with hatching to show new pipeline
+            ax.bar(x_pos, row['monetized_savings_total'] / 1e6, width=bar_width,
+                   color=color, hatch='////', edgecolor='black', linewidth=0.5, alpha=1.0)
+
+        # Old pipeline bar (right)
+        old_subset = dev_subset[dev_subset['pipeline'] == 'Old']
+        if not old_subset.empty:
+            row = old_subset.iloc[0]
+            x_pos = i * 2.5 + 0.6
+
+            # Costs (negative)
+            construction = -row['TotalConstructionCost'] / 1e6
+            maintenance = -row['TotalMaintenanceCost'] / 1e6
+            operating = -row['TotalUncoveredOperatingCost'] / 1e6
+
+            ax.bar(x_pos, construction, width=bar_width,
+                   color=kosten_farben['TotalConstructionCost'], edgecolor='black', linewidth=0.5, alpha=0.4)
+            ax.bar(x_pos, maintenance, width=bar_width, bottom=construction,
+                   color=kosten_farben['TotalMaintenanceCost'], edgecolor='black', linewidth=0.5, alpha=0.4)
+            ax.bar(x_pos, operating, width=bar_width, bottom=construction + maintenance,
+                   color=kosten_farben['TotalUncoveredOperatingCost'], edgecolor='black', linewidth=0.5, alpha=0.4)
+
+            # Savings (positive) - lighter color for old pipeline
+            ax.bar(x_pos, row['monetized_savings_total'] / 1e6, width=bar_width,
+                   color=color, hatch='...', edgecolor='black', linewidth=0.5, alpha=0.4)
+
+    # Set x-axis labels
+    line_names = [summary_df[summary_df['development'] == dev]['line_name'].iloc[0] for dev in dev_order]
+    ax.set_xticks([i * 2.5 + 0.3 for i in range(len(dev_order))])
+    ax.set_xticklabels(line_names, rotation=90)
+
+    # Labels and formatting
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=1)
+    ax.set_xlabel('Development', fontsize=12)
+    ax.set_ylabel('Value in CHF million', fontsize=12)
+    ax.set_title('Costs and benefits comparison (Old vs New Pipeline)', fontsize=14)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Legend - placed outside plot area
+    legend_handles = [
+        mpatches.Patch(color=kosten_farben['TotalConstructionCost'], label='Construction costs'),
+        mpatches.Patch(color=kosten_farben['TotalMaintenanceCost'], label='Uncovered maintenance costs'),
+        mpatches.Patch(color=kosten_farben['TotalUncoveredOperatingCost'], label='Uncovered operating costs'),
+        mpatches.Patch(facecolor='gray', hatch='////', edgecolor='black', alpha=1.0, label='Travel time savings (New Pipeline)'),
+        mpatches.Patch(facecolor='gray', hatch='...', edgecolor='black', alpha=0.4, label='Travel time savings (Old Pipeline)')
+    ]
+    ax.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1.01, 1), frameon=True, fontsize=10, fancybox=True, shadow=True)
+
+    plt.tight_layout(rect=[0, 0, 0.85, 1])  # Make room for legend on the right
+    output_path = os.path.join(output_dir, f"ranked_top{N}_cost_savings_comparison.png")
+    plt.savefig(output_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+    print(f"    ✓ Saved: {output_path}")
+
+
+# ================================================================================
+# ALL DEVELOPMENTS PIPELINE COMPARISON (OLD vs NEW)
+# ================================================================================
+
+def create_all_developments_pipeline_comparison_plots(plot_directory="plots"):
+    """
+    Create comparison plots for ALL developments comparing old vs new pipelines.
+
+    Generates:
+    1. CBA comparison (grouped bars)
+    2. Total cost change (diverging bars with red/green + hatching)
+    3. Scenario viability comparison (grouped bars with percentages)
+    4. Summary CSV with all metrics
+
+    Args:
+        plot_directory: Base directory for plots (default: "plots")
+
+    Outputs:
+        - all_developments_cba_comparison.png
+        - all_developments_cost_change_comparison.png
+        - all_developments_scenario_viability_comparison.png
+        - all_developments_pipeline_comparison_summary.csv
+    """
+    print("\n" + "="*80)
+    print("GENERATING ALL DEVELOPMENTS PIPELINE COMPARISON (OLD vs NEW)")
+    print("="*80 + "\n")
+
+    # Create output directory
+    comparison_dir = os.path.join(plot_directory, "Benefits_Pipeline_Comparison")
+    os.makedirs(comparison_dir, exist_ok=True)
+
+    # Load data from both pipelines
+    new_data_path = "data/costs/total_costs_raw.csv"
+    old_data_path = "data/costs/total_costs_raw_old.csv"
+
+    if not os.path.exists(new_data_path):
+        print(f"  ⚠ New pipeline data not found: {new_data_path}")
+        print(f"  → Skipping all developments comparison plots")
+        return
+
+    if not os.path.exists(old_data_path):
+        print(f"  ⚠ Old pipeline data not found: {old_data_path}")
+        print(f"  → Skipping all developments comparison plots")
+        return
+
+    print(f"  Loading new pipeline data: {new_data_path}")
+    print(f"  Loading old pipeline data: {old_data_path}")
+
+    # Load and prepare both datasets
+    df_new = _prepare_pipeline_data(new_data_path, pipeline='new')
+    df_old = _prepare_pipeline_data(old_data_path, pipeline='old')
+
+    # Get all developments
+    all_dev_ids = sorted(df_new['development'].unique())
+    print(f"\n  Total developments: {len(all_dev_ids)}")
+
+    # Rank by NEW pipeline mean net benefit
+    rankings = df_new.groupby('development')['total_net_benefit'].mean().sort_values(ascending=False)
+    dev_order = rankings.index.tolist()
+
+    # Get ZVV colors
+    zvv_colors = pp.zvv_colors
+
+    # Assign colors to developments
+    color_map = {dev: zvv_colors[i % len(zvv_colors)] for i, dev in enumerate(dev_order)}
+
+    # Combine datasets
+    df_combined = pd.concat([df_new, df_old], ignore_index=True)
+
+    # Generate plots
+    print(f"\n  Generating CBA comparison plot...")
+    _plot_all_cba_comparison(df_combined, color_map, dev_order, comparison_dir)
+
+    print(f"  Generating total cost change plot...")
+    _plot_all_cost_change(df_combined, color_map, dev_order, comparison_dir)
+
+    print(f"  Generating scenario viability comparison plot...")
+    _plot_all_scenario_viability(df_combined, color_map, dev_order, comparison_dir)
+
+    print(f"  Generating summary CSV...")
+    _generate_comparison_summary_csv(df_combined, dev_order, comparison_dir)
+
+    print(f"\n  {'='*70}")
+    print(f"  ✓ All developments comparison plots and CSV saved to: {comparison_dir}")
+    print(f"  {'='*70}\n")
+
+
+def _plot_all_cba_comparison(df_combined, color_map, dev_order, output_dir):
+    """Generate CBA comparison plot for all developments (vertical grouped bars)."""
+
+    # Calculate mean CBA for each development and pipeline
+    summary = df_combined.groupby(['development', 'pipeline'])['cba_ratio'].mean().reset_index()
+
+    # Create figure - dynamic width based on number of developments
+    n_devs = len(dev_order)
+    fig_width = max(12, n_devs * 0.3)
+    fig, ax = plt.subplots(figsize=(fig_width, 6), dpi=300)
+
+    bar_width = 0.35
+    x_positions = np.arange(n_devs)
+
+    # Prepare data for plotting
+    new_cbas = []
+    old_cbas = []
+    line_names = []
+
+    for dev_id in dev_order:
+        dev_data = summary[summary['development'] == dev_id]
+        line_name = df_combined[df_combined['development'] == dev_id]['line_name'].iloc[0]
+        line_names.append(line_name)
+
+        new_cba = dev_data[dev_data['pipeline'] == 'new']['cba_ratio'].values
+        old_cba = dev_data[dev_data['pipeline'] == 'old']['cba_ratio'].values
+
+        new_cbas.append(new_cba[0] if len(new_cba) > 0 else 0)
+        old_cbas.append(old_cba[0] if len(old_cba) > 0 else 0)
+
+    # Plot bars
+    for i, dev_id in enumerate(dev_order):
+        color = color_map[dev_id]
+
+        # New pipeline bar with hatching
+        ax.bar(x_positions[i] - bar_width/2, new_cbas[i], bar_width,
+               color=color, alpha=1.0, edgecolor='black', linewidth=0.5, hatch='////')
+
+        # Old pipeline bar with lighter hatching
+        ax.bar(x_positions[i] + bar_width/2, old_cbas[i], bar_width,
+               color=color, alpha=0.4, edgecolor='black', linewidth=0.5, hatch='...')
+
+    # Formatting
+    ax.set_xlabel('Development', fontsize=12)
+    ax.set_ylabel('Mean Cost-Benefit Ratio', fontsize=12)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(line_names, rotation=90, fontsize=8)
+    ax.axhline(y=1, color='red', linestyle='-', alpha=0.5, linewidth=1.5)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Legend
+    legend_handles = [
+        mpatches.Patch(facecolor='gray', hatch='////', alpha=1.0, edgecolor='black', label='New Pipeline'),
+        mpatches.Patch(facecolor='gray', hatch='...', alpha=0.4, edgecolor='black', label='Old Pipeline'),
+        mlines.Line2D([0], [0], color='red', linestyle='-', alpha=0.5, label='Break-even (CBA = 1)')
+    ]
+    ax.legend(handles=legend_handles, loc='best', frameon=True, fontsize=10, fancybox=True, shadow=True)
+
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, "all_developments_cba_comparison.png")
+    plt.savefig(output_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+    print(f"    ✓ Saved: {output_path}")
+
+
+def _plot_all_cost_change(df_combined, color_map, dev_order, output_dir):
+    """Generate total cost change plot for all developments (vertical diverging bars)."""
+
+    # Calculate mean total costs for each development and pipeline
+    summary = df_combined.groupby(['development', 'pipeline'])['total_costs'].mean().reset_index()
+
+    # Create figure - dynamic width based on number of developments
+    n_devs = len(dev_order)
+    fig_width = max(12, n_devs * 0.3)
+    fig, ax = plt.subplots(figsize=(fig_width, 6), dpi=300)
+
+    # Prepare data for plotting
+    cost_changes_abs = []  # Absolute change in CHF millions
+    cost_changes_pct = []  # Percentage change
+    line_names = []
+
+    for dev_id in dev_order:
+        dev_data = summary[summary['development'] == dev_id]
+        line_name = df_combined[df_combined['development'] == dev_id]['line_name'].iloc[0]
+        line_names.append(line_name)
+
+        new_cost = dev_data[dev_data['pipeline'] == 'new']['total_costs'].values
+        old_cost = dev_data[dev_data['pipeline'] == 'old']['total_costs'].values
+
+        if len(new_cost) > 0 and len(old_cost) > 0:
+            change_abs = (new_cost[0] - old_cost[0]) / 1e6  # Convert to millions
+            change_pct = ((new_cost[0] - old_cost[0]) / old_cost[0]) * 100 if old_cost[0] != 0 else 0
+        else:
+            change_abs = 0
+            change_pct = 0
+
+        cost_changes_abs.append(change_abs)
+        cost_changes_pct.append(change_pct)
+
+    # Plot bars with colors and hatching for colorblind accessibility
+    x_positions = np.arange(n_devs)
+    bar_width = 0.6
+
+    for i, (change_abs, change_pct) in enumerate(zip(cost_changes_abs, cost_changes_pct)):
+        if change_abs >= 0:
+            # Cost increase - red with diagonal hatching
+            ax.bar(x_positions[i], change_abs, bar_width,
+                   color='#d62728', alpha=0.7, edgecolor='black', linewidth=0.5,
+                   hatch='\\\\\\')
+        else:
+            # Cost decrease - green with opposite diagonal hatching
+            ax.bar(x_positions[i], change_abs, bar_width,
+                   color='#2ca02c', alpha=0.7, edgecolor='black', linewidth=0.5,
+                   hatch='///')
+
+    # Formatting
+    ax.set_xlabel('Development', fontsize=12)
+    ax.set_ylabel('Total Cost Change (New - Old) in CHF million', fontsize=12)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(line_names, rotation=90, fontsize=8)
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=1.5)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Add percentage change as secondary y-axis
+    ax2 = ax.twinx()
+    ax2.set_ylabel('Percentage Change (%)', fontsize=12)
+    max_abs_cost = max(abs(x) for x in cost_changes_abs) if cost_changes_abs else 1
+    max_abs_pct = max(abs(x) for x in cost_changes_pct) if cost_changes_pct else 1
+    if max_abs_cost > 0:
+        scale_factor = max_abs_pct / max_abs_cost
+        ax2.set_ylim(ax.get_ylim()[0] * scale_factor, ax.get_ylim()[1] * scale_factor)
+
+    # Legend
+    legend_handles = [
+        mpatches.Patch(facecolor='#d62728', hatch='\\\\\\', edgecolor='black', alpha=0.7, label='Cost Increase'),
+        mpatches.Patch(facecolor='#2ca02c', hatch='///', edgecolor='black', alpha=0.7, label='Cost Decrease'),
+        mlines.Line2D([0], [0], color='black', linestyle='-', label='No Change')
+    ]
+    ax.legend(handles=legend_handles, loc='best', frameon=True, fontsize=10, fancybox=True, shadow=True)
+
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, "all_developments_cost_change_comparison.png")
+    plt.savefig(output_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+    print(f"    ✓ Saved: {output_path}")
+
+
+def _plot_all_scenario_viability(df_combined, color_map, dev_order, output_dir):
+    """Generate scenario viability comparison plot for all developments (vertical grouped bars with percentages).
+
+    Only includes developments with at least one viable scenario in either pipeline.
+    """
+
+    # Calculate viability (net benefit > 0) for each development, pipeline, and scenario
+    df_combined['is_viable'] = df_combined['total_net_benefit'] > 0
+
+    # Count viable scenarios per development and pipeline
+    viability_summary = df_combined.groupby(['development', 'pipeline']).agg({
+        'is_viable': 'sum',  # Count of viable scenarios
+        'scenario': 'count'   # Total scenarios
+    }).reset_index()
+
+    viability_summary.columns = ['development', 'pipeline', 'viable_count', 'total_count']
+    viability_summary['viable_pct'] = (viability_summary['viable_count'] / viability_summary['total_count']) * 100
+
+    # Filter to only include developments with at least one viable scenario in either pipeline
+    # Get max viable count per development across both pipelines
+    max_viable_per_dev = viability_summary.groupby('development')['viable_count'].max()
+    devs_with_viable = max_viable_per_dev[max_viable_per_dev > 0].index.tolist()
+
+    # Filter dev_order to only include developments with viable scenarios
+    filtered_dev_order = [dev for dev in dev_order if dev in devs_with_viable]
+
+    if len(filtered_dev_order) == 0:
+        print(f"    ⚠ No developments with viable scenarios found - skipping viability plot")
+        return
+
+    # Create figure - dynamic width based on number of developments
+    n_devs = len(filtered_dev_order)
+    fig_width = max(12, n_devs * 0.3)
+    fig, ax = plt.subplots(figsize=(fig_width, 6), dpi=300)
+
+    bar_width = 0.35
+    x_positions = np.arange(n_devs)
+
+    # Prepare data for plotting (only for filtered developments)
+    new_viability_pct = []
+    old_viability_pct = []
+    line_names = []
+
+    for dev_id in filtered_dev_order:
+        dev_data = viability_summary[viability_summary['development'] == dev_id]
+        line_name = df_combined[df_combined['development'] == dev_id]['line_name'].iloc[0]
+        line_names.append(line_name)
+
+        new_pct = dev_data[dev_data['pipeline'] == 'new']['viable_pct'].values
+        old_pct = dev_data[dev_data['pipeline'] == 'old']['viable_pct'].values
+
+        new_viability_pct.append(new_pct[0] if len(new_pct) > 0 else 0)
+        old_viability_pct.append(old_pct[0] if len(old_pct) > 0 else 0)
+
+    # Plot bars
+    for i, dev_id in enumerate(filtered_dev_order):
+        color = color_map[dev_id]
+
+        # New pipeline bar with hatching
+        ax.bar(x_positions[i] - bar_width/2, new_viability_pct[i], bar_width,
+               color=color, alpha=1.0, edgecolor='black', linewidth=0.5, hatch='////')
+
+        # Old pipeline bar with lighter hatching
+        ax.bar(x_positions[i] + bar_width/2, old_viability_pct[i], bar_width,
+               color=color, alpha=0.4, edgecolor='black', linewidth=0.5, hatch='...')
+
+    # Formatting
+    ax.set_xlabel('Development', fontsize=12)
+    ax.set_ylabel('Viable Scenarios (%)', fontsize=12)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(line_names, rotation=90, fontsize=8)
+    ax.set_ylim(0, 105)  # 0-100% with slight margin
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Legend
+    legend_handles = [
+        mpatches.Patch(facecolor='gray', hatch='////', alpha=1.0, edgecolor='black', label='New Pipeline'),
+        mpatches.Patch(facecolor='gray', hatch='...', alpha=0.4, edgecolor='black', label='Old Pipeline')
+    ]
+    ax.legend(handles=legend_handles, loc='best', frameon=True, fontsize=10, fancybox=True, shadow=True)
+
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, "all_developments_scenario_viability_comparison.png")
+    plt.savefig(output_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+    print(f"    ✓ Saved: {output_path}")
+    print(f"    • Developments shown: {n_devs} (filtered from {len(dev_order)} total - only showing developments with ≥1 viable scenario)")
+
+
+def _generate_comparison_summary_csv(df_combined, dev_order, output_dir):
+    """Generate CSV summary of all comparison metrics."""
+
+    # Calculate all metrics
+    summary_data = []
+
+    # Mark viable scenarios
+    df_combined['is_viable'] = df_combined['total_net_benefit'] > 0
+
+    for dev_id in dev_order:
+        dev_data = df_combined[df_combined['development'] == dev_id]
+        line_name = dev_data['line_name'].iloc[0]
+
+        # Separate new and old pipeline data
+        new_data = dev_data[dev_data['pipeline'] == 'new']
+        old_data = dev_data[dev_data['pipeline'] == 'old']
+
+        # CBA metrics
+        mean_cba_new = new_data['cba_ratio'].mean() if len(new_data) > 0 else 0
+        mean_cba_old = old_data['cba_ratio'].mean() if len(old_data) > 0 else 0
+        cba_change = mean_cba_new - mean_cba_old
+
+        # Cost metrics
+        total_cost_new = new_data['total_costs'].mean() if len(new_data) > 0 else 0
+        total_cost_old = old_data['total_costs'].mean() if len(old_data) > 0 else 0
+        total_cost_change_chf = total_cost_new - total_cost_old
+        total_cost_change_pct = (total_cost_change_chf / total_cost_old * 100) if total_cost_old != 0 else 0
+
+        # Viability metrics
+        viable_scenarios_new = new_data['is_viable'].sum() if len(new_data) > 0 else 0
+        viable_scenarios_old = old_data['is_viable'].sum() if len(old_data) > 0 else 0
+        total_scenarios = new_data['scenario'].nunique() if len(new_data) > 0 else 0
+        viable_scenarios_change = viable_scenarios_new - viable_scenarios_old
+        viable_scenarios_new_pct = (viable_scenarios_new / total_scenarios * 100) if total_scenarios > 0 else 0
+        viable_scenarios_old_pct = (viable_scenarios_old / total_scenarios * 100) if total_scenarios > 0 else 0
+
+        # Net benefit (for sorting reference)
+        mean_net_benefit_new = new_data['total_net_benefit'].mean() if len(new_data) > 0 else 0
+
+        summary_data.append({
+            'development': dev_id,
+            'line_name': line_name,
+            'mean_cba_new': mean_cba_new,
+            'mean_cba_old': mean_cba_old,
+            'cba_change': cba_change,
+            'total_cost_new_chf': total_cost_new,
+            'total_cost_old_chf': total_cost_old,
+            'total_cost_change_chf': total_cost_change_chf,
+            'total_cost_change_pct': total_cost_change_pct,
+            'viable_scenarios_new': int(viable_scenarios_new),
+            'viable_scenarios_old': int(viable_scenarios_old),
+            'viable_scenarios_change': int(viable_scenarios_change),
+            'viable_scenarios_new_pct': viable_scenarios_new_pct,
+            'viable_scenarios_old_pct': viable_scenarios_old_pct,
+            'total_scenarios': int(total_scenarios),
+            'mean_net_benefit_new': mean_net_benefit_new
+        })
+
+    # Convert to DataFrame
+    summary_df = pd.DataFrame(summary_data)
+
+    # Save to CSV
+    output_path = os.path.join(output_dir, "all_developments_pipeline_comparison_summary.csv")
+    summary_df.to_csv(output_path, index=False)
+
+    print(f"    ✓ Saved: {output_path}")
+    print(f"    • Total developments: {len(summary_df)}")
+    print(f"    • Developments with improved CBA: {(summary_df['cba_change'] > 0).sum()}")
+    print(f"    • Developments with reduced costs: {(summary_df['total_cost_change_chf'] < 0).sum()}")
+    print(f"    • Developments with more viable scenarios: {(summary_df['viable_scenarios_change'] > 0).sum()}")

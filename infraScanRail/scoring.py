@@ -209,15 +209,23 @@ def process_via_column(df):
     return df
 
 def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_cost_per_meter,
-                       track_maintenance_cost, tunnel_maintenance_cost, bridge_maintenance_cost, duration):
+                       track_maintenance_cost, tunnel_maintenance_cost, bridge_maintenance_cost, duration,
+                       use_old_capacity_logic=False, output_suffix=""):
     """
     Calculate construction and maintenance costs for each development.
 
-    For EXTEND_LINES developments (Type A): Only calculates operating costs. Construction and
-    maintenance costs are handled by capacity intervention analysis in Phase 4.
+    Two modes of operation based on use_old_capacity_logic:
 
-    For NEW_DIRECT_CONNECTIONS developments (Type B): Calculates full infrastructure costs
-    (construction, maintenance, operating) based on connection curve lookup data.
+    NEW METHOD (use_old_capacity_logic=False):
+    - For EXTEND_LINES developments (Type A): Only calculates operating costs. Construction and
+      maintenance costs are handled by capacity intervention analysis in Phase 4.
+    - For NEW_DIRECT_CONNECTIONS developments (Type B): Calculates full infrastructure costs
+      (construction, maintenance, operating) based on connection curve lookup data.
+
+    OLD METHOD (use_old_capacity_logic=True):
+    - For EXTEND_LINES developments (Type A): Calculates capacity needs using 8 trains/track threshold.
+      Adds track construction/maintenance costs for segments with insufficient capacity.
+    - For NEW_DIRECT_CONNECTIONS developments (Type B): Same as new method (lookup table).
 
     Parameters:
         file_path (str): Path to the CSV file containing the rail network data.
@@ -228,6 +236,8 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
         tunnel_maintenance_cost (float): Annual maintenance cost per meter of tunnel.
         bridge_maintenance_cost (float): Annual maintenance cost per meter of bridge.
         duration (int): The duration (in years) for which maintenance costs are calculated.
+        use_old_capacity_logic (bool): If True, uses old 8 trains/track capacity check for EXTEND_LINES.
+        output_suffix (str): Suffix for output CSV filename (e.g., "_old" for old method).
 
     Returns:
         pd.DataFrame: Summary DataFrame with development costs and capacity intervention costs.
@@ -255,12 +265,215 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
             # ================================================================
             # TYPE A: EXTEND_LINES DEVELOPMENTS
             # ================================================================
-            # Construction and maintenance costs are zero (handled by capacity interventions in Phase 4)
-            # Only calculate operating costs
 
-            dev_construction_cost = 0.0
-            dev_maintenance_cost = 0.0
-            uncovered_operating_cost = dev_df['geometry'].length.sum() / 2 * cp.operating_cost_s_bahn_per_meter * (1 - cp.general_KDG)
+            if use_old_capacity_logic:
+                # OLD METHOD: 8 trains/track capacity check
+                # Add the development lines to the construction cost data
+                combined_df = pd.concat([df_construction_cost, dev_df], ignore_index=True)
+
+                # Keep track of services BEFORE merging (for debugging)
+                combined_df_with_services = combined_df.copy()
+
+                # Split the lines with a Via column
+                df_split = split_via_nodes(combined_df)
+
+                # FIX 1: Remove duplicate service entries created during Via splitting
+                # This prevents services from being counted multiple times on the same segment
+                # Only use columns that exist in the dataframe
+                dedup_columns = ['FromNode', 'ToNode', 'Service', 'Direction', 'Frequency']
+                available_dedup_columns = [col for col in dedup_columns if col in df_split.columns]
+
+                if len(available_dedup_columns) >= 4:  # Need at least FromNode, ToNode, Service, Direction
+                    # Sort by 'length of 1' (if available) to keep rows with infrastructure data
+                    if 'length of 1' in df_split.columns:
+                        df_split = df_split.sort_values('length of 1', ascending=False, na_position='last')
+
+                    df_split = df_split.drop_duplicates(
+                        subset=available_dedup_columns,
+                        keep='first'  # Keep first occurrence (which now has the most complete data)
+                    )
+
+                # DEBUG: Keep split version before merging for detailed service tracking
+                df_split_unmerged = df_split.copy()
+
+                df_split = merge_lines(df_split)
+                df_split = df_split.dropna(subset=['NumOfTracks'])
+
+                # Calculate MinTrack as the smallest digit from the NumOfTracks column
+                df_split['NumOfTracks'] = df_split['NumOfTracks'].astype(int)
+                df_split['MinTrack'] = df_split['NumOfTracks'].apply(lambda x: int(min(str(x))))
+
+                # Calculate ServicesPerTrack
+                df_split['ServicesPerTrack'] = df_split['TotalFrequency'] / df_split['MinTrack']
+
+                # FIX 2: Use threshold of 12 trains/track/hour (accounting for bidirectional traffic)
+                # TotalFrequency includes both directions, so 12 trains/track = ~8 per direction
+                # For 2-track sections: threshold becomes 32 trains/hour total, etc.
+                df_split['enoughCap'] = df_split['ServicesPerTrack'].apply(lambda x: 'Yes' if x < 12 else 'No')
+
+                # Calculate costs for connections with insufficient capacity
+                insufficient_capacity = df_split[df_split['enoughCap'] == 'No'].copy()
+
+                # Generate line segments from development DataFrame
+                def get_development_segments(dev_df):
+                    segments = []
+                    for _, row in dev_df.iterrows():
+                        from_node = row['FromNode']
+                        to_node = row['ToNode']
+                        via_nodes = row['Via'] if isinstance(row['Via'], list) else []
+
+                        # Create segments from FromNode -> Via -> ToNode
+                        prev_node = from_node
+                        for via_node in via_nodes:
+                            segments.append((prev_node, via_node))
+                            prev_node = via_node
+                        segments.append((prev_node, to_node))
+                    return segments
+
+                # Generate segments for the current development
+                development_segments = get_development_segments(dev_df)
+
+                # Filter insufficient_capacity to include only lines in the current development
+                def is_in_development(row, segments):
+                    return (row['FromNode'], row['ToNode']) in segments
+
+                insufficient_capacity = insufficient_capacity[
+                    insufficient_capacity.apply(lambda row: is_in_development(row, development_segments), axis=1)
+                ]
+
+                # Check if we have insufficient capacity segments and required columns
+                if len(insufficient_capacity) > 0:
+                    # Verify required infrastructure columns exist
+                    required_columns = ['length of 1', 'Tunnel m', 'Bridges m']
+                    missing_columns = [col for col in required_columns if col not in insufficient_capacity.columns]
+
+                    if missing_columns:
+                        print(f"\n⚠️  WARNING: Development {dev_id} has capacity issues but missing infrastructure columns: {missing_columns}")
+                        print(f"Available columns: {list(insufficient_capacity.columns)}")
+                        print(f"Skipping cost calculation for this development.\n")
+                        # Set costs to zero and continue
+                        dev_construction_cost = 0.0
+                        dev_maintenance_cost = 0.0
+                        uncovered_operating_cost = dev_df['geometry'].length.sum() / 2 * cp.operating_cost_s_bahn_per_meter * (1 - cp.general_KDG)
+
+                        # Update the base construction cost data for the next iteration
+                        df_construction_cost = pd.concat([df_construction_cost, dev_df], ignore_index=True)
+
+                        # Skip to storing development costs
+                        development_costs.append({
+                            "Development": dev_id,
+                            "Dev_ConstructionCost": dev_construction_cost,
+                            "Dev_MaintenanceCost": dev_maintenance_cost,
+                            "uncoveredOperatingCost": uncovered_operating_cost
+                        })
+                        continue
+
+                    # Initialize cost columns (MUST BE BEFORE DEBUG OUTPUT)
+                    insufficient_capacity['NewTrackCost'] = insufficient_capacity['length of 1'] * cost_per_meter
+                    insufficient_capacity['NewTunnelCost'] = (
+                        insufficient_capacity['Tunnel m'] * tunnel_cost_per_meter
+                    )
+                    insufficient_capacity['NewBridgeCost'] = (
+                        insufficient_capacity['Bridges m'] * bridge_cost_per_meter
+                    )
+
+                    # Calculate total construction cost
+                    insufficient_capacity['construction_cost'] = (
+                        insufficient_capacity['NewTrackCost'] +
+                        insufficient_capacity['NewTunnelCost'] +
+                        insufficient_capacity['NewBridgeCost']
+                    )
+
+                    # Calculate maintenance cost for each segment
+                    insufficient_capacity['maintenance_cost'] = duration * (
+                        insufficient_capacity['length of 1'] * track_maintenance_cost +
+                        insufficient_capacity['Tunnel m'] * tunnel_maintenance_cost +
+                        insufficient_capacity['Bridges m'] * bridge_maintenance_cost
+                    )
+
+                    # ================================================================
+                    # DEBUG OUTPUT: Show insufficient capacity segments for this development
+                    # ================================================================
+                    print(f"\n{'='*80}")
+                    print(f"Development {dev_id}: INSUFFICIENT CAPACITY DETECTED")
+                    print(f"{'='*80}")
+
+                    for _, segment in insufficient_capacity.iterrows():
+                        from_node = segment['FromNode']
+                        to_node = segment['ToNode']
+                        from_station = segment.get('FromStation', 'Unknown')
+                        to_station = segment.get('ToStation', 'Unknown')
+
+                        print(f"\n  Segment: {from_station} ({from_node}) → {to_station} ({to_node})")
+                        print(f"  ─────────────────────────────────────────────────────────────")
+                        print(f"  • Length: {segment['length of 1']:.0f} m")
+                        print(f"  • Tunnel: {segment['Tunnel m']:.0f} m")
+                        print(f"  • Bridge: {segment['Bridges m']:.0f} m")
+                        print(f"  • Number of Tracks: {segment['NumOfTracks']}")
+                        print(f"  • Min Track (bottleneck): {segment['MinTrack']}")
+                        print(f"  • Total Frequency: {segment['TotalFrequency']:.1f} trains/hour (both directions)")
+                        print(f"  • Services Per Track: {segment['ServicesPerTrack']:.2f} trains/track/hour")
+                        print(f"  • Threshold: 12.0 trains/track/hour (EXCEEDED!)")
+                        print(f"    (= ~8 trains/hour per direction per track)")
+
+                        # Find all services that traverse this segment (use split but unmerged data)
+                        # This shows individual directional services after Via splitting
+                        services_on_segment_split = df_split_unmerged[
+                            (df_split_unmerged['FromNode'] == from_node) &
+                            (df_split_unmerged['ToNode'] == to_node)
+                        ]
+
+                        if len(services_on_segment_split) > 0 and 'Service' in services_on_segment_split.columns:
+                            print(f"\n  Services traversing this segment (after Via splitting):")
+                            for _, svc in services_on_segment_split.iterrows():
+                                service_name = svc.get('Service', 'Unknown')
+                                direction = svc.get('Direction', '?')
+                                frequency = svc.get('Frequency', 0)
+                                from_st = svc.get('FromStation', '?')
+                                to_st = svc.get('ToStation', '?')
+                                print(f"    • {service_name} (Dir {direction}): {frequency} trains/hour [{from_st} → {to_st}]")
+
+                            total_freq_check = services_on_segment_split['Frequency'].sum()
+                            print(f"\n  ⚠️  FREQUENCY CALCULATION CHECK:")
+                            print(f"    • Sum of individual service frequencies: {total_freq_check:.1f} trains/hour")
+                            print(f"    • TotalFrequency after merge_lines(): {segment['TotalFrequency']:.1f} trains/hour")
+                            if abs(total_freq_check - segment['TotalFrequency']) > 0.1:
+                                print(f"    • ⚠️  MISMATCH DETECTED! Difference: {abs(total_freq_check - segment['TotalFrequency']):.1f} trains/hour")
+                                print(f"    • This suggests the split_via_nodes() function may be duplicating frequencies!")
+
+                        print(f"\n  Cost Impact:")
+                        print(f"    • Track construction: CHF {segment['NewTrackCost']:,.0f}")
+                        print(f"    • Tunnel upgrade: CHF {segment['NewTunnelCost']:,.0f}")
+                        print(f"    • Bridge upgrade: CHF {segment['NewBridgeCost']:,.0f}")
+                        print(f"    • Total construction: CHF {segment['construction_cost']:,.0f}")
+                        print(f"    • Total maintenance (50y): CHF {segment['maintenance_cost']:,.0f}")
+
+                    print(f"\n{'='*80}")
+                    print(f"Development {dev_id} Total Capacity-Related Costs:")
+                    print(f"  • Construction: CHF {insufficient_capacity['construction_cost'].sum():,.0f}")
+                    print(f"  • Maintenance: CHF {(insufficient_capacity['maintenance_cost'].sum() * 0.65):,.0f}")
+                    print(f"{'='*80}\n")
+                    # ================================================================
+
+                    # Summarize total construction and maintenance costs for the current development
+                    dev_construction_cost = insufficient_capacity['construction_cost'].sum()
+                    dev_maintenance_cost = insufficient_capacity['maintenance_cost'].sum() * 0.65  # 65% of the total maintenance cost
+                else:
+                    print(f"\n[Dev {dev_id}] No capacity constraints detected (all segments < 12 trains/track)")
+                    dev_construction_cost = 0.0
+                    dev_maintenance_cost = 0.0
+
+                uncovered_operating_cost = dev_df['geometry'].length.sum() / 2 * cp.operating_cost_s_bahn_per_meter * (1 - cp.general_KDG)
+
+                # Update the base construction cost data for the next iteration
+                df_construction_cost = pd.concat([df_construction_cost, dev_df], ignore_index=True)
+
+            else:
+                # NEW METHOD: Construction and maintenance costs are zero (handled by capacity interventions in Phase 4)
+                # Only calculate operating costs
+                dev_construction_cost = 0.0
+                dev_maintenance_cost = 0.0
+                uncovered_operating_cost = dev_df['geometry'].length.sum() / 2 * cp.operating_cost_s_bahn_per_meter * (1 - cp.general_KDG)
 
         elif dev_id >= settings.dev_id_start_new_direct_connections:
             # ================================================================
@@ -314,44 +527,51 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
     development_costs_df = pd.DataFrame(development_costs)
 
     # ================================================================
-    # LOAD AND MERGE CAPACITY INTERVENTION COSTS
+    # LOAD AND MERGE CAPACITY INTERVENTION COSTS (NEW METHOD ONLY)
     # ================================================================
-    capacity_intervention_costs_path = "data/costs/capacity_intervention_costs.csv"
+    if not use_old_capacity_logic:
+        # NEW METHOD: Load capacity intervention costs from Phase 4.3
+        capacity_intervention_costs_path = "data/costs/capacity_intervention_costs.csv"
 
-    try:
-        cap_int_costs_df = pd.read_csv(capacity_intervention_costs_path)
+        try:
+            cap_int_costs_df = pd.read_csv(capacity_intervention_costs_path)
 
-        # Group by dev_id to sum costs (in case multiple interventions per development)
-        cap_int_summary = cap_int_costs_df.groupby('dev_id').agg({
-            'construction_cost': 'sum',
-            'maintenance_cost': 'sum'
-        }).reset_index()
+            # Group by dev_id to sum costs (in case multiple interventions per development)
+            cap_int_summary = cap_int_costs_df.groupby('dev_id').agg({
+                'construction_cost': 'sum',
+                'maintenance_cost': 'sum'
+            }).reset_index()
 
-        # Rename columns for clarity
-        cap_int_summary.rename(columns={
-            'dev_id': 'Development',
-            'construction_cost': 'CapInt_ConstructionCost',
-            'maintenance_cost': 'CapInt_MaintenanceCost_Annual'
-        }, inplace=True)
+            # Rename columns for clarity
+            cap_int_summary.rename(columns={
+                'dev_id': 'Development',
+                'construction_cost': 'CapInt_ConstructionCost',
+                'maintenance_cost': 'CapInt_MaintenanceCost_Annual'
+            }, inplace=True)
 
-        # Convert annual maintenance to total over duration
-        cap_int_summary['CapInt_MaintenanceCost'] = cap_int_summary['CapInt_MaintenanceCost_Annual'] * duration
-        cap_int_summary.drop(columns=['CapInt_MaintenanceCost_Annual'], inplace=True)
+            # Convert annual maintenance to total over duration
+            cap_int_summary['CapInt_MaintenanceCost'] = cap_int_summary['CapInt_MaintenanceCost_Annual'] * duration
+            cap_int_summary.drop(columns=['CapInt_MaintenanceCost_Annual'], inplace=True)
 
-        # Merge with development costs
-        combined_costs_df = development_costs_df.merge(
-            cap_int_summary,
-            on='Development',
-            how='left'
-        )
+            # Merge with development costs
+            combined_costs_df = development_costs_df.merge(
+                cap_int_summary,
+                on='Development',
+                how='left'
+            )
 
-        # Fill NaN with 0 for developments without capacity interventions
-        combined_costs_df['CapInt_ConstructionCost'].fillna(0.0, inplace=True)
-        combined_costs_df['CapInt_MaintenanceCost'].fillna(0.0, inplace=True)
+            # Fill NaN with 0 for developments without capacity interventions
+            combined_costs_df['CapInt_ConstructionCost'].fillna(0.0, inplace=True)
+            combined_costs_df['CapInt_MaintenanceCost'].fillna(0.0, inplace=True)
 
-    except FileNotFoundError:
-        print(f"Warning: Capacity intervention costs file not found at {capacity_intervention_costs_path}")
-        print("Setting capacity intervention costs to 0 for all developments.")
+        except FileNotFoundError:
+            print(f"Warning: Capacity intervention costs file not found at {capacity_intervention_costs_path}")
+            print("Setting capacity intervention costs to 0 for all developments.")
+            combined_costs_df = development_costs_df.copy()
+            combined_costs_df['CapInt_ConstructionCost'] = 0.0
+            combined_costs_df['CapInt_MaintenanceCost'] = 0.0
+    else:
+        # OLD METHOD: No capacity intervention costs (capacity is in Dev costs for EXTEND_LINES)
         combined_costs_df = development_costs_df.copy()
         combined_costs_df['CapInt_ConstructionCost'] = 0.0
         combined_costs_df['CapInt_MaintenanceCost'] = 0.0
@@ -388,8 +608,10 @@ def construction_costs(file_path, cost_per_meter, tunnel_cost_per_meter, bridge_
 
     combined_costs_df = combined_costs_df[output_columns]
 
-    # Save to CSV
-    combined_costs_df.to_csv("data/costs/construction_cost.csv", index=False)
+    # Save to CSV with appropriate suffix
+    output_csv_path = f"data/costs/construction_cost{output_suffix}.csv"
+    combined_costs_df.to_csv(output_csv_path, index=False)
+    print(f"Construction costs saved to: {output_csv_path}")
 
     return combined_costs_df
 
@@ -1540,19 +1762,21 @@ def create_cost_and_benefit_df(scenario_start_year=2018, end_year=2100, start_va
     """
     Create combined cost-benefit DataFrames for all developments, scenarios, and years.
 
-    Creates TWO versions:
-    1. Baseline (WITHOUT capacity interventions) -> costs_and_benefits_dev.csv
-    2. With capacity interventions -> costs_and_benefits_flat.csv
+    NOTE: This function now returns a SINGLE version based on the cost_file_path provided.
+    The OLD and NEW methods are distinguished by which cost file is loaded:
+    - construction_cost_old.csv -> OLD method (Dev costs include capacity, CapInt=0)
+    - construction_cost.csv -> NEW method (Dev costs=0 for EXTEND_LINES, CapInt>0)
 
     Args:
         scenario_start_year: Start year for scenario timeline
         end_year: End year for scenario timeline
         start_valuation_period: Year construction begins (base year for discounting)
-        cost_file_path: Optional path to cost CSV (defaults to paths.CONSTRUCTION_COSTS)
+        cost_file_path: Path to cost CSV (required: either construction_cost.csv or construction_cost_old.csv)
 
     Returns:
-        tuple: (costs_and_benefits_baseline, costs_and_benefits_with_interventions)
-            Both DataFrames have MultiIndex (development, scenario, year) and cost/benefit columns
+        tuple: (costs_and_benefits_single, costs_and_benefits_single)
+            Returns the same DataFrame twice for backward compatibility
+            DataFrame has MultiIndex (development, scenario, year) and cost/benefit columns
     """
     import cost_parameters as cp
 
@@ -1566,6 +1790,8 @@ def create_cost_and_benefit_df(scenario_start_year=2018, end_year=2100, start_va
     # Use specified cost file or default
     costs_path = cost_file_path if cost_file_path is not None else paths.CONSTRUCTION_COSTS
     construction_and_maintenance_costs = pd.read_csv(costs_path)
+
+    print(f"  Loading costs from: {costs_path}")
 
     # Build full index
     years = list(range(scenario_start_year, end_year + 1))

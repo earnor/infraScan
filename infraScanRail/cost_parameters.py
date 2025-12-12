@@ -27,6 +27,6 @@ comfort_weighted_change_time = int(np.round(average_train_change_time * change_t
 
 # Capacity Enhancement Interventions
 # Siding lengths for cost calculations (based on track_cost_per_meter)
-segment_siding_costs = 11500000  # Track siding costs (1000m): SBB Kostentool "11500000" / Old approach "33250000"
-station_siding_costs = 9950000   # Station siding costs (550m): SBB Kostentool "9950000" / Old approach "18300000"
-platform_cost_per_unit = 6930000  # Platform costs per unit (SBB Kostentool)
+segment_siding_costs = 33250000  # Track siding costs (1000m): SBB Kostentool "11500000" / Old approach "33250000"
+station_siding_costs = 18300000   # Station siding costs (550m): SBB Kostentool "9950000" / Old approach "18300000"
+platform_cost_per_unit = 0  # Platform costs per unit: SBB Kostentool "6930000" / Old approach "0" station adjustments in the station siding costs
