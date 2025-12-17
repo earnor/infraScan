@@ -45,6 +45,9 @@ class CapacityIntervention:
         length_m: Segment length (for passing sidings)
         current_tracks: Current track count before intervention (for cost scaling)
         iteration: Which iteration this intervention was applied in
+        current_platforms: Current platform count before intervention (for station tracks)
+        platforms_added: Platforms to add (1.0 if < 2 platforms, else None)
+        platform_cost_chf: Platform construction cost (if platforms added)
     """
     intervention_id: str
     section_id: str

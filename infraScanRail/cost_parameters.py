@@ -3,9 +3,9 @@ import numpy as np
 VTTS = 14.8 # CHF/h
 # Construction costs
 yearly_maintenance_to_construction_cost_factor = 0.03
-track_cost_per_meter = 33250  # CHF per meter
-tunnel_cost_per_meter = 104000  # CHF per meter per track (From Schweizer())
-bridge_cost_per_meter = 70000  # CHF per meter per track
+track_cost_per_meter = 33250  # CHF per meter: SBB Kostentool "22200" / Old approach "33250"
+tunnel_cost_per_meter = 104000  # CHF per meter per track: SBB Kostentool "70000" / Old approach "104000"
+bridge_cost_per_meter = 70000  # CHF per meter per track: SBB Kostentool "47000" / Old approach "70000"
 track_maintenance_cost = track_cost_per_meter * yearly_maintenance_to_construction_cost_factor # CHF per meter per track per year
 tunnel_maintenance_cost = tunnel_cost_per_meter * yearly_maintenance_to_construction_cost_factor # CHF/m/a
 bridge_maintenance_cost = bridge_cost_per_meter * yearly_maintenance_to_construction_cost_factor # CHF/m/a

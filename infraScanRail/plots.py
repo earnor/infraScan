@@ -3583,56 +3583,13 @@ def plot_railway_lines_only(G, pos, railway_lines, output_file, color_dict=None,
             plt.title("Generated S-Bahn lines", fontsize=14, pad=20)
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
-            plt.xlabel('X-Koordinate', fontsize=10)
-            plt.ylabel('Y-Koordinate', fontsize=10)
+            plt.xlabel('X-Coordinate', fontsize=10)
+            plt.ylabel('Y-Coordinate', fontsize=10)
 
             # Zoom auf Linienbereich
             plt.axis('equal')
             plt.xlim(x_min, x_max)
             plt.ylim(y_min, y_max)
-
-            # === Nordpfeil überarbeitet ===
-            arrow_pos_x = 0.92  # Position oben rechts
-            arrow_pos_y = 0.92  # Position oben rechts
-
-            # "N" Beschriftung unter dem Pfeil platzieren
-            ax.text(arrow_pos_x, arrow_pos_y - 0.04, "N",
-                    fontsize=16, weight='bold',
-                    ha='center', va='center',
-                    transform=ax.transAxes,
-                    zorder=1000,
-                    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
-
-            # Pfeil zeichnen (oberhalb der Beschriftung)
-            arrow = FancyArrowPatch((arrow_pos_x, arrow_pos_y - 0.01),
-                                   (arrow_pos_x, arrow_pos_y + 0.03),
-                                   color='black',
-                                   lw=2,
-                                   arrowstyle='->',
-                                   mutation_scale=15,
-                                   transform=ax.transAxes,
-                                   zorder=1000)
-            ax.add_patch(arrow)
-
-            # === Maßstab in der Mitte des unteren Kartenrandes hinzufügen ===
-            scale_length = 5000  # 5 km
-            scale_x = x_min + (x_range / 2) - (scale_length / 2)  # Zentriert am unteren Rand
-            scale_y = y_min + 0.05 * y_range  # Nahe dem unteren Rand
-            scale_height = y_range * 0.01
-
-            # Maßstabsbalken mit weißem Hintergrund für bessere Sichtbarkeit
-            scale_bg = plt.Rectangle((scale_x - scale_length*0.05, scale_y - scale_height*1.5),
-                                    scale_length*1.1, scale_height*5,
-                                    facecolor='white', alpha=0.7, zorder=999)
-            ax.add_patch(scale_bg)
-
-            scale_rect = plt.Rectangle((scale_x, scale_y), scale_length, scale_height,
-                                      facecolor='black', edgecolor='black', zorder=1000)
-            ax.add_patch(scale_rect)
-
-            # Maßstabstext
-            ax.text(scale_x + scale_length / 2, scale_y + scale_height * 2,
-                   "5 km", ha='center', va='bottom', fontsize=12, zorder=1000)
 
             plt.savefig(output_file, dpi=300, bbox_inches='tight', pad_inches=0.2, format='png')
             plt.close()
@@ -4810,7 +4767,7 @@ def _plot_cost_savings_comparison(df_combined, color_map, dev_order, N, output_d
     ax.axhline(y=0, color='black', linestyle='-', linewidth=1)
     ax.set_xlabel('Development', fontsize=12)
     ax.set_ylabel('Value in CHF million', fontsize=12)
-    ax.set_title('Costs and benefits comparison (Old vs New Pipeline)', fontsize=14)
+    ax.set_title('Costs and benefits comparison', fontsize=14)
     ax.grid(axis='y', linestyle='--', alpha=0.7)
 
     # Legend - placed outside plot area

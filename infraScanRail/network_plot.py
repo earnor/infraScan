@@ -1259,96 +1259,51 @@ def _find_label_position(
 
 
 def _load_map_overlays() -> Tuple[Optional["GeoDataFrame"], Dict[Tuple[int, int], List[Tuple[float, float]]]]:
-    """Load optional GIS overlays used to enrich the network map."""
-    if gpd is None or make_valid is None or LineString is None:
+    """Load optional GIS overlays used to enrich the network map.
+
+    Currently only loads lakes for background water features. Network segment geometries
+    are drawn directly from station coordinates (straight lines between nodes).
+
+    Returns:
+        Tuple of (lakes GeoDataFrame or None, empty segment_geometries dict)
+    """
+    if gpd is None or make_valid is None:
         return None, {}
 
     base_dir = Path(paths.MAIN)
     lakes_path = base_dir / "data" / "landuse_landcover" / "landcover" / "lake" / "WB_STEHGEWAESSER_F.shp"
-    developments_path = base_dir / "data" / "costs" / "total_costs_with_geometry.gpkg"
     boundary_path = base_dir / "data" / "_basic_data" / "outerboundary.shp"
 
-    if not lakes_path.exists() or not developments_path.exists() or not boundary_path.exists():
-        return None, {}
-
-    try:
-        lakes = gpd.read_file(lakes_path)
-        developments = gpd.read_file(developments_path)
-        boundary = gpd.read_file(boundary_path)
-    except Exception:
-        return None, {}
-
-    for layer in (lakes, developments, boundary):
-        if "geometry" in layer:
-            layer["geometry"] = layer["geometry"].apply(_safe_make_valid)
+    # Load lakes for background water features
+    lakes = None
+    if lakes_path.exists() and boundary_path.exists():
         try:
-            if layer.crs and str(layer.crs).lower() not in {"epsg:2056", "epsg:2056.0"}:
-                layer.to_crs(epsg=2056, inplace=True)
-        except Exception:
-            # If CRS conversion fails, continue with available data.
-            pass
+            lakes = gpd.read_file(lakes_path)
+            boundary = gpd.read_file(boundary_path)
 
-    try:
-        lakes = gpd.clip(lakes, boundary)
-    except Exception:
-        pass
+            # Validate and reproject layers
+            for layer in (lakes, boundary):
+                if "geometry" in layer:
+                    layer["geometry"] = layer["geometry"].apply(_safe_make_valid)
+                try:
+                    if layer.crs and str(layer.crs).lower() not in {"epsg:2056", "epsg:2056.0"}:
+                        layer.to_crs(epsg=2056, inplace=True)
+                except Exception:
+                    # If CRS conversion fails, continue with available data.
+                    pass
 
-    segment_geometries: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
-    columns_lower = {col.lower(): col for col in developments.columns}
-    from_candidates = [
-        "source_id",
-        "source_id_new",
-        "from_node",
-        "from_id",
-        "from_id_new",
-        "source_node",
-        "source",
-    ]
-    to_candidates = [
-        "target_id",
-        "target_id_new",
-        "to_node",
-        "to_id",
-        "to_id_new",
-        "target_node",
-        "target",
-    ]
-    from_col = next((columns_lower[name] for name in from_candidates if name in columns_lower), None)
-    to_col = next((columns_lower[name] for name in to_candidates if name in columns_lower), None)
-
-    if from_col and to_col:
-        for row in developments.itertuples(index=False):
+            # Clip lakes to boundary
             try:
-                from_node = int(getattr(row, from_col))
-                to_node = int(getattr(row, to_col))
-            except (AttributeError, TypeError, ValueError):
-                continue
-
-            geometry = getattr(row, "geometry", None)
-            if geometry is None or geometry.is_empty:
-                continue
-
-            geometry = _safe_make_valid(geometry)
-            if geometry is None or geometry.is_empty:
-                continue
-
-            try:
-                if geometry.geom_type == "MultiLineString":
-                    parts = [part for part in geometry.geoms if not part.is_empty]
-                    if not parts:
-                        continue
-                    geometry = max(parts, key=lambda geom: geom.length)
-                if geometry.geom_type != "LineString":
-                    continue
-
-                coords = list(geometry.coords)
+                lakes = gpd.clip(lakes, boundary)
             except Exception:
-                continue
+                pass
+        except Exception:
+            # If lake loading fails, continue without lakes
+            lakes = None
 
-            if len(coords) < 2:
-                continue
-
-            segment_geometries[_segment_key(from_node, to_node)] = [(float(x), float(y)) for x, y in coords]
+    # Network segments are drawn as straight lines between station coordinates
+    # No external geometry file needed
+    segment_geometries: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
 
     return lakes, segment_geometries
 
