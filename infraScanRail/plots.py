@@ -1611,7 +1611,7 @@ def create_plot_catchement():
         legend_elements = [
             Patch(facecolor="lightblue", edgecolor="blue", label="Water Bodies"),
             Patch(facecolor="red", edgecolor="red", label="S-Bahn"),
-            Line2D([0], [0], marker="o", color="w", markerfacecolor="red", markersize=10, label="Trainstations"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="red", markersize=10, label="Train stations"),
         ]
         ax.legend(
             handles=legend_elements,
@@ -1896,7 +1896,7 @@ def plot_developments_expand_by_one_station():
     # Create legend
     legend_elements = [
             Patch(facecolor="lightblue", edgecolor="blue", label="Water Bodies"),
-            Line2D([0], [0], color="red", marker="o", markersize=10, label="Trainstations"),
+            Line2D([0], [0], color="red", marker="o", markersize=10, label="Train stations"),
             Line2D([0], [0], color="orange", marker="o", markersize=10, label="Endnodes"),
             Line2D([0], [0], color="red", lw=1.5, label="S-Bahn"),
     ]
@@ -3017,21 +3017,21 @@ def plot_graph(graph, positions, highlight_centers=True, missing_links=None, dir
     if highlight_centers:
         from matplotlib.lines import Line2D
         legend_elements = [
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=10, label='Zentrumsknoten'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', markersize=10, label='Grenzknoten'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=10, label='Endstation'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=10, label='Central node'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', markersize=10, label='Boundary node'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=10, label='End station'),
             Line2D([0], [0], marker='o', color='w', markerfacecolor='lightblue', markersize=10, label='Station')
         ]
         # Polygon zur Legende hinzufügen, falls vorhanden
         if polygon:
             legend_elements.append(
-                Line2D([0], [0], color='blue', linewidth=5, alpha=0.4, label='Fallstudienkorridor'))
+                Line2D([0], [0], color='blue', linewidth=5, alpha=0.4, label='Case study area'))
         if missing_links:
             legend_elements.append(
-                Line2D([0], [0], color='r', linestyle=':', linewidth=3, label='Fehlende Direktverbindung'))
+                Line2D([0], [0], color='r', linestyle=':', linewidth=3, label='Missing connection'))
         plt.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1))
 
-    plt.title("Fehlende Direktverbindungen von Korridoren")
+    plt.title("Missing direct connections of corridors")
     plt.axis('on')
     plt.grid(True)
     plt.tight_layout()

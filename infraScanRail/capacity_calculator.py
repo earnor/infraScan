@@ -15,7 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 import math
 import re
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import geopandas as gpd
 import pandas as pd
@@ -1754,153 +1754,229 @@ def _traverse_path(
     return path_nodes, edge_records, path_edge_keys
 
 
+def _classify_service_pattern(
+    service: str,
+    path_nodes: List[int],
+    node_stop_services: Dict[int, set[str]]
+) -> str:
+    """
+    Classify a service's stopping pattern for a given path.
+
+    Args:
+        service: Service identifier (e.g., "S14", "IC1")
+        path_nodes: List of node IDs representing the path
+        node_stop_services: Dict mapping node ID to set of services that stop there
+
+    Returns:
+        Pattern type: "ALL-STOP" | "ENDS-ONLY" | "PARTIAL" | "ABSENT"
+
+    Pattern Definitions:
+        - ALL-STOP: Service stops at all nodes in the path
+        - ENDS-ONLY: Service stops only at first and last nodes (requires 3+ nodes)
+        - PARTIAL: Service stops at some nodes (not all, not just ends)
+        - ABSENT: Service does not stop at any node in the path
+    """
+    if len(path_nodes) < 2:
+        return "ABSENT"
+
+    # Identify which nodes the service stops at
+    stops_at = [node for node in path_nodes if service in node_stop_services.get(node, set())]
+
+    stops_count = len(stops_at)
+    total_nodes = len(path_nodes)
+
+    # Classify pattern
+    if stops_count == 0:
+        return "ABSENT"
+    elif stops_count == total_nodes:
+        return "ALL-STOP"
+    elif stops_count == 2 and total_nodes >= 3:
+        # Check if stops only at first and last
+        if stops_at == [path_nodes[0], path_nodes[-1]]:
+            return "ENDS-ONLY"
+        else:
+            return "PARTIAL"
+    else:
+        # Stops at some but not all nodes
+        return "PARTIAL"
+
+
+def _classify_all_service_patterns(
+    path_nodes: List[int],
+    all_services: set[str],
+    node_stop_services: Dict[int, set[str]]
+) -> Dict[str, str]:
+    """
+    Classify patterns for all services operating on a path.
+
+    Args:
+        path_nodes: List of node IDs representing the path
+        all_services: Set of all service identifiers to classify
+        node_stop_services: Dict mapping node ID to set of services that stop there
+
+    Returns:
+        Dictionary mapping service name to pattern type
+        Example: {"S14": "ALL-STOP", "G": "ENDS-ONLY", "S15": "ENDS-ONLY"}
+    """
+    patterns = {}
+    for service in all_services:
+        patterns[service] = _classify_service_pattern(service, path_nodes, node_stop_services)
+    return patterns
+
+
+def _patterns_are_compatible(
+    patterns_current: Dict[str, str],
+    patterns_extended: Dict[str, str]
+) -> Tuple[bool, List[str]]:
+    """
+    Check if two pattern dictionaries are compatible.
+
+    Patterns are compatible if all services maintain their pattern type
+    when the path is extended.
+
+    Args:
+        patterns_current: Pattern classifications for current path
+        patterns_extended: Pattern classifications for extended path
+
+    Returns:
+        Tuple of (compatible: bool, changed_services: List[str])
+
+    Examples:
+        - ALL-STOP -> ALL-STOP: Compatible
+        - ENDS-ONLY -> ENDS-ONLY: Compatible
+        - ALL-STOP -> ENDS-ONLY: Incompatible (service started skipping nodes)
+        - ENDS-ONLY -> ALL-STOP: Incompatible (service started stopping at middle nodes)
+    """
+    changed_services = []
+
+    # Get union of all services (current + extended)
+    all_services = set(patterns_current.keys()) | set(patterns_extended.keys())
+
+    for service in all_services:
+        current_pattern = patterns_current.get(service, "ABSENT")
+        extended_pattern = patterns_extended.get(service, "ABSENT")
+
+        # Check if pattern changed
+        if current_pattern != extended_pattern:
+            changed_services.append(service)
+
+    # Compatible if no services changed pattern
+    compatible = len(changed_services) == 0
+
+    return compatible, changed_services
+
+
 def _split_section_by_service_patterns(
     path_nodes: List[int],
     edge_records: List[Tuple[int, int, Dict[str, float]]],
     node_stop_services: Dict[int, set[str]],
     node_pass_services: Dict[int, set[str]],
 ) -> List[Tuple[List[int], List[Tuple[int, int, Dict[str, float]]]]]:
-    """Split an infrastructure section where service stop/pass patterns change."""
-    # print(f"\n  === Analyzing service patterns for splitting ===")
+    """
+    Split an infrastructure section where service patterns become inconsistent.
 
+    This function implements pattern-based section splitting. Sections are split
+    when a service's stopping pattern would change if the path were extended.
+
+    Pattern Types:
+        - ALL-STOP: Service stops at all stations
+        - ENDS-ONLY: Service stops only at section endpoints
+        - PARTIAL: Service stops at some intermediate stations
+        - ABSENT: Service does not operate on this section
+
+    Algorithm:
+        1. Build path incrementally, adding one node at a time
+        2. For paths with 2 nodes: Cannot classify patterns yet, continue
+        3. For paths with 3+ nodes:
+           - Classify all service patterns for current path
+           - Try extending by one node
+           - Re-classify all service patterns for extended path
+           - If any service pattern changes: SPLIT at current last node
+           - Otherwise: Continue extending
+
+    Args:
+        path_nodes: List of node IDs representing the infrastructure path
+        edge_records: List of edge tuples (from_node, to_node, edge_info)
+        node_stop_services: Dict mapping node ID to set of services that stop there
+        node_pass_services: Dict mapping node ID to set of services that pass there
+
+    Returns:
+        List of refined sections as (nodes, edges) tuples
+
+    Example:
+        Path: [Uster, Aathal, Wetzikon]
+
+        At [Uster, Aathal]:
+            Too few nodes, continue
+
+        At [Uster, Aathal, Wetzikon]:
+            S14: stops at all 3 -> ALL-STOP
+            G: stops at [Uster, Wetzikon] -> ENDS-ONLY
+            All patterns consistent -> ONE section
+    """
+    # Handle trivial cases
     if len(path_nodes) <= 2 or not edge_records:
-        # print(f"  Split check: Path too short ({len(path_nodes)} nodes), returning as-is")
         return [(path_nodes, edge_records)]
 
-    candidate_services: set[str] = set()
+    # Collect all services operating on this path
+    all_services: set[str] = set()
     for node in path_nodes:
-        candidate_services.update(node_stop_services.get(node, set()))
-        candidate_services.update(node_pass_services.get(node, set()))
+        all_services.update(node_stop_services.get(node, set()))
+        all_services.update(node_pass_services.get(node, set()))
 
-    if not candidate_services:
-        # print(f"  Split check: No services found, returning as-is")
+    if not all_services:
         return [(path_nodes, edge_records)]
 
-    service_order = sorted(candidate_services)
-    # print(f"  Analyzing service patterns for: {service_order}")
-    # print(f"  Path nodes: {path_nodes}")
+    # Build sections incrementally with pattern checking
+    sections: List[Tuple[List[int], List[Tuple[int, int, Dict[str, float]]]]] = []
+    current_start_idx = 0
+    current_patterns: Optional[Dict[str, str]] = None
 
-    service_node_states: Dict[str, List[str]] = {}
-    for service in service_order:
-        states: List[str] = []
-        for node in path_nodes:
-            if service in node_stop_services.get(node, set()):
-                states.append("stop")
-            elif service in node_pass_services.get(node, set()):
-                states.append("pass")
-            else:
-                states.append("absent")
+    # Start from index 2 (3rd node) because we need 3+ nodes to classify patterns
+    for idx in range(2, len(path_nodes)):
+        # Current path up to and including idx
+        current_path = path_nodes[0:idx+1]
 
-        service_node_states[service] = states
+        # Classify patterns for current path
+        patterns = _classify_all_service_patterns(current_path, all_services, node_stop_services)
 
-    # print(f"  Service state sequences:")
-    # for service in service_order:
-    #     print(f"    {service}: {service_node_states[service]}")
-
-    def _should_split(pattern_a: Tuple[str, ...], pattern_b: Tuple[str, ...]) -> bool:
-        """Return True when service patterns change significantly.
-
-        Splits occur when:
-        - A service starts stopping (absent/pass → stop): New capacity demand
-        - A service terminates (stop → absent): Capacity demand reduction
-        """
-        for state_a, state_b in zip(pattern_a, pattern_b):
-            if state_a == state_b:
-                continue
-            # Split when service starts stopping
-            if state_b == "stop" and state_a != "stop":
-                return True
-            # Split when stopping service terminates
-            if state_a == "stop" and state_b == "absent":
-                return True
-            # Allow stop → pass without split
-            if state_a == "stop" and state_b == "pass":
-                continue
-        return False
-
-    node_patterns: List[Tuple[str, ...]] = []
-    for idx in range(len(path_nodes)):
-        pattern = tuple(service_node_states[service][idx] for service in service_order)
-        node_patterns.append(pattern)
-
-    refined_sections: List[Tuple[List[int], List[Tuple[int, int, Dict[str, float]]]]] = []
-    start_index = 0
-    current_pattern = node_patterns[0]
-
-    idx = 1
-    while idx < len(path_nodes):
-        next_pattern = node_patterns[idx]
-        should_split_value = _should_split(current_pattern, next_pattern)
-
-        if should_split_value:
-            # Analyze the type of pattern change
-            has_terminations = False
-            has_starts = False
-            has_transitions = False
-
-            for i, service in enumerate(service_order):
-                if current_pattern[i] == next_pattern[i]:
-                    continue
-
-                if current_pattern[i] in ("stop", "pass") and next_pattern[i] == "absent":
-                    has_terminations = True
-                elif current_pattern[i] == "absent" and next_pattern[i] in ("stop", "pass"):
-                    has_starts = True
-                elif current_pattern[i] in ("stop", "pass") and next_pattern[i] in ("stop", "pass"):
-                    has_transitions = True
-
-            # RULE 1: Skip if only terminations (services don't reach this node)
-            if has_terminations and not has_starts and not has_transitions:
-                # print(f"  SKIPPING split at node index {idx} (node {path_nodes[idx]}): Only terminations")
-                # print(f"    Previous pattern: {current_pattern}")
-                # print(f"    New pattern: {next_pattern}")
-                current_pattern = next_pattern
-                idx += 1
-                continue
-
-            # RULE 2: Skip at final node if only starts (services don't use incoming edge)
-            if idx == len(path_nodes) - 1 and has_starts and not has_terminations and not has_transitions:
-                # print(f"  SKIPPING split at node index {idx} (node {path_nodes[idx]}): Only starts at final node")
-                # print(f"    Previous pattern: {current_pattern}")
-                # print(f"    New pattern: {next_pattern}")
-                current_pattern = next_pattern
-                idx += 1
-                continue
-
-        if not should_split_value:
-            current_pattern = next_pattern
-            idx += 1
+        if current_patterns is None:
+            # First time classifying patterns (have 3+ nodes now)
+            current_patterns = patterns
             continue
 
-        # Split detected
-        # print(f"  SPLIT at node index {idx} (node {path_nodes[idx]}):")
-        # print(f"    Previous pattern: {current_pattern}")
-        # print(f"    New pattern: {next_pattern}")
-        # for i, service in enumerate(service_order):
-        #     if current_pattern[i] != next_pattern[i]:
-        #         print(f"    Reason: Service '{service}' changed from '{current_pattern[i]}' -> '{next_pattern[i]}'")
+        # Check if patterns are compatible with previous
+        compatible, changed_services = _patterns_are_compatible(current_patterns, patterns)
 
-        split_edge = idx - 1
-        sub_edges = edge_records[start_index : split_edge + 1]
-        sub_nodes = path_nodes[start_index : split_edge + 2]
-        if sub_edges:
-            refined_sections.append((sub_nodes, sub_edges))
+        if not compatible:
+            # Pattern break detected - SPLIT before current node
+            split_idx = idx - 1  # Index of last node before split
 
-        current_pattern = next_pattern
-        start_index = split_edge + 1
-        idx += 1
+            # Create section from start to split point
+            section_nodes = path_nodes[current_start_idx : split_idx + 1]
+            section_edge_count = split_idx - current_start_idx
+            section_edges = edge_records[current_start_idx : current_start_idx + section_edge_count]
 
-    if start_index < len(edge_records):
-        refined_sections.append((path_nodes[start_index:], edge_records[start_index:]))
+            if section_edges:
+                sections.append((section_nodes, section_edges))
 
-    if not refined_sections:
-        return [(path_nodes, edge_records)]
+            # Start new section at split node
+            current_start_idx = split_idx
+            current_patterns = None  # Reset for new section
 
-    # print(f"  Split result: {len(refined_sections)} section(s) created")
-    # for i, (nodes, edges) in enumerate(refined_sections):
-    #     print(f"    Section {i+1}: nodes {nodes[0]} -> {nodes[-1]}, {len(edges)} edge(s)")
+            # Re-evaluate from this point (don't advance idx yet)
+            # On next iteration, we'll re-classify starting from split_idx
 
-    return refined_sections
+    # Add final section (from current_start_idx to end)
+    final_nodes = path_nodes[current_start_idx:]
+    final_edge_count = len(path_nodes) - 1 - current_start_idx
+    final_edges = edge_records[current_start_idx : current_start_idx + final_edge_count]
+
+    if final_edges or len(final_nodes) > 1:
+        sections.append((final_nodes, final_edges))
+
+    # Return sections or original if no splits
+    return sections if sections else [(path_nodes, edge_records)]
 
 
 def _calculate_single_passing_track_capacity(
