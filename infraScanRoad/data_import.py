@@ -4,7 +4,7 @@ import geopandas as gpd
 import math
 import pandas as pd
 from shapely.geometry import LineString, MultiLineString, Point, MultiPoint, shape, box
-from shapely.ops import split, snap, linemerge, cascaded_union
+from shapely.ops import split, snap, linemerge, unary_union
 from rasterio import crs
 from rasterio.transform import from_origin
 from rasterio.features import shapes, rasterize
@@ -350,7 +350,7 @@ def reformat_network():
     buffered = crossing_nodes.copy()
     buffered['geometry'] = crossing_nodes.buffer(1000)
     joined = gpd.sjoin(buffered, crossing_nodes, how='left', predicate='intersects')
-    mean_coords = joined.groupby('index_right')['geometry'].apply(lambda x: cascaded_union(x).centroid)
+    mean_coords = joined.groupby('index_right')['geometry'].apply(lambda x: unary_union(x).centroid)
     crossing_nodes['new_geometry'] = crossing_nodes.apply(lambda row: mean_coords.get(row.name, row.geometry), axis=1)
     #print(crossing_nodes.head(20).to_string())
     #print("Number of nodes at highway junctions: ", crossing_nodes.shape[0])
