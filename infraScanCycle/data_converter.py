@@ -1,32 +1,37 @@
-import geopandas as gpd
 import momepy
-import networkx as nx
+import osmnx
+import geopandas as gpd
+import matplotlib.pyplot as plt
 
-gpd.options.io_engine = "fiona"
-try:
-    gdf = gpd.read_file("/Users/ruki/PycharmProjects/infraScan/infraScanCycle/data/raw/ALLTAG/OGD_VELO_ALLTAG_NETZ_L_M.shp")
-except Exception as e:
-    print(f"Error loading file: {e}")
-    exit()
 
-# 2. Convert to NetworkX MultiGraph
-# This generates a 'primal' graph where lines are edges and junctions are nodes
-G = momepy.gdf_to_nx(gdf, approach='primal')
 
-# 3. Extract nodes and edges back to GeoDataFrames
-# momepy.nx_to_gdf returns a tuple: (nodes_gdf, edges_gdf)
-nodes, edges = momepy.nx_to_gdf(G)
+#gis data
+path = '/Users/ruki/PycharmProjects/infraScan/infraScanCycle/data/raw/ALLTAG/OGD_VELO_ALLTAG_NETZ_L_M.shp'
+df = gpd.read_file(path, engine='pyogrio')
 
-# 4. Set the CRS (Coordinate Reference System)
-# It's vital to keep the spatial context for the GeoPackage
-nodes.set_crs(gdf.crs, allow_override=True, inplace=True)
-edges.set_crs(gdf.crs, allow_override=True, inplace=True)
+#Fix: Explode MultiLineStrings into individual LineStrings
+df = df.explode(index_parts=False)
 
-# 5. Save to GeoPackage
-output_file = "velo_network.gpkg"
+#convert data frame df to primal graph
+H = momepy.gdf_to_nx(df, approach= 'primal')
 
-# Use engine="fiona" here as well if pyogrio continues to fail
-edges.to_file(output_file, layer='edges', driver="GPKG", engine="fiona")
-nodes.to_file(output_file, layer='nodes', driver="GPKG", engine="fiona")
+#convert momepy graph H to GeoDataFrames
+gdf_h_edges = momepy.nx_to_gdf(H, points=False)
 
-print(f"Success! Saved {len(nodes)} nodes and {len(edges)} edges to {output_file}")
+#align coordinate system
+
+#check if they even exist in the same space
+print(f"GIS Data Bounds: {gdf_h_edges.total_bounds}")
+
+
+#use small buffer to catch near-overlaps
+gdf_h_buffered = gdf_h_edges.copy()
+gdf_h_buffered['geometry'] = gdf_h_buffered.geometry.buffer(5)
+
+#plot intersection
+fig, ax = plt.subplots(figsize=(10, 10))
+ax.set_facecolor('#111111')
+# Plot Edges (Lines)
+gdf_h_edges.plot(ax=ax, color='#1fb5ad', linewidth=1.5, label='Edges')
+plt.legend()
+plt.show()
