@@ -76,3 +76,15 @@ else:
     res_nodes.plot(ax=ax, color='white', markersize=5, zorder=3, label='Nodes')
     plt.legend()
     plt.show()
+
+#Create a copy
+df_export = res_intersection.copy()
+
+#Convert the geometry column to WKT (Well-Known Text) string format
+df_export['geometry'] = df_export['geometry'].apply(lambda x: x.wkt)
+
+#Export to CSV
+output_path = "res_intersection_network.csv"
+df_export.to_csv(output_path, index=False)
+
+print(f"Successfully exported {len(df_export)} rows to {output_path}")

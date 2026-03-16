@@ -35,3 +35,15 @@ ax.set_facecolor('#111111')
 gdf_h_edges.plot(ax=ax, color='#1fb5ad', linewidth=1.5, label='Edges')
 plt.legend()
 plt.show()
+
+#Create a copy
+df_export = gdf_h_edges.copy()
+
+#Convert the geometry column to WKT (Well-Known Text) string format
+df_export['geometry'] = df_export['geometry'].apply(lambda x: x.wkt)
+
+#Export to CSV
+output_path = "GIS_ALLTAG.csv"
+df_export.to_csv(output_path, index=False)
+
+print(f"Successfully exported {len(df_export)} rows to {output_path}")
