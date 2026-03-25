@@ -3,7 +3,7 @@ from scipy.spatial import Voronoi
 import osmnx as ox
 from pyproj import Transformer
 import sys
-
+import numpy as np
 from data_import import *
 from plots import *
 
@@ -40,7 +40,7 @@ def voronoi_finite_polygons_2d(vor, radius=None):
 
     center = vor.points.mean(axis=0)
     if radius is None:
-        radius = vor.points.ptp().max()
+        radius = np.ptp(vor.points, axis=0).max()
 
     # Construct a map containing all ridges for a given point
     all_ridges = {}
@@ -96,7 +96,7 @@ def voronoi_finite_polygons_2d(vor, radius=None):
 
 
 def get_voronoi_status_quo():
-    existing_nodes = gpd.read_file(r"data\Network\processed\points.gpkg")
+    existing_nodes = gpd.read_file(r"data/Network/processed/points.gpkg")
     existing_nodes = existing_nodes.set_crs("epsg:2056")
 
     existing_nodes = existing_nodes[existing_nodes["intersection"] == 0]
@@ -113,15 +113,15 @@ def get_voronoi_status_quo():
     # df_voronoi["ID"] = 1
     print(df_voronoi.head(10).to_string())
 
-    df_voronoi.to_file(r"data\Voronoi\voronoi_status_quo_euclidian.gpkg")
+    df_voronoi.to_file(r"data/Voronoi/voronoi_status_quo_euclidian.gpkg")
 
     return
 
 
 def get_voronoi_all_developments():
-    existing_nodes = gpd.read_file(r"data\Network\processed\points.gpkg")
+    existing_nodes = gpd.read_file(r"data/Network/processed/points.gpkg")
     existing_nodes = existing_nodes.set_crs("epsg:2056")
-    new_nodes = gpd.read_file(r"data\Network\processed\generated_nodes.gpkg")
+    new_nodes = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
 
     voronoi_developments = pd.DataFrame(columns=['ID', 'geometry'])
     voronoi_developments = gpd.GeoDataFrame(voronoi_developments, geometry="geometry", crs="epsg:2056")
@@ -151,7 +151,7 @@ def get_voronoi_all_developments():
                                       crs="epsg:2056")
         df_voronoi["ID"] = int(i)
 
-        access_within_corridor = gpd.read_file(r"data\Network\processed\points_corridor.gpkg")
+        access_within_corridor = gpd.read_file(r"data/Network/processed/points_corridor.gpkg")
         #access_within_corridor = access_within_corridor["geometry"].append(new_temp["geometry"])
         access_within_corridor = gpd.GeoDataFrame(pd.concat([pd.DataFrame(access_within_corridor["geometry"]),
                                                             pd.DataFrame(new_temp["geometry"])], ignore_index=True))
@@ -189,7 +189,7 @@ def get_voronoi_all_developments():
         neighboring_points = pd.concat([neighboring_points, points_in_neighbors])
 
     # Store the polygons as gpkg file
-    voronoi_developments.to_file(r"data\Voronoi\voronoi_developments_euclidian.gpkg")
+    voronoi_developments.to_file(r"data/Voronoi/voronoi_developments_euclidian.gpkg")
 
     # For the next steps of the work the perimeter must be adapted, thus we keep the bound of the points tha lie in the
     # neighbooring polygons of the polygons in the corridor
@@ -218,7 +218,7 @@ def nw_from_osm(limits):
 
         try:
             # Attempt to process the OSM data for the sub-polygon
-            print(f"Processing sub-polygon {i + 1}/{len(sub_polygons)}", end='\r')
+            print(f"Processing sub-polygon {i + 1}/{len(sub_polygons)}", end='/r')
             #G = ox.graph_from_polygon(lat_lon_frame, network_type="drive", simplify=True, truncate_by_edge=True)
             # Define a custom filter to exclude highways
             # This example excludes motorways, motorway_links, trunks, and trunk_links
@@ -320,7 +320,7 @@ def osm_nw_to_raster(limits):
     transform = from_origin(west=minx, north=maxy, xsize=resolution, ysize=resolution)
 
 
-    #lake = gpd.read_file(r"data\landuse_landcover\landcover\water_ch\Typisierung_LV95\typisierung.gpkg")
+    #lake = gpd.read_file(r"data/landuse_landcover/landcover/water_ch/Typisierung_LV95/typisierung.gpkg")
     ###############################################################################################################
 
     print("ready to fill")
@@ -357,7 +357,7 @@ def osm_nw_to_raster(limits):
             sys.stdout.flush()
 
     # Check for spatial overlap with the second raster and update values if necessary
-    with rasterio.open(r"data\landuse_landcover\processed\unproductive_area.tif") as src2:
+    with rasterio.open(r"data/landuse_landcover/processed/unproductive_area.tif") as src2:
         unproductive_area = src2.read(1)
         if raster.shape == unproductive_area.shape:
             print("Network raster and unproductive area are overalpping")

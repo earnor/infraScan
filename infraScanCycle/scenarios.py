@@ -17,11 +17,11 @@ def future_scenario_zuerich_2022(df_input):
     """
 
     # import boundaries of each region
-    boundaries = gpd.read_file(r"data\Scenario\Boundaries\Gemeindegrenzen\UP_BEZIRKE_F.shp")
+    boundaries = gpd.read_file(r"data/Scenario/Boundaries/Gemeindegrenzen/UP_BEZIRKE_F.shp")
 
     # group per location and time
     df = df_input.copy()
-    df = df.groupby(["bezirk", "jahr"]).sum("anzahl")
+    df = df.groupby(["bezirk", "jahr"])[["anzahl"]].sum()
     df = df.reset_index()
 
     # filter regions of interest
@@ -41,10 +41,10 @@ def future_scenario_zuerich_2022(df_input):
     df_scenario.rename(columns={2050: 's1_pop'}, inplace=True)
 
     # import boundaries of each region
-    empl_dev = pd.read_csv(r"data\Scenario\KANTON_ZUERICH_596.csv", sep=";", encoding='unicode_escape')
+    empl_dev = pd.read_csv(r"data/Scenario/KANTON_ZUERICH_596.csv", sep=";", encoding='unicode_escape')
     empl_dev = empl_dev[["BFS_NR", "GEBIET_NAME", "INDIKATOR_JAHR", "INDIKATOR_VALUE"]]
 
-    bfs_nr = gpd.read_file(r"data\Scenario\Boundaries\Gemeindegrenzen\UP_GEMEINDEN_F.shp")
+    bfs_nr = gpd.read_file(r"data/Scenario/Boundaries/Gemeindegrenzen/UP_GEMEINDEN_F.shp")
     bfs_nr = bfs_nr[["BFS", "BEZIRKSNAM"]]
 
     empl_dev = empl_dev.merge(right=bfs_nr, left_on="BFS_NR", right_on="BFS", how="left")
@@ -52,7 +52,7 @@ def future_scenario_zuerich_2022(df_input):
     empl_dev = empl_dev.rename(columns={"BEZIRKSNAM":"bezirk", "INDIKATOR_JAHR":"jahr", "INDIKATOR_VALUE":"anzahl"})
 
     # group per location and time
-    empl_dev = empl_dev.groupby(["bezirk", "jahr"]).sum("anzahl")
+    empl_dev = empl_dev.groupby(["bezirk", "jahr"])[["anzahl"]].sum()
     empl_dev = empl_dev.reset_index()
     #print(empl_dev.head(10).to_string())
 
@@ -100,13 +100,13 @@ def future_scenario_zuerich_2022(df_input):
     print(df_scenraio.columns)
     plot_2x3_subplots(df_scenraio, lim, network, location)
     """
-    df_scenario.to_file(r"data\temp\data_scenario_n.shp")
+    df_scenario.to_file(r"data/temp/data_scenario_n.shp")
     return
 
 
 def scenario_to_raster(frame=False):
     # Load the shapefile
-    scenario_polygon = gpd.read_file(r"data\temp\data_scenario_n.shp")
+    scenario_polygon = gpd.read_file(r"data/temp/data_scenario_n.shp")
 
     if frame != False:
         # Create a bounding box polygon
@@ -136,10 +136,10 @@ def scenario_to_raster(frame=False):
         scenario_polygon = gpd.GeoDataFrame(pd.concat([pd.DataFrame(scenario_polygon), pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
 
     growth_rate_columns_pop = ["s1_pop", "s2_pop", "s3_pop"]
-    path_pop = r"data\independent_variable\processed\raw\pop20.tif"
+    path_pop = r"data/independent_variable/processed/raw/pop20.tif"
 
     growth_rate_columns_empl = ["s1_empl", "s2_empl", "s3_empl"]
-    path_empl = r"data\independent_variable\processed\raw\empl20.tif"
+    path_empl = r"data/independent_variable/processed/raw/empl20.tif"
 
     growth_to_tif(scenario_polygon, path=path_pop, columns=growth_rate_columns_pop)
     growth_to_tif(scenario_polygon, path=path_empl, columns=growth_rate_columns_empl)
@@ -170,7 +170,7 @@ def growth_to_tif(polygons, path, columns):
                     modified_raster[mask] *= (change_rate)  # You may need to adjust this based on how your change rates are stored
 
                 # Save the modified raster data to a new TIFF file
-                output_tiff = f'data\independent_variable\processed\scenario\{col}.tif'
+                output_tiff = f'data/independent_variable/processed/scenario/{col}.tif'
                 with rasterio.open(output_tiff, 'w', **src.profile) as dst:
                     dst.write(modified_raster, 1)
     return
@@ -179,12 +179,12 @@ def growth_to_tif(polygons, path, columns):
 def scenario_to_voronoi(polygons_gdf, euclidean=False):
 
     # List of your raster files
-    raster_path = r"data\independent_variable\processed\scenario"
+    raster_path = r"data/independent_variable/processed/scenario"
     raster_files = ['s1_empl.tif', 's2_empl.tif', 's3_empl.tif', 's1_pop.tif', 's2_pop.tif', 's3_pop.tif']
 
     # Loop over the raster files and calculate zonal stats for each
     for i, raster_file in enumerate(raster_files, start=1):
-        with rasterio.open(raster_path+'\\' + raster_file) as src:
+        with rasterio.open(raster_path+'//' + raster_file) as src:
             affine = src.transform
             array = src.read(1)
             nodata = src.nodata
@@ -201,8 +201,8 @@ def scenario_to_voronoi(polygons_gdf, euclidean=False):
     # You can save this geodataframe to a new file if desired
     #print(polygons_gdf.head(10).to_string())
     if euclidean:
-        polygons_gdf.to_file(r"data\Voronoi\voronoi_developments_euclidian_values.shp")
+        polygons_gdf.to_file(r"data/Voronoi/voronoi_developments_euclidian_values.shp")
     else:
-        polygons_gdf.to_file(r"data\Voronoi\voronoi_developments_tt_values.shp")
+        polygons_gdf.to_file(r"data/Voronoi/voronoi_developments_tt_values.shp")
 
     return

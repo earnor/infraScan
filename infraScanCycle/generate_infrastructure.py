@@ -46,143 +46,74 @@ def generated_access_points(extent,number):
 
 def filter_access_points(gdf):
     newgdf = gdf.copy()
-    print("All")
-    print(len(newgdf))
-    # idx = list(np.zeros(N))
-    """
-    print("Lake")
-    idx = get_idx_todrop(newgdf, r"data\landuse_landcover\landcover\lake\WB_GEWAESSERRAUM_F.shp")
+    print("Total points generated:", len(newgdf))
+
+    # 1. Schutzanordnung Natur und Landschaft
+    print("Filtering: Schutzanordnung Natur und Landschaft")
+    idx = get_idx_todrop(newgdf,
+                         "data/landuse_landcover/Schutzzonen/Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD/FNS_SCHUTZZONE_F.shp")
     newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx,:]
+    newgdf = newgdf.loc[newgdf['index'] == 0, :].copy()
+    print("Remaining:", len(newgdf))
 
-    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
+    # 2. Forest
+    print("Filtering: Forest")
+    idx = get_idx_todrop(newgdf, "data/landuse_landcover/Schutzzonen/Waldareal_-OGD/WALD_WALDAREAL_F.shp")
     newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx,:]
-    print(len(newgdf))
-    """
+    newgdf = newgdf.loc[newgdf['index'] == 0, :].copy()
+    print("Remaining:", len(newgdf))
 
-
-    """
-    # Perform a spatial join
-    FFF_gdf = gpd.read_file(r"data\landuse_landcover\Schutzzonen\Fruchtfolgeflachen_-OGD\FFF_F.shp")
-    print(FFF_gdf.head().to_string())
-    joined = gpd.sjoin(newgdf, FFF_gdf, how="left", predicate="within")
-    print(joined.head().to_string())
-    # Filter points that are within polygons
-    newgdf = newgdf[~joined["index_right"].isna()]
-    print(newgdf.head().to_string())
-
-    #newgdf.loc[:, "index"] = idx
-    #print(newgdf.head().to_string())
-    #newgdf.drop(newgdf.loc[newgdf['index'] == 1],inplace=True)
-    print(len(newgdf))
-    """
-
-    print("Schutzanordnung Natur und Landschaft")
-    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\Schutzzonen\Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD\FNS_SCHUTZZONE_F.shp")
-    newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx, :]
-    print(len(newgdf))
-    """
-    print("Naturschutzobjekte")
-    idx = get_idx_todrop(newgdf, r"data\landuse_landcover\Schutzzonen\Inventar_der_Natur-_und_Landsch...uberkommunaler_Bedeutung_-OGD\INV80_NATURSCHUTZOBJEKTE_F.shp")
-    newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx, :]
-
-    idx = get_idx_todrop(newgdf, r"data\landuse_landcover\Schutzzonen\Inventar_der_Natur-_und_Landsch...uberkommunaler_Bedeutung_-OGD\INVERG_NATURSCHUTZOBJEKTE_F.shp")
-    newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx, :]
-    print(len(newgdf))
-    """
-
-    print("Forest")
-    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\Schutzzonen\Waldareal_-OGD\WALD_WALDAREAL_F.shp")
-    newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx,:]
-    print(len(newgdf))
-
-    ###########################################################################3
-    """
-    print("Wetlands")
-    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp")
-    newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx,:]
-    print(len(newgdf))
-    """
-
-    print("Network buffer")
-    network_gdf = gpd.read_file(r"data\Network\processed\edges.gpkg")
+    # 3. Network buffer
+    print("Filtering: Network buffer")
+    network_gdf = gpd.read_file("data/Network/processed/edges.gpkg")
     network_gdf['geometry'] = network_gdf['geometry'].buffer(1000)
-    network_gdf.to_file(r"data\temp\buffered_network.gpkg")
+    network_gdf.to_file("data/temp/buffered_network.gpkg")
 
-    idx = get_idx_todrop(newgdf, r"data\temp\buffered_network.gpkg")
+    idx = get_idx_todrop(newgdf, "data/temp/buffered_network.gpkg")
     newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx,:]
-    print(len(newgdf))
-    """
-    print("Residential area")
-    idx = get_idx_todrop(newgdf,r"data\landuse_landcover\landcover\Quartieranalyse_-OGD\QUARTIERE_F.shp")
-    newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0 # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx,:]
-    print(len(newgdf))
-    """
+    newgdf = newgdf.loc[newgdf['index'] == 0, :].copy()
+    print("Remaining:", len(newgdf))
 
-    print("Protected zones")
-    # List to store indices to drop
+    # 4. Protected zones (Raster Check)
+    print("Filtering: Protected zones (Raster)")
     indices_to_drop = []
+    raster_path = "data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif"
 
-    with rasterio.open("data\landuse_landcover\processed\zone_no_infra\protected_area_corridor.tif") as src:
-        # Read the raster data once outside the loop
+    with rasterio.open(raster_path) as src:
         raster_data = src.read(1)
-
-        # Loop through each point in the GeoDataFrame
         for index, row in newgdf.iterrows():
-            # Convert the point geometry to raster space
             row_x, row_y = row['geometry'].x, row['geometry'].y
             row_col, row_row = src.index(row_x, row_y)
 
-            if 0 <= row_col < raster_data.shape[0] and 0 <= row_row < raster_data.shape[1]:
-                # Read the value of the corresponding raster cell
+            if 0 <= row_row < raster_data.shape[1] and 0 <= row_col < raster_data.shape[0]:
                 value = raster_data[row_col, row_row]
-
-                # If the value is not NaN, mark the index for dropping
-                if not np.isnan(value):
+                # If value is not NaN (or matches your 'banned' criteria, e.g., value > 0)
+                if not np.isnan(value) and value != src.nodata:
                     indices_to_drop.append(index)
-
             else:
-                print(f"Point outside the polygon {row_x, row_y}")
                 indices_to_drop.append(index)
 
-        # Drop the points
     newgdf = newgdf.drop(indices_to_drop)
-    print(len(newgdf))
+    print("Remaining:", len(newgdf))
 
-    print("FFF")
-    idx = get_idx_todrop(newgdf, r"data\landuse_landcover\Schutzzonen\Fruchtfolgeflachen_-OGD\FFF_F.shp")
+    # 5. FFF
+    print("Filtering: FFF")
+    idx = get_idx_todrop(newgdf, "data/landuse_landcover/Schutzzonen/Fruchtfolgeflachen_-OGD/FFF_F.shp")
     newgdf.loc[:, "index"] = idx
-    keepidx = newgdf['index'] == 0  # 1 is the value of the columns that should be dropped
-    newgdf = newgdf.loc[keepidx, :]
-    print(len(newgdf))
+    newgdf = newgdf.loc[newgdf['index'] == 0, :].copy()
+    print("Final count:", len(newgdf))
 
+    # Cleanup and Export
     newgdf = newgdf.rename(columns={"ID": "ID_new"})
+    newgdf = newgdf.drop(columns=["index"], errors='ignore')
     newgdf = newgdf.to_crs("epsg:2056")
 
-    newgdf.to_file(r"data\Network\processed\generated_nodes.gpkg")
-
-    return
+    # CRITICAL: Return the resulting GeoDataFrame
+    return newgdf
 
 
 def get_idx_todrop(pt, filename):
-    #with fiona.open(r"data\landuse_landcover\landcover\lake\WB_STEHGEWAESSER_F.shp") as input:
+    #with fiona.open(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp") as input:
     with fiona.open(filename, crs="epsg:2056") as input:
         #pt = newgdf.copy() #for testing
         idx = np.ones(len(pt))
@@ -253,7 +184,7 @@ def create_lines(rand_pts_gdf, nearest_highway_pt_gdf):
     line_gdf["ID_current"] = nearest_highway_pt_gdf["ID_point"]
 
     line_gdf = line_gdf.set_crs("epsg:2056")
-    line_gdf.to_file(r"data\Network\processed\new_links.gpkg")
+    line_gdf.to_file(r"data/Network/processed/new_links.gpkg")
     return
 
 
@@ -261,7 +192,7 @@ def plot_lines_to_network(points_gdf,lines_gdf):
     points_gdf.plot(marker='*', color='green', markersize=5)
     base = lines_gdf.plot(edgecolor='black')
     points_gdf.plot(ax=base, marker='o', color='red', markersize=5)
-    plt.savefig(r"plot\predict\230822_network-generation.png", dpi=300)
+    plt.savefig(r"plot/predict/230822_network-generation.png", dpi=300)
     return None
 
 
@@ -288,7 +219,7 @@ def line_scoring(lines_gdf,raster_location):
 
 def routing_raster(raster_path):
     # Process LineStrings
-    generated_links = gpd.read_file(r"data\Network\processed\new_links.gpkg")
+    generated_links = gpd.read_file(r"data/Network/processed/new_links.gpkg")
     print(generated_links["ID_new"].unique())
 
     #print(generated_links.head(10))
@@ -337,7 +268,7 @@ def routing_raster(raster_path):
     generated_links['new_geometry'] = new_lines
 
     # Save the updated GeoDataFrame
-    #generated_links.to_csv(r'data\Network\processed\generated_links_updated.csv', index=False)
+    #generated_links.to_csv(r'data/Network/processed/generated_links_updated.csv', index=False)
 
     df_links = generated_links.dropna(subset=['new_geometry'])
 
@@ -357,18 +288,18 @@ def routing_raster(raster_path):
     df_links = df_links.set_geometry("geometry")
     df_links = df_links.set_crs(epsg=2056)
 
-    # df_links.to_file(r"data\Network\processed\01_linestring_links.gpkg")
+    # df_links.to_file(r"data/Network/processed/01_linestring_links.gpkg")
 
     # Step 2: Simplify LineStrings (Retaining corners)
     #tolerance = 0.01  # Adjust tolerance to your needs
     #df_links['geometry'] = df_links['geometry'].apply(lambda x: x.simplify(tolerance))
 
-    df_links.to_file(r"data\Network\processed\new_links_realistic.gpkg")
+    df_links.to_file(r"data/Network/processed/new_links_realistic.gpkg")
 
     # Also store the point which are not joinable due to banned land cover
     # Writing to the CSV file with a header
     #df_inaccessible_points = pd.DataFrame(generated_points_unaccessible, columns=["point_id"])
-    #df_inaccessible_points.to_csv(r"data\Network\processed\points_inaccessible.csv", index=False)
+    #df_inaccessible_points.to_csv(r"data/Network/processed/points_inaccessible.csv", index=False)
 
     return
 
@@ -449,7 +380,7 @@ def plot_corridor(network, limits, location, current_nodes=False, new_nodes=Fals
     ax.set_ylim(limits[2], limits[3])
 
     #plt.title("Voronoi polygons to each highway access point")
-    plt.savefig(r"plot\network_base_generated.png", dpi=300)
+    plt.savefig(r"plot/network_base_generated.png", dpi=300)
     plt.show()
 
     return
@@ -485,26 +416,26 @@ def single_tt_voronoi_ton_one(folder_path):
     combined_gdf = pd.concat(dataframes)
 
     # Save the combined dataframe as a new gpkg file
-    combined_gdf.to_file("data\Voronoi\combined_developments.gpkg", driver="GPKG")
+    combined_gdf.to_file("data/Voronoi/combined_developments.gpkg", driver="GPKG")
 
 
 def import_elevation_model(new_resolution):
 
     # Read CSV file containing the ZIP file links
-    csv_file = r"data\elevation_model\ch.swisstopo.swissalti3d-pivq0Jb7.csv"
+    csv_file = r"data/elevation_model/ch.swisstopo.swissalti3d-pivq0Jb7.csv"
     df = pd.read_csv(csv_file, names=["url"], header=None)
 
     # Download and extract ZIP files
     for url in df["url"]:
         r = requests.get(url)
-        zip_path = r"data\elevation_model\zip_files\temp.zip"
+        zip_path = r"data/elevation_model/zip_files/temp.zip"
         with open(zip_path, 'wb') as f:
             f.write(r.content)
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(r"data\elevation_model\extracted_xyz_files")
+            zip_ref.extractall(r"data/elevation_model/extracted_xyz_files")
 
     # Find all XYZ files
-    xyz_files = glob.glob(r"data\elevation_model\extracted_xyz_files\*.xyz")
+    xyz_files = glob.glob(r"data/elevation_model/extracted_xyz_files/*.xyz")
 
     # Initialize an empty DataFrame for the results
     concatenated_data = pd.DataFrame(columns=["X", "Y", "Z"])
@@ -545,7 +476,7 @@ def import_elevation_model(new_resolution):
     transform = from_origin(min_x, max_y, new_resolution, new_resolution)
 
     # Write the data to a GeoTIFF file
-    with rasterio.open(r'data\elevation_model\elevation.tif', 'w', driver='GTiff',
+    with rasterio.open(r'data/elevation_model/elevation.tif', 'w', driver='GTiff',
                        height=raster.shape[0], width=raster.shape[1],
                        count=1, dtype=str(raster.dtype),
                        crs='EPSG:2056', transform=transform) as dst:
@@ -566,10 +497,10 @@ def downsample_elevation_xyz_file(file_path, min_x, min_y, resolution):
 
 def get_road_elevation_profile():
     # Import the dataframe containing the rounting of the highway links
-    links = gpd.read_file(r"data\Network\processed\new_links_realistic.gpkg")
+    links = gpd.read_file(r"data/Network/processed/new_links_realistic.gpkg")
 
     # Open the GeoTIFF file
-    elevation_raster = r"data\elevation_model\elevation.tif"
+    elevation_raster = r"data/elevation_model/elevation.tif"
 
     def interpolate_linestring(linestring, interval):
         length = linestring.length
@@ -620,7 +551,7 @@ def get_road_elevation_profile():
     links["check_needed"] = (links['slope_mean'] > 5) | (links["steep_section"] > 40)
     links = links.drop(columns=["elevation_difference", "elevation_absolute", "slope", "slope_mean", "steep_section"])
     #links["elevation_profile"] = links["elevation_profile"].astype("string")
-    #links.to_file(r"data\Network\processed\new_links_realistic_elevation.gpkg")
+    #links.to_file(r"data/Network/processed/new_links_realistic_elevation.gpkg")
     return links
 
 
@@ -678,8 +609,8 @@ def get_tunnel_candidates(df):
             #dlg.wait_window()
     df["elevation_profile"]=df["elevation_profile"].astype('string')
     print(df)
-    #df.to_file(r"data\Network\processed\new_links_realistic_tunnel.gpkg")
-    df.to_file(r"data\Network\processed\new_links_realistic_tunnel-terminal.gpkg")
+    #df.to_file(r"data/Network/processed/new_links_realistic_tunnel.gpkg")
+    df.to_file(r"data/Network/processed/new_links_realistic_tunnel-terminal.gpkg")
 
 
 def tunnel_bridges(df):
@@ -996,7 +927,7 @@ def tunnel_bridges(df):
                    title="Elevation profile", loc="lower left", bbox_to_anchor=(1.04, 0), frameon=False)
         legend.get_title().set_horizontalalignment('left')
         plt.tight_layout()
-        plt.savefig(fr"plot\network\elevation\new_profile{row['ID_new']}.png", dpi=300)
+        plt.savefig(fr"plot/network/elevation/new_profile{row['ID_new']}.png", dpi=300)
         plt.show()
 
 
@@ -1139,10 +1070,10 @@ def tunnel_bridges(df):
     #print(bridge_gdf.head(10).to_string())
     #print(df.head().to_string())
     # safe file as geopackage
-    df.to_file(r"data\Network\processed\new_links_realistic_tunnel_adjusted.gpkg")
-    tunnel_gdf.to_file(r"data\Network\processed\edges_tunnels.gpkg")
-    bridge_gdf.to_file(r"data\Network\processed\edges_bridges.gpkg")
-    road_gdf.to_file(r"data\Network\processed\edges_roads.gpkg")
+    df.to_file(r"data/Network/processed/new_links_realistic_tunnel_adjusted.gpkg")
+    tunnel_gdf.to_file(r"data/Network/processed/edges_tunnels.gpkg")
+    bridge_gdf.to_file(r"data/Network/processed/edges_bridges.gpkg")
+    road_gdf.to_file(r"data/Network/processed/edges_roads.gpkg")
 
     """
     def slope_constrained_curve_fit(x, y):
