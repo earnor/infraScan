@@ -21,6 +21,7 @@ from data_converter import *
 
 def print_hi(name):
     os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')  # TODO: implement the same code for data_converter
+    #os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')  # TODO: implement the same code for data_converter
     sys.setrecursionlimit(2000)
     runtimes = {}
 
