@@ -17,6 +17,8 @@ from tqdm import tqdm
 import pulp
 import requests
 import zipfile
+import rasterio
+import geopandas as gpd
 
 from data_import import *
 
@@ -45,70 +47,140 @@ def generated_access_points(extent,number):
 
 
 def filter_access_points(gdf):
-    newgdf = gdf.copy()
-    print("Total points generated:", len(newgdf))
 
+    newgdf = gdf.copy().reset_index(drop=True)
+    print(f"  Total points generated: {len(newgdf)}")
+
+    # Ensure CRS is EPSG:2056 before any spatial operation
+    if newgdf.crs is None:
+        newgdf = newgdf.set_crs("EPSG:2056")
+    elif newgdf.crs.to_epsg() != 2056:
+        newgdf = newgdf.to_crs("EPSG:2056")
+
+    # ------------------------------------------------------------------
+    # Helper: filter points that fall INSIDE a vector polygon layer
+    # Returns the input GDF with points inside the polygon removed
+    # ------------------------------------------------------------------
+    def filter_by_polygon(points_gdf, shapefile_path, label):
+        print(f"  Filtering: {label}")
+        if not os.path.exists(shapefile_path):
+            print(f"    Warning: {shapefile_path} not found — skipping")
+            return points_gdf
+
+        poly_gdf = gpd.read_file(shapefile_path)
+        if poly_gdf.crs is None:
+            poly_gdf = poly_gdf.set_crs("EPSG:2056")
+        elif poly_gdf.crs.to_epsg() != 2056:
+            poly_gdf = poly_gdf.to_crs("EPSG:2056")
+
+        # sjoin: keep only points NOT inside the polygon
+        joined = gpd.sjoin(points_gdf, poly_gdf[['geometry']], how='left', predicate='within')
+        mask = joined['index_right'].isna()
+        # Deduplicate in case a point touches multiple polygons
+        mask = mask[~mask.index.duplicated(keep='first')]
+        result = points_gdf[mask.values].copy().reset_index(drop=True)
+        print(f"    Remaining: {len(result)}")
+        return result
+
+    # ------------------------------------------------------------------
     # 1. Schutzanordnung Natur und Landschaft
-    print("Filtering: Schutzanordnung Natur und Landschaft")
-    idx = get_idx_todrop(newgdf,
-                         "data/landuse_landcover/Schutzzonen/Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD/FNS_SCHUTZZONE_F.shp")
-    newgdf.loc[:, "index"] = idx
-    newgdf = newgdf.loc[newgdf['index'] == 0, :].copy()
-    print("Remaining:", len(newgdf))
+    # ------------------------------------------------------------------
+    newgdf = filter_by_polygon(
+        newgdf,
+        "data/landuse_landcover/Schutzzonen/Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD/FNS_SCHUTZZONE_F.shp",
+        "Schutzanordnung Natur und Landschaft"
+    )
 
-    # 2. Forest
-    print("Filtering: Forest")
-    idx = get_idx_todrop(newgdf, "data/landuse_landcover/Schutzzonen/Waldareal_-OGD/WALD_WALDAREAL_F.shp")
-    newgdf.loc[:, "index"] = idx
-    newgdf = newgdf.loc[newgdf['index'] == 0, :].copy()
-    print("Remaining:", len(newgdf))
+    # ------------------------------------------------------------------
+    # 2. Forest (Waldareal)
+    # ------------------------------------------------------------------
+    newgdf = filter_by_polygon(
+        newgdf,
+        "data/landuse_landcover/Schutzzonen/Waldareal_-OGD/WALD_WALDAREAL_F.shp",
+        "Forest (Waldareal)"
+    )
 
-    # 3. Network buffer
-    print("Filtering: Network buffer")
-    network_gdf = gpd.read_file("data/Network/processed/edges.gpkg")
-    network_gdf['geometry'] = network_gdf['geometry'].buffer(1000)
-    network_gdf.to_file("data/temp/buffered_network.gpkg")
+    # ------------------------------------------------------------------
+    # 3. Network buffer — keep only points within 1000m of existing network
+    #    Logic inverted: points OUTSIDE the buffer are dropped
+    # ------------------------------------------------------------------
+    print("  Filtering: Network proximity (within 1000m of existing network)")
+    network_path = "data/Network/processed/edges.gpkg"
+    if os.path.exists(network_path):
+        network_gdf = gpd.read_file(network_path)
+        if network_gdf.crs.to_epsg() != 2056:
+            network_gdf = network_gdf.to_crs("EPSG:2056")
 
-    idx = get_idx_todrop(newgdf, "data/temp/buffered_network.gpkg")
-    newgdf.loc[:, "index"] = idx
-    newgdf = newgdf.loc[newgdf['index'] == 0, :].copy()
-    print("Remaining:", len(newgdf))
+        network_buf = network_gdf.copy()
+        network_buf['geometry'] = network_gdf.geometry.buffer(1000)
+        network_buf = network_buf[['geometry']].dissolve()  # merge into single polygon
 
-    # 4. Protected zones (Raster Check)
-    print("Filtering: Protected zones (Raster)")
-    indices_to_drop = []
+        # Keep points that ARE within the buffer (inside = good here)
+        joined = gpd.sjoin(newgdf, network_buf, how='left', predicate='within')
+        mask = joined['index_right'].notna()
+        mask = mask[~mask.index.duplicated(keep='first')]
+        newgdf = newgdf[mask.values].copy().reset_index(drop=True)
+        print(f"    Remaining: {len(newgdf)}")
+    else:
+        print(f"    Warning: {network_path} not found — skipping")
+
+    # ------------------------------------------------------------------
+    # 4. Protected zones (Raster check)
+    #    Drop points that land on protected raster cells (value > 0, not nodata)
+    # ------------------------------------------------------------------
+    print("  Filtering: Protected zones (Raster)")
     raster_path = "data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif"
 
-    with rasterio.open(raster_path) as src:
-        raster_data = src.read(1)
-        for index, row in newgdf.iterrows():
-            row_x, row_y = row['geometry'].x, row['geometry'].y
-            row_col, row_row = src.index(row_x, row_y)
+    if os.path.exists(raster_path):
+        indices_to_drop = []
+        with rasterio.open(raster_path) as src:
+            raster_data = src.read(1)
+            nodata = src.nodata
 
-            if 0 <= row_row < raster_data.shape[1] and 0 <= row_col < raster_data.shape[0]:
-                value = raster_data[row_col, row_row]
-                # If value is not NaN (or matches your 'banned' criteria, e.g., value > 0)
-                if not np.isnan(value) and value != src.nodata:
-                    indices_to_drop.append(index)
-            else:
-                indices_to_drop.append(index)
+            for idx, row in newgdf.iterrows():
+                x, y = row.geometry.x, row.geometry.y
+                try:
+                    row_i, col_i = src.index(x, y)  # returns (row, col)
+                    if 0 <= row_i < raster_data.shape[0] and 0 <= col_i < raster_data.shape[1]:
+                        value = raster_data[row_i, col_i]
+                        # Drop if protected (value != nodata and value > 0)
+                        if nodata is not None and value == nodata:
+                            pass  # nodata = not protected, keep
+                        elif np.isnan(float(value)):
+                            pass  # NaN = not protected, keep
+                        elif value > 0:
+                            indices_to_drop.append(idx)
+                    else:
+                        indices_to_drop.append(idx)  # outside raster extent = drop
+                except Exception:
+                    indices_to_drop.append(idx)
 
-    newgdf = newgdf.drop(indices_to_drop)
-    print("Remaining:", len(newgdf))
+        newgdf = newgdf.drop(index=indices_to_drop).reset_index(drop=True)
+        print(f"    Remaining: {len(newgdf)}")
+    else:
+        print(f"    Warning: {raster_path} not found — skipping")
 
-    # 5. FFF
-    print("Filtering: FFF")
-    idx = get_idx_todrop(newgdf, "data/landuse_landcover/Schutzzonen/Fruchtfolgeflachen_-OGD/FFF_F.shp")
-    newgdf.loc[:, "index"] = idx
-    newgdf = newgdf.loc[newgdf['index'] == 0, :].copy()
-    print("Final count:", len(newgdf))
+    # ------------------------------------------------------------------
+    # 5. Fruchtfolgeflaechen (FFF)
+    # ------------------------------------------------------------------
+    newgdf = filter_by_polygon(
+        newgdf,
+        "data/landuse_landcover/Schutzzonen/Fruchtfolgeflachen_-OGD/FFF_F.shp",
+        "Fruchtfolgeflaechen (FFF)"
+    )
 
-    # Cleanup and Export
-    newgdf = newgdf.rename(columns={"ID": "ID_new"})
-    newgdf = newgdf.drop(columns=["index"], errors='ignore')
-    newgdf = newgdf.to_crs("epsg:2056")
+    # ------------------------------------------------------------------
+    # Cleanup and export
+    # ------------------------------------------------------------------
+    if 'ID' in newgdf.columns:
+        newgdf = newgdf.rename(columns={"ID": "ID_new"})
 
-    # CRITICAL: Return the resulting GeoDataFrame
+    # Reassign clean sequential IDs after all filtering
+    newgdf['ID_new'] = range(len(newgdf))
+    newgdf = newgdf.drop(columns=['index'], errors='ignore')
+    newgdf = newgdf.set_crs("EPSG:2056", allow_override=True)
+
+    print(f"  Final count after all filters: {len(newgdf)}")
     return newgdf
 
 
@@ -150,18 +222,85 @@ def near(point, network_gdf,pts):
 
 
 def connect_points_to_network(new_point_gdf, network_gdf):
-    #unary_union = network_gdf.unary_union
-    #new_gdf=point_gdf.copy()
-    ###
-    #network_gdf = network_gdf.rename(columns={'geometry': 'geometry_current'})
-    #network_gdf = network_gdf.set_geometry("geometry_current")
-    network_gdf["geometry_current"] = network_gdf["geometry"]
-    network_gdf = network_gdf[['intersection', 'ID_point', 'name', 'end', 'cor_1',
-       'geometry', 'geometry_current']]
-    new_gdf = gpd.sjoin_nearest(new_point_gdf,network_gdf,distance_col="distances")[["ID_new","XKOORD","YKOORD","geometry","distances","geometry_current", "ID_point"]] # "geometry",
-    ###
-    #new_gdf['straight_line'] = new_gdf.apply(lambda row: LineString([row['geometry'], row['nearest_node']]), axis=1) #Create a linestring column
-    return new_gdf
+    import geopandas as gpd
+    from shapely.geometry import LineString
+    import os
+
+    print("  Connecting candidate points to nearest cycling network nodes...")
+
+    # ------------------------------------------------------------------
+    # 1. RESOLVE is_intersection column name (may be suffixed after joins)
+    # ------------------------------------------------------------------
+    # Find whichever variant of the column exists
+    is_intersection_col = next(
+        (c for c in network_gdf.columns
+         if c == 'is_intersection' or c.startswith('is_intersection')),
+        None
+    )
+
+    if is_intersection_col is None:
+        # Column missing entirely — treat all nodes as access points
+        print("  Warning: is_intersection not found — using all nodes as targets")
+        access_nodes = network_gdf.copy().reset_index(drop=True)
+    else:
+        if is_intersection_col != 'is_intersection':
+            print(f"  Note: using '{is_intersection_col}' as intersection flag")
+        access_nodes = network_gdf[network_gdf[is_intersection_col] == 0].copy().reset_index(drop=True)
+
+    # Resolve ID_point column (must exist for node lookup)
+    if 'ID_point' not in access_nodes.columns:
+        access_nodes = access_nodes.reset_index(drop=True)
+        access_nodes['ID_point'] = access_nodes.index
+
+    print(f"    {len(access_nodes)} access nodes available as connection targets")
+
+    # ------------------------------------------------------------------
+    # 2. DROP leftover join columns that conflict with sjoin_nearest
+    # ------------------------------------------------------------------
+    for df in [new_point_gdf, access_nodes]:
+        drop_cols = [c for c in ['index_right', 'index_left'] if c in df.columns]
+        df.drop(columns=drop_cols, inplace=True)
+
+    # ------------------------------------------------------------------
+    # 3. NEAREST JOIN — one target node per candidate point
+    # ------------------------------------------------------------------
+    joined = gpd.sjoin_nearest(
+        new_point_gdf.reset_index(drop=True),
+        access_nodes[['ID_point', 'geometry']].reset_index(drop=True),
+        how='left',
+        distance_col='dist_to_node'
+    ).drop(columns=['index_right'], errors='ignore')
+
+    joined = joined[~joined.index.duplicated(keep='first')].reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # 4. RETRIEVE MATCHED NODE GEOMETRY and build LineString
+    # ------------------------------------------------------------------
+    node_lookup = access_nodes.set_index('ID_point')['geometry']
+    joined['node_id']   = joined['ID_point']
+    joined['node_geom'] = joined['node_id'].map(node_lookup)
+
+    joined['geometry'] = joined.apply(
+        lambda row: LineString([row.geometry, row['node_geom']])
+        if row['node_geom'] is not None else None,
+        axis=1
+    )
+    joined = joined[joined['geometry'].notnull()].copy()
+
+    # ------------------------------------------------------------------
+    # 5. FINALISE
+    # ------------------------------------------------------------------
+    links = gpd.GeoDataFrame(joined, geometry='geometry', crs="EPSG:2056")
+    links = links.drop(columns=['node_geom', 'ID_point'], errors='ignore')
+    links['ID_link'] = range(len(links))
+
+    os.makedirs('data/Network/processed', exist_ok=True)
+    links.to_file('data/Network/processed/new_links.gpkg', driver='GPKG')
+
+    print(f"  -> {len(links)} candidate links created")
+    print(f"     distance range: {links['dist_to_node'].min():.0f}–{links['dist_to_node'].max():.0f} m")
+
+    return links
 
 
 def create_nearest_gdf(filtered_rand_gdf):
@@ -217,91 +356,103 @@ def line_scoring(lines_gdf,raster_location):
     return lines_gdf
 
 
-def routing_raster(raster_path):
-    # Process LineStrings
-    generated_links = gpd.read_file(r"data/Network/processed/new_links.gpkg")
-    print(generated_links["ID_new"].unique())
+def routing_raster(raster_path, links_path='data/Network/processed/new_links_corridor.gpkg'):
 
-    #print(generated_links.head(10))
-    new_lines = []
-    generated_points_unaccessible = []
+    if not os.path.exists(links_path):
+        raise FileNotFoundError(f"Missing: {links_path} — run connect_points_to_network() first")
+
+    generated_links = gpd.read_file(links_path)
+    print(f"  Routing {len(generated_links)} candidate links...")
+
+    new_geometries      = []
+    inaccessible_points = []
 
     with rasterio.open(raster_path) as dataset:
-        raster_data = dataset.read(1)  # Assumes forbidden cells are marked with 1 or another distinct value
+        raster_data = dataset.read(1)
+        transform   = dataset.transform
 
-        transform = dataset.transform
+        print("  Building routing graph from raster...")
+        graph = raster_to_graph(raster_data)
 
-        for i, line in enumerate(generated_links.geometry):
-            # Get the start and end points from the linestring
+        for i, row in generated_links.iterrows():
+            line        = row.geometry
             start_point = line.coords[0]
-            end_point = line.coords[-1]
+            end_point   = line.coords[-1]
 
-            # Convert real-world coordinates to raster indices
-            start_index = rasterio.transform.rowcol(transform, xs=start_point[0], ys=start_point[1])
-            end_index = rasterio.transform.rowcol(transform, xs=end_point[0], ys=end_point[1])
+            start_idx = rasterio.transform.rowcol(
+                transform, xs=start_point[0], ys=start_point[1]
+            )
+            end_idx = rasterio.transform.rowcol(
+                transform, xs=end_point[0], ys=end_point[1]
+            )
 
-            # Convert raster to graph
-            graph = raster_to_graph(raster_data)
-
-            # Calculate the shortest path avoiding forbidden cells
+            path = None
             try:
-                path, generated_points_unaccessible = find_path(graph, start_index, end_index, generated_points_unaccessible, end_point)
+                path, inaccessible_points = find_path(
+                    graph, start_idx, end_idx, inaccessible_points, end_point
+                )
             except Exception as e:
-                path=None
-                print(e)
-                #print(generated_links.iloc[i])
+                path = None
 
+            # ----------------------------------------------------------
+            # GUARD: path must have at least 2 points for a LineString
+            # A single-point path means start == end (same raster cell)
+            # or find_path returned a degenerate result
+            # ----------------------------------------------------------
+            if path and len(path) >= 2:
+                coords = [
+                    rasterio.transform.xy(transform, rows=p[0], cols=p[1], offset='center')
+                    for p in path
+                ]
+                # Snap to exact original coordinates (avoids 25m raster offset)
+                coords[0]  = start_point
+                coords[-1] = end_point
 
-            if path:
-                # If you need to convert back the path to real-world coordinates, you would use the raster's transform
-                # Here's a stub for that process
-                real_world_path = [rasterio.transform.xy(transform, cols=point[1], rows=point[0], offset='center') for point in path]
-                #print("Start ", real_world_path[0], " ersetzt durch ", line.coords[0])
-                #print("Ende ", real_world_path[-1], " ersetzt durch ", line.coords[-1])
-                real_world_path[0] = line.coords[0]
-                real_world_path[-1] = line.coords[-1]
-                new_lines.append(real_world_path)
+                # Final guard: deduplicate consecutive identical points
+                coords = [c for j, c in enumerate(coords)
+                          if j == 0 or c != coords[j - 1]]
+
+                if len(coords) >= 2:
+                    new_geometries.append(LineString(coords))
+                else:
+                    new_geometries.append(None)
+
+            elif path and len(path) == 1:
+                # Start and end in the same raster cell — use straight line
+                if start_point != end_point:
+                    new_geometries.append(LineString([start_point, end_point]))
+                else:
+                    new_geometries.append(None)
             else:
-                new_lines.append(None)
+                new_geometries.append(None)
 
-    # Update GeoDataFrame
-    generated_links['new_geometry'] = new_lines
+    # ------------------------------------------------------------------
+    # Update geometries and clean up
+    # ------------------------------------------------------------------
+    generated_links = generated_links.copy()
+    generated_links['geometry'] = new_geometries
 
-    # Save the updated GeoDataFrame
-    #generated_links.to_csv(r'data/Network/processed/generated_links_updated.csv', index=False)
+    routed  = generated_links.dropna(subset=['geometry']).copy()
+    routed  = gpd.GeoDataFrame(routed, geometry='geometry', crs="EPSG:2056")
+    routed['length_routed_m'] = routed.geometry.length
 
-    df_links = generated_links.dropna(subset=['new_geometry'])
+    dropped = len(generated_links) - len(routed)
+    print(f"  -> {len(routed)} routed links "
+          f"({dropped} dropped — no valid path found)")
+    if len(routed) > 0:
+        print(f"     routed length range: "
+              f"{routed['length_routed_m'].min():.0f}–"
+              f"{routed['length_routed_m'].max():.0f} m")
 
-    df_links = gpd.GeoDataFrame(df_links)
-    # Assuming 'df' is your DataFrame and it has a column 'coords' with coordinate arrays
-    # Step 1: Convert to LineStrings
-    #df_links['geometry'] = df_links['new_geometry'].apply(lambda x: LineString(x))
-    #df_links2 = df_links
-    for index, row in df_links.iterrows():
-        try:
-            tempgeom = df_links['new_geometry'].apply(lambda x: LineString(x))
-        except Exception as e:
-            df_links.drop(index, inplace=True)
-            #print(e)
-    df_links['geometry'] = tempgeom
-    df_links = df_links.drop(columns="new_geometry")
-    df_links = df_links.set_geometry("geometry")
-    df_links = df_links.set_crs(epsg=2056)
+    os.makedirs('data/Network/processed', exist_ok=True)
+    routed.to_file('data/Network/processed/new_links_realistic.gpkg', driver='GPKG')
 
-    # df_links.to_file(r"data/Network/processed/01_linestring_links.gpkg")
+    if inaccessible_points:
+        pd.DataFrame(inaccessible_points, columns=['x', 'y']) \
+          .to_csv('data/Network/processed/points_inaccessible.csv', index=False)
+        print(f"  -> {len(inaccessible_points)} inaccessible points logged")
 
-    # Step 2: Simplify LineStrings (Retaining corners)
-    #tolerance = 0.01  # Adjust tolerance to your needs
-    #df_links['geometry'] = df_links['geometry'].apply(lambda x: x.simplify(tolerance))
-
-    df_links.to_file(r"data/Network/processed/new_links_realistic.gpkg")
-
-    # Also store the point which are not joinable due to banned land cover
-    # Writing to the CSV file with a header
-    #df_inaccessible_points = pd.DataFrame(generated_points_unaccessible, columns=["point_id"])
-    #df_inaccessible_points.to_csv(r"data/Network/processed/points_inaccessible.csv", index=False)
-
-    return
+    return routed
 
 
 def raster_to_graph(raster_data):
@@ -741,7 +892,7 @@ def tunnel_bridges(df):
                 prob += lp_vars[i - 1] - lp_vars[i] <= max_diff
             # Change indicator constraints
             # If change_var is 0, lp_var must be equal to the original value
-            prob += lp_vars[i] - values[i] <= 1e9 * change_vars[i]
+            prob += lp_vars[i] - float(values[i]) <= 1e9 * change_vars[i]
             prob += values[i] - lp_vars[i] <= 1e9 * change_vars[i]
 
         # Constraints for keeping first and last values unchanged

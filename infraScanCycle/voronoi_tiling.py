@@ -95,27 +95,76 @@ def voronoi_finite_polygons_2d(vor, radius=None):
     return new_regions, np.asarray(new_vertices)
 
 
-def get_voronoi_status_quo():
-    existing_nodes = gpd.read_file(r"data/Network/processed/points.gpkg")
-    existing_nodes = existing_nodes.set_crs("epsg:2056")
+def get_voronoi_status_quo(corridor_polygon=None):
+    """
+    Computes Euclidean Voronoi polygons for existing cycling network
+    access points (non-intersection nodes) as the status quo baseline.
 
-    existing_nodes = existing_nodes[existing_nodes["intersection"] == 0]
+    Each access point gets a Voronoi cell representing the area for
+    which it is the closest entry point to the cycling network.
 
-    existing_temp = existing_nodes["geometry"]
-    coordinates_array = np.array(existing_temp.apply(lambda geom: (geom.x, geom.y)).tolist())
+    Output: data/Voronoi/voronoi_status_quo_euclidian.gpkg
+    """
+    import geopandas as gpd
+    import numpy as np
+    from shapely.geometry import Polygon
+    from scipy.spatial import Voronoi
+    import os
 
-    # generate the Voronoi diagram
-    vor = Voronoi(coordinates_array)
+    os.makedirs('data/Voronoi', exist_ok=True)
 
+    # ------------------------------------------------------------------
+    # 1. LOAD access points — use points.gpkg (has is_intersection)
+    #    Filter to non-intersection nodes only (actual access points)
+    # ------------------------------------------------------------------
+    nodes = gpd.read_file('data/Network/processed/points.gpkg')
+    if nodes.crs is None:
+        nodes = nodes.set_crs("EPSG:2056")
+
+    access_nodes = nodes[nodes['is_intersection'] == 0].copy().reset_index(drop=True)
+
+    # Optionally restrict to corridor
+    if corridor_polygon is not None:
+        poly_gdf = gpd.GeoDataFrame({'geometry': [corridor_polygon]}, crs="EPSG:2056")
+        access_nodes = gpd.sjoin(
+            access_nodes, poly_gdf, how='inner', predicate='within'
+        ).drop(columns=['index_right'], errors='ignore').reset_index(drop=True)
+
+    print(f"  Computing Voronoi for {len(access_nodes)} access points...")
+
+    if len(access_nodes) < 4:
+        raise ValueError("Need at least 4 access points for Voronoi tessellation")
+
+    # ------------------------------------------------------------------
+    # 2. COMPUTE Voronoi
+    # ------------------------------------------------------------------
+    coords = np.array([(geom.x, geom.y) for geom in access_nodes.geometry])
+    vor    = Voronoi(coords)
     regions, vertices = voronoi_finite_polygons_2d(vor)
-    df_voronoi = gpd.GeoDataFrame(geometry=gpd.GeoSeries([Polygon(vertices[region]) for region in regions]),
-                                  crs="epsg:2056")
-    # df_voronoi["ID"] = 1
-    print(df_voronoi.head(10).to_string())
 
-    df_voronoi.to_file(r"data/Voronoi/voronoi_status_quo_euclidian.gpkg")
+    # ------------------------------------------------------------------
+    # 3. BUILD GeoDataFrame — one polygon per access point
+    # ------------------------------------------------------------------
+    polygons = [Polygon(vertices[region]) for region in regions]
 
-    return
+    voronoi_gdf = gpd.GeoDataFrame(
+        {'ID_point':       access_nodes['ID_point'].values,
+         'is_destination': access_nodes['is_destination'].values
+                           if 'is_destination' in access_nodes.columns else 0},
+        geometry=polygons,
+        crs="EPSG:2056"
+    )
+
+    # Clip to corridor if provided
+    if corridor_polygon is not None:
+        voronoi_gdf['geometry'] = voronoi_gdf.geometry.intersection(corridor_polygon)
+        voronoi_gdf = voronoi_gdf[~voronoi_gdf.geometry.is_empty].copy()
+
+    voronoi_gdf.to_file('data/Voronoi/voronoi_status_quo_euclidian.gpkg', driver='GPKG')
+
+    print(f"  -> {len(voronoi_gdf)} Voronoi polygons saved")
+
+    return voronoi_gdf
 
 
 def get_voronoi_all_developments():
@@ -219,18 +268,33 @@ def nw_from_osm(limits):
         try:
             # Attempt to process the OSM data for the sub-polygon
             print(f"Processing sub-polygon {i + 1}/{len(sub_polygons)}", end='/r')
-            #G = ox.graph_from_polygon(lat_lon_frame, network_type="drive", simplify=True, truncate_by_edge=True)
-            # Define a custom filter to exclude highways
-            # This example excludes motorways, motorway_links, trunks, and trunk_links
-            #custom_filter = '["highway"!~"motorway|motorway_link|trunk|trunk_link"]'
-            # Create the graph using the custom filter
-            G = ox.graph_from_polygon(lat_lon_frame, network_type="drive", simplify=True, truncate_by_edge=True) # custom_filter=custom_filter,
+            # These OSMnx data are used as FEEDER network — they represent how people travel
+            # from their home to the nearest cycle network access point (on foot or by bike
+            # on normal streets, NOT on the high-quality cycle main network).
+            # network_type="all" retrieves all street types from OSM.
+            G = ox.graph_from_polygon(lat_lon_frame, network_type="all", simplify=True, truncate_by_edge=True)
             G = ox.add_edge_speeds(G)
 
             # Convert the graph to a GeoDataFrame
             gdf_edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
+            gdf_edges = gdf_edges[["geometry", "speed_kph", "highway"]]
+
+            # Filter by road type instead of speed — keeps all street types accessible by bike.
+            # Excluded: motorway, trunk, primary, secondary (too fast, cycling not permitted/safe).
+            # Included: residential, living_street, cycleway, path, footway, unclassified, service
+            # these are all roads where a cyclist can realistically travel to reach
+            #           the next access point of the main cycle network.
+            cycle_feeder_types = [
+                'cycleway',  # dedicated cycle path
+                'path',  # general path, often cycleable
+                'footway',  # footpath, usable by cyclists in many cases
+                'living_street',  # shared space, low speed
+                'residential',  # residential street, standard feeder road
+                'unclassified',  # minor road, typically low traffic
+                'service'  # service road, parking lots etc.
+            ]
+            gdf_edges = gdf_edges[gdf_edges["highway"].isin(cycle_feeder_types)]
             gdf_edges = gdf_edges[["geometry", "speed_kph"]]
-            gdf_edges = gdf_edges[gdf_edges["speed_kph"] <= 80]
 
             # Project the edges GeoDataFrame to the desired CRS (if necessary)
             gdf_edges = gdf_edges.to_crs("EPSG:2056")
@@ -312,8 +376,8 @@ def osm_nw_to_raster(limits):
     num_cols = int((maxx - minx) / resolution)
     num_rows = int((maxy - miny) / resolution)
 
-    # Initialize the raster with 4 = minimal travel speed (or np.nan for no-data value)
-    #raster = np.zeros((num_rows, num_cols), dtype=np.float32)
+    # Initialize raster with 4 km/h as default (walking speed — fallback for cells with no road).
+    # For cycling: cells with a cycle path will be overwritten with their actual speed (up to 15 km / h).
     raster = np.full((num_rows, num_cols), 4, dtype=np.float32)
 
     # Define the transform
