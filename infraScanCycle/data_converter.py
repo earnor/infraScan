@@ -10,16 +10,24 @@ from shapely.geometry import LineString, MultiLineString
 import os
 import pandas as pd
 import ast
+import networkx as nx
+from typing import Optional, Any
+from shapely.validation import make_valid
 
 os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
+# os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')  # TODO: implement the same code for data_converter
 
-def import_network_GIS_ALLTAG():
+
+def import_network_GIS_ALLTAG() -> Any:
     path = 'data/raw/ALLTAG/OGD_VELO_ALLTAG_NETZ_L_M.shp'
     df = gpd.read_file(path, engine='pyogrio')
 
-    # Ensure CRS is metric (Swiss LV95) — do this ONCE before anything else
+    # Ensure CRS is metric (Swiss LV95)
     if df.crs.to_epsg() != 2056:
         df = df.to_crs("EPSG:2056")
+
+    df['geometry'] = df.geometry.apply(lambda g: make_valid(g) if g is not None else g)
+    df = df[df.geometry.notna() & ~df.geometry.is_empty].reset_index(drop=True)
 
     # Store original winding geometry as WKT for later visualization
     df['visual_geom'] = df['geometry'].apply(lambda g: g.wkt)
@@ -50,6 +58,20 @@ def import_network_GIS_ALLTAG():
     os.makedirs('data/Network/processed', exist_ok=True)
     gdf_nodes.to_file('data/Network/processed/nodes.gpkg', driver='GPKG')
     gdf_edges.to_file('data/Network/processed/edges.gpkg', driver='GPKG')
+
+    # ── CSV Export ────────────────────────────────────────────────────────
+    # Nodes: drop geometry, export all attributes
+    nodes_csv = gdf_nodes.drop(columns='geometry').copy()
+    # Add x/y explicitly from the Point geometry
+    nodes_csv['x'] = gdf_nodes.geometry.x
+    nodes_csv['y'] = gdf_nodes.geometry.y
+    nodes_csv.to_csv('data/Network/processed/nodes_export.csv', index=False)
+    print(f"  Nodes exported → data/Network/processed/nodes_export.csv  ({len(nodes_csv)} rows)")
+
+    # Edges: drop geometry, export all attributes (includes length_m, ROUTENTYP, visual_geom, etc.)
+    edges_csv = gdf_edges.drop(columns='geometry').copy()
+    edges_csv.to_csv('data/Network/processed/edges_export.csv', index=False)
+    print(f"  Edges exported → data/Network/processed/edges_export.csv  ({len(edges_csv)} rows)")
 
     # Return only edges GeoDataFrame — structure.py expects a single GeoDataFrame
     return gdf_edges
@@ -177,7 +199,106 @@ def import_osmnx_feeder_data():
     return gdf_nodes, gdf_edges
 
 
+def plot_network(
+    network,
+    source_col: str = None,
+    target_col: str = None,
+    directed: bool = False,
+    node_color: str = "#4C9BE8",
+    edge_color: str = "#888888",
+    node_size: int = 10,          # small — there are thousands of nodes
+    with_labels: bool = False,    # off by default for geo networks
+    title: str = "Network Graph",
+    figsize: tuple = (12, 9),
+    layout: str = "spring",
+) -> None:
 
+    G = nx.DiGraph() if directed else nx.Graph()
+    pos = {}
 
+    # ── Case 1: GeoDataFrame with geometry ────────────────────────────────
+    if isinstance(network, gpd.GeoDataFrame) and "geometry" in network.columns:
 
+        if isinstance(source_col, str) and isinstance(target_col, str):
+            # Explicit node-ID columns — use those
+            for _, row in network.iterrows():
+                G.add_edge(row[source_col], row[target_col])
+            layout_fn = {
+                "spring": nx.spring_layout, "circular": nx.circular_layout,
+                "kamada_kawai": nx.kamada_kawai_layout, "spectral": nx.spectral_layout,
+                "shell": nx.shell_layout, "random": nx.random_layout,
+            }.get(layout, nx.spring_layout)
+            pos = layout_fn(G, seed=42)
 
+        else:
+            # Derive nodes from LineString endpoints, snap to integer grid
+            # to merge nearby points into the same node
+            SNAP = 10  # meters — adjust if network has gaps
+
+            def snap(xy):
+                return (round(xy[0] / SNAP) * SNAP, round(xy[1] / SNAP) * SNAP)
+
+            for _, row in network.iterrows():
+                geom = row.geometry
+                if geom is None or geom.is_empty:
+                    continue
+                lines = [geom] if geom.geom_type == "LineString" else list(geom.geoms)
+                for line in lines:
+                    coords = list(line.coords)
+                    u = snap(coords[0])
+                    v = snap(coords[-1])
+                    if u != v:
+                        G.add_edge(u, v)
+                        pos[u] = u  # x, y coords used directly as position
+                        pos[v] = v
+
+    # ── Case 2: plain list of tuples ──────────────────────────────────────
+    elif isinstance(network, list):
+        for edge in network:
+            if len(edge) == 3:
+                u, v, w = edge
+                G.add_edge(u, v, weight=w)
+            else:
+                G.add_edge(*edge)
+        pos = nx.spring_layout(G, seed=42)
+
+    # ── Case 3: plain DataFrame with source/target columns ────────────────
+    elif isinstance(network, pd.DataFrame) and source_col and target_col:
+        for _, row in network.iterrows():
+            G.add_edge(row[source_col], row[target_col])
+        pos = nx.spring_layout(G, seed=42)
+
+    else:
+        raise TypeError(
+            f"Cannot build graph from type {type(network)}. "
+            "Pass a GeoDataFrame with geometry, a list of tuples, "
+            "or a DataFrame with source_col/target_col."
+        )
+
+    print(f"  Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+
+    # ── Draw ──────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=figsize)
+
+    nx.draw_networkx_edges(
+        G, pos,
+        edge_color=edge_color,
+        width=0.8,
+        alpha=0.6,
+        ax=ax,
+    )
+    nx.draw_networkx_nodes(
+        G, pos,
+        node_color=node_color,
+        node_size=node_size,
+        alpha=0.85,
+        ax=ax,
+    )
+    if with_labels:
+        nx.draw_networkx_labels(G, pos, font_size=6, ax=ax)
+
+    ax.set_title(title, fontsize=14, fontweight="bold")
+    ax.set_aspect("equal")   # keep geographic proportions correct
+    ax.axis("off")
+    plt.tight_layout()
+    plt.show()

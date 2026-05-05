@@ -6,7 +6,7 @@ import pandas as pd
 import geopandas as gpd
 import sys
 import ast # Added for the elevation profile fix
-
+from plot_network import*
 from data_import import *
 from voronoi_tiling import *
 from scenarios import *
@@ -15,18 +15,41 @@ from generate_infrastructure import *
 from scoring import *
 from OSM_network import *
 from traveltime_delay import *
+from data_converter import *
+import warnings
+import tracemalloc
+warnings.filterwarnings("ignore", message="driver ESRI Shapefile does not support open option CRS")
+
+
+def _mem():
+    current, peak = tracemalloc.get_traced_memory()
+    print(f"[MEM] current={current/1e6:.1f} MB  peak={peak/1e6:.1f} MB")
 
 
 
 def print_hi(name):
-    os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')  # TODO: implement the same code for data_converter
+    os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
+    #os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
     sys.setrecursionlimit(2000)
+    tracemalloc.start()
     runtimes = {}
 
     ##################################################################################
     # Initializing global variables
     print("\nINITIALIZE VARIABLES \n")
     st = time.time()
+
+    # Filter which development type to score:
+    #   None            → all (Netzlücken + Schwachstellen)
+    #   'netzluecke'    → only Netzlücken
+    #   'schwachstelle' → only Schwachstellen
+    DEV_TYPE_FILTER = 'netzluecke'
+    # Set True to skip the graph-based TTS section (slow) during quick test runs
+    SKIP_TT = False
+    # Minimum distance (m) between kept access points — 0 = keep all nodes.
+    # Intersections are always kept; non-intersection nodes closer than this
+    # to any already-kept node are dropped.  Try 300–500 to reduce OD pairs ~4×.
+    ACCESS_POINT_MIN_DIST = 400
 
     # Define spatial limits of the research corridor
     # The coordinates must end with 000 in order to match the coordinates of the input raster data
@@ -37,7 +60,7 @@ def print_hi(name):
     # Boundary for plot
     boundary_plot = polygon_from_points(e_min=e_min+1000, e_max=e_max-500, n_min=n_min+1000, n_max=n_max-2000)
 
-    # Get a polygon as limits for teh corridor
+    # Get a polygon as limits for the corridor
     innerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max)
 
     # For global operation a margin is added to the boundary
@@ -55,45 +78,30 @@ def print_hi(name):
     # Sources to consult: ARE Wegleitung Kosten-Nutzen-Analyse, VSS norms for cycling
     # ---------------------------------------------------------------------------------
 
-    # Construction costs [CHF/m] — highway values, replace with cycle path costs
-    # Typical cycle path: ~500–2000 CHF/m depending on surface and segregation
-    c_openhighway = None  # TODO: set cycle path construction cost [CHF/m]
-    c_tunnel = None  # TODO: set or remove (tunnels rare for cycling)
-    c_bridge = None  # TODO: set cycle bridge cost [CHF/m] (much cheaper than highway)
-    ramp = None  # TODO: remove ramp cost (not applicable for cycling)
+    # Construction costs [CHF/m]
+    c_cycle_path_new    = 1000   # new path (Netzlücke)    TODO: calibrate
+    c_cycle_path_update = 300    # upgrade (Schwachstelle)  TODO: calibrate
+
+    # Maintenance costs
+    c_om_cycle_path    = 100     # operational maintenance [CHF/m/year]  TODO: calibrate
+    c_structural_maint = 1.2/100 # structural maintenance [fraction of construction cost/year]
 
     # Value of Travel Time Savings [CHF/h]
-    # Highway: 32.2 CHF/h — cycling VTTS is lower (~10–15 CHF/h for leisure, higher for commute)
-    VTTS = None  # TODO: set cycling VTTS [CHF/h]
-    travel_time_duration = 50  # years — can stay the same
+    VTTS = 28  # CHF/h — Swiss official value ~28 CHF/h for leisure cycling
+    travel_time_duration = 50  # appraisal horizon [years]
 
-    # Noise costs — cycling produces no relevant noise, remove from scoring
-    # noise_distance and noise_values left as comments, not used
-    # noise_distance = [0, 10, 20, 40, 80, 160, 320, 640, 1280, 2560]
-    # noise_values = [7254, 5536, 4055, 2812, 1799, 1019, 467, 130, 20]
-    # noise_duration = 50
+    # Route comfort monetisation [CHF / m / year per CLI unit]
+    comfort_value_chf_m_year = 2.0  # TODO: calibrate
 
-    # Climate effects [CHF/m/50a] — cycling emits no CO2 during use
-    # Construction CO2 of cycle path is much lower than highway
-    co2_cycle = None  # TODO: set cycle path construction CO2 cost [CHF/m/50a]
-
-    # Nature and Landscape — reduce significantly for cycling (smaller footprint)
-    fragmentation = None  # TODO: reduce or set to 0 for cycle paths [CHF/m2/a]
-    fragmentation_duration = 50
-    habitat_loss = None  # TODO: reduce or set to 0 for cycle paths [CHF/m2/a]
-    habitat_loss_duration = 30
-
-    # Land reallocation — may apply for new dedicated cycle paths through farmland
-    forest_reallocation = None  # TODO: set or 0 if Wald is not reallocated [CHF/m2/a]
-    meadow_reallocation = None  # TODO: set for cycle paths through Fruchtfolgeflaeche [CHF/m2/a]
-    reallocation_duration = 50
+    # Safety — willingness-to-pay to avoid risk-weighted route exposure [CHF/(risk_unit·trip·year)]
+    value_of_safety = None  # TODO: set once a unit value is agreed (e.g. 0.0001)
 
     runtimes["Initialize variables"] = time.time() - st
     st = time.time()
 
     ##################################################################################
     # Import and prepare raw data
-    print("\nIMPORT RAW DATA \n") #TODO: raw data will be the converted network vector->nodes and edges)
+    print("\nIMPORT RAW DATA \n")
 
     # Import shapes of lake for plots
     get_lake_data() #ok
@@ -101,17 +109,17 @@ def print_hi(name):
     # Import the file containing the locations to be plotted
     import_locations() #ok
 
-    # Define area that is protected for constructing highway links, TODO: Where can I find this, is it the same as for InfraScanRoad?
+    # Define area that is protected for constructing cycling paths
     get_protected_area(limits=limits_corridor)
     get_unproductive_area(limits=limits_corridor)
     landuse(limits=limits_corridor)
 
     # Tif file of all unsuitable land cover and protected areas
     # File is stored to 'data/landuse_landcover/processed/zone_no_infra/protected_area_{suffix}.tif'
-
     all_protected_area_to_raster(suffix="corridor")
 
     runtimes["Import land use and land cover data"] = time.time() - st
+    _mem()
     st = time.time()
 
     ##################################################################################
@@ -124,25 +132,19 @@ def print_hi(name):
     print("\nINFRASTRUCTURE NETWORK \n")
     ##################################################################################
     # 1) Import network
-    # Import the highway network and preprocess it
-    # Data are stored as "data/temp/network_highway.gpkg" TODO: ask if network should be combined
-    load_nw() #check
+    # Import the cycling network and preprocess it ALLTAG.GIS
+    # higher network layer (like highway for cycling) stored in infraScanCycle/data/raw/ALLTAG/Velonetz_Alltag_-OGD.gpkg
+    # gaps in higher level network stored in infraScanCycle/data/raw/SCHWACHSTELLEN/TBA_VNP_SCHWACHSTELLEN_L.shp
+    # make option to join them together
 
-    # READ SPECIFIC LAYER AND SET CRS
-    network = gpd.read_file('data/converted/transport_network.gpkg', layer='edges')
+    network = import_network_GIS_ALLTAG()  # already EPSG:2056, already clean 29.04.26
 
-    # CRITICAL: Force reprojection to LV95 so it overlaps with your corridor
-    network = network.to_crs("EPSG:2056")
+
+    #plot network (can comment out)
+    # plot_network(network)
+
     # CLEAN DATA
     network = network[network.geometry.notnull()]
-
-    # Import and match access points
-    df_access = pd.read_csv(r"data/raw/VELOPARKIERANLAGEN/OGD_VELOPARKIERANLAGEN_P.csv", sep=",")
-    df_access.columns = df_access.columns.str.strip()  # Crucial for OGD data
-    # Ensure df_access is converted to a GeoDataFrame with the same CRS before mapping
-    # (Check if map_access_points_on_network handles this, if not, do it here)
-
-    map_access_points_on_network(current_points=df_access, network=network) #check
 
 
     runtimes["Import network data"] = time.time() - st
@@ -154,424 +156,405 @@ def print_hi(name):
 
     # Simplify the physical topology of the network
     # One distinct edge between two nodes (currently multiple edges between nodes)
-    # Edges are stored in r"data/Network/processed/edges.gpkg" #TODO 3a
+    # Edges are stored in r"data/Network/processed/edges.gpkg"
     # Points in simplified network can be intersections ("intersection"==1) or access points ("intersection"==0)
-    # Points are stored in r"data/Network/processed/points.gpkg" #TODO 3a
-    reformat_network() #check
+    # Points are stored in r"data/Network/processed/points.gpkg"
+    
+    nodes_gdf, edges_final = reformat_network()
+
+    # plot network (can comment out)
+    #plot_network(edges_final)
 
     # Filter the infrastructure elements that lie within a given polygon
-    # Points within the corridor are stored in r"data/Network/processed/points_corridor.gpkg" #TODO 3a
-    # Edges within the corridor are stored in r"data/Network/processed/edges_corridor.gpkg" #TODO 3a
-    # Edges crossing the corridor border are stored in r"data/Network/processed/edges_on_corridor.gpkg" #TODO 3a
+    # Points within the corridor are stored in r"data/Network/processed/points_corridor.gpkg"
+    # Edges within the corridor are stored in r"data/Network/processed/edges_corridor.gpkg"
+    # Edges crossing the corridor border are stored in r"data/Network/processed/edges_on_corridor.gpkg"
+    points_corridor, edges_corridor, edges_border = network_in_corridor(
+        polygon=outerboundary, access_point_min_dist=ACCESS_POINT_MIN_DIST)
+    #plot network corridor
+    #plot_corridor_network(outerboundary, points_corridor, edges_corridor, edges_border, points_full=nodes_gdf, edges_full=edges_final)
 
-    network_in_corridor(polygon=outerboundary)#check
-
-    # Add attributes to nodes within the corridor (mainly access point T/F)
-    # Points with attributes saved as "data/Network/processed/points_attribute.gpkg" #TODO 3a
-    map_values_to_nodes()
-
-    # Add attributes to the edges #TODO 3a (e.g. speed, incline, etc)
-    print("\nget_edge_attributes: start \n")
-    get_edge_attributes()
-    print("\nget_edge_attributes: end \n")
-    # Add specific elements to the network #TODO: intervention or what?
-    required_manipulations_on_network()
+    # Add attributes to the edges
+    edges = get_edge_attributes() #TODO
+    # plot
+    #plot_edge_attributes(edges)
 
     runtimes["Preprocess the network"] = time.time() - st
     st = time.time()
 
+    # --- NETWORK QUALITY CHECK ---
+    print("\n--- NETWORK QUALITY CHECK ---")
+    print(edges['ROUTENTYP'].value_counts())
+    print(
+        f"Edges missing ROUTENTYP:       {edges['ROUTENTYP'].isna().sum() if 'ROUTENTYP' in edges.columns else 'col missing'}")
+    print(f"One-way edges:                 {edges['oneway'].sum()}")
+    print(
+        f"Corridor edge coverage:        {len(edges_corridor)}/{len(edges)} ({100 * len(edges_corridor) / len(edges):.0f}%)")
+    print(f"Total nodes:                   {len(nodes_gdf)}")
+    print(f"Corridor nodes:                {len(points_corridor)}")
+    print(
+        f"Intersections in corridor:     {points_corridor['is_intersection'].sum() if 'is_intersection' in points_corridor.columns else 'col missing'}")
+    print(
+        f"Endpoints in corridor:         {points_corridor['is_endpoint'].sum() if 'is_endpoint' in points_corridor.columns else 'col missing'}")
+    print("-----------------------------\n")
+
+
+    """
     ##################################################################################
-    # 3) Generate developments (new access points) and connection to existing infrastructure #TODO 3c
+    # 3a) OPTION A: Generate developments (new access points) and connection to existing infrastructure
 
     # Make random points within the perimeter (extent) and filter them
-    num_rand = 1000
+    num_rand = 1000 #Todo: change to 1000
     random_gdf = generated_access_points(extent=innerboundary, number=num_rand)
+
+
     # Assign the return value of the function to the variable name
     filtered_gdf = filter_access_points(random_gdf)
-    filtered_gdf.to_file(r"data/Network/processed/generated_nodes.gpkg") #check
-    # Import the generated points as dataframe
-    generated_points = filtered_gdf  # TODO 3c
+    filtered_gdf.to_file(r"data/Network/processed/generated_nodes.gpkg")
 
-    # Import current points as dataframe and filter only access points (no intersection points)
-    current_access_points = gpd.read_file(r"data/Network/processed/points_corridor_attribute.gpkg")
+    generated_points = filtered_gdf
 
-    # Connect the generated points to the existing access points
-    filtered_rand_temp = connect_points_to_network(generated_points, current_access_points)
-    nearest_gdf = create_nearest_gdf(filtered_rand_temp)
-    create_lines(generated_points, nearest_gdf)
+    # Import current points as dataframe (Note: all nodes are now access points)
+    current_access_points = gpd.read_file(r"data/Network/processed/access_points_corridor.gpkg")
 
-    # Filter the generated links that connect to one of the access point within the corridor
-    only_links_to_corridor()
+    # Filter to corridor nodes only (spatial join with corridor polygon)
+    poly_gdf = gpd.GeoDataFrame({'geometry': [outerboundary]}, crs="EPSG:2056")
+    current_access_points = gpd.sjoin(
+        current_access_points, poly_gdf, how='inner', predicate='within'
+    ).drop(columns=['index_right'], errors='ignore').reset_index(drop=True)
+
+    print(f"  Current access points in corridor: {len(current_access_points)}")
+    print(f"  Columns: {current_access_points.columns.tolist()}")
+
+    # Connect generated points to existing network nodes
+    edges_gdf = edges
+    new_links = connect_points_to_network(generated_points, current_access_points, edges_gdf=edges_gdf)
+
+    # plot
+    plot_connections(generated_points, current_access_points, new_links, polygon=outerboundary)
+
+    # Filter by max realistic cycling link distance
+    min_link_dist = 200  # don't connect points already very close to network
+    max_link_dist = 10000
+
+    new_links_realistic = new_links[
+        (new_links['dist_to_node'] >= min_link_dist) &
+        (new_links['dist_to_node'] <= max_link_dist)
+        ].copy().reset_index(drop=True)
+
+    print(f"  -> {len(new_links_realistic)} links within {max_link_dist}m threshold "
+          f"(dropped {len(new_links) - len(new_links_realistic)})")
+
+    new_links_realistic.to_file('data/Network/processed/new_links_corridor.gpkg', driver='GPKG')
+
 
     # Find a routing for the generated links that considers protected areas
     raster = r'data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif'
-    routing_raster(raster_path=raster)  # TODO:Ensure the routing algorithm penalizes slope (gradient)
+    routing_raster(raster_path=raster)
 
-    # Compute the voronoi polygons
-    get_voronoi_status_quo()
+    routed = gpd.read_file('data/Network/processed/new_links_realistic.gpkg')
+    max_routed_length = 3000  # routed path shouldn't be more than 2x the straight-line max
+    routed = routed[routed['length_routed_m'] <= max_routed_length].copy().reset_index(drop=True)
+    routed.to_file('data/Network/processed/new_links_realistic.gpkg', driver='GPKG')
+    print(f"  After routed length filter: {len(routed)} links")
+    # ── Slope filter (cycling max 8%) ────────────────────────────────────
+    max_slope_pct = 8.0
+    elevation_raster_path = r'data/elevation_model/elevation.tif'
+
+    with rasterio.open(elevation_raster_path) as elev_src:
+        elev_data = elev_src.read(1)
+
+        def _max_slope(geom, src=elev_src, data=elev_data, interval=50):
+            n = max(2, int(geom.length / interval) + 1)
+            pts = [geom.interpolate(d) for d in np.linspace(0, geom.length, n)]
+            z = [data[src.index(p.x, p.y)] for p in pts]
+            return float(np.max(np.abs(np.diff(z)) / interval * 100))
+
+        routed['max_slope_pct'] = routed.geometry.apply(_max_slope)
+
+    before_slope = len(routed)
+    routed = routed[routed['max_slope_pct'] <= max_slope_pct].copy().reset_index(drop=True)
+    print(f"  After slope filter (max {max_slope_pct}%): {len(routed)} links "
+          f"(dropped {before_slope - len(routed)})")
+    routed.to_file('data/Network/processed/new_links_realistic.gpkg', driver='GPKG')
+
+    # Keep only generated points that have a surviving link
+    connected_ids = set(routed['ID_new'].unique())
+    generated_points = generated_points[
+        generated_points['ID_new'].isin(connected_ids)
+    ].copy().reset_index(drop=True)
+
+    print(f"  Generated points with valid links: {len(generated_points)} "
+          f"(dropped {len(filtered_gdf) - len(generated_points)})")
+    generated_points.to_file(r"data/Network/processed/generated_nodes.gpkg", driver='GPKG')
+    # plot
+    plot_connections(generated_points, current_access_points, routed, polygon=outerboundary)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Compute the Voronoi polygons for status quo
+    voronoi_sq = get_voronoi_status_quo(corridor_polygon=innerboundary)
+    # plot
+    plot_voronoi_status_quo(voronoi_sq, nodes_gdf, edges_final, corridor_polygon=innerboundary)
     limits_variables = [2680600, 1227700, 2724300, 1265600]
+
 
     runtimes["Generate infrastructure developments"] = time.time() - st
     st = time.time()
 
-    # Import the raw data, reshape it partially and store it as tif
+    #combines generated infrastructure with current network (comment out)
+    
+    #combined_nodes, combined_edges = build_combined_network(
+        #nodes_gdf=nodes_gdf,
+        #edges_gdf=edges_gdf,  # the attributed edges from get_edge_attributes()
+        #generated_points=generated_points,
+        #routed_links=routed  # the filtered routed links
+    #)
+
+    #plot_combined_vs_status_quo(
+        #nodes_gdf, edges_gdf,
+        #combined_nodes, combined_edges,
+        #corridor_polygon=outerboundary
+    #)
+    
     import_data(limits_variables)
     runtimes["Import variable for scenario (population and employment)"] = time.time() - st
     st = time.time()
 
+    """
+
+    ##################################################################################
+    # 3b) OPTION B: Generate Developments based on the weak points and gaps in the
+    # ALLTAG network
+    # Schwachstellen  — existing edges with quality issues (is_schwachstelle == 1)
+    # Netzlücken      — planned but unbuilt edges          (is_development   == 1)
+
+    developments = get_development_candidates(edges, corridor_polygon=innerboundary,
+                                              dev_type_filter=DEV_TYPE_FILTER)
+
+    runtimes["Generate infrastructure developments"] = time.time() - st
+    st = time.time()
+
+    #plot_developments(edges, corridor_polygon=outerboundary)
+
+    # Voronoi polygons for status quo (needed by scenario aggregation below)
+    voronoi_sq = get_voronoi_status_quo(corridor_polygon=innerboundary) #TODO: check points
+    #plot_voronoi_status_quo(voronoi_sq, nodes_gdf, edges_final, corridor_polygon=innerboundary)
+
+    # Wider bounding box for scenario rasters and scoring (covers full Voronoi catchment)
+    limits_variables = [2680600, 1227700, 2724300, 1265600]
+
+    import_data(limits_variables) #todo: move up the pipline or change
+    runtimes["Import variable for scenario (population and employment)"] = time.time() - st
+    _mem()
+    st = time.time()
+
+    ##################################################################################
+
+
     ##################################################################################
     ##################################################################################
-    # SCENARIO #TODO 3b
+    # SCENARIO
     print("\nSCENARIO \n")
     ##################################################################################
     # 1) Define scenario based on cantonal predictions
-
     # Import the predicted scenario defined by the canton of Zürich
-    scenario_zh = pd.read_csv(r"data/Scenario/KTZH_00000705_00001741.csv", sep=";") #TODO 3b
+    scenario_zh = pd.read_csv(r"data/Scenario/KTZH_00000705_00001741.csv", sep=";")
 
     # Define the relative growth per scenario and district
     # The growth rates are stored in "data/temp/data_scenario_n.shp"
-    future_scenario_zuerich_2022(scenario_zh) #TODO 3b
+    future_scenario_zuerich_2022(scenario_zh)
     # Plot the growth rates as computed above for population and employment and over three scenarios
 
 
-    # Compute the predicted amount of population and employment in each raster cell (hectar) for each scenario #TODO 3b
+    # Compute the predicted amount of population and employment in each raster cell (hectar) for each scenario
     # The resulting raster data are stored in "data/independent_variables/scenario/{col}.tif" with col being pop or empl and the scenario
     scenario_to_raster(limits_variables)
 
     # Aggregate the scenario data to over the voronoi polygons, here euclidian polygons
     # Store the resulting file to "data/Voronoi/voronoi_developments_euclidian_values.shp"
-    polygons_gdf = gpd.read_file(r"data/Voronoi/voronoi_developments_euclidian.gpkg") #TODO 3b
+    polygons_gdf = gpd.read_file(r"data/Voronoi/voronoi_status_quo_euclidian.gpkg")
     scenario_to_voronoi(polygons_gdf, euclidean=True)
+
+    # plot
+    # plot_scenarios(corridor_polygon=outerboundary)
+
 
     # Convert multiple tif files to one same tif with multiple bands
     stack_tif_files(var="empl")
     stack_tif_files(var="pop")
     runtimes["Generate the scenarios"] = time.time() - st
+    _mem()
     st = time.time()
 
-    ##################################################################################
-    ##################################################################################
-    # IMPLEMENT THE SCORING #TODO 3d: redefine scoring the network for cycling
-    # 1) Redefine protected area for scoring perimeter
-    # 2) Import road network from OSM and rasterize it #TODO 3d
-    # 3) Compute construction costs #TODO 3d
-    # 4) Compute costs of externalities #TODO 3d
-    # 5) Get Voronoi tiling based on travel time #TODO 3d
-    # 6) Compute accessibility costs #TODO 3d
 
+    ##################################################################################
+    ##################################################################################
     print("\nIMPLEMENT SCORING \n")
 
     ##################################################################################
-    # 1) Redefine protected area for scoring perimeter
+    # 0) Load developments and network files
+    developments = pd.read_csv('data/Network/processed/developments_list.csv')
+    edges_sq  = gpd.read_file('data/Network/processed/edges_with_attribute.gpkg')
+    nodes_sq  = gpd.read_file('data/Network/processed/points_with_attribute.gpkg')
+    dev_nodes = gpd.read_file('data/Network/processed/generated_nodes.gpkg')
+    dev_nodes = dev_nodes[dev_nodes["within_corridor"] | dev_nodes["on_border"]]
+    runtimes["Load scoring inputs"] = time.time() - st
+    st = time.time()
 
-    # This operation has already been done above for the corridor limits, here it is applied to the voronoi polygon limits which are bigger than the corridor limits
+    ##################################################################################
+    # 1) Raster-based travel time and OD matrices
+    make_cycling_speed_raster(cycling_speed_kmh=15)
+    travel_cost_polygon(limits_variables)
+    voronoi_sq = gpd.read_file(r"data/Network/travel_time/Voronoi_statusquo.gpkg")
+    GetCyclingOD(voronoi_gdf=voronoi_sq)
+    accessib_sq = accessibility_status_quo(VTT_h=VTTS, duration=travel_time_duration)
+
+    travel_cost_developments(limits_variables)
+    single_tt_voronoi_ton_one("data/Network/travel_time/developments")
+    polygon_gdf = gpd.read_file(r"data/Voronoi/combined_developments.gpkg")
+    scenario_to_voronoi(polygon_gdf, euclidean=False)
+    GetVoronoiOD_multi()
+    accessib_devs = accessibility_developments(accessib_sq, VTT_h=VTTS, duration=travel_time_duration)
+    runtimes["OD matrices and accessibility"] = time.time() - st
+    _mem()
+    st = time.time()
+    """
+    ##################################################################################
+    #old
+    # 2) Graph-based travel time savings → data/costs/traveltime_savings.csv
+    if not SKIP_TT:
+        tt_optimization_status_quo()
+        tt_optimization_all_developments()
+        monetize_tts(VTTS=VTTS, duration=travel_time_duration)
+    runtimes["Travel time savings (graph)"] = time.time() - st
+    _mem()
+    st = time.time()
+    """
+    ##################################################################################
+    # 3) Protected area for scoring perimeter (wider than corridor, needed by externalities)
     get_protected_area(limits=limits_variables)
     get_unproductive_area(limits=limits_variables)
     landuse(limits=limits_variables)
-
-    # Find possible links considering land cover and protected areas
     all_protected_area_to_raster(suffix="variables")
-    """
-    ##################################################################################
-    # 2) Import road network from OSM and rasterize it
-    # Import the road network from OSM and rasterize it
-    nw_from_osm(limits_variables) #todo this requires data under data/Network/OSM_road that is not available.
-    osm_nw_to_raster(limits_variables)
-    runtimes["Import and rasterize local road network from OSM"] = time.time() - st
-    st = time.time()
-
-    # Write runtimes to a file
-    with open(r'runtimes.txt', 'w') as file:
-        for part, runtime in runtimes.items():
-            file.write(f"{part}: {runtime}\n")
-    ##################################################################################
-    # 3) Compute construction costs
-
-    # Compute the elevation profile for each routing to assess the amount
-    # First import the elevation model downscale the resolution and store it as raster data to 'data/elevation_model/elevation.tif'
-    resolution = 50 # meter
-    import_elevation_model(new_resolution=resolution)
-    runtimes["Import elevation model in 50 meter resolution"] = time.time() - st
-    st = time.time()
-
-    # Compute the elevation profile for each generated highway routing based on the elevation model
-    links_temp = get_road_elevation_profile() #TODO: For cycling, slope > 4% should significantly increase the "perceived" travel time cost.
-    links_temp.to_csv(r'data/Network/processed/new_links_realistic_woTunnel.csv')
-
-    # Based on the elevation profile of each links compute the required amount of bridges and tunnels
-    # Safe the dataset to "data/Network/processed/new_links_realistic_tunnel.gpkg"
-    get_tunnel_candidates(links_temp)
-    # Convert the string representation of lists back into actual Python lists
-    if isinstance(links_temp['elevation_profile'].iloc[0], str):
-        print("Converting elevation_profile strings back to lists...")
-        links_temp['elevation_profile'] = links_temp['elevation_profile'].apply(ast.literal_eval)
-    tunnel_bridges(links_temp)
-
-    runtimes["Optimize eleavtion profile of links to find need for tunnel and bridges"] = time.time() - st
-    st = time.time()
-
-    # Compute the construction costs for each development (generated points with according link to existing access point)
-    # Not including tunnels and bridges with regards to the elevation profile of a section yet
-    # Result stored to "data/costs/construction.gpkg"
-    print(" -> Construction costs")
-
-    c_structural_maint = 1.2 / 100 # % of cosntruction costs
-    c_om_openhighway = 89.7 # CHF/m/a
-    c_om_tunnel = 89.7 # CHF/m/a
-    c_om_bridge = 368.8 # CHF/m/a
-    maintenance_duration = 50 # years
-
-    construction_costs(highway=c_openhighway, tunnel=c_tunnel, bridge=c_bridge, ramp=ramp)
-    maintenance_costs(duration=maintenance_duration, highway=c_om_openhighway, tunnel=c_om_tunnel, bridge=c_om_bridge, structural=c_structural_maint)
-
-    runtimes["Compute construction and maintenance costs"] = time.time() - st
-    st = time.time()
-
-
-    ##################################################################################
-    # 4) Compute costs of externalities
-    # Compute the costs arising from externalities for each development (generated points with according link to existing access point)
-    # Result stored to "data/Network/processed/new_links_externalities_costs.gpkg"
-
-    print(" -> Externalities") #TODO 3d
-
-    externalities_costs(ce_highway=co2_highway, ce_tunnel=co2_tunnel,
-                        realloc_forest=forest_reallocation ,realloc_FFF=meadow_reallocation,
-                        realloc_dry_meadow=meadow_reallocation, realloc_period=reallocation_duration,
-                        nat_fragmentation=fragmentation, fragm_period=fragmentation_duration,
-                        nat_loss_habitat=habitat_loss, habitat_period=habitat_loss_duration)
-
-
-    print(" -> Noise") #TODO: necessary
-    noise_costs(years=noise_duration, boundaries=noise_distance, unit_costs=noise_values)
-
-    # r"data/costs/externalities.gpkg"
-    # r"data/costs/noise.gpkg"
-
-    # Add geospatial link to the table with costs
-    # Result stored to "data/costs/building_externalities.gpkg"
-    map_coordinates_to_developments()
-
-    # Plot individual cost elements on map
-    gdf_extern_costs = gpd.read_file(r"data/Network/processed/new_links_externalities_costs.gpkg")
-    gdf_constr_costs = gpd.read_file(r"data/Network/processed/new_links_construction_costs.gpkg")
-    gdf_costs = gpd.read_file(r"data/costs/building_externalities.gpkg")
-    tif_path_plot = r"data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif"
-    plot_cost_result(df_costs=gdf_costs, banned_area=tif_path_plot, boundary=innerboundary, network=network, access_points=current_access_points)
-
-    runtimes["Compute Externalities"] = time.time() - st
+    runtimes["Protected area (variables perimeter)"] = time.time() - st
     st = time.time()
 
     ##################################################################################
-    # 5) Get Voronoi tiling based on travel time #todo 3d
-    # Based on the rasterised road network from OSM, compute the travel time required to access the closest existing
-    # highway access point from each cell in the perimeter. As result, it is also known for each cell which current
-    # access points is the closest (its ID)
-    # The raster file showing the travel time to the next access point is stored to 'data/Network/travel_time/travel_time_raster.tif'
-    # The raster file showing the ID of the closest access point is stored in 'data/Network/travel_time/source_id_raster.tif'
-    # Aggregating all cells with same closest access point is equivalent to a travel time based voronoi tiling. This is
-    # stored as vector file in "data/Network/travel_time/Voronoi_statusquo.gpkg"
-    travel_cost_polygon(limits_variables) #TODO: change the speed assumption
-
-    voronoi_status_quo = gpd.read_file(r"data/Voronoi/voronoi_status_quo_euclidian.gpkg")
-    voronoi_tt = gpd.read_file(r"data/Network/travel_time/Voronoi_statusquo.gpkg")
-
-    # Same operation is made for all developments
-    # These are store similarly than above, with id_new being the id of the development (ID of generated point)
-    # The raster file showing the travel time to the next access point is stored to 'data/Network/travel_time/developments/dev{id_new}_travel_time_raster.tif'
-    # The raster file showing the ID of the closest access point is stored in 'data/Network/travel_time/developments/dev{id_new}_source_id_raster.tif'
-    # Aggregating all cells with same closest access point is equivalent to a travel time based voronoi tiling. This is
-    # stored as vector file in "data/Network/travel_time/developments/dev{id_new}_Voronoi.gpkg"
-    travel_cost_developments(limits_variables)
-
-    runtimes["Voronoi tiling: Compute travel time from each raster cell to the closest access point"] = time.time() - st
-    st = time.time()
-
-    # Generate one dataframe containing the Voronoi polygons for all developments and all access points within the
-    # perimeter. Before the polygons are store in an individual dataset for each development
-    # The resulting dataframe is stored to "data/Voronoi/combined_developments.gpkg"
-    folder_path = "data/Network/travel_time/developments"
-    single_tt_voronoi_ton_one(folder_path)
-
-    # Based on the scenario and the travel time based Voronoi tiling, compute the predicted population and employment
-    # in each polygon and for each scenario
-    # Resulting dataset is stored to "data/Voronoi/voronoi_developments_tt_values.shp"
-    polygon_gdf = gpd.read_file(r"data/Voronoi/combined_developments.gpkg")
-    scenario_to_voronoi(polygon_gdf, euclidean=False)
-
-    runtimes["Aggregate scenarios by Voronoi polygons"] = time.time() - st
+    # 4) Construction and maintenance costs
+    #    Netzlücken: full build at c_cycle_path_new [CHF/m]
+    #    Schwachstellen: upgrade at c_cycle_path_update [CHF/m]
+    construction_costs(
+        cycle_path=c_cycle_path_new,
+        upgrade_factor=c_cycle_path_update / c_cycle_path_new,
+    )
+    maintenance_costs(
+        duration=travel_time_duration,
+        cycle_path=c_om_cycle_path,
+        structural=c_structural_maint,
+    )
+    runtimes["Construction and maintenance costs"] = time.time() - st
     st = time.time()
 
     ##################################################################################
-    # 6) Compute access time costs
-
-    # Compute the accessibility for status quo for scenarios
-    accessib_status_quo = accessibility_status_quo(VTT_h=VTTS, duration=travel_time_duration)
-
-    # Compute the benefit in accessibility for each development compared to the status quo
-    # The accessibility for each polygon for every development is store in "data/Voronoi/voronoi_developments_local_accessibility.gpkg"
-    # The benefit of each development compared to the status quo is stored in 'data/costs/local_accessibility.csv'
-    accessibility_developments(accessib_status_quo, VTT_h=VTTS, duration=travel_time_duration)  # make this more efficient in terms of for loops and open files
-
-    runtimes["Compute highway access time benefits"] = time.time() - st
+    # 5) Route comfort
+    #    CLI per ROUTENTYP (Velobahn=1.0 … Nebenverbindung=0.5, baseline=0.1)
+    #    Slope penalty: <4% good (×1.0), 4–8% hard (×0.6), >8% very bad (×0.3)
+    route_comfort(duration=travel_time_duration,
+                  comfort_value_chf_m_year=comfort_value_chf_m_year)
+    runtimes["Route comfort"] = time.time() - st
     st = time.time()
 
-    #################################################################################
-    # Travel time delay on highway
-
-    # Compute the OD matrix for the current infrastructure under all scenarios
-    GetVoronoiOD()
-    # od = GetVoronoiOD()
-
-    # Compute the OD matrix for the infrastructure developments under all scenarios
-    GetVoronoiOD_multi()
-
-    runtimes["Reallocate OD matrices to Voronoi polygons"] = time.time() - st
+    ##################################################################################
+    # 6) Safety benefits
+    #    Risk weights per ROUTENTYP; new infrastructure gets lower risk weight. 
+    #    Set value_of_safety (CHF per risk_unit·trip·year) to monetise.
+    safety_benefits(value_of_safety=value_of_safety, duration=travel_time_duration)
+    runtimes["Safety benefits"] = time.time() - st
     st = time.time()
 
-
-    tt_optimization_status_quo()
-
-    # check if flow are possible
-    link_traffic_to_map()
-    print('Flag: link_traffic_to_map is complete')
-    # Run travel time optimization for infrastructure developments and all scenarios
-    tt_optimization_all_developments()
-    print('Flag: tt_optimization_all_developments is complete')
-    # Monetize travel time savings
-    monetize_tts(VTTS=VTTS, duration=travel_time_duration)
+    ##################################################################################
+    # 7) Net benefits: NB = C + M + T + R + S  per scenario
+    nb_df = net_benefits()
+    runtimes["Net benefits"] = time.time() - st
+    st = time.time()
 
     ##################################################################################
-    # Aggregate the single cost elements to one dataframe
-    # New dataframe is stored in "data/costs/total_costs.gpkg"
-    # New dataframe also stored in "data/costs/total_costs.csv"
-    print(" -> Aggregate costs")
-    aggregate_costs()
-
-    # Import to the overall cost dataframe
-    gdf_costs = gpd.read_file(r"data/costs/total_costs.gpkg")
-    # Convert all costs in million CHF
-    gdf_costs["total_low"] = (gdf_costs["total_low"] / 1000000).astype(int)
-    gdf_costs["total_medium"] = (gdf_costs["total_medium"] / 1000000).astype(int)
-    gdf_costs["total_high"] = (gdf_costs["total_high"] / 1000000).astype(int)
-
-    runtimes["Aggregate costs"] = time.time() - st
-
-    # Write runtimes to a file
-    with open(r'runtimes_2.txt', 'w') as file:
-        for part, runtime in runtimes.items():
-            file.write(f"{part}: {runtime}/n")
-
-    ##################################################################################
-    ##################################################################################
-    # VISUALIZE THE RESULTS #task 3d
-
+    # VISUALIZE THE RESULTS
     print("\nVISUALIZE THE RESULTS \n")
+    os.makedirs("plot/results", exist_ok=True)
 
-    # Import layers to plot
     tif_path_plot = r"data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif"
+    network       = gpd.read_file(r"data/Network/processed/edges_with_attribute.gpkg")
+    access_points = gpd.read_file(r"data/Network/processed/points_corridor_attribute.gpkg")
 
-    links_beeline = gpd.read_file(r"data/Network/processed/new_links.gpkg")
-    links_realistic = gpd.read_file(r"data/Network/processed/new_links_realistic.gpkg")
-    print(links_realistic.head(5).to_string())
-    # Plot the net benefits for each generated point and interpolate the area in between
-    generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
-    # Get a gpd df with points have an ID_new that is not in links_realistic ID_new
-    filtered_rand_gdf = generated_points[~generated_points["ID_new"].isin(links_realistic["ID_new"])]
-    #plot_points_gen(points=generated_points, edges=links_beeline, banned_area=tif_path_plot, boundary=boundary_plot, network=network, all_zones=True, plot_name="gen_nodes_beeline")
-    #plot_points_gen(points=generated_points, points_2=filtered_rand_gdf, edges=links_realistic, banned_area=tif_path_plot, boundary=boundary_plot, network=network, all_zones=False, plot_name="gen_links_realistic")
+    gdf_nb_raw = gpd.read_file(r"data/costs/net_benefits.gpkg")
+    money_cols = ["C", "M", "T_s1", "T_s2", "T_s3", "R",
+                  "S_s1", "S_s2", "S_s3", "NB_s1", "NB_s2", "NB_s3"]
+    gdf_nb = gdf_nb_raw.copy()
+    for col in money_cols:
+        gdf_nb[col] = gdf_nb[col] / 1e6
+    gdf_nb["total_low"]    = gdf_nb["NB_s1"]
+    gdf_nb["total_medium"] = gdf_nb["NB_s2"]
+    gdf_nb["total_high"]   = gdf_nb["NB_s3"]
 
-    voronoi_dev_2 = gpd.read_file(r"data/Network/travel_time/developments/dev779_Voronoi.gpkg")
-    plot_voronoi_development(voronoi_tt, voronoi_dev_2, generated_points, boundary=innerboundary, network=network, access_points=current_access_points, plot_name="new_voronoi")
+    for scen_col, scen_label, plot_tag in [
+        ("NB_s1", "low growth (s1)",    "nb_map_s1"),
+        ("NB_s2", "medium growth (s2)", "nb_map_s2"),
+        ("NB_s3", "high growth (s3)",   "nb_map_s3"),
+    ]:
+        plot_cost_result(
+            df_costs=gdf_nb.copy(), banned_area=tif_path_plot,
+            title_bar=f"cycling net benefit — {scen_label}",
+            boundary=boundary_plot, network=network,
+            access_points=access_points, plot_name=plot_tag, col=scen_col,
+        )
 
-    #plot_voronoi_comp(voronoi_status_quo, voronoi_tt, boundary=boundary_plot, network=network, access_points=current_access_points, plot_name="voronoi")
+    for comp_col, comp_label, plot_tag in [
+        ("C",    "construction cost",     "comp_construction"),
+        ("M",    "maintenance cost",      "comp_maintenance"),
+        ("T_s2", "travel time savings",   "comp_traveltime"),
+        ("R",    "route comfort benefit", "comp_comfort"),
+        ("S_s2", "safety benefit",        "comp_safety"),
+    ]:
+        plot_single_cost_result(
+            df_costs=gdf_nb_raw.copy(), banned_area=tif_path_plot,
+            title_bar=comp_label, boundary=boundary_plot, network=network,
+            access_points=access_points, plot_name=plot_tag, col=comp_col,
+        )
 
+    gdf_nb["mean_costs"] = gdf_nb[["NB_s1", "NB_s2", "NB_s3"]].mean(axis=1)
+    gdf_nb["std"]        = gdf_nb[["NB_s1", "NB_s2", "NB_s3"]].std(axis=1)
+    gdf_nb["cv"]         = (gdf_nb["std"] / gdf_nb["mean_costs"].abs()
+                            ).replace([float("inf"), float("-inf")], 0).fillna(0) * 1e4
+    plot_cost_uncertainty(
+        df_costs=gdf_nb.copy(), banned_area=tif_path_plot, boundary=boundary_plot,
+        network=network, col="std",
+        legend_title="Std. dev. across\nscenarios [Mio. CHF]",
+        access_points=access_points, plot_name="nb_uncertainty",
+    )
 
-    # Plot the net benefits for each generated point and interpolate the area in between
-    # if plot_name is not False, then the plot is stored in "plot/results/{plot_name}.png"
-    plot_cost_result(df_costs=gdf_costs, banned_area=tif_path_plot, title_bar="scenario low growth", boundary=boundary_plot, network=network,
-                     access_points=current_access_points, plot_name="total_costs_low",col="total_low")
-    plot_cost_result(df_costs=gdf_costs, banned_area=tif_path_plot, title_bar="scenario medium growth", boundary=boundary_plot, network=network,
-                     access_points=current_access_points, plot_name="total_costs_medium",col="total_medium")
-    plot_cost_result(df_costs=gdf_costs, banned_area=tif_path_plot, title_bar="scenario high growth", boundary=boundary_plot, network=network,
-                     access_points=current_access_points, plot_name="total_costs_high",col="total_high")
+    boxplot(gdf_nb, nbr=15)
 
-    # Plot single cost element
+    plot_benefit_distribution_line_multi(
+        df_costs=gdf_nb.copy(),
+        columns=["NB_s1", "NB_s2", "NB_s3"],
+        labels=["low growth", "medium growth", "high growth"],
+        plot_name="nb_all_scenarios", legend_title="Growth scenario",
+    )
 
-    plot_single_cost_result(df_costs=gdf_costs, banned_area=tif_path_plot, title_bar="construction",
-                            boundary=boundary_plot, network=network, access_points=current_access_points,
-                           plot_name="construction and maintenance", col="construction_maintenance")
-    # Due to erros when plotting convert values to integer
-    gdf_costs["local_s1"] = gdf_costs["local_s1"].astype(int)
-    plot_single_cost_result(df_costs=gdf_costs, banned_area=tif_path_plot, title_bar="access time to highway",
-                            boundary=boundary_plot, network=network, access_points=current_access_points,
-                            plot_name="access_costs",col="local_s1")
-    plot_single_cost_result(df_costs=gdf_costs, banned_area=tif_path_plot, title_bar="highway travel time",
-                            boundary=boundary_plot, network=network, access_points=current_access_points,
-                            plot_name="tt_costs",col="tt_medium")
-    plot_single_cost_result(df_costs=gdf_costs, banned_area=tif_path_plot, title_bar="noise emissions",
-                            boundary=boundary_plot, network=network, access_points=current_access_points,
-                            plot_name="externalities_costs", col="externalities_s1")
+    gdf_nb_comp = gdf_nb.copy()
+    for c in ["C", "M", "T_s2", "R", "S_s2"]:
+        gdf_nb_comp[c] = gdf_nb_comp[c].astype(int)
+    plot_benefit_distribution_line_multi(
+        df_costs=gdf_nb_comp,
+        columns=["C", "M", "T_s2", "R", "S_s2"],
+        labels=["Construction (C)", "Maintenance (M)",
+                "Travel time savings (T)", "Route comfort (R)", "Safety (S)"],
+        plot_name="nb_components",
+        legend_title="NB component\n(medium scenario)",
+    )
+    runtimes["Visualization"] = time.time() - st
 
-    # Plot uncertainty
-    gdf_costs['mean_costs'] = gdf_costs[["total_low", "total_medium", "total_high"]].mean(axis=1)
-    gdf_costs["std"] = gdf_costs[["total_low", "total_medium", "total_high"]].std(axis=1)
-    gdf_costs['cv'] = gdf_costs[["total_low", "total_medium", "total_high"]].std(axis=1) / abs(gdf_costs['mean_costs'])
-    gdf_costs['cv'] = gdf_costs['cv'] * 10000000
-
-    plot_cost_uncertainty(df_costs=gdf_costs, banned_area=tif_path_plot,
-                          boundary=boundary_plot, network=network, col="std",
-                          legend_title="Standard deviation\n[Mio. CHF]",
-                          access_points=current_access_points, plot_name="uncertainty")
-
-    plot_cost_uncertainty(df_costs=gdf_costs, banned_area=tif_path_plot,
-                          boundary=boundary_plot, network=network, col="cv",
-                          legend_title="Coefficient of variation/n[0/0'000'000]",
-                          access_points=current_access_points, plot_name="cv")
-
-    # Plot the uncertainty of the nbr highest ranked developments as boxplot
-    boxplot(gdf_costs, 15)
-
-    plot_benefit_distribution_bar_single(df_costs=gdf_costs, column="total_medium")
-
-    plot_benefit_distribution_line_multi(df_costs=gdf_costs, columns=["total_low", "total_medium", "total_high"],
-                                         labels=["low growth", "medium growth",
-                                                 "high growth"], plot_name="overall", legend_title="Tested scenario")
-
-    single_components = ["construction_maintenance", "local_s1", "tt_low", "externalities_s1"]
-    for i in single_components:
-        gdf_costs[i] = (gdf_costs[i] / 1000000).astype(int)
-    # Plot benefit distribution for all cost elements
-    plot_benefit_distribution_line_multi(df_costs=gdf_costs,
-                                         columns=["construction_maintenance", "local_s1", "tt_low", "externalities_s1"],
-                                         labels=["construction and maintenance", "access costs", "highway travel time",
-                                                 "external costs"], plot_name="single_components",
-                                         legend_title="Scoring components")
-    #todo plot the uncertainty
-    #plot_best_worse(df=gdf_costs)
-
-
-    # Plot influence of discounting
-    """
-    """
-    map_vor = CustomBasemap(boundary=outerboundary, network=network)
-    map_vor.single_development(id=2, new_nodes=filtered_rand_gdf, new_links=new_links)
-    map_vor.voronoi(id=2, gdf_voronoi=voronoi_gdf)
-    map_vor.show()
-
-
-    for i in voronoi_gdf["ID"].unique():
-        map_vor = CustomBasemap(boundary=outerboundary, network=network)
-        map_vor.single_development(id=i, new_nodes=filtered_rand_gdf, new_links=new_links)
-        map_vor.voronoi(id=i, gdf_voronoi=voronoi_gdf)
-        del map_vor
-
-
-    map_development = CustomBasemap(boundary=outerboundary, network=network, access_points=current_access_points, frame=innerboundary)
-    map_development.new_development(new_nodes=filtered_rand_gdf, new_links=lines_gdf)
-    map_development.show()
-    """
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':

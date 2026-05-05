@@ -6,7 +6,7 @@ from rasterstats import zonal_stats
 import boto3
 import rasterio as rio
 from rasterio.session import AWSSession
-
+from shapely.validation import make_valid
 
 def future_scenario_zuerich_2022(df_input):
     """
@@ -83,23 +83,6 @@ def future_scenario_zuerich_2022(df_input):
 
     print(df_scenario.columns)
 
-    """
-    scen_2_pop  = [1.199, 1.261, 1.192, 1.215, 1.32, 1.32, 1.215]
-    scen_2_empl = [1.169, 1.231, 1.162, 1.185, 1.29, 1.35, 1.185]
-
-    scen_3_pop  = [1.279, 1.35, 1.272, 1.295, 1.40, 1.40, 1.295]
-    scen_3_empl = [1.245, 1.35, 1.242, 1.265, 1.40, 1.45, 1.265]
-
-
-    df_scenraio["scen_2_empl"] = scen_2_empl
-    df_scenraio["scen_2_pop"] = scen_2_pop
-
-    df_scenraio["scen_3_empl"] = scen_3_empl
-    df_scenraio["scen_3_pop"] = scen_3_pop
-
-    print(df_scenraio.columns)
-    plot_2x3_subplots(df_scenraio, lim, network, location)
-    """
     df_scenario.to_file(r"data/temp/data_scenario_n.shp")
     return
 
@@ -111,15 +94,18 @@ def scenario_to_raster(frame=False):
     if frame != False:
         # Create a bounding box polygon
         bounding_poly = box(frame[0], frame[1], frame[2], frame[3])
-        len = (frame[2]-frame[0])/100
-        width = (frame[3]-frame[1])/100
-        print(f"frame: {len, width} it should be 377, 437")
+        n_cols = (frame[2] - frame[0]) / 100
+        n_rows = (frame[3] - frame[1]) / 100
 
         # Calculate the difference polygon
         # This will be the area in the bounding box not covered by existing polygons
+
         difference_poly = bounding_poly
         for geom in scenario_polygon['geometry']:
-            difference_poly = difference_poly.difference(geom)
+            if geom is not None and not geom.is_empty:
+                geom = make_valid(geom)
+                difference_poly = difference_poly.difference(geom)
+
 
         # Calculate the mean values for the three columns
         #mean_values = scenario_polygon.mean()
@@ -206,3 +192,115 @@ def scenario_to_voronoi(polygons_gdf, euclidean=False):
         polygons_gdf.to_file(r"data/Voronoi/voronoi_developments_tt_values.shp")
 
     return
+
+
+def plot_scenarios(corridor_polygon=None):
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    import matplotlib.cm as cm
+    from matplotlib.patches import Patch
+    import numpy as np
+
+    scenario_gdf = gpd.read_file(r"data/temp/data_scenario_n.shp")
+    voronoi_gdf  = gpd.read_file(r"data/Voronoi/voronoi_developments_euclidian_values.shp")
+
+    if scenario_gdf.crs is None: scenario_gdf = scenario_gdf.set_crs("EPSG:2056")
+    if voronoi_gdf.crs  is None: voronoi_gdf  = voronoi_gdf.set_crs("EPSG:2056")
+
+    scenarios   = ['s1', 's2', 's3']
+    scen_labels = ['S1 — High growth', 'S2 — Medium growth', 'S3 — Low growth']
+    variables   = ['pop', 'empl']
+    var_labels  = ['Population (relative to 2020)', 'Employment (relative to 2011)']
+
+    # ---------------------------------------------------------------
+    # FIGURE 1: District-level growth rates  (2 rows × 3 cols)
+    # ---------------------------------------------------------------
+    fig1, axes1 = plt.subplots(2, 3, figsize=(20, 12))
+
+    for row, (var, var_label) in enumerate(zip(variables, var_labels)):
+        cols = [f'{s}_{var}' for s in scenarios]
+        vmin = scenario_gdf[cols].min().min()
+        vmax = scenario_gdf[cols].max().max()
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+        cmap = cm.RdYlGn
+
+        for col_idx, (scen, scen_label, col) in enumerate(zip(scenarios, scen_labels, cols)):
+            ax = axes1[row, col_idx]
+            scenario_gdf.plot(
+                column=col, ax=ax, cmap=cmap, norm=norm,
+                edgecolor='white', linewidth=0.6, alpha=0.85
+            )
+
+            # District labels
+            for _, row_data in scenario_gdf.iterrows():
+                if row_data.geometry is not None and not row_data.geometry.is_empty:
+                    cx, cy = row_data.geometry.centroid.x, row_data.geometry.centroid.y
+                    val = row_data[col]
+                    ax.annotate(f"{row_data['BEZIRK']}\n×{val:.2f}",
+                                xy=(cx, cy), ha='center', va='center',
+                                fontsize=6, color='black')
+
+            if corridor_polygon is not None:
+                gpd.GeoDataFrame({'geometry': [corridor_polygon]}, crs="EPSG:2056").boundary.plot(
+                    ax=ax, color='black', linewidth=1.5, linestyle='--', zorder=5)
+
+            ax.set_title(f'{scen_label}\n{var_label}', fontsize=10, fontweight='bold')
+            ax.set_aspect('equal')
+            ax.axis('off')
+
+        # Shared colorbar per row
+        sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = fig1.colorbar(sm, ax=axes1[row, :], shrink=0.6, pad=0.02,
+                             label=f'Growth multiplier — {var_label}')
+
+    fig1.suptitle('Cantonal Growth Scenarios 2020→2050\nby District (Canton of Zürich)',
+                  fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig('data/Voronoi/plot_scenarios_districts.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    print("Saved → data/Voronoi/plot_scenarios_districts.png")
+
+    # ---------------------------------------------------------------
+    # FIGURE 2: Voronoi — aggregated demand per catchment (2 rows × 3 cols)
+    # ---------------------------------------------------------------
+    fig2, axes2 = plt.subplots(2, 3, figsize=(20, 12))
+
+    for row, (var, var_label) in enumerate(zip(variables, var_labels)):
+        cols = [f'{s}_{var}' for s in scenarios]
+
+        # Drop NaN for colorbar range
+        valid = voronoi_gdf[cols].replace(0, np.nan).dropna()
+        vmin  = valid.min().min()
+        vmax  = valid.max().max()
+        norm  = mcolors.Normalize(vmin=vmin, vmax=vmax)
+        cmap  = cm.YlOrRd
+
+        for col_idx, (scen, scen_label, col) in enumerate(zip(scenarios, scen_labels, cols)):
+            ax = axes2[row, col_idx]
+            voronoi_gdf.plot(
+                column=col, ax=ax, cmap=cmap, norm=norm,
+                edgecolor='gray', linewidth=0.4, alpha=0.85,
+                missing_kwds={'color': 'lightgray', 'label': 'No data'}
+            )
+
+            if corridor_polygon is not None:
+                gpd.GeoDataFrame({'geometry': [corridor_polygon]}, crs="EPSG:2056").boundary.plot(
+                    ax=ax, color='black', linewidth=1.5, linestyle='--', zorder=5)
+
+            ax.set_title(f'{scen_label}\n{var_label}', fontsize=10, fontweight='bold')
+            ax.set_aspect('equal')
+            ax.axis('off')
+
+        sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        fig2.colorbar(sm, ax=axes2[row, :], shrink=0.6, pad=0.02,
+                      label=f'Total {var} per Voronoi catchment')
+
+    fig2.suptitle('Scenario Demand aggregated to Voronoi Catchments\n(Euclidean access areas)',
+                  fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig('data/Voronoi/plot_scenarios_voronoi.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    print("Saved → data/Voronoi/plot_scenarios_voronoi.png")

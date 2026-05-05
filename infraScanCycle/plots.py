@@ -639,15 +639,15 @@ def plot_benefit_distribution_line_multi(df_costs, columns, labels, plot_name, l
         # Create a dict with column names as keys and labels as values
         legend_labels = dict(zip(columns, labels))
 
-    linestyles = ['solid', 'dashdot', 'dashed', 'dotted']
-    line_colors = ['darkgray', 'gray', 'dimgray', 'black'] # 'gray', 'lightgray',
+    linestyles = ['solid', 'dashdot', 'dashed', 'dotted', 'solid']
+    line_colors = ['darkgray', 'gray', 'dimgray', 'black', 'lightgray']
 
     fig, ax = plt.subplots(figsize=(13, 6))
 
     # Create a line plot with legends
     for i, column in enumerate(columns):
-        ax.plot(bin_counts.index.astype(str), bin_counts[f'bin_{column}'], label=legend_labels[column], color=line_colors[i], linestyle=linestyles[i])
-    ax.legend(bbox_to_anchor=(1.02, 0), loc="lower left", borderaxespad=0., title=legend_title, fontsize=12, title_fontsize=14, frameon=False)
+        ax.plot(bin_counts.index.astype(str), bin_counts[f'bin_{column}'], label=legend_labels[column], color=line_colors[i % len(line_colors)], linestyle=linestyles[i % len(linestyles)])
+        ax.legend(bbox_to_anchor=(1.02, 0), loc="lower left", borderaxespad=0., title=legend_title, fontsize=12, title_fontsize=14, frameon=False)
 
     plt.xlabel('Net benefit [Mio CHF]', fontsize=14)
     plt.ylabel('Occurrence', fontsize=14)

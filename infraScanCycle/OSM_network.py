@@ -9,18 +9,40 @@ import rasterio.features
 import numpy as np
 from shapely.ops import unary_union
 from shapely.geometry import Polygon, MultiPolygon
+from shapely.validation import make_valid
 
 
-def travel_cost_polygon(frame):
+def make_cycling_speed_raster(cycling_speed_kmh=15):
+    """
+    Creates a uniform cycling speed raster from the existing speed_limit_raster.
+    All passable cells (speed > 0) are replaced with cycling_speed_kmh.
+    Impassable cells (speed == 0, e.g. lakes) remain 0.
+    Result saved to data/Network/OSM_tif/cycling_speed_raster.tif
+    """
+    raster_file = r"data/Network/OSM_tif/speed_limit_raster.tif"
+    output_file = r"data/Network/OSM_tif/cycling_speed_raster.tif"
 
-    points_all = gpd.read_file(r"data\Network\processed\points_attribute.gpkg")
+    with rasterio.open(raster_file) as src:
+        raster_data = src.read(1).astype(float)
+        profile = src.profile
+
+    # Replace all passable cells with the cycling speed
+    cycling_raster = np.where(raster_data > 0, cycling_speed_kmh, 0).astype(float)
+
+    with rasterio.open(output_file, 'w', **profile) as dst:
+        dst.write(cycling_raster, 1)
+
+    print(f"Cycling speed raster created at {output_file} ({cycling_speed_kmh} km/h)")
+    return output_file
+
+
+def travel_cost_polygon(frame, raster_file=r"data/Network/OSM_tif/cycling_speed_raster.tif"):
+    points_all = gpd.read_file(r"data/Network/processed/access_points_corridor.gpkg")
     # Need the node id as ID_point
-    points_all = points_all[points_all["intersection"] == 0]
     points_all_frame = points_all.cx[frame[0]:frame[2], frame[1]:frame[3]]
-    # print(points_all_frame.head(10).to_string())
+
 
     # travel speed
-    raster_file = r"data\Network\OSM_tif\speed_limit_raster.tif"
     # should change lake speed to 0
     # and other area to slightly higher speed to other land covers
     with rasterio.open(raster_file) as dataset:
@@ -30,26 +52,37 @@ def travel_cost_polygon(frame):
         # Convert real-world coordinates to raster indices
         sources_indices = [~transform * (x, y) for x, y in zip(points_all_frame.geometry.x, points_all_frame.geometry.y)]
         sources_indices = [(int(y), int(x)) for x, y in sources_indices]
-        """
-        # Calculate path lengths using Dijkstra's algorithm
-        start = time.time()
-        path_lengths, source_index = nx.multi_source_dijkstra_path_length(graph, sources_indices, weight='weight')
-        end = time.time()
-        print(f"Time dijkstra: {end-start} sec.")
 
-        # Initialize an empty raster for path lengths
-        path_length_raster = np.full(raster_data.shape, np.nan)
-        source_raster = np.full(raster_data.shape, np.nan)
+        def snap_to_nonzero(idx, raster):
+            """Snap source points on zero-speed cells to nearest valid neighbour."""
+            corrected = {}
+            updated = []
+            for (y, x) in idx:
+                if raster[y, x] > 0:
+                    updated.append((y, x))
+                else:
+                    # Search expanding neighbourhood
+                    found = False
+                    for r in range(1, 5):
+                        for dy in range(-r, r + 1):
+                            for dx in range(-r, r + 1):
+                                ny, nx = y + dy, x + dx
+                                if 0 <= ny < raster.shape[0] and 0 <= nx < raster.shape[1]:
+                                    if raster[ny, nx] > 0:
+                                        corrected[(ny, nx)] = (y, x)
+                                        updated.append((ny, nx))
+                                        found = True
+                                        break
+                            if found:
+                                break
+                        if found:
+                            break
+                    if not found:
+                        updated.append((y, x))  # leave in place, Dijkstra will skip
+            return updated, corrected
 
-        # Populate the raster with path lengths
-        for node, length in path_lengths.items():
-            y, x = node
-            path_length_raster[y, x] = length
-        """
+        sources_indices, idx_correct = snap_to_nonzero(sources_indices, raster_data)
 
-        sources_indices, idx_correct = match_access_point_on_highway(sources_indices, raster_data)
-        # Remove all cells that contain highway
-        #raster_data[raster_data > 90] = 50
 
 
         start = time.time()
@@ -84,7 +117,7 @@ def travel_cost_polygon(frame):
 
     # Save the path length raster
     with rasterio.open(
-            r'data\Network\travel_time\travel_time_raster.tif', 'w',
+            r'data/Network/travel_time/travel_time_raster.tif', 'w',
             driver='GTiff',
             height=path_length_raster.shape[0],
             width=path_length_raster.shape[1],
@@ -123,7 +156,7 @@ def travel_cost_polygon(frame):
     # Set NaN values to a specific NoData value, e.g., -1
     source_coord_raster[np.isnan(source_coord_raster)] = -1
 
-    path_id_raster = r'data\Network\travel_time\source_id_raster.tif'
+    path_id_raster = r'data/Network/travel_time/source_id_raster.tif'
     with rasterio.open(path_id_raster, 'w',
         driver='GTiff',
         height=source_coord_raster.shape[0],
@@ -138,52 +171,13 @@ def travel_cost_polygon(frame):
     # get Voronoi polygons in vector data as gpd df
     gdf_polygon = raster_to_polygons(path_id_raster)
     #print(gdf_polygon.head(10).to_string())
-    gdf_polygon.to_file(r"data\Network\travel_time\Voronoi_statusquo.gpkg")
-
-        # how to get the inputs? nodes in which reference system, weights automatically?
-        # how to get the coordinates of the closest point?
-
-        # tif with travel time
-        # tif with closest point
+    gdf_polygon.to_file(r"data/Network/travel_time/Voronoi_statusquo.gpkg")
 
 
     return
 
 
-def raster_to_polygons___(tif_path):
-    # Read the raster data
-    with rasterio.open(tif_path) as src:
-        data = src.read(1)
-        data = data.astype('int32')
-        transform = src.transform
 
-    # Find unique values in the raster
-    unique_values = np.unique(data[data >= 0])  # Assuming negative values are no-data
-
-    # Initialize list to store polygons and their values
-    polygons = []
-
-    # Iterate over unique values and create polygons
-    for val in unique_values:
-        # Create mask for the current value
-        mask = data == val
-
-        # Generate shapes (polygons) from the mask
-        shapes = rasterio.features.shapes(data, mask=mask, transform=transform)
-        for shape, value in shapes:
-            if value == val:
-                # Convert shape to a Shapely Polygon and add to list
-                polygons.append({
-                    'geometry': Polygon(shape['coordinates'][0]),
-                    'ID_point': val
-                })
-
-    # Create a GeoDataFrame
-    gdf = gpd.GeoDataFrame(polygons, crs=src.crs)
-    #gdf_dissolved = gdf.dissolve(by='ID_point')
-    gdf_dissolved = groupby_multipoly(gdf, by="ID_point")
-
-    return gdf_dissolved
 
 
 def raster_to_polygons(tif_path):
@@ -217,11 +211,11 @@ def raster_to_polygons(tif_path):
         combined_polygons = []
         for shape, value in positive_shapes:
             if value == val:
-                outer_polygon = Polygon(shape['coordinates'][0])
-
-                # Create holes
-                holes = [Polygon(hole_shape['coordinates'][0]) for hole_shape, hole_value in hole_shapes if hole_value < 0]
-                holes_union = unary_union(holes)
+                outer_polygon = make_valid(Polygon(shape['coordinates'][0]))
+                holes = [make_valid(Polygon(hole_shape['coordinates'][0])) for hole_shape, hole_value in hole_shapes if
+                         hole_value < 0]
+                holes = [h for h in holes if not h.is_empty]
+                holes_union = unary_union(holes) if holes else outer_polygon.__class__()
 
                 # Combine outer polygon with holes
                 if holes_union.is_empty:
@@ -259,9 +253,8 @@ def groupby_multipoly(df, by, aggfunc="first"):
     return aggregated
 
 
-def raster_to_graph(raster_data):
-    #high_weight = 90 # sec  is the time required to cross 100 with 4 km/h
-    raster_cell = 100 # m
+def raster_to_graph(raster_data, raster_cell=50):
+
 
     # convert travel speed from km/h to m/s
     raster_data = raster_data * 1000 / 3600
@@ -318,248 +311,167 @@ def raster_to_graph(raster_data):
     return graph
 
 
-def match_access_point_on_highway(idx, raster):
-    # get value of all idx in raster cell
-    # initialise dict
-    # for i in idx
-    #   if value of i < 120
-    #       if there is a cell A with raster value == 120 in 8 neighbors of i
-    #           replace idx of i = idx of cell A
-    #           dict.add(idx of A: idx of i)
-    #       elif value of i < 100
-    #           if there is a cell B with raster value == 100 in 8 neighbors of i
-    #               replace idx of i = idx of cell B
-    #               dict.add(idx of B: idx of i)
-    #       elif value of i < 80
-    #           if there is a cell C with raster value == 80 in 8 neighbors of i
-    #               replace idx of i = idx of cell C
-    #               dict.add(idx of C: idx of i)
-    # return idx, dict
 
+
+
+def travel_cost_developments(frame, raster_file=r"data/Network/OSM_tif/cycling_speed_raster.tif"):
+    os.makedirs('data/Network/travel_time/developments', exist_ok=True)
+
+    files = glob.glob(r'data/Network/travel_time/developments/*')
+    for f in files:
+        os.remove(f)
+
+    points = gpd.read_file(r"data/Network/processed/points_with_attribute.gpkg")
+    points = points[points["is_intersection"] == False] if "is_intersection" in points.columns else points
+    points = points.cx[frame[0]:frame[2], frame[1]:frame[3]]
+
+    generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
+    generated_points = generated_points[generated_points["within_corridor"] | generated_points["on_border"]]
+
+    with rasterio.open(raster_file) as dataset:
+        raster_data = dataset.read(1)
+        transform = dataset.transform
+        inv_transform = ~transform
+        cell_size = abs(dataset.transform.a)
+
+        # ── Build graph ONCE ────────────────────────────────────────────────
+        t0 = time.time()
+        graph = raster_to_graph(raster_data, raster_cell=cell_size)
+        print(f"Graph built in {time.time() - t0:.1f}s")
+
+        # ── Status-quo Dijkstra ONCE (all existing access points) ───────────
+        sq_raw = [inv_transform * (geom.x, geom.y) for geom in points.geometry]
+        sq_indices = [(int(y), int(x)) for x, y in sq_raw]
+        sq_indices = [(y, x) for y, x in sq_indices
+                      if 0 <= y < raster_data.shape[0] and 0 <= x < raster_data.shape[1]]
+        sq_indices, sq_idx_correct = match_access_point_on_cycling_network(sq_indices, raster_data)
+
+        t0 = time.time()
+        sq_distances, sq_paths = nx.multi_source_dijkstra(G=graph, sources=sq_indices, weight='weight')
+        print(f"Status-quo Dijkstra done in {time.time() - t0:.1f}s  ({len(sq_distances)} reachable cells)")
+
+        # Build sq distance and source-index arrays (shape = raster)
+        sq_dist_arr = np.full(raster_data.shape, np.inf)
+        sq_src_arr  = np.full(raster_data.shape, None, dtype=object)
+        for node, dist in sq_distances.items():
+            y, x = node
+            sq_dist_arr[y, x] = dist
+            path = sq_paths[node]
+            sq_src_arr[y, x] = path[0] if path else node
+
+        # Apply sq snapping corrections to source array
+        for (y, x), src in np.ndenumerate(sq_src_arr):
+            if src in sq_idx_correct:
+                sq_src_arr[y, x] = sq_idx_correct[src]
+
+        # Map raster indices → ID_point for status-quo sources
+        points_copy = points.copy()
+        points_copy['ry'], points_copy['rx'] = zip(*points_copy.geometry.apply(
+            lambda g: (int(np.floor((inv_transform * (g.x, g.y))[1])),
+                       int(np.floor((inv_transform * (g.x, g.y))[0])))))
+        sq_index_to_id = {(r['ry'], r['rx']): r['ID_point'] for _, r in points_copy.iterrows()}
+        # Also register snapped positions
+        for snapped, orig in sq_idx_correct.items():
+            if orig in sq_index_to_id:
+                sq_index_to_id[snapped] = sq_index_to_id[orig]
+
+        # Pre-build sq source-ID array (float) for fast per-dev reuse
+        sq_src_id_arr = np.full(raster_data.shape, -1.0)
+        for (y, x), src in np.ndenumerate(sq_src_arr):
+            if src is not None and src in sq_index_to_id:
+                sq_src_id_arr[y, x] = float(sq_index_to_id[src])
+
+        # ── Per-development loop ─────────────────────────────────────────────
+        for _, row in generated_points.iterrows():
+            geometry = row.geometry
+            id_new   = row['ID_new']
+            print(f"Development {id_new}")
+
+            # Snap new node to raster
+            dx, dy = inv_transform * (geometry.x, geometry.y)
+            dev_idx = (int(dy), int(dx))
+            if not (0 <= dev_idx[0] < raster_data.shape[0] and 0 <= dev_idx[1] < raster_data.shape[1]):
+                print(f"  Dev {id_new} outside raster — skipped")
+                continue
+
+            dev_snapped_list, dev_idx_correct = match_access_point_on_cycling_network([dev_idx], raster_data)
+            dev_idx_snapped = dev_snapped_list[0]
+
+            # Single-source Dijkstra from only the new development node
+            t0 = time.time()
+            dev_distances, dev_paths = nx.single_source_dijkstra(G=graph, source=dev_idx_snapped, weight='weight')
+            print(f"  Dev {id_new} Dijkstra: {time.time() - t0:.1f}s")
+
+            # Build dev distance array
+            dev_dist_arr = np.full(raster_data.shape, np.inf)
+            for node, dist in dev_distances.items():
+                y, x = node
+                dev_dist_arr[y, x] = dist
+
+            # ── Merge: take element-wise minimum ──────────────────────────
+            dev_wins = dev_dist_arr < sq_dist_arr
+
+            path_length_raster = np.where(dev_wins, dev_dist_arr, sq_dist_arr)
+            path_length_raster[np.isinf(path_length_raster)] = np.nan
+
+            # Source-ID raster: dev cells get 9999, sq cells keep their ID
+            source_id_raster = np.where(dev_wins, 9999.0, sq_src_id_arr)
+            # Cells unreachable by both → -1
+            both_inf = np.isinf(dev_dist_arr) & np.isinf(sq_dist_arr)
+            source_id_raster[both_inf] = -1.0
+
+            # Save travel time raster
+            with rasterio.open(
+                fr'data/Network/travel_time/developments/dev{id_new}_travel_time_raster.tif', 'w',
+                driver='GTiff', height=path_length_raster.shape[0], width=path_length_raster.shape[1],
+                count=1, dtype=path_length_raster.dtype, crs=dataset.crs, transform=transform
+            ) as dst:
+                dst.write(path_length_raster, 1)
+
+            # Save source-ID raster
+            path_id_raster = fr'data/Network/travel_time/developments/dev{id_new}_source_id_raster.tif'
+            with rasterio.open(
+                path_id_raster, 'w', driver='GTiff',
+                height=source_id_raster.shape[0], width=source_id_raster.shape[1],
+                count=1, dtype=source_id_raster.dtype, crs=dataset.crs, transform=transform
+            ) as dst:
+                dst.write(source_id_raster, 1)
+
+            gdf_polygon = raster_to_polygons(path_id_raster)
+            gdf_polygon.to_file(fr"data/Network/travel_time/developments/dev{id_new}_Voronoi.gpkg")
+
+    return
+
+def match_access_point_on_cycling_network(idx, raster):
     matched_dict = {}
     updated_idx = []
-
     for i in idx:
         y, x = i
-        value = raster[y, x]
-        match_found = False  # Flag to indicate if a match is found
-
-        if value < 80:
-            # First search in the immediate neighborhood
-            for dy in range(-1, 2):
-                for dx in range(-1, 2):
+        match_found = raster[y, x] > 0
+        for radius in range(1, 4):
+            if match_found:
+                break
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
                     ny, nx = y + dy, x + dx
                     if 0 <= ny < raster.shape[0] and 0 <= nx < raster.shape[1]:
-                        if raster[ny, nx] >= 100:
-                            matched_dict[(ny, nx)] = i
-                            i = (ny, nx)
-                            match_found = True
-                            break
-                        elif raster[ny, nx] >= 80:
-                            matched_dict[(ny, nx)] = i
-                            i = (ny, nx)
-                            match_found = True
-                            break
-                        elif raster[ny, nx] >= 50:
-                            matched_dict[(ny, nx)] = i
-                            i = (ny, nx)
-                            match_found = True
-                            break
-                        elif raster[ny, nx] >= 30:
+                        if raster[ny, nx] > 0:
                             matched_dict[(ny, nx)] = i
                             i = (ny, nx)
                             match_found = True
                             break
                 if match_found:
                     break
-
-            # If no match found, expand search to wider range
-            if not match_found:
-                for dy in range(-2, 3):
-                    for dx in range(-2, 3):
-                        if dy == 0 and dx == 0:  # Skip the cell itself
-                            continue
-                        ny, nx = y + dy, x + dx
-                        if 0 <= ny < raster.shape[0] and 0 <= nx < raster.shape[1]:
-                            if raster[ny, nx] >= 100:
-                                matched_dict[(ny, nx)] = i
-                                i = (ny, nx)
-                                break
-                            elif raster[ny, nx] >= 80:
-                                matched_dict[(ny, nx)] = i
-                                i = (ny, nx)
-                                break
-                            elif raster[ny, nx] >= 50:
-                                matched_dict[(ny, nx)] = i
-                                i = (ny, nx)
-                                match_found = True
-                                break
-                            elif raster[ny, nx] >= 30:
-                                matched_dict[(ny, nx)] = i
-                                i = (ny, nx)
-                                match_found = True
-                                break
-                    if match_found:
-                        print("No point found to match on network")
-                        break
-
         updated_idx.append(i)
-
     return updated_idx, matched_dict
-
-
-def travel_cost_developments(frame):
-    # First delete all elements that are in the folder where the files are stored to avoid doubling
-
-    files = glob.glob(r'data\Network\travel_time\developments/*')
-    for f in files:
-        os.remove(f)
-
-    points = gpd.read_file(r"data\Network\processed\points_attribute.gpkg")
-    # Need the node id as ID_point
-    points = points[points["intersection"] == 0]
-    points = points.cx[frame[0]:frame[2], frame[1]:frame[3]]
-
-    generated_points = gpd.read_file(r"data\Network\processed\generated_nodes.gpkg")
-
-    # travel speed
-    raster_file = r"data\Network\OSM_tif\speed_limit_raster.tif"
-    # should change lake speed to 0
-    # and other area to slightly higher speed to other land covers
-    with rasterio.open(raster_file) as dataset:
-        raster_data = dataset.read(1)  # Assumes forbidden cells are marked with 1 or another distinct value
-        transform = dataset.transform
-
-        # Iterate over all developments
-        for index, row in generated_points.iterrows():
-            geometry = row.geometry  # Access geometry
-            id_new = row['ID_new']  # Access value in ID_new column
-            print(f"Development {id_new}")
-
-            # Create a new row to add to the target GeoDataFrame
-            new_row = {'geometry': geometry, 'intersection': 0, 'ID_point': 9999} # , 'ID_new': id_new
-
-            # Append new row to target_gdf
-            temp_points = points.copy()
-            #temp_points = temp_points.append(new_row, ignore_index=True)
-            # geometries.append(tempgeom)
-            temp_points = gpd.GeoDataFrame(pd.concat([temp_points, pd.DataFrame(pd.Series(new_row)).T], ignore_index=True))
-
-            # Convert real-world coordinates to raster indices
-            sources_indices = [~transform * (x, y) for x, y in zip(temp_points.geometry.x, temp_points.geometry.y)]
-            sources_indices = [(int(y), int(x)) for x, y in sources_indices]
-
-            sources_indices, idx_correct = match_access_point_on_highway(sources_indices, raster_data)
-            # Remove all cells that contain highway
-            # raster_data[raster_data > 90] = 50
-
-            start = time.time()
-            # Convert raster to graph
-            graph = raster_to_graph(raster_data)
-
-            # Get both path lengths and paths
-            distances, paths = nx.multi_source_dijkstra(G=graph, sources=sources_indices, weight='weight')
-            end = time.time()
-            print(f"Initialize graph and running dijkstra: {end - start} sec.")
-
-            # Initialize empty rasters for path lengths and source coordinates
-            path_length_raster = np.full(raster_data.shape, np.nan)
-
-            # Initialize an empty raster with np.nan and dtype float
-            temp_raster = np.full(raster_data.shape, np.nan, dtype=float)
-            # Change the dtype to object
-            source_coord_raster = temp_raster.astype(object)
-
-            # Populate the raster
-            for node, path in paths.items():
-                y, x = node
-                path_length_raster[y, x] = distances[node]
-
-                if path:  # Check if path is not empty
-                    source_y, source_x = path[0]  # First element of the path is the source
-                    source_coord_raster[y, x] = (source_y, source_x)
-
-            # Save the path length raster
-            with rasterio.open(
-                    fr'data\Network\travel_time\developments\dev{id_new}_travel_time_raster.tif', 'w',
-                    driver='GTiff',
-                    height=path_length_raster.shape[0],
-                    width=path_length_raster.shape[1],
-                    count=1,
-                    dtype=path_length_raster.dtype,
-                    crs=dataset.crs,
-                    transform=transform
-            ) as new_dataset:
-                new_dataset.write(path_length_raster, 1)
-
-            # Inverse transform to convert CRS coordinates to raster indices
-            inv_transform = ~transform
-
-            # Convert the geometry coordinates to raster indices
-            temp_points['raster_x'], temp_points['raster_y'] = zip(*temp_points['geometry'].apply(lambda geom: inv_transform * (geom.x, geom.y)))
-            temp_points["raster_y"] = temp_points["raster_y"].apply(lambda x: int(np.floor(x)))
-            temp_points["raster_x"] = temp_points["raster_x"].apply(lambda x: int(np.floor(x)))
-
-            # Create a dictionary to map raster indices to ID_point
-            index_to_id = {(row['raster_y'], row['raster_x']): row['ID_point'] for _, row in temp_points.iterrows()}
-
-            # Iterate over the source_coord_raster and replace coordinates with ID_point
-            # Assuming new_array is your 2D array of coordinates and matched_dict is your dictionary
-            for (y, x), coord in np.ndenumerate(source_coord_raster):
-                if coord in idx_correct:
-                    source_coord_raster[y, x] = idx_correct[coord]
-
-            for (y, x), source_coord in np.ndenumerate(source_coord_raster):
-                if source_coord in index_to_id:
-                    source_coord_raster[y, x] = index_to_id[source_coord]
-
-            # Make sure there are no tuples as point ID
-            for (y, x), value in np.ndenumerate(source_coord_raster):
-                # Check if the value is a tuple or an array (or another iterable except strings)
-                if isinstance(value, (tuple, list, np.ndarray)):
-                    # Keep only the first value of the tuple/array
-                    source_coord_raster[y, x] = value[0]
-                    print(f"Index ({value}) replace by {value[0]}")
-                elif np.isnan(value):
-                    source_coord_raster[y, x] = -1
-                    pass
-
-            # Convert the array to a float data type
-            source_coord_raster = source_coord_raster.astype(float)
-            # Set NaN values to a specific NoData value, e.g., -1
-            source_coord_raster[np.isnan(source_coord_raster)] = -1
-
-            path_id_raster = fr'data\Network\travel_time\developments\dev{id_new}_source_id_raster.tif'
-            with rasterio.open(
-                path_id_raster, 'w',
-                driver='GTiff',
-                height=source_coord_raster.shape[0],
-                width=source_coord_raster.shape[1],
-                count=1,
-                dtype=source_coord_raster.dtype,
-                crs=dataset.crs,
-                transform=transform
-                ) as new_dataset:
-                    new_dataset.write(source_coord_raster, 1)
-
-            # get Voronoi polygons in vector data as gpd df
-            gdf_polygon = raster_to_polygons(path_id_raster)
-            # print(gdf_polygon.head(10).to_string())
-            gdf_polygon.to_file(fr"data\Network\travel_time\developments\dev{id_new}_Voronoi.gpkg")
-                # how to get the inputs? nodes in which reference system, weights automatically?
-                # how to get the coordinates of the closest point?
-
-                # tif with travel time
-                # tif with closest point
-    return
 
 
 def get_voronoi_frame(polygons_gdf):
     margin = 100
-    points_gdf = gpd.read_file(r"data\Network\processed\points_corridor_attribute.gpkg")
+    points_gdf = gpd.read_file(r"data/Network/processed/points_with_attribute.gpkg")
     points_gdf = points_gdf[points_gdf["intersection"] == 0]
 
-    points_all = gpd.read_file(r"data\Network\processed\points.gpkg")
+    points_all = gpd.read_file(r"data/Network/processed/points.gpkg")
     points_all.crs = "epsg:2056"
     points_all = points_all[points_all["intersection"] == 0]
 
@@ -576,7 +488,7 @@ def get_voronoi_frame(polygons_gdf):
     # Use unary_union to union all geometries into a single geometry
     #polygons_with_points = unary_union(polygons_with_points['geometry'])
     #polygons_with_points = gpd.GeoDataFrame(geometry=[polygons_with_points], crs="epsg:2056")
-    #polygons_with_points.to_file(r"data\Network\processed\ppg.gpkg")
+    #polygons_with_points.to_file(r"data/Network/processed/ppg.gpkg")
 
     # Step 2: Find polygons touching the identified set
     # Add custom suffixes to avoid naming conflicts
