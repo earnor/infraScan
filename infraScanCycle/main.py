@@ -28,6 +28,8 @@ def _mem():
 
 
 def print_hi(name):
+    # TODO: hardcoded path — replace with pathlib.Path(__file__).parent or a
+    # config variable so the script runs on any machine without editing.
     os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
     #os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
     sys.setrecursionlimit(2000)
@@ -44,12 +46,13 @@ def print_hi(name):
     #   'netzluecke'    → only Netzlücken
     #   'schwachstelle' → only Schwachstellen
     DEV_TYPE_FILTER = 'netzluecke'
-    # Set True to skip the graph-based TTS section (slow) during quick test runs
-    SKIP_TT = False
-    # Minimum distance (m) between kept access points — 0 = keep all nodes.
+
+    
+    # Minimum distance (m) between kept access points
+    # 0 = keep all nodes.
     # Intersections are always kept; non-intersection nodes closer than this
     # to any already-kept node are dropped.  Try 300–500 to reduce OD pairs ~4×.
-    ACCESS_POINT_MIN_DIST = 400
+    ACCESS_POINT_MIN_DIST = 0
 
     # Define spatial limits of the research corridor
     # The coordinates must end with 000 in order to match the coordinates of the input raster data
@@ -57,8 +60,6 @@ def print_hi(name):
     n_min, n_max = 1237000, 1254000     # 1238000, 1252000 - 1237000, 1252000
     limits_corridor = [e_min, n_min, e_max, n_max]
 
-    # Boundary for plot
-    boundary_plot = polygon_from_points(e_min=e_min+1000, e_max=e_max-500, n_min=n_min+1000, n_max=n_max-2000)
 
     # Get a polygon as limits for the corridor
     innerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max)
@@ -67,7 +68,7 @@ def print_hi(name):
     margin = 3000 # meters TODO: change margin
     outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
 
-    # Define the size of the resolution of the raster to 25-50 meter, before 100 was too coarse
+    # Define the size of the resolution of the raster to 25-50 meter
     raster_size = 50 # meters
 
     ##################################################################################
@@ -87,20 +88,20 @@ def print_hi(name):
     c_structural_maint = 1.2/100 # structural maintenance [fraction of construction cost/year]
 
     # Value of Travel Time Savings [CHF/h]
-    VTTS = 28  # CHF/h — Swiss official value ~28 CHF/h for leisure cycling
+    VTTS = 18.2  # CHF/h — Swiss official value ~18.2 CHF/h for leisure cycling
     travel_time_duration = 50  # appraisal horizon [years]
 
     # Route comfort monetisation [CHF / m / year per CLI unit]
     comfort_value_chf_m_year = 2.0  # TODO: calibrate
 
     # Safety — willingness-to-pay to avoid risk-weighted route exposure [CHF/(risk_unit·trip·year)]
-    value_of_safety = None  # TODO: set once a unit value is agreed (e.g. 0.0001)
+    value_of_safety = 0.0001  # TODO: set once a unit value is agreed (e.g. 0.0001)
 
     runtimes["Initialize variables"] = time.time() - st
     st = time.time()
 
     ##################################################################################
-    # Import and prepare raw data
+    # Import and prepare raw data check all good
     print("\nIMPORT RAW DATA \n")
 
     # Import shapes of lake for plots
@@ -132,59 +133,133 @@ def print_hi(name):
     print("\nINFRASTRUCTURE NETWORK \n")
     ##################################################################################
     # 1) Import network
-    # Import the cycling network and preprocess it ALLTAG.GIS
-    # higher network layer (like highway for cycling) stored in infraScanCycle/data/raw/ALLTAG/Velonetz_Alltag_-OGD.gpkg
-    # gaps in higher level network stored in infraScanCycle/data/raw/SCHWACHSTELLEN/TBA_VNP_SCHWACHSTELLEN_L.shp
-    # make option to join them together
+    # Reads ALLTAG shapefile, reprojects to EPSG:2056, snaps endpoints to 0.1 m grid,
+    # explodes MultiLineStrings, and converts to a primal graph via momepy.
+    # Outputs: data/Network/processed/{nodes,edges}.gpkg + CSV exports.
+    network = import_network_GIS_ALLTAG()
 
-    network = import_network_GIS_ALLTAG()  # already EPSG:2056, already clean 29.04.26
-
-
-    #plot network (can comment out)
-    # plot_network(network)
-
-    # CLEAN DATA
-    network = network[network.geometry.notnull()]
-
+    # Plot 1 — raw shapefile import: edges coloured by ROUTENTYP, no node classification yet
+    plot_raw_network(network, title="Step 1 — Raw imported network (ALLTAG shapefile)", save_path="data/Network/processed/plot_01_raw_import.png")
 
     runtimes["Import network data"] = time.time() - st
     st = time.time()
 
-
     ##################################################################################
     # 2) Process network
-
-    # Simplify the physical topology of the network
-    # One distinct edge between two nodes (currently multiple edges between nodes)
-    # Edges are stored in r"data/Network/processed/edges.gpkg"
-    # Points in simplified network can be intersections ("intersection"==1) or access points ("intersection"==0)
-    # Points are stored in r"data/Network/processed/points.gpkg"
-    
+    # reformat_network(): resolves topology, tags intersections/endpoints, attaches
+    #   route names and Netzlücken/Schwachstellen flags, adds travel-time attributes.
+    #   Outputs: data/Network/processed/{edges,points}.gpkg
+    # network_in_corridor(): spatial filter to innerboundary; thins access points by
+    #   ACCESS_POINT_MIN_DIST; saves corridor and border-crossing subsets.
+    # get_edge_attributes(): returns the fully attributed edge GDF used by scoring.
     nodes_gdf, edges_final = reformat_network()
 
-    # plot network (can comment out)
-    #plot_network(edges_final)
+    # Plot 2 — after topology resolution: intersections, dead ends, through-nodes classified
+    plot_network_classified(nodes_gdf, edges_final)
 
-    # Filter the infrastructure elements that lie within a given polygon
-    # Points within the corridor are stored in r"data/Network/processed/points_corridor.gpkg"
-    # Edges within the corridor are stored in r"data/Network/processed/edges_corridor.gpkg"
-    # Edges crossing the corridor border are stored in r"data/Network/processed/edges_on_corridor.gpkg"
     points_corridor, edges_corridor, edges_border = network_in_corridor(
-        polygon=outerboundary, access_point_min_dist=ACCESS_POINT_MIN_DIST)
-    #plot network corridor
-    #plot_corridor_network(outerboundary, points_corridor, edges_corridor, edges_border, points_full=nodes_gdf, edges_full=edges_final)
+        polygon=innerboundary, access_point_min_dist=ACCESS_POINT_MIN_DIST)
 
-    # Add attributes to the edges
-    edges = get_edge_attributes() #TODO
-    # plot
-    #plot_edge_attributes(edges)
+    # Plot 3 — corridor filter: full network as context, corridor subset highlighted
+    plot_corridor_network(outerboundary, points_corridor, edges_corridor, edges_border,
+                         points_full=nodes_gdf, edges_full=edges_final)
+
+
+    edges = get_edge_attributes()
+    # TODO: edges_corridor.gpkg (written by network_in_corridor) and
+    # edges_with_attribute.gpkg (written by get_edge_attributes) are the same
+    # network but different files.  Later code reads both (edges here, edges_sq
+    # below at line 451).  Verify that ID_edge is consistent between the two files;
+    # travel_cost_developments() matches candidates to the base GDF by ID_edge.
+
+    # Plot 4 — edge attributes: free-flow speed, capacity, travel time
+    plot_edge_attributes(edges)
+
+    ##################################################################################
+    # A) Add Netzlücken to corridor graph at BAD_FFS
+    # Netzlücken are planned-but-unbuilt edges (is_development == 1).  Including them
+    # with a degraded speed (BAD_FFS = 15 km/h) makes the graph more connected
+    # while signalling that these links are substandard in their current state.
+    # They get their own ROUTENTYP so they are distinguishable from both existing
+    # edges and auto-generated connectors in plots and routing.
+    edges_aug = edges.copy()
+    nl_mask   = edges_aug['is_development'] == 1
+    edges_aug.loc[nl_mask, 'ROUTENTYP'] = 'Netzlücke'
+    edges_aug.loc[nl_mask, 'ffs']       = BAD_FFS
+    edges_aug.loc[nl_mask, 'tt_min']    = (
+        edges_aug.loc[nl_mask, 'length_m'] / 1000) / BAD_FFS * 60
+    print(f"\n  Added {nl_mask.sum()} Netzlücken at BAD_FFS ({BAD_FFS} km/h) to corridor graph")
+
+    G_with_nl = build_graph_direct(edges_aug)
+    conn_nl   = check_network_connectivity(G_with_nl, label="corridor + Netzlücken")
+
+    ##################################################################################
+    # B) Auto-generate connector paths where the network is still disconnected
+    # Always delete any stale connectivity_developments.gpkg so _build_base_gdf()
+    # never loads bridges from a previous run with different corridor/Netzlücken state.
+    _conn_cache = 'data/Network/processed/connectivity_developments.gpkg'
+    if os.path.exists(_conn_cache):
+        os.remove(_conn_cache)
+        print("  Cleared stale connectivity_developments.gpkg")
+
+    conn_gdf = gpd.GeoDataFrame(
+        columns=['geometry', 'ROUTENTYP', 'ffs', 'tt_min', 'length_m'],
+        geometry='geometry', crs="EPSG:2056"
+    )
+    if not conn_nl['is_connected']:
+        print(f"\n  {conn_nl['num_components']} component(s) remain after Netzlücken — "
+              f"auto-generating connector paths …")
+        raw_conn = generate_connectivity_developments(
+            corridor_polygon=innerboundary,
+            include_netzluecken=True,
+        )
+        if len(raw_conn) > 0:
+            raw_conn['ROUTENTYP'] = 'Nebenverbindung'  # cycling path — same type as bridge edges
+            raw_conn['ffs']       = WORST_FFS
+            raw_conn['tt_min']    = raw_conn['length_m'] / 1000 / WORST_FFS * 60
+            conn_gdf = raw_conn
+
+            edges_full = pd.concat([edges_aug, conn_gdf], ignore_index=True)
+            G_full     = build_graph_direct(edges_full)
+            check_network_connectivity(G_full, label="corridor + Netzlücken + Connectors")
+        else:
+            print("  No connectors generated — gaps may already be bridged by Netzlücken.")
+            # Write empty file so _build_base_gdf() finds no bridges to load
+            gpd.GeoDataFrame(geometry=[], crs="EPSG:2056").to_file(_conn_cache, driver='GPKG')
+    else:
+        print("  Network fully connected after adding Netzlücken — no connectors needed.")
+        # Write empty file so _build_base_gdf() finds no bridges to load
+        gpd.GeoDataFrame(geometry=[], crs="EPSG:2056").to_file(_conn_cache, driver='GPKG')
+
+    ##################################################################################
+    # C) Plot all route types: existing / Schwachstellen / Netzlücken / Connectors
+    plot_network_all_types(
+        edges_gdf=edges_aug,
+        conn_gdf=conn_gdf,
+        corridor_polygon=innerboundary,
+        save_path="data/Network/processed/network_all_types.png",
+    )
+
+    # Save the full annotated network (all route types) as GeoPackages for GIS reference.
+    # Edges include ID_edge, ROUTENTYP, ffs, tt_min, is_development, is_schwachstelle.
+    # Nodes include ID_point, is_intersection, is_through_point, is_endpoint.
+    _full_edges = edges_aug.copy()
+    if len(conn_gdf) > 0:
+        _full_edges = pd.concat([_full_edges, conn_gdf], ignore_index=True)
+    _full_edges['ID_edge'] = range(len(_full_edges))
+    _full_edges.to_file('data/Network/processed/network_full_annotated_edges.gpkg', driver='GPKG')
+    nodes_gdf.to_file('data/Network/processed/network_full_annotated_nodes.gpkg', driver='GPKG')
+    print(f"  Full annotated network saved: "
+          f"{len(_full_edges)} edges, {len(nodes_gdf)} nodes "
+          f"→ network_full_annotated_{{edges,nodes}}.gpkg")
 
     runtimes["Preprocess the network"] = time.time() - st
     st = time.time()
 
     # --- NETWORK QUALITY CHECK ---
     print("\n--- NETWORK QUALITY CHECK ---")
-    print(edges['ROUTENTYP'].value_counts())
+    _rt_col = next((c for c in edges.columns if c.upper().startswith('ROUTENTYP')), None)
+    print(edges[_rt_col].value_counts() if _rt_col else "ROUTENTYP column not found")
     print(
         f"Edges missing ROUTENTYP:       {edges['ROUTENTYP'].isna().sum() if 'ROUTENTYP' in edges.columns else 'col missing'}")
     print(f"One-way edges:                 {edges['oneway'].sum()}")
@@ -199,6 +274,11 @@ def print_hi(name):
     print("-----------------------------\n")
 
 
+    # TODO: Option A (random-point pipeline) is entirely commented out below.
+    # Decide: remove it permanently, or document why it is kept for reference.
+    # If kept, it must be tested independently — it references functions
+    # (generated_access_points, filter_access_points, connect_points_to_network,
+    # routing_raster, build_combined_network) that diverged from the Option B flow.
     """
     ##################################################################################
     # 3a) OPTION A: Generate developments (new access points) and connection to existing infrastructure
@@ -323,27 +403,67 @@ def print_hi(name):
     """
 
     ##################################################################################
-    # 3b) OPTION B: Generate Developments based on the weak points and gaps in the
-    # ALLTAG network
-    # Schwachstellen  — existing edges with quality issues (is_schwachstelle == 1)
-    # Netzlücken      — planned but unbuilt edges          (is_development   == 1)
+    # 3b) Assemble all development candidates and prepare for scoring
+    #
+    # Step 1 — Official candidates: Netzlücken + Schwachstellen
+    #   Extracts edges tagged is_development==1 (Netzlücken: planned-but-unbuilt
+    #   connections) and is_schwachstelle==1 (Schwachstellen: existing edges below
+    #   quality standard) from the attributed edge table.  Restricts them to the
+    #   study corridor, assigns sequential IDs 0…N-1, and writes:
+    #     • developments_list.csv      — tabular report used by the scoring loop
+    #     • development_candidates.gpkg — geometries used for routing and plotting
+    #   These are the ONLY edges scored individually for cost-benefit analysis.
+    #
+    # Step 2 — Connectivity bridges (reuse conn_gdf from step 2B above)
+    #   The auto-generated connectors were already built in step 2B using
+    #   generate_connectivity_developments(include_netzluecken=True), which routes
+    #   around protected areas and only places a bridge where a Netzlücke does not
+    #   already close the gap.  Reusing conn_gdf avoids a second raster-routing pass
+    #   and keeps development_candidates.gpkg consistent with the step-2B plot.
+    #   Bridges receive IDs starting after the last official candidate so the CSV
+    #   and GPKG stay aligned.  Bridges are NEVER scored — they are infrastructure
+    #   placeholders that ensure Dijkstra can reach every corridor node.
+    #
+    # Step 3 — Status-quo Voronoi
+    #   Computes Euclidean catchment polygons around each access point using the
+    #   existing network only (no developments active).  Used by the scenario module
+    #   to aggregate population/employment demand to each access point.
+    #
+    # Step 4 — Import scenario variables
+    #   Loads population and employment rasters for the wider bounding box that
+    #   covers the full Voronoi catchment (larger than the corridor).
 
-    developments = get_development_candidates(edges, corridor_polygon=innerboundary,
-                                              dev_type_filter=DEV_TYPE_FILTER)
+    # Step 1: official Netzlücken / Schwachstellen
+    developments = get_development_candidates(
+        edges, corridor_polygon=innerboundary, dev_type_filter=DEV_TYPE_FILTER
+    )
 
     runtimes["Generate infrastructure developments"] = time.time() - st
     st = time.time()
 
-    #plot_developments(edges, corridor_polygon=outerboundary)
+    # Step 2: connectivity bridges are stored separately — they are never scored.
+    # development_candidates.gpkg contains ONLY official Netzlücken/Schwachstellen.
+    # Bridges are already written to connectivity_developments.gpkg in step 2B.
+    connectivity_devs = conn_gdf if len(conn_gdf) > 0 else gpd.GeoDataFrame()
 
-    # Voronoi polygons for status quo (needed by scenario aggregation below)
-    voronoi_sq = get_voronoi_status_quo(corridor_polygon=innerboundary) #TODO: check points
-    #plot_voronoi_status_quo(voronoi_sq, nodes_gdf, edges_final, corridor_polygon=innerboundary)
+    developments.to_file('data/Network/processed/development_candidates.gpkg', driver='GPKG')
+    print(f"  development_candidates.gpkg: {len(developments)} official candidates "
+          f"({(developments['dev_type'] == 'netzluecke').sum()} Netzlücken, "
+          f"{(developments['dev_type'] == 'schwachstelle').sum()} Schwachstellen)")
+    print(f"  connectivity_developments.gpkg: {len(connectivity_devs)} bridge(s) "
+          f"(not scored — infrastructure placeholders only)")
 
-    # Wider bounding box for scenario rasters and scoring (covers full Voronoi catchment)
+    # Plot 5 — official candidates: existing (grey) / Schwachstellen (orange) / Netzlücken (red)
+    plot_developments(edges, corridor_polygon=innerboundary)
+
+
+    # Step 3: Voronoi polygons for the status quo
+    voronoi_sq = get_voronoi_status_quo(corridor_polygon=innerboundary)
+    plot_voronoi_status_quo(voronoi_sq, nodes_gdf, edges_final, corridor_polygon=innerboundary)
+
+    # Step 4: import scenario variables (population + employment) for wider bounding box
     limits_variables = [2680600, 1227700, 2724300, 1265600]
-
-    import_data(limits_variables) #todo: move up the pipline or change
+    import_data(limits_variables)
     runtimes["Import variable for scenario (population and employment)"] = time.time() - st
     _mem()
     st = time.time()
@@ -376,7 +496,7 @@ def print_hi(name):
     scenario_to_voronoi(polygons_gdf, euclidean=True)
 
     # plot
-    # plot_scenarios(corridor_polygon=outerboundary)
+    plot_scenarios(corridor_polygon=innerboundary)
 
 
     # Convert multiple tif files to one same tif with multiple bands
@@ -396,40 +516,62 @@ def print_hi(name):
     developments = pd.read_csv('data/Network/processed/developments_list.csv')
     edges_sq  = gpd.read_file('data/Network/processed/edges_with_attribute.gpkg')
     nodes_sq  = gpd.read_file('data/Network/processed/points_with_attribute.gpkg')
-    dev_nodes = gpd.read_file('data/Network/processed/generated_nodes.gpkg')
-    dev_nodes = dev_nodes[dev_nodes["within_corridor"] | dev_nodes["on_border"]]
+    # dev_nodes: representative points for each scored development (centroid of edge geometry)
+    _dev_cands = gpd.read_file('data/Network/processed/development_candidates.gpkg')
+    dev_nodes  = _dev_cands.copy()
+    dev_nodes['geometry'] = dev_nodes.geometry.centroid
+    dev_nodes  = dev_nodes[dev_nodes["within_corridor"] | dev_nodes["on_border"]]
     runtimes["Load scoring inputs"] = time.time() - st
     st = time.time()
 
     ##################################################################################
-    # 1) Raster-based travel time and OD matrices
+    # 1) OD matrix — fastest path between every pair of corridor access points,
+    #    filtered to pairs whose path distance is ≤ 25 km.
+    #
+    #    Graph: full base network (existing edges at surveyed speeds, Netzlücken at
+    #    BAD_FFS, Schwachstellen at BAD_FFS, connectivity bridges at WORST_FFS).
+    #    Dijkstra weight: tt_sec (travel time — finds the fastest route, not shortest).
+    #    Distance filter: cumulative edge length along the fastest-time path must not
+    #    exceed OD_MAX_DIST_M.  Pairs beyond this threshold are not realistic cycling
+    #    trips in this corridor and are dropped before any further analysis.
+    #
+    #    Output: data/OD/od_fastest_paths.csv
+    #      origin_id  – ID_point of origin access point
+    #      dest_id    – ID_point of destination access point
+    #      tt_sec     – fastest travel time [s]
+    #      dist_m     – path distance [m] along the fastest-time route
+    OD_MAX_DIST_M = 25_000
+    print(f"\n--- OD MATRIX (fastest paths, ≤{OD_MAX_DIST_M/1000:.0f} km) ---")
+    od_df = compute_od_matrix(max_dist_m=OD_MAX_DIST_M)
+    runtimes["OD matrix (fastest paths ≤25 km)"] = time.time() - st
+    _mem()
+    st = time.time()
+
+    ##################################################################################
+    # 2) Raster-based travel time and accessibility
     make_cycling_speed_raster(cycling_speed_kmh=15)
-    travel_cost_polygon(limits_variables)
+    travel_cost_polygon(limits_corridor)
     voronoi_sq = gpd.read_file(r"data/Network/travel_time/Voronoi_statusquo.gpkg")
-    GetCyclingOD(voronoi_gdf=voronoi_sq)
+
     accessib_sq = accessibility_status_quo(VTT_h=VTTS, duration=travel_time_duration)
 
-    travel_cost_developments(limits_variables)
+    travel_cost_developments(limits_corridor)
     single_tt_voronoi_ton_one("data/Network/travel_time/developments")
     polygon_gdf = gpd.read_file(r"data/Voronoi/combined_developments.gpkg")
     scenario_to_voronoi(polygon_gdf, euclidean=False)
     GetVoronoiOD_multi()
     accessib_devs = accessibility_developments(accessib_sq, VTT_h=VTTS, duration=travel_time_duration)
-    runtimes["OD matrices and accessibility"] = time.time() - st
+    runtimes["Raster travel time and accessibility"] = time.time() - st
     _mem()
     st = time.time()
-    """
+
     ##################################################################################
-    #old
-    # 2) Graph-based travel time savings → data/costs/traveltime_savings.csv
-    if not SKIP_TT:
-        tt_optimization_status_quo()
-        tt_optimization_all_developments()
-        monetize_tts(VTTS=VTTS, duration=travel_time_duration)
-    runtimes["Travel time savings (graph)"] = time.time() - st
+    # 3) Travel time savings — pure Dijkstra (length/speed, no congestion/capacity)
+    monetize_dijkstra_tts(VTTS=VTTS, duration=travel_time_duration)
+    runtimes["Travel time savings (Dijkstra)"] = time.time() - st
     _mem()
     st = time.time()
-    """
+
     ##################################################################################
     # 3) Protected area for scoring perimeter (wider than corridor, needed by externalities)
     get_protected_area(limits=limits_variables)
@@ -505,7 +647,7 @@ def print_hi(name):
         plot_cost_result(
             df_costs=gdf_nb.copy(), banned_area=tif_path_plot,
             title_bar=f"cycling net benefit — {scen_label}",
-            boundary=boundary_plot, network=network,
+            boundary=outerboundary, network=network,
             access_points=access_points, plot_name=plot_tag, col=scen_col,
         )
 
@@ -518,7 +660,7 @@ def print_hi(name):
     ]:
         plot_single_cost_result(
             df_costs=gdf_nb_raw.copy(), banned_area=tif_path_plot,
-            title_bar=comp_label, boundary=boundary_plot, network=network,
+            title_bar=comp_label, boundary=outerboundary, network=network,
             access_points=access_points, plot_name=plot_tag, col=comp_col,
         )
 
@@ -527,7 +669,7 @@ def print_hi(name):
     gdf_nb["cv"]         = (gdf_nb["std"] / gdf_nb["mean_costs"].abs()
                             ).replace([float("inf"), float("-inf")], 0).fillna(0) * 1e4
     plot_cost_uncertainty(
-        df_costs=gdf_nb.copy(), banned_area=tif_path_plot, boundary=boundary_plot,
+        df_costs=gdf_nb.copy(), banned_area=tif_path_plot, boundary=outerboundary,
         network=network, col="std",
         legend_title="Std. dev. across\nscenarios [Mio. CHF]",
         access_points=access_points, plot_name="nb_uncertainty",
@@ -553,6 +695,32 @@ def print_hi(name):
         plot_name="nb_components",
         legend_title="NB component\n(medium scenario)",
     )
+
+    # ── DEVELOPMENT RESULT VISUALIZATIONS ────────────────────────────────────
+
+    # 1) Ranked priority bar: one bar per development sorted by NB_s2,
+    #    error bars = scenario range s1–s3, coloured by dev_type.
+    plot_priority_ranking(plot_name="priority_ranking")
+
+    # 2) Component waterfall: C+M (left) vs T+R+S (right) stacked per development.
+    #    Shows what drives each net benefit — cheap to build or high travel savings?
+    plot_nb_components_waterfall(plot_name="nb_components_waterfall")
+
+    # 3) Travel-time improvement raster: top 3 developments side-by-side,
+    #    green = minutes saved vs status quo, corridor network overlaid.
+    plot_tt_improvement_map(
+        boundary=outerboundary, network=network,
+        top_n=3, plot_name="tt_improvement_map",
+    )
+
+    # 4) NB on network: candidate edge geometries coloured by NB_s2,
+    #    line width proportional to construction cost, corridor as backdrop.
+    #    More accurate than the interpolated heatmap in plot_cost_result().
+    plot_nb_on_network(
+        boundary=outerboundary, network=network,
+        access_points=access_points, plot_name="nb_network_map",
+    )
+
     runtimes["Visualization"] = time.time() - st
 
 

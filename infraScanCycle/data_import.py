@@ -71,7 +71,6 @@ def import_data(limits):
     csv_to_tiff(empl20_ch, attribute="empl20", path=r"data/independent_variable/processed/raw/empl20_ch.tif")
 
     empl20 = empl20_ch[(empl20_ch["E_COORD"] >= limits[0]) & (empl20_ch["E_COORD"] <= limits[2] - 100) & (empl20_ch["N_COORD"] >= limits[1]) & (empl20_ch["N_COORD"] <= limits[3] - 100)]
-    print(empl20.head(10).to_string())
     csv_to_tiff(empl20, attribute="empl20", path=r"data/independent_variable/processed/raw/empl20.tif")
 
     population20 = pd.read_csv(r"data/independent_variable/statpop/ag-b-00.03-vz2020statpop/STATPOP2020.csv", sep=";")
@@ -110,8 +109,6 @@ def fill_raster_dataframe(df, rastersize=100):
     minX, maxX = round(math.floor(minX), -2), round(math.ceil(maxX), -2)
     minY, maxY = df['N_COORD'].min(), df['N_COORD'].max()
     minY, maxY = round(math.floor(minY), -2), round(math.ceil(maxY), -2)
-
-    print(minX, ", ", maxX, ", ", minY, ", ", maxY)
 
     # Create a regular grid within the specified bounds
     x_grid = np.arange(minX, maxX, rastersize)
@@ -152,9 +149,6 @@ def csv_to_tiff(data_table, attribute, path, rastersize = 100):
     #print(width, "   -   ", height, "   -   ", width*height)
     #sorted_df = df.sort_values(by=['Age', 'Salary'], ascending=[True, False])
     data_table_sorted = data_table.sort_values(by=["N_COORD", "E_COORD"], ascending=[False, True])
-    print(x_min, ", ", x_max, ", ", y_min,", ", y_max)
-    print(data_table_sorted.shape)
-
     # Create the GeoTIFF file
     with rasterio.open(path, "w", driver="GTiff", width=width, height=height, count=1,
                        dtype=data_table_sorted[attribute].dtype, crs=crs.CRS.from_string(crs_value), transform=transform) as dst:
@@ -184,7 +178,10 @@ def get_lake_data():
     gdf = gdf[gdf["GEWAESSERN"].isin(["Zürichsee", "Greifensee", "Pfäffikersee"])]
     # Set the CRS on the object first, then save without the crs argument
     gdf.crs = "epsg:2056"
-    gdf.to_file('data/landuse_landcover/processed/lake_data_zh.gpkg')
+    out = 'data/landuse_landcover/processed/lake_data_zh.gpkg'
+    if os.path.exists(out):
+        os.remove(out)
+    gdf.to_file(out)
     return
 
 
@@ -263,14 +260,15 @@ def reformat_network():
                 edges_gdf[['geometry']].reset_index(),
                 raw, how='left', max_distance=50
             ).drop_duplicates(subset='index').set_index('index')
-            edges_gdf['verbindung'] = joined_names['verbindung'].reindex(edges_gdf.index).fillna('').values
-            edges_gdf['rw_key_nr']  = joined_names['rw_key_nr'].reindex(edges_gdf.index).fillna('').values
+            edges_gdf['verbindung'] = joined_names['verbindung'].reindex(edges_gdf.index).fillna('').astype(object).values
+            edges_gdf['rw_key_nr']  = joined_names['rw_key_nr'].reindex(edges_gdf.index).fillna('').astype(object).values
             print(f"  Route names joined: {(edges_gdf['verbindung'] != '').sum()} edges have VERBINDUNG")
         except Exception as e:
             print(f"  Warning: could not join route names: {e}")
     else:
         print(f"  Warning: raw OGD network not found at {RAW_NETZ_PATH} — route names unavailable")
 
+    """
     # ------------------------------------------------------------------
     # 2. FILTER: Velorouten / Hauptverbindungen / Nebenverbindungen only
     # ------------------------------------------------------------------
@@ -289,7 +287,7 @@ def reformat_network():
         columns=[c for c in edges_gdf.columns if c not in essential],
         errors='ignore'
     )
-
+    """
     # ------------------------------------------------------------------
     # 3. TAG Netzlücken (planned edges are developments)
     # ------------------------------------------------------------------
@@ -337,7 +335,7 @@ def reformat_network():
                 .drop_duplicates(subset='index')
                 .set_index('index')['NUMMER']
             )
-            edges_gdf['sw_nummer'] = nummer_map.reindex(edges_gdf.index).fillna('').values
+            edges_gdf['sw_nummer'] = nummer_map.reindex(edges_gdf.index).fillna('').astype(object).values
 
             print(f"  Schwachstellen: {edges_gdf['is_schwachstelle'].sum()} edges tagged "
                   f"({edges_gdf['sw_nummer'].ne('').sum()} with NUMMER)")
@@ -355,13 +353,25 @@ def reformat_network():
     def _xy(coord):
         return (round(coord[0], COORD_ROUND), round(coord[1], COORD_ROUND))
 
+    # TODO: junction detection counts how often each rounded coordinate appears
+    # as an edge endpoint.  A count >= 3 means ≥ 3 edges share that endpoint,
+    # which is the correct heuristic for a topological intersection.
+    # However, this counts frequencies, not actual geometric connectivity — two
+    # unrelated edges that happen to round to the same coordinate will look like
+    # a junction even if they belong to disconnected sub-networks.
+    # After splitting, verify that nodes flagged as intersections actually have
+    # >= 3 incident edges in edges_split.
     starts_xy = [_xy(g.coords[0])  for g in edges_gdf.geometry]
     ends_xy   = [_xy(g.coords[-1]) for g in edges_gdf.geometry]
     counts    = Counter(starts_xy + ends_xy)
-    junc_pts  = [Point(x, y) for (x, y), n in counts.items() if n >= 3]
+    junc_pts    = [Point(x, y) for (x, y), n in counts.items() if n >= 3]
+    through_pts = {(x, y) for (x, y), n in counts.items() if n == 2}
+    endpoint_pts = {(x, y) for (x, y), n in counts.items() if n == 1}
 
     junctions = gpd.GeoDataFrame(geometry=junc_pts, crs="EPSG:2056")
-    print(f"  {len(junctions)} junction nodes")
+    print(f"  {len(junctions)} junction nodes, "
+          f"{len(through_pts)} through-nodes, "
+          f"{len(endpoint_pts)} dead-ends")
 
     # ------------------------------------------------------------------
     # 6. SPLIT EDGES at hubs + junctions using STRtree (replaces MultiPoint
@@ -372,6 +382,12 @@ def reformat_network():
     if not all_split_pts:
         edges_split = edges_gdf.copy()
     else:
+        # TODO: SNAP_TOL = 1.0 m controls which junction points are considered
+        # "on" an edge for splitting.  If two edges share a node but their
+        # coordinates differ by > 1 m before rounding (e.g. from a misaligned
+        # source shapefile), the split is skipped and they remain disconnected.
+        # Inspect the gap histogram after reformat_network() to confirm 1 m
+        # is appropriate for the ALLTAG dataset; increase if gaps persist.
         tree = STRtree(all_split_pts)
         new_edges = []
         for _, edge in edges_gdf.iterrows():
@@ -423,12 +439,19 @@ def reformat_network():
     nodes_gdf = gpd.GeoDataFrame(node_rows, crs="EPSG:2056")
 
     # ------------------------------------------------------------------
-    # 8. FLAG intersections and hub destinations
+    # 8. FLAG intersections, through-nodes, dead-ends and hub destinations
     # ------------------------------------------------------------------
-    # Intersections: reuse junction coord set
-    junc_keys = {(round(pt.x, COORD_ROUND), round(pt.y, COORD_ROUND)) for pt in junc_pts}
+    junc_keys     = {(round(pt.x, COORD_ROUND), round(pt.y, COORD_ROUND)) for pt in junc_pts}
     nodes_gdf['is_intersection'] = nodes_gdf['geometry'].apply(
         lambda g: int(_xy(g.coords[0]) in junc_keys)
+    ).astype(np.int8)
+
+    nodes_gdf['is_through_point'] = nodes_gdf['geometry'].apply(
+        lambda g: int(_xy(g.coords[0]) in through_pts)
+    ).astype(np.int8)
+
+    nodes_gdf['is_endpoint'] = nodes_gdf['geometry'].apply(
+        lambda g: int(_xy(g.coords[0]) in endpoint_pts)
     ).astype(np.int8)
 
     nodes_gdf['is_destination'] = np.int8(0)
@@ -437,11 +460,28 @@ def reformat_network():
     # 9. EXPORT
     # ------------------------------------------------------------------
     os.makedirs('data/Network/processed', exist_ok=True)
+
+    # Drop uppercase columns that have a separate lowercase duplicate.
+    # GPKG/SQLite is case-insensitive: VERBINDUNG + verbindung → "Error adding field".
+    _lower_count = Counter(c.lower() for c in edges_split.columns)
+    drop_upper = [c for c in edges_split.columns
+                  if c != c.lower() and _lower_count[c.lower()] > 1]
+    if drop_upper:
+        edges_split = edges_split.drop(columns=drop_upper)
+
+    # Also drop columns whose names would be laundered/truncated by GDAL
+    # (e.g. 'visual_geom' carrying WKT strings that belong in a separate layer)
+    for _drop in ('visual_geom',):
+        if _drop in edges_split.columns:
+            edges_split = edges_split.drop(columns=[_drop])
+
     nodes_gdf.to_file('data/Network/processed/points.gpkg', driver='GPKG')
     edges_split.to_file('data/Network/processed/edges.gpkg', driver='GPKG')
 
     print(f"  -> {len(edges_split)} edges, {len(nodes_gdf)} nodes")
     print(f"     {nodes_gdf['is_intersection'].sum()} intersections, "
+          f"{nodes_gdf['is_through_point'].sum()} through-nodes, "
+          f"{nodes_gdf['is_endpoint'].sum()} dead-ends, "
           f"{nodes_gdf['is_destination'].sum()} hub destinations")
     print(f"     {edges_split['is_development'].sum()} Netzlücken, "
           f"{edges_split['is_schwachstelle'].sum()} Schwachstellen")
@@ -451,30 +491,39 @@ def reformat_network():
 
 
 
-def plot_network(nodes_gdf, edges_gdf, figsize=(14, 10)):
+def plot_network_classified(nodes_gdf, edges_gdf, figsize=(14, 10)):
     fig, ax = plt.subplots(figsize=figsize)
 
     # --- Edges ---
     edges_gdf.plot(ax=ax, color='steelblue', linewidth=0.8, alpha=0.6, zorder=1)
 
-    # --- Regular nodes (degree 2) ---
-    regular = nodes_gdf[
-        (nodes_gdf['is_intersection'] == 0) & (nodes_gdf['is_endpoint'] == 0)
-    ]
-    if len(regular):
-        ax.scatter(regular['x'], regular['y'],
-                   s=8, color='gray', alpha=0.5, zorder=2, label=f'Through node ({len(regular)})')
+    has_endpoint     = 'is_endpoint'     in nodes_gdf.columns
+    has_intersection = 'is_intersection' in nodes_gdf.columns
 
     # --- Intersections (degree >= 3) ---
-    intersections = nodes_gdf[nodes_gdf['is_intersection'] == 1]
-    if len(intersections):
-        ax.scatter(intersections['x'], intersections['y'],
-                   s=30, color='orange', alpha=0.85, zorder=3, label=f'Intersection ({len(intersections)})')
+    if has_intersection:
+        intersections = nodes_gdf[nodes_gdf['is_intersection'] == 1]
+        non_inter     = nodes_gdf[nodes_gdf['is_intersection'] == 0]
+    else:
+        intersections = nodes_gdf.iloc[0:0]
+        non_inter     = nodes_gdf
 
     # --- Dead ends (degree == 1) ---
-    endpoints = nodes_gdf[nodes_gdf['is_endpoint'] == 1]
+    if has_endpoint:
+        endpoints = non_inter[non_inter['is_endpoint'] == 1]
+        regular   = non_inter[non_inter['is_endpoint'] == 0]
+    else:
+        endpoints = non_inter.iloc[0:0]
+        regular   = non_inter
+
+    if len(regular):
+        ax.scatter(regular.geometry.x, regular.geometry.y,
+                   s=8, color='gray', alpha=0.5, zorder=2, label=f'Through node ({len(regular)})')
+    if len(intersections):
+        ax.scatter(intersections.geometry.x, intersections.geometry.y,
+                   s=30, color='orange', alpha=0.85, zorder=3, label=f'Intersection ({len(intersections)})')
     if len(endpoints):
-        ax.scatter(endpoints['x'], endpoints['y'],
+        ax.scatter(endpoints.geometry.x, endpoints.geometry.y,
                    s=20, color='red', alpha=0.85, zorder=4, label=f'Dead end ({len(endpoints)})')
 
     ax.set_title('Cycling Network — Node Classification', fontsize=14)
@@ -497,24 +546,32 @@ def plot_network(nodes_gdf, edges_gdf, figsize=(14, 10)):
 
 def get_edge_attributes():
     """
-    Assigns cycling-specific capacity and free-flow speed to edges
-    based on ROUTENTYP from the ALLTAG dataset.
+    Assigns cycling-specific free-flow speed, comfort index, and safety risk
+    to edges based on ROUTENTYP from the ALLTAG dataset.
 
-    ROUTENTYP → ffs (km/h) / capacity (bikes/h):
-        Veloschnellroute          → 25 km/h / 1000 bikes/h
-        Hauptverbindung           → 20 km/h /  600 bikes/h
-        Nebenverbindung           → 15 km/h /  300 bikes/h
-        Zusätzliche Freizeitverbindung → 15 km/h / 200 bikes/h
-        default                   → 18 km/h /  400 bikes/h
+    Empirical calibration (Bernardi et al. observed 12.5–26.5 km/h across sites):
+      - Dedicated commuter cycling highways (Velobahn):  near observed max ~25 km/h
+      - Main commuter connections (Hauptverbindung):     above avg, ~20 km/h
+      - Secondary mixed-use paths (Nebenverbindung):     matches annual avg 15–16 km/h
+      - Recreational / shared paths (Freizeitverbindung): below avg due to 5–30%
+                                                           pedestrian share → 13 km/h
+      - Default / unclassified:                          empirical avg 15 km/h
+
+    ROUTENTYP → ffs (km/h) | comfort CLI | safety risk weight:
+        Velobahn / Veloschnellroute     → 20 km/h | 1.00 | 1.0
+        Hauptverbindung                 → 20 km/h | 0.75 | 2.0
+        Nebenverbindung                 → 18 km/h | 0.50 | 3.0
+        Zusätzliche Freizeitverbindung  → 18 km/h | 0.25 | 4.0
+        default / unclassified          → 15 km/h | 0.40 | 5.0
     """
     ROUTENTYP_ATTRS = {
-        'Velobahn': {'ffs': 25, 'capacity': 1000},  # add this
-        'Veloschnellroute': {'ffs': 25, 'capacity': 1000},
-        'Hauptverbindung': {'ffs': 20, 'capacity': 600},
-        'Nebenverbindung': {'ffs': 15, 'capacity': 300},
-        'Zusätzliche Freizeitverbindung': {'ffs': 15, 'capacity': 200},
+        'Velobahn':                      {'ffs': 20, 'cli': 1.00, 'risk_w': 1.0},
+        'Veloschnellroute':              {'ffs': 20, 'cli': 1.00, 'risk_w': 1.0},
+        'Hauptverbindung':               {'ffs': 20, 'cli': 0.75, 'risk_w': 2.0},
+        'Nebenverbindung':               {'ffs': 18, 'cli': 0.50, 'risk_w': 3.0},
+        'Zusätzliche Freizeitverbindung':{'ffs': 18, 'cli': 0.25, 'risk_w': 4.0},
     }
-    DEFAULT_ATTRS = {'ffs': 18, 'capacity': 400}
+    DEFAULT_ATTRS = {'ffs': 15, 'cli': 0.40, 'risk_w': 5.0}
 
     edges = gpd.read_file('data/Network/processed/edges_with_attribute.gpkg')
     if edges.crs is None:
@@ -523,7 +580,7 @@ def get_edge_attributes():
     print(f"  Edge columns: {edges.columns.tolist()}")
 
     # ------------------------------------------------------------------
-    # 1. ROUTENTYP → ffs and capacity
+    # 1. ROUTENTYP → ffs, comfort index, safety risk weight
     #    Use startswith match to survive any column name truncation
     # ------------------------------------------------------------------
     routentyp_col = next((c for c in edges.columns if c.upper().startswith('ROUTENTYP')), None)
@@ -532,12 +589,14 @@ def get_edge_attributes():
         return ROUTENTYP_ATTRS.get(str(routentyp).strip(), DEFAULT_ATTRS)[key]
 
     if routentyp_col:
-        edges['ffs']      = edges[routentyp_col].apply(lambda r: lookup(r, 'ffs'))
-        edges['capacity'] = edges[routentyp_col].apply(lambda r: lookup(r, 'capacity'))
+        edges['ffs']    = edges[routentyp_col].apply(lambda r: lookup(r, 'ffs'))
+        edges['cli']    = edges[routentyp_col].apply(lambda r: lookup(r, 'cli'))
+        edges['risk_w'] = edges[routentyp_col].apply(lambda r: lookup(r, 'risk_w'))
     else:
         print("  Warning: ROUTENTYP column not found — applying defaults")
-        edges['ffs']      = DEFAULT_ATTRS['ffs']
-        edges['capacity'] = DEFAULT_ATTRS['capacity']
+        edges['ffs']    = DEFAULT_ATTRS['ffs']
+        edges['cli']    = DEFAULT_ATTRS['cli']
+        edges['risk_w'] = DEFAULT_ATTRS['risk_w']
 
     # ------------------------------------------------------------------
     # 2. FAHRRICHTUNGSTYP → oneway flag
@@ -562,13 +621,23 @@ def get_edge_attributes():
     else:
         edges['tt_min'] = (edges.geometry.length / 1000) / edges['ffs'] * 60
 
+    # TODO: ID_edge is reassigned here as a sequential range over the entire
+    # edges_with_attribute.gpkg file.  However, edges_corridor.gpkg is written
+    # by network_in_corridor() BEFORE get_edge_attributes() runs, so the
+    # corridor file does NOT yet have ID_edge.  _build_base_gdf() in
+    # OSM_network.py tries to merge ffs from edges_with_attribute.gpkg by
+    # ID_edge.  This only works if network_in_corridor() preserves the ID_edge
+    # values from reformat_network() in its output.  Confirm the ID_edge values
+    # are consistent across both files; if not, reorder steps in main.py so
+    # get_edge_attributes() runs before network_in_corridor().
     edges['ID_edge'] = range(len(edges))
 
     edges.to_file('data/Network/processed/edges_with_attribute.gpkg', driver='GPKG')
 
     print(f"  -> {len(edges)} edges attributed")
     print(f"     ffs range:      {edges['ffs'].min()}–{edges['ffs'].max()} km/h")
-    print(f"     capacity range: {edges['capacity'].min()}–{edges['capacity'].max()} bikes/h")
+    print(f"     cli range:      {edges['cli'].min():.2f}–{edges['cli'].max():.2f}")
+    print(f"     risk_w range:   {edges['risk_w'].min():.1f}–{edges['risk_w'].max():.1f}")
     print(f"     one-way edges:  {edges['oneway'].sum()}")
     print(f"     tt_min range:   {edges['tt_min'].min():.1f}–{edges['tt_min'].max():.1f} min")
 
@@ -597,17 +666,17 @@ def plot_edge_attributes(edges=None):
     ax.legend(fontsize=8)
     ax.set_aspect('equal')
 
-    # --- 2. Capacity ---
+    # --- 2. Comfort index (CLI) ---
     ax = axes[1]
-    norm = mcolors.Normalize(vmin=edges['capacity'].min(), vmax=edges['capacity'].max())
-    cmap = cm.YlOrRd
+    norm = mcolors.Normalize(vmin=0, vmax=1)
+    cmap = cm.RdYlGn
     for _, row in edges.iterrows():
-        color = cmap(norm(row['capacity']))
+        color = cmap(norm(row['cli']))
         gpd.GeoDataFrame([row], crs=edges.crs).plot(ax=ax, color=[color], linewidth=1.5)
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    plt.colorbar(sm, ax=ax, label='Capacity (bikes/h)', shrink=0.6)
-    ax.set_title('Capacity (bikes/h)', fontsize=12)
+    plt.colorbar(sm, ax=ax, label='Comfort index (CLI)', shrink=0.6)
+    ax.set_title('Comfort Index (CLI)', fontsize=12)
     ax.set_aspect('equal')
 
     # --- 3. Travel time ---
@@ -668,38 +737,9 @@ def network_in_corridor(polygon, access_point_min_dist=0):
     print(f"  Nodes in corridor → points_corridor.gpkg + .csv  ({len(points_corridor)} rows)")
 
     # ------------------------------------------------------------------
-    # 3. ACCESS POINTS inside corridor — optionally thinned by min distance
+    # 3. ACCESS POINTS inside corridor — all corridor nodes are access points
     # ------------------------------------------------------------------
     access_points_corridor = points_corridor.copy().reset_index(drop=True)
-    if access_point_min_dist > 0:
-        # Greedy farthest-first thinning: always keep intersections, then
-        # drop non-intersection nodes that are within min_dist of a kept node.
-        coords = np.column_stack([access_points_corridor.geometry.x,
-                                  access_points_corridor.geometry.y])
-        is_intersection = access_points_corridor.get('is_intersection',
-                          pd.Series(False, index=access_points_corridor.index))
-        kept = []
-        kept_coords = []
-        # Pass 1: keep all intersection nodes
-        for i, row in access_points_corridor.iterrows():
-            if is_intersection.iloc[i]:
-                kept.append(i)
-                kept_coords.append(coords[i])
-        # Pass 2: add non-intersection nodes that are far enough from all kept nodes
-        for i in range(len(access_points_corridor)):
-            if is_intersection.iloc[i]:
-                continue
-            if not kept_coords:
-                kept.append(i)
-                kept_coords.append(coords[i])
-                continue
-            dists = np.linalg.norm(np.array(kept_coords) - coords[i], axis=1)
-            if dists.min() >= access_point_min_dist:
-                kept.append(i)
-                kept_coords.append(coords[i])
-        access_points_corridor = access_points_corridor.iloc[kept].reset_index(drop=True)
-        print(f"  Access point thinning ({access_point_min_dist}m): "
-              f"{len(points_corridor)} → {len(access_points_corridor)} nodes")
     access_points_corridor['ID_access'] = range(len(access_points_corridor))
     access_points_corridor.to_file('data/Network/processed/access_points_corridor.gpkg', driver='GPKG')
     access_points_corridor.drop(columns='geometry').to_csv(
@@ -782,15 +822,14 @@ def network_in_corridor(polygon, access_point_min_dist=0):
     # Summary
     # ------------------------------------------------------------------
     print(f"\n  Summary:")
-    print(f"    {len(points_corridor)} / {len(points)} nodes inside corridor")
-    if 'is_intersection' in points_corridor.columns:
-        print(f"    {points_corridor['is_intersection'].sum()} intersections in corridor")
-    if 'is_endpoint' in points_corridor.columns:
-        print(f"    {points_corridor['is_endpoint'].sum()} endpoints in corridor")
+    print(f"    {len(points_corridor)} / {len(points)} nodes inside corridor (all are access points)")
+    for flag in ('is_intersection', 'is_through_point', 'is_endpoint'):
+        if flag in points_corridor.columns:
+            print(f"    {points_corridor[flag].sum()} {flag.replace('is_', '')} in corridor")
     print(f"    {len(edges_corridor)} / {len(edges)} edges inside corridor")
     print(f"    {len(edges_border)} edges crossing corridor border")
 
-    print(f"network_in_corridor(): start")
+    print(f"network_in_corridor(): end")
     return points_corridor, edges_corridor, edges_border
 
 
@@ -1075,7 +1114,6 @@ def landuse(limits):
                                 (areal_stat["N_COORD"] <= limits[3])]
 
     areal_stat = areal_stat[["E_COORD", "N_COORD", "AS18_27"]]
-    print(areal_stat.shape)
 
     # Cycling: much smaller footprint than a highway — fewer land-use categories are true barriers.
     # Removed: 4 (Parks/Grünanlagen), 5 (Strassen/Verkehr), 8 (Sportanlagen), 10 (Camping),
@@ -1089,9 +1127,7 @@ def landuse(limits):
     protected_categories = [1, 2, 3, 7, 9]
 
     protected_area = areal_stat[areal_stat["AS18_27"].isin(protected_categories)]
-    print(protected_area.shape)
     protected_area_full = fill_raster_dataframe(protected_area)
-    print(protected_area_full.head(10).to_string())
     # Correction of the reference of each raster cell from bottom left to top left
     protected_area_full["N_COORD"] = protected_area_full["N_COORD"] + 100
     csv_to_tiff(protected_area_full, attribute="AS18_27", path=r"data/landuse_landcover/processed/protected_area.tif")

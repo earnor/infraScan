@@ -13,13 +13,45 @@ import ast
 import networkx as nx
 from typing import Optional, Any
 from shapely.validation import make_valid
+from OSM_network import build_network_from_shapefile, check_network_connectivity
 
+# TODO: hardcoded os.chdir() — this file is imported by main.py which already
+# sets the working directory.  Calling chdir() here again is redundant and
+# will break if the module is imported from a different entry point.
+# Remove this line and rely on main.py to set the working directory, or
+# use pathlib.Path(__file__).parent for all relative paths in this module.
 os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
-# os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')  # TODO: implement the same code for data_converter
+# os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
 
 
 def import_network_GIS_ALLTAG() -> Any:
     path = 'data/raw/ALLTAG/OGD_VELO_ALLTAG_NETZ_L_M.shp'
+
+    # ── Step 1: Build routing graph + connectivity check ─────────────────────
+    # build_network_from_shapefile() loads the raw ALLTAG shapefile, nodes all
+    # lines at their mutual intersections via unary_union (so every crossing
+    # becomes a true shared node), and returns a bidirectional DiGraph.
+    print("\n[import_network_GIS_ALLTAG] Building noded routing graph from ALLTAG shapefile …")
+    G_alltag, gdf_noded = build_network_from_shapefile(
+        path,
+        cycling_speed_kmh=15,
+        snap_tolerance=1.0,
+    )
+
+    # Connectivity report — printed immediately so gaps are visible before any
+    # further processing.  If num_components > 1 the corridor Dijkstra will
+    # be unable to route between disconnected sub-networks.
+    conn_report = check_network_connectivity(G_alltag, label="ALLTAG raw network (noded routing graph)")
+
+    if not conn_report['is_connected']:
+        print(f"  ⚠  {conn_report['num_components']} disconnected component(s) detected "
+              f"in the raw ALLTAG data.\n"
+              f"     Largest component covers "
+              f"{conn_report['largest_component']}/{G_alltag.number_of_nodes()} nodes "
+              f"({100*conn_report['largest_component']/max(G_alltag.number_of_nodes(),1):.1f}%).\n"
+              f"     Connectivity bridges will be generated later to link isolated sub-graphs.")
+
+    # ── Step 2: Load + preprocess for momepy primal-graph conversion ──────────
     df = gpd.read_file(path, engine='pyogrio')
 
     # Ensure CRS is metric (Swiss LV95)
@@ -32,29 +64,49 @@ def import_network_GIS_ALLTAG() -> Any:
     # Store original winding geometry as WKT for later visualization
     df['visual_geom'] = df['geometry'].apply(lambda g: g.wkt)
 
-    # Save the actual winding length BEFORE simplifying to straight lines
+    # Save the actual winding length BEFORE any processing
     df['length_m'] = df.geometry.length
 
-    # Simplify each geometry to a straight line between its endpoints
-    def simplify_to_endpoints(geom):
+    # Explode MultiLineStrings into individual LineStrings so every sub-segment
+    # becomes its own edge and intermediate shared nodes are preserved in the
+    # primal graph topology.  A MultiLineString that bends through an
+    # intermediate node would otherwise collapse to a single straight edge that
+    # skips that node, breaking connectivity.
+    df = df.explode(index_parts=False).reset_index(drop=True)
+
+    # Snap all endpoints to 1-metre grid so topologically shared nodes get
+    # exactly the same coordinate and momepy merges them into one graph node.
+    # Interior vertices are kept unchanged for geometry accuracy.
+    def _snap_endpoints(geom):
         if geom is None or geom.is_empty:
             return None
-        if isinstance(geom, MultiLineString):
-            start_point = geom.geoms[0].coords[0]
-            end_point = geom.geoms[-1].coords[-1]
-        else:
-            coords = list(geom.coords)
-            start_point = coords[0]
-            end_point = coords[-1]
-        return LineString([start_point, end_point])
+        coords = list(geom.coords)
+        if len(coords) < 2:
+            return None
+        s = (round(coords[0][0], 0), round(coords[0][1], 0))
+        e = (round(coords[-1][0], 0), round(coords[-1][1], 0))
+        if s == e:
+            return None  # degenerate (zero-length after snapping) — drop it
+        interior = [(x, y) for x, y in coords[1:-1]]
+        return LineString([s] + interior + [e])
 
-    df['geometry'] = df['geometry'].apply(simplify_to_endpoints)
+    df['geometry'] = df.geometry.apply(_snap_endpoints)
+    df = df[df.geometry.notna()].reset_index(drop=True)
+    df['length_m'] = df.geometry.length  # recompute after explode + snapping
 
-    # Convert to primal graph and back to GeoDataFrames
+    # ── Step 3: Convert to primal graph via momepy ────────────────────────────
+    # momepy builds a networkx MultiGraph where every LineString endpoint that
+    # shares a coordinate becomes a single node — the primal topology needed by
+    # reformat_network() downstream.
     H = momepy.gdf_to_nx(df, approach='primal')
     gdf_nodes, gdf_edges = momepy.nx_to_gdf(H, points=True)
 
-    # Save outputs
+    # Connectivity check on the momepy primal graph for comparison.
+    # momepy returns an undirected MultiGraph — check_network_connectivity
+    # handles both directed and undirected inputs.
+    check_network_connectivity(H, label="ALLTAG momepy primal graph")
+
+    # ── Step 4: Save outputs ──────────────────────────────────────────────────
     os.makedirs('data/Network/processed', exist_ok=True)
     gdf_nodes.to_file('data/Network/processed/nodes.gpkg', driver='GPKG')
     gdf_edges.to_file('data/Network/processed/edges.gpkg', driver='GPKG')

@@ -102,21 +102,20 @@ def voronoi_finite_polygons_2d(vor, radius=None):
 
 def get_voronoi_status_quo(corridor_polygon=None):
     """
-    Computes Euclidean Voronoi polygons for existing cycling network
-    access points (non-intersection nodes) as the status quo baseline.
+    Computes Euclidean Voronoi polygons for ALL existing cycling network nodes.
 
-    Each access point gets a Voronoi cell representing the area for
-    which it is the closest entry point to the cycling network.
+    Every node (intersection, through-point, dead-end) is an access point and
+    gets a Voronoi cell representing the area for which it is the closest entry
+    point to the cycling network.  Always recomputed each run to stay consistent
+    with any changes to the network topology.
 
     Output: data/Voronoi/voronoi_status_quo_euclidian.gpkg
     """
-
-
     os.makedirs('data/Voronoi', exist_ok=True)
+    _out_path = 'data/Voronoi/voronoi_status_quo_euclidian.gpkg'
 
     # ------------------------------------------------------------------
-    # 1. LOAD access points — use points.gpkg (has is_intersection)
-    #    Filter to non-intersection nodes only (actual access points) TODO: change to all
+    # 1. LOAD all network nodes — all nodes are access points
     # ------------------------------------------------------------------
     nodes = gpd.read_file('data/Network/processed/points.gpkg')
     if nodes.crs is None:

@@ -7,9 +7,489 @@ import networkx as nx
 import rasterio
 import rasterio.features
 import numpy as np
+from scipy.spatial import cKDTree
 from shapely.ops import unary_union
 from shapely.geometry import Polygon, MultiPolygon
 from shapely.validation import make_valid
+
+
+_EDGES_CORRIDOR_PATH = r'data/Network/processed/edges_corridor.gpkg'
+_EDGES_BORDER_PATH   = r'data/Network/processed/edges_corridor_border.gpkg'
+
+# Placeholder speeds for gap edges in the base network.
+# Netzlücken / Schwachstellen: present but below quality — slow cycling path
+# Connectivity bridges:         auto-generated cycling links — same degraded speed
+BAD_FFS   = 15.0  # km/h
+WORST_FFS = 15.0  # km/h
+
+
+# TODO: check_parallel_edges_gdf() is defined but never called in the pipeline.
+# After _build_base_gdf() or _build_graph_direct(), call it to detect duplicate
+# node-pairs that create parallel edges in the bidirectional graph.  Parallel
+# edges can distort Dijkstra weights and inflate the edge count silently.
+def check_parallel_edges_gdf(gdf):
+    """
+    Report how many undirected node-pairs share more than one edge in *gdf*.
+
+    An edge is identified by its endpoint coordinates rounded to 0.1 m (the
+    same precision used everywhere in the routing code).  Two edges that
+    connect the same pair of nodes in either direction are counted as one
+    parallel pair.
+
+    Returns
+    -------
+    n_parallel : int   — number of node-pairs with > 1 edge
+    counts     : pd.Series — node-pair → edge count (only pairs with count > 1)
+    """
+    def _endpoints(geom):
+        coords = list(geom.coords)
+        u = (round(coords[0][0],  1), round(coords[0][1],  1))
+        v = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+        return tuple(sorted([u, v]))  # undirected
+
+    ep = gdf.geometry.apply(_endpoints)
+    counts = ep.value_counts()
+    parallel = counts[counts > 1]
+    print(f"[check_parallel_edges] {len(parallel)} node-pairs with >1 edge "
+          f"({parallel.sum()} edges involved out of {len(gdf)} total)")
+    return len(parallel), parallel
+
+
+def _load_corridor_gdf(only_existing=True):
+    """Load the pre-filtered corridor edges (231 in-corridor + 32 on-border).
+
+    only_existing: drop rows where is_development == True (Netzlücken).
+    """
+    inside = gpd.read_file(_EDGES_CORRIDOR_PATH)
+    border = gpd.read_file(_EDGES_BORDER_PATH)
+    gdf = pd.concat([inside, border], ignore_index=True)
+    if only_existing and 'is_development' in gdf.columns:
+        gdf = gdf[gdf['is_development'] == False].copy()
+    return gdf.explode(index_parts=False).reset_index(drop=True)
+
+
+def _build_graph_direct(gdf, cycling_speed_kmh=15):
+    """
+    Build a routable DiGraph from a GeoDataFrame of LineStrings by iterating
+    edges directly.  Uses the stored start/end coordinates of each edge as
+    nodes — no topology splitting.  Use this for networks (like the corridor
+    files) whose topology is already correct.
+
+    # TODO: no explicit connectivity validation after graph construction.
+    # If two edges share a junction whose coordinates differ by >0.1 m before
+    # snapping, they produce two separate nodes and leave a gap.
+    # After building G, check nx.number_connected_components(G.to_undirected())
+    # and print a warning if > 1 so gaps are caught early.
+
+    When the GDF has a `tt_min` column the stored per-edge travel time (in
+    minutes) is used as the edge weight (converted to seconds).  Otherwise
+    the weight is computed from length and cycling_speed_kmh.
+    """
+    speed_ms   = cycling_speed_kmh * 1000 / 3600
+    G          = nx.DiGraph()
+    length_col = 'length_m' if 'length_m' in gdf.columns else None
+    tt_col     = 'tt_min'   if 'tt_min'   in gdf.columns else None
+
+    for _, row in gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        coords = list(geom.coords)
+        u = (round(coords[0][0],  1), round(coords[0][1],  1))
+        v = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+        length = row[length_col] if length_col else geom.length
+        if tt_col is not None:
+            raw = row[tt_col]
+            try:
+                tt_sec = float(raw) * 60
+                tt = tt_sec if tt_sec > 0 else length / speed_ms
+            except (TypeError, ValueError):
+                tt = length / speed_ms
+        else:
+            tt = length / speed_ms
+        G.add_node(u, x=u[0], y=u[1])
+        G.add_node(v, x=v[0], y=v[1])
+        G.add_edge(u, v, weight=tt, length=length)
+        G.add_edge(v, u, weight=tt, length=length)
+
+    return G
+
+
+def _build_graph_from_gdf(gdf, cycling_speed_kmh=15):
+    """
+    Build a routable DiGraph splitting all edges at mutual intersections via
+    unary_union.  Use this only when adding new geometry (e.g. a Netzlücke)
+    that may cross existing edges and needs new junction nodes.
+    """
+    merged = unary_union(gdf.geometry.values)
+    segments = list(merged.geoms)
+
+    speed_ms = cycling_speed_kmh * 1000 / 3600
+    G = nx.DiGraph()
+
+    for seg in segments:
+        coords = list(seg.coords)
+        u = (round(coords[0][0], 1), round(coords[0][1], 1))
+        v = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+        length = seg.length
+        tt = length / speed_ms
+        G.add_node(u, x=u[0], y=u[1])
+        G.add_node(v, x=v[0], y=v[1])
+        G.add_edge(u, v, weight=tt, length=length)
+        G.add_edge(v, u, weight=tt, length=length)
+
+    return G
+
+
+# ---------------------------------------------------------------------------
+# Public helpers: load-from-file + connectivity check
+# ---------------------------------------------------------------------------
+
+def build_network_from_shapefile(path, cycling_speed_kmh=15, snap_tolerance=0.1):
+    """
+    Load a line shapefile or GeoPackage, node all lines at their mutual
+    intersections (via shapely unary_union), and return a bidirectional DiGraph.
+
+    Parameters
+    ----------
+    path              : str  — path to .shp, .gpkg, or any fiona-readable file
+    cycling_speed_kmh : float — default speed used to compute edge weights [km/h]
+    snap_tolerance    : float — coordinate rounding precision in metres (default 0.1 m)
+
+    Returns
+    -------
+    G   : nx.DiGraph   with node keys (x, y) rounded to snap_tolerance
+    gdf : GeoDataFrame of the noded line segments (useful for export / QA)
+    """
+    gdf_raw = gpd.read_file(path)
+
+    # Keep only LineString / MultiLineString rows; drop empties
+    gdf_raw = gdf_raw[~gdf_raw.geometry.is_empty & gdf_raw.geometry.notna()].copy()
+    gdf_raw = gdf_raw.explode(index_parts=False).reset_index(drop=True)
+
+    print(f"[build_network] Loaded {len(gdf_raw)} line segments from {path}")
+    print(f"[build_network] CRS: {gdf_raw.crs}")
+
+    # ── Node the lines: unary_union splits every line at all intersection points ──
+    merged = unary_union(gdf_raw.geometry.values)
+    if merged.geom_type == 'LineString':
+        segments = [merged]
+    else:
+        segments = [g for g in merged.geoms if not g.is_empty]
+
+    print(f"[build_network] {len(segments)} segments after noding (was {len(gdf_raw)})")
+
+    # ── Build graph ──────────────────────────────────────────────────────────────
+    prec = int(round(-np.log10(snap_tolerance))) if snap_tolerance > 0 else 1
+    speed_ms = cycling_speed_kmh * 1000 / 3600
+    G = nx.DiGraph()
+
+    noded_records = []
+    for seg in segments:
+        coords = list(seg.coords)
+        u = (round(coords[0][0],  prec), round(coords[0][1],  prec))
+        v = (round(coords[-1][0], prec), round(coords[-1][1], prec))
+        length = seg.length
+        tt     = length / speed_ms
+        G.add_node(u, x=u[0], y=u[1])
+        G.add_node(v, x=v[0], y=v[1])
+        G.add_edge(u, v, weight=tt, length=length)
+        G.add_edge(v, u, weight=tt, length=length)
+        noded_records.append({'geometry': seg, 'length_m': length, 'tt_sec': tt})
+
+    gdf_noded = gpd.GeoDataFrame(noded_records, crs=gdf_raw.crs)
+
+    print(f"[build_network] Graph: {G.number_of_nodes()} nodes, "
+          f"{G.number_of_edges()} directed edges")
+
+    return G, gdf_noded
+
+
+def check_network_connectivity(G, label="network"):
+    """
+    Run a full connectivity analysis on *G* and print a human-readable report.
+
+    Works on both directed and undirected graphs.  For directed graphs the check
+    uses the underlying undirected topology (weak connectivity) so that a
+    bidirectional edge network is not falsely reported as disconnected.
+
+    Parameters
+    ----------
+    G     : nx.Graph or nx.DiGraph
+    label : str — name printed in the report header
+
+    Returns
+    -------
+    report : dict with keys
+        is_connected        bool
+        num_components      int
+        largest_component   int  (node count)
+        isolated_nodes      int
+        component_sizes     list[int]  (sorted descending)
+    """
+    Gu = G.to_undirected() if G.is_directed() else G
+
+    n_nodes = Gu.number_of_nodes()
+    n_edges = Gu.number_of_edges()
+
+    if n_nodes == 0:
+        print(f"[connectivity:{label}] Graph is empty — nothing to check.")
+        return {'is_connected': False, 'num_components': 0,
+                'largest_component': 0, 'isolated_nodes': 0, 'component_sizes': []}
+
+    components     = list(nx.connected_components(Gu))
+    num_components = len(components)
+    sizes          = sorted([len(c) for c in components], reverse=True)
+    largest        = sizes[0]
+    isolated       = sum(1 for s in sizes if s == 1)
+    is_connected   = num_components == 1
+
+    status = "CONNECTED" if is_connected else f"DISCONNECTED — {num_components} component(s)"
+
+    print(f"\n{'─'*60}")
+    print(f"  Connectivity report: {label}")
+    print(f"{'─'*60}")
+    print(f"  Nodes            : {n_nodes}")
+    print(f"  Edges (undirected): {n_edges}")
+    print(f"  Components       : {num_components}  →  {status}")
+    print(f"  Largest component: {largest} nodes "
+          f"({100 * largest / n_nodes:.1f}% of network)")
+    if not is_connected:
+        print(f"  Isolated nodes   : {isolated}")
+        print(f"  Component sizes  : {sizes[:10]}"
+              f"{'…' if len(sizes) > 10 else ''}")
+        print(f"  Action required  : add connectivity bridges or snap dangling endpoints")
+    print(f"{'─'*60}\n")
+
+    return {
+        'is_connected':      is_connected,
+        'num_components':    num_components,
+        'largest_component': largest,
+        'isolated_nodes':    isolated,
+        'component_sizes':   sizes,
+    }
+
+
+def _build_base_gdf():
+    """Assemble the full base network used for both status-quo scoring and as
+    the fixed backdrop in every per-development Dijkstra run.
+
+    Layer            Source                              tt_min
+    ─────────────────────────────────────────────────────────────────────
+    Good existing    edges_corridor{,_border}.gpkg       ROUTENTYP-based ffs
+    Netzlücken       same files (is_development == 1)    BAD_FFS
+    Schwachstellen   same files (is_schwachstelle == 1)  BAD_FFS
+    Connectivity     connectivity_developments.gpkg      WORST_FFS
+    bridges
+
+    The corridor files may lack ffs/tt_min (saved before get_edge_attributes
+    runs).  In that case ffs is merged from edges_with_attribute.gpkg by
+    ID_edge, and tt_min is computed per-segment from (length/ffs).
+    """
+    inside = gpd.read_file(_EDGES_CORRIDOR_PATH)
+    border = gpd.read_file(_EDGES_BORDER_PATH)
+    gdf = pd.concat([inside, border], ignore_index=True).explode(index_parts=False).reset_index(drop=True)
+
+    # Merge ffs from edges_with_attribute.gpkg when corridor files lack it
+    if 'ffs' not in gdf.columns and 'ID_edge' in gdf.columns:
+        attr_path = 'data/Network/processed/edges_with_attribute.gpkg'
+        if os.path.exists(attr_path):
+            attrs = gpd.read_file(attr_path)[['ID_edge', 'ffs']].drop_duplicates('ID_edge')
+            gdf = gdf.merge(attrs, on='ID_edge', how='left')
+            print(f"  Base GDF: merged ffs from edges_with_attribute.gpkg "
+                  f"({gdf['ffs'].notna().sum()}/{len(gdf)} edges matched)")
+
+    # TODO: default ffs 15.0 km/h is hardcoded in three places (here, in
+    # _build_graph_direct fallback, and in travel_cost_developments fallback).
+    # Define a module-level constant FFS_DEFAULT = 15.0 and reference it
+    # everywhere so a single change propagates.  Also add a validation that
+    # no ffs value is <= 0 (would produce infinite or negative travel times).
+    seg_len = gdf['length_m'] if 'length_m' in gdf.columns else gdf.geometry.length
+    if 'ffs' in gdf.columns:
+        ffs_col = gdf['ffs'].fillna(15.0)
+    else:
+        ffs_col = pd.Series(15.0, index=gdf.index)
+    gdf['tt_min'] = (seg_len / 1000) / ffs_col * 60
+
+    # Override Netzlücken and Schwachstellen to BAD_FFS
+    bad_mask = pd.Series(False, index=gdf.index)
+    if 'is_development' in gdf.columns:
+        bad_mask |= gdf['is_development'].astype(bool)
+    if 'is_schwachstelle' in gdf.columns:
+        bad_mask |= (gdf['is_schwachstelle'] == 1)
+
+    if bad_mask.any():
+        gdf.loc[bad_mask, 'tt_min'] = (seg_len[bad_mask] / 1000) / BAD_FFS * 60
+        print(f"  Base GDF: {bad_mask.sum()} edge(s) set to BAD_FFS ({BAD_FFS} km/h) — Netzlücken / Schwachstellen")
+
+    # Append connectivity bridges at WORST_FFS (never scored, always present)
+    conn_path = 'data/Network/processed/connectivity_developments.gpkg'
+    if os.path.exists(conn_path):
+        bridges = gpd.read_file(conn_path).explode(index_parts=False).reset_index(drop=True)
+        bridge_len = bridges.geometry.length
+        bridges['tt_min'] = (bridge_len / 1000) / WORST_FFS * 60
+        if 'length_m' not in bridges.columns:
+            bridges['length_m'] = bridge_len
+        keep = ['geometry', 'tt_min', 'length_m']
+        for col in ('ID_edge', 'is_development', 'is_schwachstelle'):
+            if col in bridges.columns:
+                keep.append(col)
+        gdf = pd.concat([gdf, bridges[keep]], ignore_index=True)
+        print(f"  Base GDF: {len(bridges)} connectivity bridge(s) added at WORST_FFS ({WORST_FFS} km/h)")
+
+    return gdf
+
+
+build_graph_direct = _build_graph_direct   # public alias — use this outside this module
+
+
+_MAX_DETOUR_FACTOR = 2.5   # drop OD pairs where network path > 2.5× straight-line distance
+
+
+def compute_od_matrix(max_dist_m=25_000, cycling_speed_kmh=15):
+    """
+    Build the full base network (existing edges + Netzlücken at BAD_FFS +
+    connectivity bridges at WORST_FFS), snap all corridor access points to
+    graph nodes, then run single-source Dijkstra from each origin to find the
+    fastest path to every other access point.
+
+    OD pairs are dropped when:
+      • path distance > max_dist_m (default 25 km), OR
+      • detour factor = path_dist / straight_line_dist > _MAX_DETOUR_FACTOR (2.5×)
+        — flags paths routed through long connectivity bridges rather than
+          real cycling infrastructure.
+    """
+    access_pts = gpd.read_file('data/Network/processed/access_points_corridor.gpkg')
+
+    # Precompute straight-line lookup: ID_point → (x, y) in LV95
+    id_to_xy = {
+        int(r['ID_point']): (r.geometry.x, r.geometry.y)
+        for _, r in access_pts.iterrows()
+    }
+
+    t0 = time.time()
+    gdf_base = _build_base_gdf()
+    G = _build_graph_direct(gdf_base, cycling_speed_kmh)
+    print(f"  Base graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges "
+          f"in {time.time() - t0:.1f}s")
+
+    snapped    = _snap_points_to_graph(access_pts, G)
+    node_to_id = {node: id_pt for node, id_pt in snapped}
+    origin_nodes = list(node_to_id.keys())
+
+    od_rows  = []
+    n_drop_dist   = 0
+    n_drop_detour = 0
+    t0 = time.time()
+
+    for origin_node in origin_nodes:
+        id_origin = node_to_id[origin_node]
+        ox, oy = id_to_xy.get(id_origin, (None, None))
+        tt_dict, path_dict = nx.single_source_dijkstra(G, origin_node, weight='weight')
+
+        for dest_node, id_dest in node_to_id.items():
+            if dest_node == origin_node:
+                continue
+            if dest_node not in path_dict:
+                continue
+
+            path = path_dict[dest_node]
+            dist_m = sum(
+                G[path[k]][path[k + 1]].get('length', 0.0)
+                for k in range(len(path) - 1)
+            )
+            if dist_m > max_dist_m:
+                n_drop_dist += 1
+                continue
+
+            # Detour filter: drop implausible reroutes through connectivity bridges
+            if ox is not None:
+                dx, dy = id_to_xy.get(id_dest, (None, None))
+                if dx is not None:
+                    straight_m = ((ox - dx) ** 2 + (oy - dy) ** 2) ** 0.5
+                    if straight_m > 0 and (dist_m / straight_m) > _MAX_DETOUR_FACTOR:
+                        n_drop_detour += 1
+                        continue
+
+            od_rows.append({
+                'origin_id': id_origin,
+                'dest_id':   id_dest,
+                'tt_sec':    tt_dict[dest_node],
+                'dist_m':    dist_m,
+            })
+
+    od_df = pd.DataFrame(od_rows)
+    print(f"  OD matrix: {len(od_df)} pairs kept  "
+          f"[dropped {n_drop_dist} >{max_dist_m/1000:.0f} km, "
+          f"{n_drop_detour} detour >{_MAX_DETOUR_FACTOR}×]  "
+          f"[{time.time() - t0:.1f}s, {len(origin_nodes)} origins]")
+
+    os.makedirs('data/OD', exist_ok=True)
+    od_df.to_csv('data/OD/od_fastest_paths.csv', index=False)
+    print(f"  Saved → data/OD/od_fastest_paths.csv")
+    return od_df
+
+
+def build_project_network_graph(cycling_speed_kmh=15, only_existing=True):
+    """Build a routable DiGraph from the saved corridor edge files."""
+    gdf = _load_corridor_gdf(only_existing=only_existing)
+    G = _build_graph_direct(gdf, cycling_speed_kmh)
+    label = 'existing' if only_existing else 'all'
+    print(f"Corridor graph ({label}: {G.number_of_nodes()} nodes, "
+          f"{G.number_of_edges()} edges)")
+    check_network_connectivity(G, label=f"corridor ({label})")
+    return G
+
+
+def _snap_points_to_graph(points_gdf, G):
+    """
+    Snap each point in points_gdf to the nearest node in G.
+    Returns a list of (snap_node, id_point) tuples (one per row).
+    """
+    nodes_list = list(G.nodes())
+    node_arr = np.array(nodes_list)
+    tree = cKDTree(node_arr)
+
+    result = []
+    for _, row in points_gdf.iterrows():
+        xy = np.array([row.geometry.x, row.geometry.y])
+        _, idx = tree.query(xy)
+        result.append((nodes_list[idx], row['ID_point']))
+    return result
+
+
+def _rasterize_network_to_grid(node_times, node_srcs, G, raster_shape, transform):
+    """
+    Convert per-node Dijkstra results to a raster grid via nearest-node assignment.
+    Pixels further than 2 km from any reachable node are marked as unreachable.
+
+    Returns: (travel_time_arr float32, source_id_arr float32)
+    """
+    nodes = list(node_times.keys())
+    coords = np.array([(G.nodes[n]['x'], G.nodes[n]['y']) for n in nodes])
+    tt_vals  = np.array([node_times[n]           for n in nodes], dtype=np.float32)
+    src_vals = np.array([node_srcs.get(n, -1.0)  for n in nodes], dtype=np.float32)
+
+    tree = cKDTree(coords)
+
+    h, w = raster_shape
+    col_grid, row_grid = np.meshgrid(np.arange(w), np.arange(h))
+    xs, ys = rasterio.transform.xy(transform, row_grid.ravel(), col_grid.ravel())
+    pixel_coords = np.column_stack([xs, ys])
+
+    dists, idxs = tree.query(pixel_coords)
+
+    tt_arr  = tt_vals[idxs].reshape(h, w)
+    src_arr = src_vals[idxs].reshape(h, w)
+
+    # TODO: 2000 m hardcoded threshold for "too far from any reachable node".
+    # Pixels beyond this become NaN (unreachable).  Should be a named constant
+    # or parameter tied to the expected network density of the corridor.
+    far = dists.reshape(h, w) > 2000
+    tt_arr[far]  = np.nan
+    src_arr[far] = -1.0
+
+    return tt_arr, src_arr
 
 
 def make_cycling_speed_raster(cycling_speed_kmh=15):
@@ -36,143 +516,63 @@ def make_cycling_speed_raster(cycling_speed_kmh=15):
     return output_file
 
 
-def travel_cost_polygon(frame, raster_file=r"data/Network/OSM_tif/cycling_speed_raster.tif"):
+def travel_cost_polygon(frame, raster_file=r"data/Network/OSM_tif/cycling_speed_raster.tif",
+                        cycling_speed_kmh=15):
+    """
+    Compute status-quo travel time from all access points using the FULL base
+    network: existing edges at their surveyed speeds, Netzlücken / Schwachstellen
+    at BAD_FFS, and connectivity bridges at WORST_FFS.
+    """
     points_all = gpd.read_file(r"data/Network/processed/access_points_corridor.gpkg")
-    # Need the node id as ID_point
-    points_all_frame = points_all.cx[frame[0]:frame[2], frame[1]:frame[3]]
 
+    # Build full base graph
+    t0 = time.time()
+    gdf_base = _build_base_gdf()
+    G = _build_graph_direct(gdf_base, cycling_speed_kmh)
+    print(f"Base graph built in {time.time() - t0:.1f}s  "
+          f"({G.number_of_nodes()} nodes, {G.number_of_edges()} edges)")
+    check_network_connectivity(G, label="base graph (travel_cost_polygon)")
 
-    # travel speed
-    # should change lake speed to 0
-    # and other area to slightly higher speed to other land covers
-    with rasterio.open(raster_file) as dataset:
-        raster_data = dataset.read(1)  # Assumes forbidden cells are marked with 1 or another distinct value
-        transform = dataset.transform
+    # Snap access points to nearest network node; track which node → which ID_point
+    snapped = _snap_points_to_graph(points_all, G)
+    source_nodes = list({node for node, _ in snapped})
+    node_to_id = {}
+    for node, id_pt in snapped:
+        node_to_id[node] = id_pt  # last write wins for duplicates
 
-        # Convert real-world coordinates to raster indices
-        sources_indices = [~transform * (x, y) for x, y in zip(points_all_frame.geometry.x, points_all_frame.geometry.y)]
-        sources_indices = [(int(y), int(x)) for x, y in sources_indices]
+    # Multi-source Dijkstra on Alltag network
+    t0 = time.time()
+    distances, paths = nx.multi_source_dijkstra(G=G, sources=source_nodes, weight='weight')
+    print(f"Dijkstra: {len(distances)} reachable nodes in {time.time() - t0:.1f}s")
 
-        def snap_to_nonzero(idx, raster):
-            """Snap source points on zero-speed cells to nearest valid neighbour."""
-            corrected = {}
-            updated = []
-            for (y, x) in idx:
-                if raster[y, x] > 0:
-                    updated.append((y, x))
-                else:
-                    # Search expanding neighbourhood
-                    found = False
-                    for r in range(1, 5):
-                        for dy in range(-r, r + 1):
-                            for dx in range(-r, r + 1):
-                                ny, nx = y + dy, x + dx
-                                if 0 <= ny < raster.shape[0] and 0 <= nx < raster.shape[1]:
-                                    if raster[ny, nx] > 0:
-                                        corrected[(ny, nx)] = (y, x)
-                                        updated.append((ny, nx))
-                                        found = True
-                                        break
-                            if found:
-                                break
-                        if found:
-                            break
-                    if not found:
-                        updated.append((y, x))  # leave in place, Dijkstra will skip
-            return updated, corrected
+    # Build per-node source-ID map
+    node_srcs = {}
+    for node, path in paths.items():
+        src = path[0] if path else node
+        node_srcs[node] = float(node_to_id.get(src, -1))
 
-        sources_indices, idx_correct = snap_to_nonzero(sources_indices, raster_data)
+    # Rasterize onto reference raster grid
+    with rasterio.open(raster_file) as ref:
+        transform    = ref.transform
+        raster_shape = (ref.height, ref.width)
+        profile      = ref.profile.copy()
 
+    tt_arr, src_arr = _rasterize_network_to_grid(distances, node_srcs, G, raster_shape, transform)
 
+    os.makedirs(r'data/Network/travel_time', exist_ok=True)
+    out_profile = profile.copy()
+    out_profile.update(dtype='float32', count=1)
 
-        start = time.time()
-        # Convert raster to graph
-        graph = raster_to_graph(raster_data)
-        end = time.time()
-        print(f"Time to initialize graph: {end-start} sec.")
+    with rasterio.open(r'data/Network/travel_time/travel_time_raster.tif', 'w', **out_profile) as dst:
+        dst.write(tt_arr, 1)
 
-        start = time.time()
-        # Get both path lengths and paths
-        distances, paths = nx.multi_source_dijkstra(G=graph, sources=sources_indices, weight='weight')
-        end = time.time()
-        print(f"Time dijkstra: {end - start} sec.")
-
-        # Initialize empty rasters for path lengths and source coordinates
-        path_length_raster = np.full(raster_data.shape, np.nan)
-
-        # Initialize an empty raster with np.nan and dtype float
-        temp_raster = np.full(raster_data.shape, np.nan, dtype=float)
-        # Change the dtype to object
-        source_coord_raster = temp_raster.astype(object)
-
-        # Populate the rasters
-        for node, path in paths.items():
-            y, x = node
-            path_length_raster[y, x] = distances[node]
-
-            if path:  # Check if path is not empty
-                source_y, source_x = path[0]  # First element of the path is the source
-                source_coord_raster[y, x] = (source_y, source_x)
-
-
-    # Save the path length raster
-    with rasterio.open(
-            r'data/Network/travel_time/travel_time_raster.tif', 'w',
-            driver='GTiff',
-            height=path_length_raster.shape[0],
-            width=path_length_raster.shape[1],
-            count=1,
-            dtype=path_length_raster.dtype,
-            crs=dataset.crs,
-            transform=transform
-    ) as new_dataset:
-        new_dataset.write(path_length_raster, 1)
-
-    # Inverse transform to convert CRS coordinates to raster indices
-    inv_transform = ~transform
-
-    # Convert the geometry coordinates to raster indices
-    points_all_frame['raster_x'], points_all_frame['raster_y'] = zip(*points_all_frame['geometry'].apply(lambda geom: inv_transform * (geom.x, geom.y)))
-    points_all_frame["raster_y"] = points_all_frame["raster_y"].apply(lambda x: int(np.floor(x)))
-    points_all_frame["raster_x"] = points_all_frame["raster_x"].apply(lambda x: int(np.floor(x)))
-
-    # Create a dictionary to map raster indices to ID_point
-    index_to_id = {(row['raster_y'], row['raster_x']): row['ID_point'] for _, row in points_all_frame.iterrows()}
-
-    # Iterate over the source_coord_raster and replace coordinates with ID_point
-    # Assuming new_array is your 2D array of coordinates and matched_dict is your dictionary
-
-
-    for (y, x), coord in np.ndenumerate(source_coord_raster):
-        if coord in idx_correct:
-            source_coord_raster[y, x] = idx_correct[coord]
-
-    for (y, x), source_coord in np.ndenumerate(source_coord_raster):
-        if source_coord in index_to_id:
-            source_coord_raster[y, x] = index_to_id[source_coord]
-
-    # Convert the array to a float data type
-    source_coord_raster = source_coord_raster.astype(float)
-    # Set NaN values to a specific NoData value, e.g., -1
-    source_coord_raster[np.isnan(source_coord_raster)] = -1
-
+    src_arr[np.isnan(tt_arr)] = -1.0
     path_id_raster = r'data/Network/travel_time/source_id_raster.tif'
-    with rasterio.open(path_id_raster, 'w',
-        driver='GTiff',
-        height=source_coord_raster.shape[0],
-        width=source_coord_raster.shape[1],
-        count=1,
-        dtype=source_coord_raster.dtype,
-        crs=dataset.crs,
-        transform=transform
-        ) as new_dataset:
-            new_dataset.write(source_coord_raster, 1)
+    with rasterio.open(path_id_raster, 'w', **out_profile) as dst:
+        dst.write(src_arr, 1)
 
-    # get Voronoi polygons in vector data as gpd df
     gdf_polygon = raster_to_polygons(path_id_raster)
-    #print(gdf_polygon.head(10).to_string())
     gdf_polygon.to_file(r"data/Network/travel_time/Voronoi_statusquo.gpkg")
-
 
     return
 
@@ -314,132 +714,190 @@ def raster_to_graph(raster_data, raster_cell=50):
 
 
 
-def travel_cost_developments(frame, raster_file=r"data/Network/OSM_tif/cycling_speed_raster.tif"):
-    os.makedirs('data/Network/travel_time/developments', exist_ok=True)
+def travel_cost_developments(frame, raster_file=r"data/Network/OSM_tif/cycling_speed_raster.tif",
+                              cycling_speed_kmh=15):
+    """
+    Score each official Netzlücke / Schwachstelle development candidate by
+    measuring travel-time improvement against a fixed base network.
 
-    files = glob.glob(r'data/Network/travel_time/developments/*')
-    for f in files:
+    Base network (same as travel_cost_polygon):
+      • Existing edges       → stored ffs / tt_min
+      • Netzlücken           → BAD_FFS  (gap present but hard to traverse)
+      • Schwachstellen       → BAD_FFS  (below quality standard)
+      • Connectivity bridges → WORST_FFS (bare link, never scored)
+
+    Per-development scenario:
+      Find the one edge in the base that matches this candidate (by ID_edge),
+      restore its planned ffs-derived tt_min, re-run Dijkstra, compare to base.
+      All other Netzlücken / Schwachstellen stay at BAD_FFS.
+      Connectivity bridges are NEVER scored — they are excluded from the loop.
+    """
+    os.makedirs('data/Network/travel_time/developments', exist_ok=True)
+    for f in glob.glob(r'data/Network/travel_time/developments/*'):
         os.remove(f)
 
-    points = gpd.read_file(r"data/Network/processed/points_with_attribute.gpkg")
-    points = points[points["is_intersection"] == False] if "is_intersection" in points.columns else points
-    points = points.cx[frame[0]:frame[2], frame[1]:frame[3]]
+    points = gpd.read_file(r"data/Network/processed/access_points_corridor.gpkg")
 
-    generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
-    generated_points = generated_points[generated_points["within_corridor"] | generated_points["on_border"]]
+    # Official candidates only — connectivity bridges are not scored
+    all_candidates = gpd.read_file(r"data/Network/processed/development_candidates.gpkg")
+    dev_candidates = all_candidates[
+        (all_candidates['within_corridor'] | all_candidates['on_border']) &
+        (all_candidates['dev_type'] != 'connectivity')
+    ].copy()
+    print(f"Scoring {len(dev_candidates)} official development candidate(s) "
+          f"(connectivity bridges excluded)")
 
-    with rasterio.open(raster_file) as dataset:
-        raster_data = dataset.read(1)
-        transform = dataset.transform
-        inv_transform = ~transform
-        cell_size = abs(dataset.transform.a)
+    with rasterio.open(raster_file) as ref:
+        transform    = ref.transform
+        raster_shape = (ref.height, ref.width)
+        out_profile  = ref.profile.copy()
+    out_profile.update(dtype='float32', count=1)
 
-        # ── Build graph ONCE ────────────────────────────────────────────────
+    # ── Build the shared base network ────────────────────────────────────────
+    t0 = time.time()
+    gdf_base = _build_base_gdf()
+    G_base   = _build_graph_direct(gdf_base, cycling_speed_kmh)
+    print(f"Base graph: {G_base.number_of_nodes()} nodes, "
+          f"{G_base.number_of_edges()} edges in {time.time()-t0:.1f}s")
+    check_network_connectivity(G_base, label="base graph (travel_cost_developments)")
+
+    snapped_base    = _snap_points_to_graph(points, G_base)
+    base_sources    = list({n for n, _ in snapped_base})
+    base_node_to_id = {n: id_pt for n, id_pt in snapped_base}
+
+    t0 = time.time()
+    base_distances, base_paths = nx.multi_source_dijkstra(
+        G=G_base, sources=base_sources, weight='weight'
+    )
+    print(f"Baseline Dijkstra: {len(base_distances)} reachable nodes in {time.time()-t0:.1f}s")
+
+    base_node_srcs = {
+        n: float(base_node_to_id.get(path[0] if path else n, -1))
+        for n, path in base_paths.items()
+    }
+    base_tt_arr, base_src_arr = _rasterize_network_to_grid(
+        base_distances, base_node_srcs, G_base, raster_shape, transform
+    )
+    base_tt_inf = np.where(np.isnan(base_tt_arr), np.inf, base_tt_arr)
+
+    has_id_edge = 'ID_edge' in gdf_base.columns
+
+    # Status-quo Voronoi is reused for every development — access points never change,
+    # so polygon geometries are identical across all developments.
+    sq_voronoi_path = r'data/Network/travel_time/Voronoi_statusquo.gpkg'
+    sq_voronoi = gpd.read_file(sq_voronoi_path) if os.path.exists(sq_voronoi_path) else None
+
+    improvements = []  # list of {ID_new, tt_improvement_h}
+
+    # ── Per-development loop ─────────────────────────────────────────────────
+    for _, dev_row in dev_candidates.iterrows():
+        id_new   = dev_row['ID_new']
+        dev_type = str(dev_row.get('dev_type', ''))
+        desc     = str(dev_row.get('description', f'dev {id_new}'))[:70]
+        print(f"\nDevelopment {id_new} [{dev_type}]: {desc}")
+
+        # Resolve planned ffs (used to compute per-segment tt_min when improved)
+        if 'ffs' in dev_row.index and pd.notna(dev_row.get('ffs')):
+            planned_ffs = float(dev_row['ffs'])
+        elif ('tt_min' in dev_row.index and pd.notna(dev_row.get('tt_min'))
+              and 'length_m' in dev_row.index and float(dev_row['length_m']) > 0):
+            # Back-compute ffs from total tt_min and total length
+            planned_ffs = (float(dev_row['length_m']) / 1000) / (float(dev_row['tt_min']) / 60)
+        else:
+            planned_ffs = 15.0  # fallback
+
+        # Find matching edge(s) in base by ID_edge
+        id_edge = dev_row.get('ID_edge', None) if 'ID_edge' in dev_row.index else None
+        if not has_id_edge or id_edge is None:
+            print(f"  Warning: no ID_edge available — skipping development {id_new}")
+            continue
+
+        mask = gdf_base['ID_edge'] == id_edge
+        n_matched = mask.sum()
+        if n_matched == 0:
+            print(f"  Warning: no edge matched ID_edge={id_edge} in base GDF — skipping")
+            continue
+
+        # Build development GDF: swap matched edge(s) to planned speed
+        gdf_dev = gdf_base.copy()
+        length_col_name = 'length_m' if 'length_m' in gdf_dev.columns else None
+        if length_col_name:
+            seg_lens = gdf_dev.loc[mask, length_col_name]
+        else:
+            seg_lens = gdf_dev.loc[mask].geometry.length
+        gdf_dev.loc[mask, 'tt_min'] = (seg_lens / 1000) / planned_ffs * 60
+
+        print(f"  Swapped {n_matched} segment(s) with ID_edge={id_edge} "
+              f"→ planned ffs={planned_ffs:.1f} km/h")
+
         t0 = time.time()
-        graph = raster_to_graph(raster_data, raster_cell=cell_size)
-        print(f"Graph built in {time.time() - t0:.1f}s")
+        G_dev = _build_graph_direct(gdf_dev, cycling_speed_kmh)
+        print(f"  Dev graph: {G_dev.number_of_nodes()} nodes, "
+              f"{G_dev.number_of_edges()} edges in {time.time()-t0:.1f}s")
 
-        # ── Status-quo Dijkstra ONCE (all existing access points) ───────────
-        sq_raw = [inv_transform * (geom.x, geom.y) for geom in points.geometry]
-        sq_indices = [(int(y), int(x)) for x, y in sq_raw]
-        sq_indices = [(y, x) for y, x in sq_indices
-                      if 0 <= y < raster_data.shape[0] and 0 <= x < raster_data.shape[1]]
-        sq_indices, sq_idx_correct = match_access_point_on_cycling_network(sq_indices, raster_data)
+        snapped_dev = _snap_points_to_graph(points, G_dev)
+        dev_sources = list({n for n, _ in snapped_dev})
 
         t0 = time.time()
-        sq_distances, sq_paths = nx.multi_source_dijkstra(G=graph, sources=sq_indices, weight='weight')
-        print(f"Status-quo Dijkstra done in {time.time() - t0:.1f}s  ({len(sq_distances)} reachable cells)")
+        dev_distances, dev_paths = nx.multi_source_dijkstra(
+            G=G_dev, sources=dev_sources, weight='weight'
+        )
+        print(f"  Dijkstra: {len(dev_distances)} reachable nodes in {time.time()-t0:.1f}s")
 
-        # Build sq distance and source-index arrays (shape = raster)
-        sq_dist_arr = np.full(raster_data.shape, np.inf)
-        sq_src_arr  = np.full(raster_data.shape, None, dtype=object)
-        for node, dist in sq_distances.items():
-            y, x = node
-            sq_dist_arr[y, x] = dist
-            path = sq_paths[node]
-            sq_src_arr[y, x] = path[0] if path else node
+        # TODO: source-node mapping uses base_node_to_id (keyed on G_base nodes).
+        # dev_paths comes from G_dev, whose node set is identical to G_base
+        # because _build_graph_direct() uses the same rounded coordinates.
+        # This works correctly as long as no new access points are injected into
+        # G_dev.  If that ever changes, create a separate dev_node_to_id here.
+        dev_node_srcs = {
+            n: float(base_node_to_id.get(path[0] if path else n, -1))
+            for n, path in dev_paths.items()
+        }
+        dev_tt_arr, dev_src_arr = _rasterize_network_to_grid(
+            dev_distances, dev_node_srcs, G_dev, raster_shape, transform
+        )
+        dev_tt_inf = np.where(np.isnan(dev_tt_arr), np.inf, dev_tt_arr)
 
-        # Apply sq snapping corrections to source array
-        for (y, x), src in np.ndenumerate(sq_src_arr):
-            if src in sq_idx_correct:
-                sq_src_arr[y, x] = sq_idx_correct[src]
+        # Element-wise minimum vs. baseline
+        dev_wins  = dev_tt_inf < base_tt_inf
+        merged_tt = np.where(dev_wins, dev_tt_inf, base_tt_inf).astype(np.float32)
+        merged_tt[np.isinf(merged_tt)] = np.nan
 
-        # Map raster indices → ID_point for status-quo sources
-        points_copy = points.copy()
-        points_copy['ry'], points_copy['rx'] = zip(*points_copy.geometry.apply(
-            lambda g: (int(np.floor((inv_transform * (g.x, g.y))[1])),
-                       int(np.floor((inv_transform * (g.x, g.y))[0])))))
-        sq_index_to_id = {(r['ry'], r['rx']): r['ID_point'] for _, r in points_copy.iterrows()}
-        # Also register snapped positions
-        for snapped, orig in sq_idx_correct.items():
-            if orig in sq_index_to_id:
-                sq_index_to_id[snapped] = sq_index_to_id[orig]
+        merged_src = np.where(dev_wins, 9999.0, base_src_arr).astype(np.float32)
+        merged_src[np.isnan(merged_tt)] = -1.0
 
-        # Pre-build sq source-ID array (float) for fast per-dev reuse
-        sq_src_id_arr = np.full(raster_data.shape, -1.0)
-        for (y, x), src in np.ndenumerate(sq_src_arr):
-            if src is not None and src in sq_index_to_id:
-                sq_src_id_arr[y, x] = float(sq_index_to_id[src])
+        improvement = np.nansum(base_tt_inf[~np.isinf(base_tt_inf)] -
+                                merged_tt[~np.isinf(base_tt_inf)])
+        improvement_h = improvement / 3600
+        print(f"  Total TT improvement: {improvement_h:.1f} node-hours")
+        improvements.append({'ID_new': id_new, 'tt_improvement_h': improvement_h})
 
-        # ── Per-development loop ─────────────────────────────────────────────
-        for _, row in generated_points.iterrows():
-            geometry = row.geometry
-            id_new   = row['ID_new']
-            print(f"Development {id_new}")
+        with rasterio.open(
+            fr'data/Network/travel_time/developments/dev{id_new}_travel_time_raster.tif',
+            'w', **out_profile
+        ) as dst:
+            dst.write(merged_tt, 1)
 
-            # Snap new node to raster
-            dx, dy = inv_transform * (geometry.x, geometry.y)
-            dev_idx = (int(dy), int(dx))
-            if not (0 <= dev_idx[0] < raster_data.shape[0] and 0 <= dev_idx[1] < raster_data.shape[1]):
-                print(f"  Dev {id_new} outside raster — skipped")
-                continue
-
-            dev_snapped_list, dev_idx_correct = match_access_point_on_cycling_network([dev_idx], raster_data)
-            dev_idx_snapped = dev_snapped_list[0]
-
-            # Single-source Dijkstra from only the new development node
-            t0 = time.time()
-            dev_distances, dev_paths = nx.single_source_dijkstra(G=graph, source=dev_idx_snapped, weight='weight')
-            print(f"  Dev {id_new} Dijkstra: {time.time() - t0:.1f}s")
-
-            # Build dev distance array
-            dev_dist_arr = np.full(raster_data.shape, np.inf)
-            for node, dist in dev_distances.items():
-                y, x = node
-                dev_dist_arr[y, x] = dist
-
-            # ── Merge: take element-wise minimum ──────────────────────────
-            dev_wins = dev_dist_arr < sq_dist_arr
-
-            path_length_raster = np.where(dev_wins, dev_dist_arr, sq_dist_arr)
-            path_length_raster[np.isinf(path_length_raster)] = np.nan
-
-            # Source-ID raster: dev cells get 9999, sq cells keep their ID
-            source_id_raster = np.where(dev_wins, 9999.0, sq_src_id_arr)
-            # Cells unreachable by both → -1
-            both_inf = np.isinf(dev_dist_arr) & np.isinf(sq_dist_arr)
-            source_id_raster[both_inf] = -1.0
-
-            # Save travel time raster
-            with rasterio.open(
-                fr'data/Network/travel_time/developments/dev{id_new}_travel_time_raster.tif', 'w',
-                driver='GTiff', height=path_length_raster.shape[0], width=path_length_raster.shape[1],
-                count=1, dtype=path_length_raster.dtype, crs=dataset.crs, transform=transform
-            ) as dst:
-                dst.write(path_length_raster, 1)
-
-            # Save source-ID raster
-            path_id_raster = fr'data/Network/travel_time/developments/dev{id_new}_source_id_raster.tif'
-            with rasterio.open(
-                path_id_raster, 'w', driver='GTiff',
-                height=source_id_raster.shape[0], width=source_id_raster.shape[1],
-                count=1, dtype=source_id_raster.dtype, crs=dataset.crs, transform=transform
-            ) as dst:
-                dst.write(source_id_raster, 1)
-
+        # Reuse status-quo Voronoi geometry — access points don't change between
+        # developments, so the catchment polygons are identical for every dev.
+        if sq_voronoi is not None:
+            sq_voronoi.to_file(
+                fr"data/Network/travel_time/developments/dev{id_new}_Voronoi.gpkg"
+            )
+        else:
+            path_id_raster = (
+                fr'data/Network/travel_time/developments/dev{id_new}_source_id_raster.tif'
+            )
+            with rasterio.open(path_id_raster, 'w', **out_profile) as dst:
+                dst.write(merged_src, 1)
             gdf_polygon = raster_to_polygons(path_id_raster)
-            gdf_polygon.to_file(fr"data/Network/travel_time/developments/dev{id_new}_Voronoi.gpkg")
+            gdf_polygon.to_file(
+                fr"data/Network/travel_time/developments/dev{id_new}_Voronoi.gpkg"
+            )
 
+    os.makedirs('data/costs', exist_ok=True)
+    pd.DataFrame(improvements).to_csv('data/costs/dijkstra_improvements.csv', index=False)
+    print(f"\n  Dijkstra improvements saved → data/costs/dijkstra_improvements.csv")
     return
 
 def match_access_point_on_cycling_network(idx, raster):
@@ -480,6 +938,9 @@ def get_voronoi_frame(polygons_gdf):
     # get its extrem values
 
     # Step 1: Identify polygons containing points
+    # TODO: drop(columns=["index_right"]) will raise KeyError if the sjoin
+    # did not produce that column (e.g. when points_gdf has no matching column).
+    # Replace with .drop(columns=["index_right"], errors='ignore').
     points_gdf = points_gdf.drop(columns=["index_right"])
     polygons_with_points = gpd.sjoin(polygons_gdf, points_gdf, predicate='contains').drop_duplicates(
         subset=polygons_gdf.index.name)

@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import networkx as nx
-from rasterio.features import geometry_mask
+from rasterio.features import geometry_mask, rasterize as rio_rasterize
 from scipy.stats.qmc import LatinHypercube
 import re
 import glob
@@ -90,6 +90,12 @@ def get_development_candidates(edges_gdf, corridor_polygon=None, dev_type_filter
         candidates['within_corridor'] = True
         candidates['on_border']       = False
 
+    # TODO: ID_new is set from the DataFrame index after corridor filter and
+    # reset_index(drop=True), so IDs are always 0…N-1.  This is fine for the
+    # official candidates, but generate_connectivity_developments() derives its
+    # start_id from max(ID_new)+1 here.  If this function is called twice (e.g.
+    # in a re-run) without clearing the file, IDs may collide.  Consider
+    # persisting a global ID counter or reading the max from disk.
     candidates['ID_new'] = candidates.index
 
     # ------------------------------------------------------------------
@@ -168,12 +174,228 @@ def get_development_candidates(edges_gdf, corridor_polygon=None, dev_type_filter
     # ------------------------------------------------------------------
     candidates.to_file('data/Network/processed/development_candidates.gpkg', driver='GPKG')
 
-    # Representative points (centroids) — used by Voronoi / OD loops
-    pts = candidates.copy()
-    pts['geometry'] = pts.geometry.centroid
-    pts.to_file('data/Network/processed/generated_nodes.gpkg', driver='GPKG')
-
     return candidates
+
+
+def generate_connectivity_developments(
+        corridor_polygon,
+        protected_raster=r'data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif',
+        lake_shapefile=r'data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp',
+        existing_candidates=None,
+        max_gap_m=5000,
+        include_netzluecken=False):
+    """
+    Find disconnected sub-networks in the existing corridor and generate new
+    LineString edges — routed around protected areas — to close the gaps.
+
+    Returns a GeoDataFrame with the same schema as get_development_candidates()
+    (geometry, dev_type, ID_new, within_corridor, on_border, description,
+    length_m, is_development).  Append this to the official candidates before
+    scoring so the connectivity links are evaluated alongside Netzlücken.
+
+    Parameters
+    ----------
+    corridor_polygon    : shapely Polygon (EPSG:2056)
+    protected_raster    : path to the protected-area cost raster produced by
+                          all_protected_area_to_raster(suffix='corridor')
+    existing_candidates : GeoDataFrame from get_development_candidates — used
+                          only to pick non-colliding ID_new values
+    max_gap_m           : skip component pairs whose nearest nodes are further
+                          apart than this (avoids implausible long bridges)
+    """
+    _EMPTY = gpd.GeoDataFrame(
+        columns=['geometry', 'dev_type', 'ID_new', 'within_corridor',
+                 'on_border', 'description', 'length_m', 'is_development'],
+        crs="EPSG:2056"
+    )
+
+    print("\nConnectivity analysis:")
+
+    # ── 1. Build undirected graph from the saved corridor edge files ──────────
+    inside = gpd.read_file('data/Network/processed/edges_corridor.gpkg')
+    border = gpd.read_file('data/Network/processed/edges_corridor_border.gpkg')
+    edges_all = pd.concat([inside, border], ignore_index=True)
+    # When include_netzluecken=True (called from the step-2 connectivity pass),
+    # Netzlücken stay in the graph so bridges are only generated where a
+    # Netzlücke does not already close the gap.
+    if not include_netzluecken and 'is_development' in edges_all.columns:
+        edges_all = edges_all[edges_all['is_development'] == False]
+
+    G = nx.Graph()
+    for _, row in edges_all.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        coords = list(geom.coords)
+        u = (round(coords[0][0], 1), round(coords[0][1], 1))
+        v = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+        G.add_edge(u, v)
+
+    components = sorted(nx.connected_components(G), key=len, reverse=True)
+    n_comp = len(components)
+    sizes  = [len(c) for c in components]
+    print(f"  Connected components: {n_comp}  "
+          f"(largest: {sizes[0]} nodes, smallest: {sizes[-1]} nodes)")
+
+    if n_comp <= 1:
+        print("  Network is fully connected — no connectivity developments needed.")
+        return _EMPTY
+
+    # ── 2. Load the protected-area raster and build routing graph once ────────
+    if not os.path.exists(protected_raster):
+        print(f"  Warning: protected raster not found at {protected_raster} — using straight lines")
+        routing_graph = None
+        transform     = None
+    else:
+        with rasterio.open(protected_raster) as src:
+            raster_data = src.read(1).astype(float)
+            transform   = src.transform
+            raster_crs  = src.crs
+        raster_rows, raster_cols = raster_data.shape
+
+        # Burn lake polygons into the cost raster so raster_to_graph() removes
+        # those nodes — A* treats lakes as hard barriers, not just expensive cells.
+        if lake_shapefile and os.path.exists(lake_shapefile):
+            lake_gdf = gpd.read_file(lake_shapefile)
+            if lake_gdf.crs != raster_crs:
+                lake_gdf = lake_gdf.to_crs(raster_crs)
+            lake_gdf['geometry'] = lake_gdf.geometry.apply(
+                lambda g: make_valid(g) if g is not None else g)
+            lake_gdf = lake_gdf[lake_gdf.geometry.notna() & ~lake_gdf.geometry.is_empty]
+            if len(lake_gdf) > 0:
+                lake_mask = rio_rasterize(
+                    [(geom, 1) for geom in lake_gdf.geometry],
+                    out_shape=(raster_rows, raster_cols),
+                    transform=transform,
+                    fill=0,
+                    dtype='uint8',
+                )
+                n_lake = int((lake_mask > 0).sum())
+                raster_data = np.where(lake_mask > 0, 1.0, raster_data)
+                print(f"  Lake burned into cost raster: {n_lake} cells blocked")
+        elif lake_shapefile:
+            print(f"  Warning: lake shapefile not found at {lake_shapefile} — skipping lake avoidance")
+
+        print("  Building routing graph from protected-area raster...")
+        routing_graph = raster_to_graph(raster_data)
+
+        # Build a cKDTree of all passable nodes so we can snap blocked
+        # start/end pixels to the nearest passable cell before calling A*.
+        from scipy.spatial import cKDTree as _cKDTree
+        _passable_nodes = np.array(list(routing_graph.nodes()), dtype=np.int32)
+        _passable_tree  = _cKDTree(_passable_nodes)
+
+    # ── 3. Greedy nearest-pair connection (small components → main cluster) ───
+    merged_nodes = list(components[0])
+    # TODO: when existing_candidates is None or empty, start_id defaults to 100.
+    # But official Netzlücken may already have ID_new values >= 100 (especially
+    # if there are many candidates).  Replace the fallback with 0 and always
+    # derive start_id from the actual max in development_candidates.gpkg so
+    # IDs stay globally unique even if existing_candidates is not passed in.
+    start_id = (
+        int(existing_candidates['ID_new'].max()) + 1
+        if existing_candidates is not None and len(existing_candidates) > 0
+        else 100
+    )
+
+    new_rows      = []
+    inaccessible  = []
+
+    for comp_i, comp in enumerate(components[1:], start=1):
+        comp_nodes = list(comp)
+
+        # Closest node in this component to any node in the merged cluster
+        best_dist = np.inf
+        best_u = best_v = None
+        for u_key in comp_nodes:
+            ux, uy = u_key
+            for v_key in merged_nodes:
+                vx, vy = v_key
+                d = ((ux - vx) ** 2 + (uy - vy) ** 2) ** 0.5
+                if d < best_dist:
+                    best_dist, best_u, best_v = d, u_key, v_key
+
+        if best_dist > max_gap_m:
+            print(f"  Component {comp_i} ({len(comp)} nodes): gap {best_dist:.0f} m "
+                  f"> max_gap_m={max_gap_m} m — skipped")
+            merged_nodes.extend(comp_nodes)
+            continue
+
+        print(f"  Component {comp_i} ({len(comp)} nodes): bridging gap of {best_dist:.0f} m")
+
+        # Route from best_u → best_v avoiding protected areas
+        if routing_graph is not None:
+            def _clamp_px(xy):
+                r, c = rasterio.transform.rowcol(transform, xs=xy[0], ys=xy[1])
+                return (int(np.clip(r, 0, raster_rows - 1)),
+                        int(np.clip(c, 0, raster_cols - 1)))
+
+            def _snap_passable(px):
+                """If px was removed (blocked), find the nearest passable node."""
+                if routing_graph.has_node(px):
+                    return px
+                _, idx = _passable_tree.query(px)
+                return tuple(_passable_nodes[idx])
+
+            start_px = _snap_passable(_clamp_px(best_u))
+            end_px   = _snap_passable(_clamp_px(best_v))
+            if start_px is None or end_px is None or start_px == end_px:
+                print(f"  Component {comp_i}: endpoints fully blocked — skipping bridge")
+                merged_nodes.extend(comp_nodes)
+                continue
+            path, inaccessible = find_path(routing_graph, start_px, end_px,
+                                           inaccessible, best_v)
+            if path and len(path) >= 2:
+                coords = [
+                    rasterio.transform.xy(transform, rows=p[0], cols=p[1], offset='center')
+                    for p in path
+                ]
+                coords[0]  = best_u
+                coords[-1] = best_v
+                coords = [c for j, c in enumerate(coords) if j == 0 or c != coords[j - 1]]
+                geom = LineString(coords).simplify(25, preserve_topology=True) if len(coords) >= 2 \
+                       else LineString([best_u, best_v])
+            else:
+                print(f"  Component {comp_i}: no obstacle-free path found — skipping bridge "
+                      f"(gap would cross protected area or lake)")
+                merged_nodes.extend(comp_nodes)
+                continue
+        else:
+            # No routing graph available — skip rather than draw a straight line through obstacles
+            print(f"  Component {comp_i}: no routing graph available — skipping bridge")
+            merged_nodes.extend(comp_nodes)
+            continue
+
+        new_rows.append({
+            'geometry':        geom,
+            'ROUTENTYP':       'Nebenverbindung',  # cycling path type
+            'dev_type':        'connectivity',
+            'ID_new':          start_id + len(new_rows),
+            'within_corridor': True,
+            'on_border':       False,
+            'length_m':        geom.length,
+            'ffs':             15.0,
+            'is_development':  1,
+            'description':     (f"CONNECT sub-network ({len(comp)} nodes) to main corridor, "
+                                f"{geom.length:.0f} m — auto-generated cycling connectivity link"),
+        })
+
+        merged_nodes.extend(comp_nodes)
+
+    if not new_rows:
+        print("  No connectivity developments generated.")
+        return _EMPTY
+
+    result = gpd.GeoDataFrame(new_rows, crs="EPSG:2056")
+    total_m = result['length_m'].sum()
+    print(f"  -> {len(result)} connectivity development(s) generated "
+          f"(total {total_m:.0f} m)")
+
+    out = 'data/Network/processed/connectivity_developments.gpkg'
+    result.to_file(out, driver='GPKG')
+    print(f"  -> Saved: {out}")
+
+    return result
 
 
 def generated_access_points(extent,number):
@@ -777,6 +999,13 @@ def routing_raster(raster_path, links_path='data/Network/processed/new_links_cor
     return routed
 
 
+# NOTE: OSM_network.py also defines a raster_to_graph() that converts a speed
+# raster (km/h) into a weighted graph for Dijkstra travel-time.  This version
+# is different: it takes a binary protected-area raster and assigns a high
+# penalty weight to protected cells (for routing around them).
+# TODO: the two versions have diverged and serve different purposes but share
+# the same name.  Rename this one (e.g. raster_to_routing_graph) to avoid
+# confusion when both modules are imported with *.
 def raster_to_graph(raster_data):
     rows, cols = raster_data.shape
     graph = nx.grid_2d_graph(rows, cols)
@@ -792,30 +1021,24 @@ def raster_to_graph(raster_data):
         for y in range(rows - 1)
     ], weight=1.4)
 
-    # Assign high cost to protected cells instead of removing them
-    # This keeps the graph connected while strongly discouraging routing through them
-    PENALTY = 1000  # much more expensive than normal cell (weight=1)
+    # Remove nodes for blocked cells entirely — hard barrier, A* cannot pass through
     for y in range(rows):
         for x in range(cols):
-            if raster_data[y, x] > 0:
-                for neighbor in list(graph.neighbors((y, x))):
-                    graph[(y, x)][neighbor]['weight'] = PENALTY
+            if raster_data[y, x] > 0 and graph.has_node((y, x)):
+                graph.remove_node((y, x))
 
     return graph
 
 
 def find_path(graph, start, end, list_no_path, point_end):
-    # Find the shortest path using A* algorithm or dijkstra
-    # You might want to include a heuristic function for A*
     try:
         def heuristic(a, b):
             return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
-
         path = nx.astar_path(graph, start, end, heuristic=heuristic, weight='weight')
         return path, list_no_path
-    except nx.NetworkXNoPath:
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
         list_no_path.append(point_end)
-        print("  No path found:", point_end)
+        print(f"  No obstacle-free path: {point_end}")
         return None, list_no_path
 
 

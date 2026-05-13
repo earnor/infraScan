@@ -9,7 +9,6 @@ os.environ['USE_PYGEOS'] = '0'
 import geopandas as gpd
 import pandas as pd
 import numpy as np
-import osmnx as ox
 import scipy.io
 from scipy.interpolate import griddata
 from scipy.optimize import minimize, Bounds, least_squares
@@ -28,6 +27,10 @@ from itertools import islice
 import time
 
 # Loaded once per process; avoids repeated gpkg reads inside the hot assignment loop.
+# TODO: _AP_IDS_CACHE is a module-level mutable global.  It is not thread-safe —
+# if N_JOBS > 1 (joblib Parallel) spawns workers in threads, two threads can race
+# on the None check and both read the file.  Replace with functools.lru_cache on
+# _get_ap_ids(), or initialise the cache once before the parallel section.
 _AP_IDS_CACHE: "frozenset | None" = None
 
 def _get_ap_ids() -> frozenset:
@@ -51,7 +54,11 @@ def construction_costs(cycle_path, upgrade_factor=0.40):
     upgrade_factor = fraction of cycle_path cost for Schwachstellen upgrades (default 40%)
     """
     candidates = gpd.read_file(r"data/Network/processed/development_candidates.gpkg")
-    candidates = candidates[candidates["within_corridor"] | candidates["on_border"]].fillna(0)
+    # Connectivity bridges (dev_type='connectivity') are never scored — exclude them.
+    candidates = candidates[
+        (candidates["within_corridor"] | candidates["on_border"]) &
+        (candidates["dev_type"] != "connectivity")
+    ].fillna(0)
 
     # Each candidate is already one edge → no groupby needed
     candidates["path_len"] = candidates.geometry.length
@@ -88,7 +95,6 @@ def maintenance_costs(duration, cycle_path, structural):
 
     # Store the modified GeoDataFrame
     generated_links_gdf.to_file(r"data/costs/maintenance.gpkg", driver='GPKG')
-    print(generated_links_gdf.head(10).to_string())
     return
 
 
@@ -105,6 +111,14 @@ def land_tb_reallocated(links, buffer_distance):
     buffer = buffer[buffer.geometry.notna() & buffer.geometry.is_valid]
     # Create a buffer around each line
 
+    # TODO: BUG — `dissolved` and `dissolved_geometries` are used here but
+    # never defined in this function.  This will raise NameError at runtime.
+    # The intent seems to be buffering the links, dissolving by zone type, and
+    # accumulating the union.  Implement the missing geometry buffering step:
+    #   buffer['geometry'] = buffer.geometry.buffer(buffer_distance)
+    #   dissolved = buffer.dissolve()
+    #   dissolved_geometries = []
+    # and place those lines BEFORE this block.
     valid_geoms = dissolved.geometry.apply(make_valid)
     dissolved_geometries.append(valid_geoms.unary_union)
 
@@ -164,6 +178,10 @@ def externalities_costs(ce_cycling_path, realloc_forest, realloc_FFF, realloc_dr
 
 
 
+# TODO: accessibility_developments() reads scenario rasters from
+# "data/independent_variable/processed/scenario/{path}" but the path
+# in scenarios.py writes them to "data/independent_variable/processed/scenario/".
+# Verify the directory exists and the file names match before running.
 def accessibility_developments(costs, VTT_h, duration):
     scenario_paths = ['s1_pop.tif', 's2_pop.tif', 's3_pop.tif']
     voronoi_path = r"data/Voronoi/voronoi_developments_tt_values.shp"
@@ -191,8 +209,6 @@ def accessibility_developments(costs, VTT_h, duration):
                 'transform': src.transform,
                 'shape': (src.height, src.width),
             }
-        print(path)
-
     # Group by development so each TT raster is opened only once (not once per scenario)
     for id_development, dev_rows in voronoi_gdf.groupby('ID_develop'):
         tt_path = fr"data/Network/travel_time/developments/dev{id_development}_travel_time_raster.tif"
@@ -218,12 +234,10 @@ def accessibility_developments(costs, VTT_h, duration):
     grouped_sum = voronoi_gdf.groupby('ID_develop').sum()
     grouped_sum = grouped_sum[["s1_pop", "s2_pop", "s3_pop"]]
     costs = costs[["s1_pop", "s2_pop", "s3_pop"]]
-    print(grouped_sum.head().to_string())
 
     grouped_sum["local_s1"] = costs["s1_pop"] - grouped_sum["s1_pop"]
     grouped_sum["local_s2"] = costs["s2_pop"] - grouped_sum["s2_pop"]
     grouped_sum["local_s3"] = costs["s3_pop"] - grouped_sum["s3_pop"]
-    print(grouped_sum.head().to_string())
     grouped_sum = grouped_sum.reset_index().rename(columns={'index': 'ID_development'})
 
     grouped_sum.to_csv('data/costs/local_accessibility.csv', index=False)
@@ -261,7 +275,6 @@ def accessibility_status_quo(VTT_h, duration):
     for path in scenario_paths:
         with rasterio.open(fr"data/independent_variable/processed/scenario/{path}") as scenario_tif:
             trip_tif = scenario_tif.read(1) * trip_generation
-            print(trip_tif.shape)
             column_name = path.split('.')[0]
 
             for idx, polygons in polygon_lists.items():
@@ -474,7 +487,9 @@ def tif_to_vector(raster_path, vector_path):
 
 def map_coordinates_to_developments():
     df_temp = gpd.read_file(r"data/Network/processed/new_links_realistic_costs.gpkg")
-    points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
+    _dc = gpd.read_file(r"data/Network/processed/development_candidates.gpkg")[["ID_new", "geometry"]]
+    _dc["geometry"] = _dc.geometry.centroid
+    points = _dc
     # print(points.columns)
     # print(points.head(10).to_string())
     # print(points["ID_new"].unique())
@@ -513,8 +528,8 @@ def route_comfort(duration, comfort_value_chf_m_year=2.0):
     """
     ROUTENTYP_CLI = {
         'Velobahn':                        1.00,
-        'Veloschnellroute':                0.90,
-        'Hauptverbindung':                 0.70,
+        'Veloschnellroute':                1.00,
+        'Hauptverbindung':                 0.80,
         'Nebenverbindung':                 0.50,
         'Zusätzliche Freizeitverbindung':  0.25,
     }
@@ -570,7 +585,10 @@ def route_comfort(duration, comfort_value_chf_m_year=2.0):
             elev_nodata    = src.nodata
 
     candidates = gpd.read_file(r"data/Network/processed/development_candidates.gpkg")
-    candidates = candidates[candidates["within_corridor"] | candidates["on_border"]]
+    candidates = candidates[
+        (candidates["within_corridor"] | candidates["on_border"]) &
+        (candidates["dev_type"] == "netzluecke")
+    ]
     edges      = gpd.read_file(r"data/Network/processed/edges_corridor.gpkg")
 
     rt_col = next((c for c in edges.columns if c.upper().startswith('ROUTENTYP')), None)
@@ -620,211 +638,61 @@ def route_comfort(duration, comfort_value_chf_m_year=2.0):
     return result
 
 
+_GAP_RISK_W = 10.0   # Netzlücke status-quo risk weight (Low safety)
+
+
 def safety_benefits(value_of_safety, duration):
     """
-    Compute safety benefits for each development vs. the status-quo cycling network.
+    Compute safety benefit for each Netzlücke development as an edge-level metric.
 
-    For every OD pair (between access-point Voronoi zones) the function finds
-    the shortest path by travel time on both the current and the augmented
-    network (current + new development link) and computes the difference in
-    cumulative route-safety cost.  The result is monetised via value_of_safety.
+    Status-quo: each Netzlücke carries _GAP_RISK_W (Low safety — missing link).
+    Post-development: the built edge carries NEW_LINK_RISK (new dedicated infra).
 
-    Logic
-    -----
-    1. Assign a risk weight to every edge based on its ROUTENTYP.
-       Higher weight = less safe / more exposed to car traffic.
-    2. Build a NetworkX graph for the status-quo network.
-    3. For each OD pair (origin, destination access point), find the
-       travel-time-optimal route and sum up  risk_weight × length_m
-       along the route → route_risk_sq.
-    4. For each development:
-         a. Add the new node and link to the graph.
-         b. Re-compute route_risk_dev for each OD pair.
-         c. safety_benefit = Σ_OD [ trips_OD × (route_risk_sq - route_risk_dev) ]
-    5. Monetise:  CHF = safety_benefit × value_of_safety × duration
+    safety_benefit = (GAP_RISK_W - NEW_LINK_RISK) × length_m
+                     × total_trips × value_of_safety × duration  [CHF]
 
-    Parameters
-    ----------
-    value_of_safety : float
-        Willingness-to-pay to avoid one unit of risk-weighted route length,
-        per trip, per year  [CHF / (risk_unit · trip · year)].
-        A reasonable proxy:  safety literature values accident risk at
-        ~0.10–0.30 CHF per person per km on unsegregated vs. segregated
-        cycling infrastructure.
-    duration : int
-        Appraisal horizon in years.
+    total_trips: sum of all OD demand in the development's cycling OD matrix
+    (no routing required — demand acts as an edge-level weight).
 
-    Returns
-    -------
-    pd.DataFrame  columns: ID_new, safety_sq, safety_dev,
-                           safety_s1, safety_s2, safety_s3  [CHF]
-        Saved to  data/costs/safety_benefits.csv
-        and       data/costs/safety_benefits.gpkg
+    Scenario scaling (s1/s2/s3) applies the Voronoi population ratios from
+    voronoi_developments_tt_values.shp, consistent with other benefit metrics.
     """
-    # ------------------------------------------------------------------ #
-    # 1.  Safety risk weights per ROUTENTYP
-    #     (risk per metre, relative; higher = more dangerous)
-    # ------------------------------------------------------------------ #
-    ROUTENTYP_RISK = {
-        "Veloschnellroute":              1.0,   # dedicated express route – safest
-        "Hauptverbindung":               2.0,   # main cycling connection
-        "Nebenverbindung":               3.5,   # secondary – often shared road
-        "Zusätzliche Freizeitverbindung": 2.5,  # recreational – usually off-road
-    }
-    DEFAULT_RISK  = 5.0   # unclassified / mixed traffic
-    NEW_LINK_RISK = 1.5   # new dedicated cycling infrastructure
+    NEW_LINK_RISK = 1.5  # new dedicated cycling infrastructure
 
-    # ------------------------------------------------------------------ #
-    # 2.  Load network
-    # ------------------------------------------------------------------ #
-    points = gpd.read_file("data/Network/processed/points_with_attribute.gpkg")
-    edges  = gpd.read_file("data/Network/processed/edges_with_attribute.gpkg")
-    edges  = edges.set_crs("epsg:2056", allow_override=True)
-
-    edges["length_m"] = edges.geometry.length
-    edges["risk_w"]   = edges["ROUTENTYP"].map(ROUTENTYP_RISK).fillna(DEFAULT_RISK)
-    edges["risk_len"] = edges["risk_w"] * edges["length_m"]
-
-    # ------------------------------------------------------------------ #
-    # 3.  Build status-quo NetworkX graph
-    #     Node IDs  = ID_point (int)
-    #     Edge attr = tt   [min]  – used for routing
-    #                 risk_len    – accumulated along route for safety score
-    # ------------------------------------------------------------------ #
-    G_sq = nx.Graph()
-
-    for _, row in points.iterrows():
-        G_sq.add_node(int(row["ID_point"]),
-                      x=row.geometry.x, y=row.geometry.y)
-
-    for _, row in edges.iterrows():
-        u = int(row["start"])
-        v = int(row["end"])
-        tt       = float(row["tt_min"])
-        risk_len = float(row["risk_len"])
-        length_m = float(row["length_m"])
-
-        # For parallel edges keep the one with the lower travel time
-        if G_sq.has_edge(u, v):
-            if tt < G_sq[u][v].get("tt", float("inf")):
-                G_sq[u][v].update({"tt": tt, "risk_len": risk_len, "length_m": length_m})
-        else:
-            G_sq.add_edge(u, v, tt=tt, risk_len=risk_len, length_m=length_m)
-
-    # ------------------------------------------------------------------ #
-    # 4.  Load generated links and nodes for developments
-    # ------------------------------------------------------------------ #
-    new_links = gpd.read_file("data/Network/processed/development_candidates.gpkg")
-    nodes_path = "data/Network/processed/generated_nodes.gpkg"
-    new_nodes = gpd.read_file(nodes_path)
+    candidates = gpd.read_file("data/Network/processed/development_candidates.gpkg")
+    candidates = candidates[
+        (candidates["within_corridor"] | candidates["on_border"]) &
+        (candidates["dev_type"] == "netzluecke")
+    ]
 
     voronoi_vals_path = "data/Voronoi/voronoi_developments_tt_values.shp"
     voronoi_vals = gpd.read_file(voronoi_vals_path) if os.path.exists(voronoi_vals_path) else None
 
-    dev_ids = sorted(new_links[new_links["within_corridor"] | new_links["on_border"]]["ID_new"].unique())
-    results = []
+    records = []
+    for _, row in candidates.iterrows():
+        dev_id   = int(row['ID_new'])
+        length_m = float(row['length_m']) if row.get('length_m', 0) > 0 else row.geometry.length
 
-    # ------------------------------------------------------------------ #
-    # 5.  Helper: compute total safety cost for an OD matrix on a graph
-    #     Returns a dict  (origin, dest) → (trips, route_risk)
-    # ------------------------------------------------------------------ #
-    def od_safety_cost(G, od_matrix):
-        nodes   = list(od_matrix.index)
-        results = {}
-        for o in nodes:
-            if o not in G:
-                continue
-            try:
-                _, paths = nx.single_source_dijkstra(G, o, weight="tt")
-            except Exception:
-                continue
-            for d in nodes:
-                if d == o or d not in G:
-                    continue
-                trips = float(od_matrix.loc[o, d])
-                if trips <= 0:
-                    continue
-                if d not in paths:
-                    print(f"  [DEBUG] Disconnected OD pair: {o} → {d}, trips={trips:.1f}")
-                    # No cycling route exists in status-quo: user reroutes via
-                    # mixed traffic. Penalty = Euclidean distance × detour
-                    # factor × DEFAULT_RISK (worst-case risk weight).
-                    ox = G.nodes[o].get("x", 0); oy = G.nodes[o].get("y", 0)
-                    dx = G.nodes[d].get("x", 0); dy = G.nodes[d].get("y", 0)
-                    eucl_m = ((ox - dx) ** 2 + (oy - dy) ** 2) ** 0.5
-                    route_risk = eucl_m * 1.4 * DEFAULT_RISK  # 1.4 detour factor
-                else:
-                    path = paths[d]
-                    route_risk = sum(
-                        G[u][v].get("risk_len", 0.0)
-                        for u, v in zip(path[:-1], path[1:])
-                    )
-                results[(o, d)] = (trips, route_risk)
-        return results
+        # Load OD demand — sum of all cycling trips assigned to this development
+        od_path = f"data/traffic_flow/od/developments/cycling_od_matrix_dev{dev_id}_medium.csv"
+        total_trips = 1.0
+        if os.path.exists(od_path):
+            od = pd.read_csv(od_path, index_col=0)
+            vals = od.values.copy()
+            np.fill_diagonal(vals, 0)
+            total_trips = max(float(vals.sum()), 1.0)
 
+        # Edge-level risk: status quo (gap) vs developed (new infra)
+        risk_sq  = _GAP_RISK_W    * length_m
+        risk_dev = NEW_LINK_RISK  * length_m
+        risk_delta = risk_sq - risk_dev   # always positive
 
+        base_benefit = (
+            risk_delta * total_trips * value_of_safety * duration
+            if value_of_safety is not None
+            else risk_delta * total_trips
+        )
 
-
-
-    # ------------------------------------------------------------------ #
-    # 8.  Loop over developments
-    # ------------------------------------------------------------------ #
-    results = []
-
-    for dev_id in tqdm(dev_ids, desc="Safety benefits"):
-        dev_link_rows = new_links[new_links["ID_new"] == dev_id]
-
-
-        # Load per-development OD matrix (required — skip if missing)
-        od_dev_path = f"data/traffic_flow/od/developments/cycling_od_matrix_dev{dev_id}_medium.csv"
-        if not os.path.exists(od_dev_path):
-            continue
-        od_dev = pd.read_csv(od_dev_path, index_col=0)
-        od_dev.index = od_dev.index.map(lambda x: int(float(x)))
-        od_dev.columns = od_dev.columns.map(lambda x: int(float(x)))
-
-        # Restrict OD to nodes present in G_sq
-        valid_nodes = [n for n in od_dev.index if n in G_sq]
-        od_f = od_dev.loc[valid_nodes, valid_nodes]
-        vals = od_f.values.copy()
-        np.fill_diagonal(vals, 0)
-        od_f = pd.DataFrame(vals, index=od_f.index, columns=od_f.columns)
-
-        # Compute safety on status-quo before applying development
-        sq_costs_dev = od_safety_cost(G_sq, od_f)
-
-        # Mutate G_sq in-place for this development; save original state to restore after
-        saved_edges = {}
-        for _, lr in dev_link_rows.iterrows():
-            u, v = int(lr["start"]), int(lr["end"])
-            tt = float(lr["tt_min"])
-            length_m = float(lr["length_m"])
-            risk_len = NEW_LINK_RISK * length_m
-            if G_sq.has_edge(u, v):
-                saved_edges[(u, v)] = dict(G_sq[u][v])
-                G_sq[u][v].update({"risk_len": risk_len})
-            else:
-                saved_edges[(u, v)] = None
-                G_sq.add_edge(u, v, tt=tt, risk_len=risk_len, length_m=length_m)
-
-        dev_costs = od_safety_cost(G_sq, od_f)
-
-        # Restore G_sq to status-quo state (no copy needed)
-        for (u, v), orig in saved_edges.items():
-            if orig is None:
-                G_sq.remove_edge(u, v)
-            else:
-                G_sq[u][v].update(orig)
-
-        sq_risk = sum(t * r for t, r in sq_costs_dev.values())
-        dev_risk = sum(t * r for t, r in dev_costs.values())
-        del sq_costs_dev, dev_costs, od_f, saved_edges
-        delta = sq_risk - dev_risk  # positive = safer with development
-
-        if value_of_safety is not None:
-            base_benefit = delta * value_of_safety * 365 * duration
-        else:
-            base_benefit = delta  # unmonetised risk delta
         safety_s1 = base_benefit
         safety_s2 = base_benefit
         safety_s3 = base_benefit
@@ -839,31 +707,45 @@ def safety_benefits(value_of_safety, duration):
                     safety_s1 = base_benefit * (s1 / s2)
                     safety_s3 = base_benefit * (s3 / s2)
 
-        results.append({
-            "ID_new": int(dev_id),
-            "safety_sq": sq_risk,
-            "safety_dev": dev_risk,
-            "safety_s1": safety_s1,
-            "safety_s2": safety_s2,
-            "safety_s3": safety_s3,
+        records.append({
+            "ID_new":     dev_id,
+            "safety_sq":  round(risk_sq,       2),
+            "safety_dev": round(risk_dev,       2),
+            "safety_s1":  round(safety_s1,      2),
+            "safety_s2":  round(safety_s2,      2),
+            "safety_s3":  round(safety_s3,      2),
         })
 
-    # ------------------------------------------------------------------ #
-    # 9.  Save results
-    # ------------------------------------------------------------------ #
-    out_df = pd.DataFrame(results)
+    out_df = pd.DataFrame(records)
     os.makedirs("data/costs", exist_ok=True)
     out_df.to_csv("data/costs/safety_benefits.csv", index=False)
 
-    gen_nodes = gpd.read_file(nodes_path)[["ID_new", "geometry"]]
-    out_gdf   = gen_nodes.merge(out_df, on="ID_new", how="right")
+    _dev_cands = gpd.read_file("data/Network/processed/development_candidates.gpkg")[["ID_new", "geometry"]]
+    _dev_cands["geometry"] = _dev_cands.geometry.centroid  # representative point per development
+    out_gdf = _dev_cands.merge(out_df, on="ID_new", how="right")
     if out_gdf.geometry.notna().any():
         out_gdf = gpd.GeoDataFrame(out_gdf, geometry="geometry", crs="epsg:2056")
         out_gdf.to_file("data/costs/safety_benefits.gpkg", driver="GPKG")
 
-    print(f"[safety_benefits] Done – {len(out_df)} developments, "
-          f"saved to data/costs/safety_benefits.csv / .gpkg")
+    print(f"[safety_benefits] {len(out_df)} developments — "
+          f"data/costs/safety_benefits.csv / .gpkg")
+    if len(out_df):
+        print(f"  Risk delta range: "
+              f"{(out_df['safety_sq'] - out_df['safety_dev']).min():.1f}–"
+              f"{(out_df['safety_sq'] - out_df['safety_dev']).max():.1f} risk·m")
+        print(f"  Benefit (s2): {out_df['safety_s2'].min():,.0f}–"
+              f"{out_df['safety_s2'].max():,.0f} CHF")
     return out_df
+
+
+def od_fastest_paths(*args, **kwargs):
+    """Removed — travel-time comparisons are handled by
+    OSM_network.travel_cost_developments() (multi-source Dijkstra, ALLTAG network).
+    """
+    print("[od_fastest_paths] Skipped — use travel_cost_developments() instead.")
+    return None
+
+
 
 def net_benefits():
     """
@@ -979,10 +861,11 @@ def net_benefits():
     os.makedirs("data/costs", exist_ok=True)
     out.to_csv(r"data/costs/net_benefits.csv", index=False)
 
-    # ── Save GPKG (attach point geometry) ────────────────────────────────────
-    nodes = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")[["ID_new", "geometry"]]
-    nodes["ID_new"] = nodes["ID_new"].astype(int)
-    out_gdf = nodes.merge(out, on="ID_new", how="right")
+    # ── Save GPKG (attach representative point geometry from development edges) ─
+    _dev_cands = gpd.read_file(r"data/Network/processed/development_candidates.gpkg")[["ID_new", "geometry"]]
+    _dev_cands["ID_new"] = _dev_cands["ID_new"].astype(int)
+    _dev_cands["geometry"] = _dev_cands.geometry.centroid
+    out_gdf = _dev_cands.merge(out, on="ID_new", how="right")
     out_gdf = gpd.GeoDataFrame(out_gdf, geometry="geometry", crs="EPSG:2056")
     out_gdf.to_file(r"data/costs/net_benefits.gpkg", driver="GPKG")
 
@@ -1070,7 +953,6 @@ def aggregate_costs():
 
     # Sum externality costs
     # total_costs["externalities"] = total_costs['climate_cost'] + total_costs['land_realloc'] + total_costs['nature']
-    print(total_costs.head(10).to_string())
     # Compute net benefit for each development
     total_costs["total_low"] = total_costs[["construction_maintenance", "local_s2", "tt_low", "externalities_s2"]].sum(
         axis=1)
@@ -1087,9 +969,10 @@ def aggregate_costs():
     total_costs[["ID_new", "total_low", "total_medium", "total_high"]].to_csv(r"data/costs/total_costs.csv")
 
     # Save Results a geodata
-    # Map point geometries
-    points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
-    total_costs = total_costs.merge(right=points, how="left", on="ID_new")
+    # Map point geometries from development candidate centroids
+    _dc = gpd.read_file(r"data/Network/processed/development_candidates.gpkg")[["ID_new", "geometry"]]
+    _dc["geometry"] = _dc.geometry.centroid
+    total_costs = total_costs.merge(right=_dc, how="left", on="ID_new")
     total_costs = gpd.GeoDataFrame(total_costs, geometry="geometry")
 
     # Store as file
@@ -1544,7 +1427,18 @@ def GetVoronoiOD_multi():
     xx_values = [xx for xx in xx_values if xx in _corridor_ids]
     print(f"{len(xx_values)} corridor developments to process")
 
+    os.makedirs('data/traffic_flow/od/developments', exist_ok=True)
+
     for xx in tqdm(xx_values, desc='Processing Voronoi IDs'):
+        # Skip if all three scenario OD matrices already exist for this development
+        _od_paths = [
+            f"data/traffic_flow/od/developments/cycling_od_matrix_dev{xx}_low.csv",
+            f"data/traffic_flow/od/developments/cycling_od_matrix_dev{xx}_medium.csv",
+            f"data/traffic_flow/od/developments/cycling_od_matrix_dev{xx}_high.csv",
+        ]
+        if all(os.path.exists(p) for p in _od_paths):
+            continue
+
         # Construct the file path
         file_path = f"{directory_path}dev{xx}_source_id_raster.tif"
 
@@ -2089,18 +1983,29 @@ def SUE_C_Logit(nroutes, D_od, par, delta_ir, delta_odr, cf_r, theta):
     # print(f"ub: {ub}")
     # res=least_squares(fun, D_r0.flatten(),jac=fun_der,bounds=bounds)
 
-    # D_r to be optimized -> demand on each route
-    res = minimize(fun, D_r0.flatten(),
-                   method='trust-constr',
-                   constraints=[eq_cons, ineq_cons],
-                   options={
-                       'maxiter': 3,
-                       'gtol': 5.0,   # loose — exit as soon as gradient norm < 5
-                       'xtol': 1e-3,
-                       'verbose': 0,
-                       'disp': False},
-                   bounds=bounds
-                   )
+    # D_r to be optimized -> demand on each route.
+    # trust-constr is preferred but fails with a LinAlgError when the equality-
+    # constraint Jacobian (delta_odr) is numerically singular.  SLSQP is used
+    # as a fallback: it is less sensitive to rank deficiency and handles the
+    # bounds directly without an SVD factorisation step.
+    x0 = np.clip(D_r0.flatten(), lb, ub)
+    try:
+        res = minimize(fun, x0,
+                       method='trust-constr',
+                       constraints=[eq_cons, ineq_cons],
+                       options={
+                           'maxiter': 3,
+                           'gtol': 5.0,
+                           'xtol': 1e-3,
+                           'verbose': 0,
+                           'disp': False},
+                       bounds=bounds)
+    except (np.linalg.LinAlgError, ValueError):
+        res = minimize(fun, x0,
+                       method='SLSQP',
+                       constraints=[eq_cons],
+                       options={'maxiter': 50, 'ftol': 1.0, 'disp': False},
+                       bounds=bounds)
     # callback=callback_function
     # )
     # Describe variables
@@ -2339,24 +2244,19 @@ def _run_one_dev(dev, cand_row, links_base, points_base):
     return results
 
 
-def tt_optimization_all_developments(n_jobs=1):
-    """Run SUE travel-time assignment for all developments.
-
-    n_jobs: number of parallel workers (1 = sequential/safe default, 2+ = parallel).
+def tt_optimization_all_developments(n_jobs=1, dev_type_filter=None):
+    """n_jobs: number of parallel workers(1 = sequential / safe default, 2 + = parallel).
     Set n_jobs > 1 only if peak memory is well below half of available RAM.
+    dev_type_filter: None(all), 'netzluecke', or 'schwachstelle'
     """
     scenario = ["low", "medium", "high"]
-
-    developments = [
-        int(re.match(r'cycling_od_matrix_dev([0-9]+)_medium\.csv', f).group(1))
-        for f in os.listdir(r"data/traffic_flow/od/developments")
-        if re.match(r'cycling_od_matrix_dev([0-9]+)_medium\.csv', f)
-    ]
-
     dev_candidates = gpd.read_file(r"data/Network/processed/development_candidates.gpkg")
-    _corridor_ids = set(
-        dev_candidates[dev_candidates["within_corridor"] | dev_candidates["on_border"]]["ID_new"].tolist())
-    developments = [d for d in developments if d in _corridor_ids]
+    in_corridor = dev_candidates["within_corridor"] | dev_candidates["on_border"]
+    if dev_type_filter is not None:
+        in_corridor = in_corridor & (dev_candidates["dev_type"] == dev_type_filter)
+        print(f"  dev_type_filter='{dev_type_filter}': {in_corridor.sum()} candidates")
+    _corridor_ids = set(dev_candidates[in_corridor]["ID_new"].tolist())
+    developments = list(_corridor_ids)
 
     # Base network loaded once and shared (read-only) across workers
     points_base = gpd.read_file(r"data/Network/processed/points_with_attribute.gpkg")
@@ -2415,38 +2315,70 @@ def tt_optimization_status_quo():
 
 
 def monetize_tts(VTTS, duration):
-    # Import total travel time for each scenario and each development
-    tt_total = pd.read_csv(r"data/traffic_flow/travel_time.csv")
-    # tt_total_low = pd.read_csv(r"data/traffic_flow/travel_time_low.csv")
-    # tt_total["low"] = tt_total_low["low"]
-    # Some values are stored in list format, convert them to float
+   # Import total travel time for each scenario and each development
+   tt_total = pd.read_csv(r"data/traffic_flow/travel_time.csv")
+   # tt_total_low = pd.read_csv(r"data/traffic_flow/travel_time_low.csv")
+   # tt_total["low"] = tt_total_low["low"]
+   # Some values are stored in list format, convert them to float
 
-    # convert columns object to float
-    tt_total["low"] = tt_total["low"].apply(lambda x: float(x[1:-1]))
-    tt_total["medium"] = tt_total["medium"].apply(lambda x: float(x[1:-1]))
-    tt_total["high"] = tt_total["high"].apply(lambda x: float(x[1:-1]))
+   # convert columns object to float
+   tt_total["low"] = tt_total["low"].apply(lambda x: float(x[1:-1]))
+   tt_total["medium"] = tt_total["medium"].apply(lambda x: float(x[1:-1]))
+   tt_total["high"] = tt_total["high"].apply(lambda x: float(x[1:-1]))
 
-    # Import reference travel time for each scenario and current infrastructure
-    tt_status_quo = pd.read_csv(fr"data/traffic_flow/travel_time_status_quo.csv")
+   # Import reference travel time for each scenario and current infrastructure
+   tt_status_quo = pd.read_csv(fr"data/traffic_flow/travel_time_status_quo.csv")
 
-    # monetization factor of travel time (peak hour * CHF/h * 365 d/a * 30 a)
-    #mon_factor = VTTS * 365 * duration
+   # monetization factor of travel time (peak hour * CHF/h * 365 d/a * 30 a)
+   #mon_factor = VTTS * 365 * duration
+   mon_factor = VTTS * 2.5 * 250 * duration
+   # Compute difference in travel time for each scenario and each development
+
+   tt_total["tt_low"] = (tt_status_quo["low"].iloc[0] - tt_total["low"]) * mon_factor
+   tt_total["tt_medium"] = (tt_status_quo["medium"].iloc[0] - tt_total["medium"]) * mon_factor
+   tt_total["tt_high"] = (tt_status_quo["high"].iloc[0] - tt_total["high"]) * mon_factor
+
+   # Change presign of all psitive values to negative
+   columns_to_negate = ['tt_low', 'tt_medium', 'tt_high']
+   for col in columns_to_negate:
+       tt_total[col] = tt_total[col].apply(lambda x: -abs(x))
+
+   # drop useless columns
+   tt_total = tt_total.drop(columns=["low", "medium", "high"])
+   tt_total.to_csv(r"data/costs/traveltime_savings.csv")
+
+
+def monetize_dijkstra_tts(VTTS, duration):
+    """Convert Dijkstra-based node-hour improvements to CHF travel time savings.
+
+    Replaces the SUE-based monetize_tts when SKIP_TT=True.
+    Travel time is purely length/speed (no congestion, no capacity constraints).
+
+    Formula matches monetize_tts:
+        savings_chf = improvement_h * VTTS * 2.5 * 250 * duration
+    Applied equally to all three scenarios (no scenario-specific demand modelling).
+    Savings are stored as negative values (cost convention: negative = saved cost).
+    """
+    import pandas as pd, os
+
+    src = r'data/costs/dijkstra_improvements.csv'
+    if not os.path.exists(src):
+        print(f"[monetize_dijkstra_tts] {src} not found — skipping")
+        return
+
+    df = pd.read_csv(src)
     mon_factor = VTTS * 2.5 * 250 * duration
-    # Compute difference in travel time for each scenario and each development
+    savings = -(df['tt_improvement_h'] * mon_factor)  # negative = saved cost
 
-    tt_total["tt_low"] = (tt_status_quo["low"].iloc[0] - tt_total["low"]) * mon_factor
-    tt_total["tt_medium"] = (tt_status_quo["medium"].iloc[0] - tt_total["medium"]) * mon_factor
-    tt_total["tt_high"] = (tt_status_quo["high"].iloc[0] - tt_total["high"]) * mon_factor
-
-    # Change presign of all psitive values to negative
-    columns_to_negate = ['tt_low', 'tt_medium', 'tt_high']
-    for col in columns_to_negate:
-        tt_total[col] = tt_total[col].apply(lambda x: -abs(x))
-
-    # drop useless columns
-    tt_total = tt_total.drop(columns=["low", "medium", "high"])
-    tt_total.to_csv(r"data/costs/traveltime_savings.csv")
-
-
+    out = pd.DataFrame({
+        'ID_new':     df['ID_new'].astype(int),
+        'tt_low':     savings,
+        'tt_medium':  savings,
+        'tt_high':    savings,
+    })
+    os.makedirs('data/costs', exist_ok=True)
+    out.to_csv(r'data/costs/traveltime_savings.csv', index=False)
+    print(f"  Dijkstra TT savings monetized → data/costs/traveltime_savings.csv  "
+          f"({len(out)} rows, factor={mon_factor:.1f} CHF/h)")
 
 
