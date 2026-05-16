@@ -306,21 +306,19 @@ def _build_base_gdf():
     # no ffs value is <= 0 (would produce infinite or negative travel times).
     seg_len = gdf['length_m'] if 'length_m' in gdf.columns else gdf.geometry.length
     if 'ffs' in gdf.columns:
-        ffs_col = gdf['ffs'].fillna(15.0)
+        ffs_col = gdf['ffs'].fillna(20.0)
     else:
-        ffs_col = pd.Series(15.0, index=gdf.index)
+        ffs_col = pd.Series(20.0, index=gdf.index)
     gdf['tt_min'] = (seg_len / 1000) / ffs_col * 60
 
-    # Override Netzlücken and Schwachstellen to BAD_FFS
+    # Override Netzlücken only to BAD_FFS — Schwachstellen keep their ROUTENTYP ffs (20 km/h)
     bad_mask = pd.Series(False, index=gdf.index)
     if 'is_development' in gdf.columns:
         bad_mask |= gdf['is_development'].astype(bool)
-    if 'is_schwachstelle' in gdf.columns:
-        bad_mask |= (gdf['is_schwachstelle'] == 1)
 
     if bad_mask.any():
         gdf.loc[bad_mask, 'tt_min'] = (seg_len[bad_mask] / 1000) / BAD_FFS * 60
-        print(f"  Base GDF: {bad_mask.sum()} edge(s) set to BAD_FFS ({BAD_FFS} km/h) — Netzlücken / Schwachstellen")
+        print(f"  Base GDF: {bad_mask.sum()} edge(s) set to BAD_FFS ({BAD_FFS} km/h) — Netzlücken only")
 
     # Append connectivity bridges at WORST_FFS (never scored, always present)
     conn_path = 'data/Network/processed/connectivity_developments.gpkg'
@@ -402,20 +400,25 @@ def compute_od_matrix(max_dist_m=25_000, cycling_speed_kmh=15):
                 n_drop_dist += 1
                 continue
 
-            # Detour filter: drop implausible reroutes through connectivity bridges
+            air_dist_m  = None
+            detour_ratio = None
             if ox is not None:
                 dx, dy = id_to_xy.get(id_dest, (None, None))
                 if dx is not None:
-                    straight_m = ((ox - dx) ** 2 + (oy - dy) ** 2) ** 0.5
-                    if straight_m > 0 and (dist_m / straight_m) > _MAX_DETOUR_FACTOR:
-                        n_drop_detour += 1
-                        continue
+                    air_dist_m = ((ox - dx) ** 2 + (oy - dy) ** 2) ** 0.5
+                    if air_dist_m > 0:
+                        detour_ratio = dist_m / air_dist_m
+                        if detour_ratio > _MAX_DETOUR_FACTOR:
+                            n_drop_detour += 1
+                            continue
 
             od_rows.append({
-                'origin_id': id_origin,
-                'dest_id':   id_dest,
-                'tt_sec':    tt_dict[dest_node],
-                'dist_m':    dist_m,
+                'origin_id':    id_origin,
+                'dest_id':      id_dest,
+                'tt_sec':       tt_dict[dest_node],
+                'dist_m':       dist_m,
+                'air_dist_m':   air_dist_m,
+                'detour_ratio': detour_ratio,
             })
 
     od_df = pd.DataFrame(od_rows)
@@ -884,6 +887,12 @@ def travel_cost_developments(frame, raster_file=r"data/Network/OSM_tif/cycling_s
             sq_voronoi.to_file(
                 fr"data/Network/travel_time/developments/dev{id_new}_Voronoi.gpkg"
             )
+            # Write status-quo source_id raster for this development so that
+            # GetVoronoiOD_multi() can discover and process it.  Since Voronoi
+            # zones are unchanged (same access points), base_src_arr is correct.
+            path_id_raster = fr'data/Network/travel_time/developments/dev{id_new}_source_id_raster.tif'
+            with rasterio.open(path_id_raster, 'w', **out_profile) as dst:
+                dst.write(base_src_arr, 1)
         else:
             path_id_raster = (
                 fr'data/Network/travel_time/developments/dev{id_new}_source_id_raster.tif'

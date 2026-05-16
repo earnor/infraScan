@@ -100,35 +100,47 @@ def voronoi_finite_polygons_2d(vor, radius=None):
     return new_regions, np.asarray(new_vertices)
 
 
-def get_voronoi_status_quo(corridor_polygon=None):
+def get_voronoi_status_quo(corridor_polygon=None, nodes_gdf=None):
     """
-    Computes Euclidean Voronoi polygons for ALL existing cycling network nodes.
+    Computes Euclidean Voronoi polygons for corridor cycling network nodes.
 
-    Every node (intersection, through-point, dead-end) is an access point and
-    gets a Voronoi cell representing the area for which it is the closest entry
-    point to the cycling network.  Always recomputed each run to stay consistent
-    with any changes to the network topology.
+    Every node is an access point and gets a Voronoi cell representing the
+    area for which it is the closest entry point to the cycling network.
+    Always recomputed each run to stay consistent with the current network.
+
+    Parameters
+    ----------
+    corridor_polygon : shapely.geometry.Polygon, optional
+        If provided and nodes_gdf is None, restricts nodes to those
+        intersecting this polygon.
+    nodes_gdf : GeoDataFrame, optional
+        Pre-filtered node GeoDataFrame to use directly (e.g. points_corridor).
+        When supplied, corridor_polygon is only used for clipping, not filtering.
 
     Output: data/Voronoi/voronoi_status_quo_euclidian.gpkg
     """
     os.makedirs('data/Voronoi', exist_ok=True)
-    _out_path = 'data/Voronoi/voronoi_status_quo_euclidian.gpkg'
 
     # ------------------------------------------------------------------
-    # 1. LOAD all network nodes — all nodes are access points
+    # 1. LOAD corridor nodes
     # ------------------------------------------------------------------
-    nodes = gpd.read_file('data/Network/processed/points.gpkg')
-    if nodes.crs is None:
-        nodes = nodes.set_crs("EPSG:2056")
+    if nodes_gdf is not None:
+        # Use the caller-supplied node set directly (exact same nodes as the run)
+        access_nodes = nodes_gdf.copy().reset_index(drop=True)
+        if access_nodes.crs is None:
+            access_nodes = access_nodes.set_crs("EPSG:2056")
+    else:
+        nodes = gpd.read_file('data/Network/processed/points.gpkg')
+        if nodes.crs is None:
+            nodes = nodes.set_crs("EPSG:2056")
+        access_nodes = nodes.copy().reset_index(drop=True)
 
-    access_nodes = nodes.copy().reset_index(drop=True)
-
-    # Optionally restrict to corridor
-    if corridor_polygon is not None:
-        poly_gdf = gpd.GeoDataFrame({'geometry': [corridor_polygon]}, crs="EPSG:2056")
-        access_nodes = gpd.sjoin(
-            access_nodes, poly_gdf, how='inner', predicate='intersects'  # was 'within'
-        ).drop(columns=['index_right'], errors='ignore').reset_index(drop=True)
+        # Optionally restrict to corridor
+        if corridor_polygon is not None:
+            poly_gdf = gpd.GeoDataFrame({'geometry': [corridor_polygon]}, crs="EPSG:2056")
+            access_nodes = gpd.sjoin(
+                access_nodes, poly_gdf, how='inner', predicate='intersects'
+            ).drop(columns=['index_right'], errors='ignore').reset_index(drop=True)
 
     print(f"  Computing Voronoi for {len(access_nodes)} access points...")
 
