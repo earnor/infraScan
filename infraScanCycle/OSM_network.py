@@ -19,8 +19,8 @@ _EDGES_BORDER_PATH   = r'data/Network/processed/edges_corridor_border.gpkg'
 # Placeholder speeds for gap edges in the base network.
 # Netzlücken / Schwachstellen: present but below quality — slow cycling path
 # Connectivity bridges:         auto-generated cycling links — same degraded speed
-BAD_FFS   = 15.0  # km/h
-WORST_FFS = 15.0  # km/h
+BAD_FFS   = 13.0  # km/h
+WORST_FFS = 13.0  # km/h
 
 
 # TODO: check_parallel_edges_gdf() is defined but never called in the pipeline.
@@ -205,7 +205,7 @@ def build_network_from_shapefile(path, cycling_speed_kmh=15, snap_tolerance=0.1)
     return G, gdf_noded
 
 
-def check_network_connectivity(G, label="network"):
+def check_network_connectivity(G, label="network", edges_gdf=None, nodes_gdf=None):
     """
     Run a full connectivity analysis on *G* and print a human-readable report.
 
@@ -213,10 +213,17 @@ def check_network_connectivity(G, label="network"):
     uses the underlying undirected topology (weak connectivity) so that a
     bidirectional edge network is not falsely reported as disconnected.
 
+    When edges_gdf / nodes_gdf are supplied and the graph is disconnected, both
+    GeoDataFrames are filtered in-place to the largest connected component and
+    returned in the result dict.  Nodes are matched by rounding coordinates to
+    1 decimal place (matching the build_graph_direct convention).
+
     Parameters
     ----------
-    G     : nx.Graph or nx.DiGraph
-    label : str — name printed in the report header
+    G         : nx.Graph or nx.DiGraph
+    label     : str — name printed in the report header
+    edges_gdf : GeoDataFrame or None — edge table to filter (optional)
+    nodes_gdf : GeoDataFrame or None — node table to filter (optional)
 
     Returns
     -------
@@ -226,6 +233,8 @@ def check_network_connectivity(G, label="network"):
         largest_component   int  (node count)
         isolated_nodes      int
         component_sizes     list[int]  (sorted descending)
+        edges_gdf           GeoDataFrame or None  (filtered if disconnected)
+        nodes_gdf           GeoDataFrame or None  (filtered if disconnected)
     """
     Gu = G.to_undirected() if G.is_directed() else G
 
@@ -235,7 +244,8 @@ def check_network_connectivity(G, label="network"):
     if n_nodes == 0:
         print(f"[connectivity:{label}] Graph is empty — nothing to check.")
         return {'is_connected': False, 'num_components': 0,
-                'largest_component': 0, 'isolated_nodes': 0, 'component_sizes': []}
+                'largest_component': 0, 'isolated_nodes': 0, 'component_sizes': [],
+                'edges_gdf': edges_gdf, 'nodes_gdf': nodes_gdf}
 
     components     = list(nx.connected_components(Gu))
     num_components = len(components)
@@ -261,12 +271,39 @@ def check_network_connectivity(G, label="network"):
         print(f"  Action required  : add connectivity bridges or snap dangling endpoints")
     print(f"{'─'*60}\n")
 
+    if not is_connected and (edges_gdf is not None or nodes_gdf is not None):
+        largest_nodes = max(nx.connected_components(Gu), key=len)
+
+        def _coords_of(geom):
+            c = list(geom.coords)
+            return ((round(c[0][0], 1), round(c[0][1], 1)),
+                    (round(c[-1][0], 1), round(c[-1][1], 1)))
+
+        if edges_gdf is not None:
+            edge_mask = edges_gdf.geometry.apply(
+                lambda g: all(n in largest_nodes for n in _coords_of(g))
+            )
+            edges_gdf = edges_gdf[edge_mask].reset_index(drop=True)
+
+        if nodes_gdf is not None:
+            pt_mask = nodes_gdf.geometry.apply(
+                lambda g: (round(g.x, 1), round(g.y, 1)) in largest_nodes
+            )
+            nodes_gdf = nodes_gdf[pt_mask].reset_index(drop=True)
+
+        n_dropped = n_nodes - len(largest_nodes)
+        n_edges_kept = len(edges_gdf) if edges_gdf is not None else '?'
+        print(f"  Kept largest component: {len(largest_nodes)} nodes, "
+              f"{n_edges_kept} edges  ({n_dropped} nodes dropped)")
+
     return {
         'is_connected':      is_connected,
         'num_components':    num_components,
         'largest_component': largest,
         'isolated_nodes':    isolated,
         'component_sizes':   sizes,
+        'edges_gdf':         edges_gdf,
+        'nodes_gdf':         nodes_gdf,
     }
 
 

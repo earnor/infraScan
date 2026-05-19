@@ -1,6 +1,6 @@
 import os
 os.environ['USE_PYGEOS'] = '0'
-import geopandas as gpd
+
 import math
 import pandas as pd
 from shapely.geometry import LineString, MultiLineString, Point, MultiPoint, shape, box, Polygon
@@ -19,6 +19,9 @@ from rasterio.transform import from_origin
 
 from shapely.validation import make_valid
 
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import geopandas as gpd
 
 
 from collections import Counter
@@ -29,29 +32,8 @@ from matplotlib.lines import Line2D
 
 
 
-    ##################################################################################
-    # TODO: REVISE RASTERIZATION FOR SCENARIOS (import_data)
-    # 1. MAINTAIN (Lines 34–68): The STATENT (employment) and STATPOP (population)
-    #    imports remain critical. They are the primary drivers of cycling demand
-    #    and potential origin-destination (OD) flows.
-    # 2. ADD: Integrate a "Safety" raster layer. If accident hotspots or historical
-    #    cycling safety data are available, import them here to create a "penalty"
-    #    layer.
-    # 3. LOGIC: This allows the scoring module to prioritize routes that avoid
-    #    dangerous intersections or roads with high accident frequencies.
-    ##################################################################################
 def import_data(limits):
-    """
-    Reads the required data for the analysis. This includes employment, population and land use data.
-    The data are given in different format, but generally treated in tabular form using pandas or geopandas
-    DataFrames.
-    As the structure of the individual raw data differ from timestamp to timestamp, they data is manipulated such
-    that get an overall structure. The resulting datas are then stored as shapefiles
-    :param limits: spatial limits required for further analysis given by the extent of the voronoi polygons of the access points
-    :return:
-    """
 
-    # Read the CSV file into a Pandas DataFrame #TODO: for scenarios
     # Arealstatistik - 1985, 1997, 2009, 2018
     #areal_stat = pd.read_csv(r'data/landuse_landcover/landcover/ag-b-00.03-37-area-csv.csv', sep=";")
     #areal_stat = areal_stat.drop(areal_stat.columns[[3,4,5,6,7,8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31,32,33,34,35]], axis=1)
@@ -87,15 +69,7 @@ def import_data(limits):
     #betriebzaehlung20.to_csv(r"data/temp/empl_filtered.csv")
     return
 
-##################################################################################
-    # TODO: NEW FUNCTION REQUIRED - ELEVATION & SLOPE ANALYSIS
-    # 1. LOGIC: While a 5% incline is negligible for cars, it is a "dealbreaker" for cyclists.
-    # 2. ADD: Integrate a function to join network edges with a Digital Elevation Model (DEM).
-    # 3. CALCULATION: Sample LineString geometries at start, end, and midpoints to find gradient:
-    #    Slope (%) = (ΔElevation / Distance) * 100
-    # 4. NOTE: A realistic cycle network scan must penalize uphill routes within the
-    #    routing algorithm to reflect actual user behavior/effort.
-    ##################################################################################
+
 
 
 def fill_raster_dataframe(df, rastersize=100):
@@ -208,221 +182,525 @@ def polygon_from_points(bounds=None, e_min=None, e_max=None, n_min=None, n_max=N
 
 
 
-def reformat_network():
+def _connect_dead_ends_to_nodes(edges_gdf, threshold=50.0):
+    """
+    For each remaining dead-end endpoint, find the nearest other endpoint
+    (any node) within `threshold` metres that it is NOT already directly
+    connected to.  Add a short straight connector edge between them.
 
+    This handles the case where a dead-end stub nearly reaches an existing
+    junction node but falls just outside the merge tolerance.
+    """
+    from scipy.spatial import cKDTree
+
+    # Count degrees and collect all unique endpoints
+    ep_count = {}
+    for geom in edges_gdf.geometry:
+        if geom is None or geom.is_empty:
+            continue
+        for xy in [(geom.coords[0][0], geom.coords[0][1]),
+                   (geom.coords[-1][0], geom.coords[-1][1])]:
+            ep_count[xy] = ep_count.get(xy, 0) + 1
+
+    dead_ends = [xy for xy, cnt in ep_count.items() if cnt == 1]
+    all_nodes = list(ep_count.keys())
+    if not dead_ends or len(all_nodes) < 2:
+        return edges_gdf
+
+    # Build direct-connection lookup: which node pairs already share an edge?
+    connected_pairs = set()
+    for geom in edges_gdf.geometry:
+        if geom is None or geom.is_empty:
+            continue
+        s = (geom.coords[0][0],  geom.coords[0][1])
+        e = (geom.coords[-1][0], geom.coords[-1][1])
+        connected_pairs.add((s, e))
+        connected_pairs.add((e, s))
+
+    arr  = np.array(all_nodes)
+    tree = cKDTree(arr)
+    new_rows  = []
+    connected = set()   # dead ends already handled this pass
+
+    template = edges_gdf.iloc[0].copy()   # attribute template for stubs
+
+    for dead_xy in dead_ends:
+        if dead_xy in connected:
+            continue
+        dists, idxs = tree.query(np.array(dead_xy), k=min(10, len(all_nodes)))
+        dists = np.atleast_1d(dists)
+        idxs  = np.atleast_1d(idxs)
+        for dist, idx in zip(dists, idxs):
+            if dist < 0.1:
+                continue   # same point
+            if dist > threshold:
+                break
+            target_xy = tuple(arr[idx])
+            if (dead_xy, target_xy) in connected_pairs:
+                continue
+            # Add connector
+            stub = template.copy()
+            stub['geometry']         = LineString([dead_xy, target_xy])
+            stub['length_m']         = stub['geometry'].length
+            stub['is_connector']     = 1
+            stub['is_development']   = 0
+            stub['is_schwachstelle'] = 0
+            stub['ROUTENTYP']        = 'Connector'
+            new_rows.append(stub)
+            connected_pairs.add((dead_xy, target_xy))
+            connected_pairs.add((target_xy, dead_xy))
+            connected.add(dead_xy)
+            break   # one connection per dead end is enough
+
+    if not new_rows:
+        print(f"  Dead-end→node connect: 0 stubs added (threshold={threshold} m)")
+        return edges_gdf
+
+    additions = gpd.GeoDataFrame(new_rows, crs=edges_gdf.crs)
+    result    = pd.concat([edges_gdf, additions], ignore_index=True)
+    print(f"  Dead-end→node connect: {len(new_rows)} stub(s) added (threshold={threshold} m)")
+    return result
+
+
+def _snap_dead_ends_to_edges(edges_gdf, threshold=30.0):
+    """
+    For every degree-1 (dead-end) node, find the nearest edge whose interior
+    is within `threshold` metres.  Project the dead-end onto that edge,
+    split the edge at the projected point, and add a short connector stub
+    from the dead-end to the projected point.
+
+    This connects dangling stubs that are close to—but not touching—a
+    neighbouring route, without requiring exact coordinate overlap.
+    """
+    # Count endpoint degrees
+    ep_count = {}
+    ep_to_edges = {}   # (x,y) → list of row indices whose endpoint is here
+    for idx, row in edges_gdf.iterrows():
+        for pt_xy in [(row.geometry.coords[0][0], row.geometry.coords[0][1]),
+                      (row.geometry.coords[-1][0], row.geometry.coords[-1][1])]:
+            ep_count[pt_xy] = ep_count.get(pt_xy, 0) + 1
+            ep_to_edges.setdefault(pt_xy, []).append(idx)
+
+    dead_end_pts = {xy for xy, cnt in ep_count.items() if cnt == 1}
+    if not dead_end_pts:
+        print("  Dead-end snap: no dead-end nodes found")
+        return edges_gdf
+
+    # STRtree over edges for fast proximity lookup
+    edge_list  = list(edges_gdf.itertuples())
+    edge_geoms = [row.geometry for row in edge_list]
+    edge_tree  = STRtree(edge_geoms)
+
+    new_rows  = []
+    drop_idx  = set()
+    n_snapped = 0
+
+    for dead_xy in dead_end_pts:
+        dead_pt   = Point(dead_xy)
+        # Edges that already touch this dead end (don't snap to own edge)
+        own_edges = set(ep_to_edges.get(dead_xy, []))
+
+        # Candidate edges within threshold
+        cands = edge_tree.query(dead_pt.buffer(threshold))
+        best_dist  = threshold
+        best_idx   = None
+        best_proj  = None
+
+        for ci in cands:
+            orig_idx = edge_list[ci].Index
+            if orig_idx in own_edges or orig_idx in drop_idx:
+                continue
+            geom = edge_geoms[ci]
+            dist = geom.distance(dead_pt)
+            if dist < best_dist:
+                # Projected point must be in the interior (not at an endpoint)
+                proj_frac = geom.project(dead_pt, normalized=True)
+                if 0.01 < proj_frac < 0.99:
+                    best_dist = dist
+                    best_idx  = orig_idx
+                    best_proj = geom.interpolate(proj_frac, normalized=True)
+
+        if best_idx is None or best_proj is None:
+            continue
+
+        # Split the target edge at the projected point
+        target_row  = edges_gdf.loc[best_idx]
+        target_geom = target_row.geometry
+        try:
+            snapped_geom = snap(target_geom, best_proj, best_dist + 0.1)
+            parts = list(split(snapped_geom, best_proj).geoms)
+        except Exception:
+            continue
+        if len(parts) < 2:
+            continue
+
+        drop_idx.add(best_idx)
+        for part in parts:
+            if part.length > 0.1:
+                r = target_row.copy()
+                r['geometry'] = part
+                r['length_m'] = part.length
+                new_rows.append(r)
+
+        # Connector stub: dead-end → projected point
+        if best_dist > 0.1:
+            stub_geom = LineString([dead_xy, (best_proj.x, best_proj.y)])
+            stub = target_row.copy()
+            stub['geometry']         = stub_geom
+            stub['length_m']         = stub_geom.length
+            stub['is_connector']     = 1
+            stub['is_development']   = 0
+            stub['is_schwachstelle'] = 0
+            stub['ROUTENTYP']        = 'Connector'
+            new_rows.append(stub)
+
+        n_snapped += 1
+
+    if n_snapped == 0:
+        print(f"  Dead-end snap: 0 dead-ends connected (threshold={threshold} m)")
+        return edges_gdf
+
+    # Rebuild: keep all rows not dropped, add new split/stub rows
+    kept = edges_gdf[~edges_gdf.index.isin(drop_idx)]
+    additions = gpd.GeoDataFrame(new_rows, crs=edges_gdf.crs)
+    result = pd.concat([kept, additions], ignore_index=True)
+    result = result[result.geometry.length > 0.1].reset_index(drop=True)
+    print(f"  Dead-end snap: {n_snapped} dead-end(s) connected to nearest edge "
+          f"(threshold={threshold} m) → {len(edges_gdf)} → {len(result)} edges")
+    return result
+
+
+def _split_edges_at_nodes(edges_gdf, snap_tol=1.0):
+    """
+    Find nodes that lie ON the interior of an existing edge (within snap_tol metres)
+    but are not connected to it, and split the edge at that point.
+
+    This catches the case where edge A runs from node 1 → node 2 passing
+    directly through the location of node 3, but the graph has no edge
+    from 1→3 or 3→2.  After splitting, node 3 is a proper junction.
+    """
+    # Collect all unique endpoints — these are the nodes we want to test
+    endpoint_set = set()
+    for geom in edges_gdf.geometry:
+        if geom is None or geom.is_empty:
+            continue
+        coords = list(geom.coords)
+        endpoint_set.add((coords[0][0],  coords[0][1]))
+        endpoint_set.add((coords[-1][0], coords[-1][1]))
+
+    ep_points = [Point(x, y) for x, y in endpoint_set]
+    if not ep_points:
+        return edges_gdf
+
+    # STRtree over endpoints for fast per-edge lookup
+    ep_tree = STRtree(ep_points)
+
+    new_rows   = []
+    drop_idx   = set()
+    n_splits   = 0
+
+    for idx, edge in edges_gdf.iterrows():
+        geom = edge.geometry
+        if geom is None or geom.is_empty or geom.length < 0.1:
+            new_rows.append(edge)
+            continue
+
+        # Find endpoints near this edge (within snap_tol of the LINE, not just the bbox)
+        candidate_idx = ep_tree.query(geom.buffer(snap_tol))
+        split_pts = []
+        for ci in candidate_idx:
+            pt = ep_points[ci]
+            # Skip the edge's own endpoints
+            if pt.distance(Point(geom.coords[0])) < snap_tol:
+                continue
+            if pt.distance(Point(geom.coords[-1])) < snap_tol:
+                continue
+            # Only keep points that actually lie on the edge interior
+            if geom.distance(pt) <= snap_tol:
+                split_pts.append(pt)
+
+        if not split_pts:
+            new_rows.append(edge)
+            continue
+
+        # Split the edge at all matching interior points
+        try:
+            working = snap(geom, MultiPoint(split_pts), snap_tol)
+            result  = split(working, MultiPoint(split_pts))
+            parts   = list(result.geoms)
+        except Exception:
+            new_rows.append(edge)
+            continue
+
+        if len(parts) <= 1:
+            new_rows.append(edge)
+            continue
+
+        drop_idx.add(idx)
+        for part in parts:
+            if part.length > 0.1:
+                row = edge.copy()
+                row['geometry'] = part
+                row['length_m'] = part.length
+                new_rows.append(row)
+        n_splits += 1
+
+    if n_splits == 0:
+        print(f"  Node-on-edge split: no interior nodes found (tol={snap_tol} m)")
+        return edges_gdf
+
+    result_gdf = gpd.GeoDataFrame(new_rows, crs=edges_gdf.crs).reset_index(drop=True)
+    print(f"  Node-on-edge split: {n_splits} edge(s) split → "
+          f"{len(edges_gdf)} → {len(result_gdf)} edges (tol={snap_tol} m)")
+    return result_gdf
+
+
+def _connect_components(nodes_gdf, edges_gdf, coord_round=2):
+    """
+    Find all disconnected components in the network and connect them by adding
+    a synthetic straight-line edge between the closest pair of nodes from each
+    component pair.  Repeats until the network is fully connected.
+
+    Synthetic edges are marked with is_connector=1 so they can be handled
+    differently during scoring (never scored, always present for routing).
+    """
+    import networkx as nx
+    from scipy.spatial import cKDTree
+
+    # Build undirected graph from edge start/end node IDs
+    G = nx.Graph()
+    G.add_nodes_from(nodes_gdf['ID_point'].tolist())
+    for _, e in edges_gdf.iterrows():
+        G.add_edge(int(e['start']), int(e['end']))
+
+    components = list(nx.connected_components(G))
+    if len(components) == 1:
+        print(f"  Component connect: already fully connected ({len(nodes_gdf)} nodes)")
+        return nodes_gdf, edges_gdf
+
+    print(f"  Component connect: {len(components)} disconnected components → bridging …")
+
+    # Index: node ID → (x, y)
+    id_to_xy = {int(row['ID_point']): (row.geometry.x, row.geometry.y)
+                for _, row in nodes_gdf.iterrows()}
+
+    new_edges = []
+    # Iteratively bridge the two closest components until fully connected
+    while True:
+        components = list(nx.connected_components(G))
+        if len(components) == 1:
+            break
+
+        best_dist  = float('inf')
+        best_pair  = None   # (node_id_a, node_id_b)
+
+        # Build KDTree per component, query against all others
+        comp_pts   = [np.array([id_to_xy[n] for n in c if n in id_to_xy]) for c in components]
+        comp_ids   = [list(c) for c in components]
+
+        for i in range(len(components)):
+            if len(comp_pts[i]) == 0:
+                continue
+            tree_i = cKDTree(comp_pts[i])
+            for j in range(i + 1, len(components)):
+                if len(comp_pts[j]) == 0:
+                    continue
+                dists, idxs = tree_i.query(comp_pts[j])
+                k = np.argmin(dists)
+                if dists[k] < best_dist:
+                    best_dist  = dists[k]
+                    best_pair  = (comp_ids[i][idxs[k]], comp_ids[j][k])
+
+        if best_pair is None:
+            break
+
+        na, nb = best_pair
+        xa, ya = id_to_xy[na]
+        xb, yb = id_to_xy[nb]
+        geom = LineString([(xa, ya), (xb, yb)])
+
+        # Build synthetic row inheriting columns from edges_gdf, with safe defaults
+        row = {col: None for col in edges_gdf.columns}
+        row['geometry']        = geom
+        row['length_m']        = geom.length
+        row['start']           = na
+        row['end']             = nb
+        row['ID_edge']         = int(edges_gdf['ID_edge'].max()) + len(new_edges) + 1
+        row['is_connector']    = 1
+        row['is_development']  = 0
+        row['is_schwachstelle']= 0
+        row['ROUTENTYP']       = 'Connector'
+        new_edges.append(row)
+        G.add_edge(na, nb)
+        print(f"    Bridge added: node {na} ↔ {nb}  ({best_dist:.0f} m)")
+
+    if new_edges:
+        additions  = gpd.GeoDataFrame(new_edges, crs=edges_gdf.crs)
+        edges_gdf  = pd.concat([edges_gdf, additions], ignore_index=True)
+
+        # Recompute node flags from updated edge set
+        def _xy(coord):
+            return (round(coord[0], coord_round), round(coord[1], coord_round))  # noqa: B023
+
+        ep_counts = Counter()
+        for geom in edges_gdf.geometry:
+            ep_counts[_xy(geom.coords[0])]  += 1
+            ep_counts[_xy(geom.coords[-1])] += 1
+
+        nodes_gdf['is_intersection']  = nodes_gdf.geometry.apply(
+            lambda g: int(ep_counts[_xy(g.coords[0])] >= 3)).astype(np.int8)
+        nodes_gdf['is_through_point'] = nodes_gdf.geometry.apply(
+            lambda g: int(ep_counts[_xy(g.coords[0])] == 2)).astype(np.int8)
+        nodes_gdf['is_endpoint']      = nodes_gdf.geometry.apply(
+            lambda g: int(ep_counts[_xy(g.coords[0])] == 1)).astype(np.int8)
+
+        # Persist updated files
+        os.makedirs('data/Network/processed', exist_ok=True)
+        lc = Counter(c.lower() for c in edges_gdf.columns)
+        drop_upper = [c for c in edges_gdf.columns if c != c.lower() and lc[c.lower()] > 1]
+        for col in drop_upper + ['visual_geom']:
+            if col in edges_gdf.columns:
+                edges_gdf = edges_gdf.drop(columns=[col])
+        nodes_gdf.to_file('data/Network/processed/points.gpkg',  driver='GPKG')
+        edges_gdf.to_file('data/Network/processed/edges.gpkg',   driver='GPKG')
+
+        print(f"  Component connect: {len(new_edges)} bridge(s) added → network now fully connected")
+
+    return nodes_gdf, edges_gdf
+
+
+def reformat_network():
     print("\nreformat_network: start\n")
 
-    # --- config -----------------------------------------------------------
-    KEEP_ROUTENTYP          = {'Velobahn', 'Hauptverbindung', 'Nebenverbindung'}
-    DEVELOPMENT_PLANUNGSTYP = {'geplant', 'Variante'}
-    # OGD network shapefile — source of VERBINDUNG / RW_KEY_NR (lost during momepy conversion)
-    RAW_NETZ_PATH           = 'data/raw/ALLTAG/OGD_VELO_ALLTAG_NETZ_L_M.shp'
-    # Schwachstellen OGD shapefile (408.4) — has NUMMER per segment
-    SCHWACHSTELLEN_PATH     = 'data/raw/SCHWACHSTELLEN/TBA_VNP_SCHWACHSTELLEN_L.shp'
-    SCHWACHSTELLEN_BUF_M    = 5
-    COORD_ROUND             = 2   # 0.01 mm — eliminates float noise without costly sjoin
-    SNAP_TOL                = 1.0
+    MERGE_TOL   = 15.0  # m — nodes closer than this are merged into one
+    COORD_ROUND = 2     # decimal places for endpoint rounding (0.01 mm)
 
-    # ------------------------------------------------------------------
-    # 1. LOAD + immediate column drop (saves memory before any heavy ops)
-    # ------------------------------------------------------------------
+    # ── Step 1: Load edges and nodes ─────────────────────────────────────────
     edges_path = 'data/Network/processed/edges.gpkg'
+    nodes_path = 'data/Network/processed/nodes.gpkg'
 
     if not os.path.exists(edges_path):
-        raise FileNotFoundError(f"Missing: {edges_path} — run import_network_GIS_ALLTAG() first")
+        raise FileNotFoundError(f"Missing {edges_path} — run import_network_GIS_ALLTAG() first")
 
     edges_gdf = gpd.read_file(edges_path)
-
     if edges_gdf.crs.to_epsg() != 2056:
         edges_gdf = edges_gdf.to_crs("EPSG:2056")
 
-    routentyp_col   = next((c for c in edges_gdf.columns if c.upper().startswith('ROUTENTYP')),   None)
-    planungstyp_col = next((c for c in edges_gdf.columns if c.upper().startswith('PLANUNGSTY')), None)
-
-    # ------------------------------------------------------------------
-    # 1b. RE-ATTACH route name and route number from raw OGD shapefile.
-    #     import_network_GIS_ALLTAG passes through momepy which drops all
-    #     columns except ROUTENTYP and PLANUNGSTY.  We recover VERBINDUNG
-    #     (route name, e.g. "Zürich - Dübendorf") and RW_KEY_NR (route
-    #     number, e.g. "04_046a") via a nearest-edge spatial join.
-    # ------------------------------------------------------------------
-    edges_gdf['verbindung'] = ''
-    edges_gdf['rw_key_nr']  = ''
-    if os.path.exists(RAW_NETZ_PATH):
-        try:
-            raw = gpd.read_file(RAW_NETZ_PATH)[['geometry', 'VERBINDUNG', 'RW_KEY_NR']].copy()
-            if raw.crs is None:
-                raw = raw.set_crs("EPSG:2056")
-            elif raw.crs.to_epsg() != 2056:
-                raw = raw.to_crs("EPSG:2056")
-            raw = raw.rename(columns={'VERBINDUNG': 'verbindung', 'RW_KEY_NR': 'rw_key_nr'})
-            joined_names = gpd.sjoin_nearest(
-                edges_gdf[['geometry']].reset_index(),
-                raw, how='left', max_distance=50
-            ).drop_duplicates(subset='index').set_index('index')
-            edges_gdf['verbindung'] = joined_names['verbindung'].reindex(edges_gdf.index).fillna('').astype(object).values
-            edges_gdf['rw_key_nr']  = joined_names['rw_key_nr'].reindex(edges_gdf.index).fillna('').astype(object).values
-            print(f"  Route names joined: {(edges_gdf['verbindung'] != '').sum()} edges have VERBINDUNG")
-        except Exception as e:
-            print(f"  Warning: could not join route names: {e}")
+    if os.path.exists(nodes_path):
+        nodes_raw = gpd.read_file(nodes_path)
+        if nodes_raw.crs.to_epsg() != 2056:
+            nodes_raw = nodes_raw.to_crs("EPSG:2056")
     else:
-        print(f"  Warning: raw OGD network not found at {RAW_NETZ_PATH} — route names unavailable")
-
-    """
-    # ------------------------------------------------------------------
-    # 2. FILTER: Velorouten / Hauptverbindungen / Nebenverbindungen only
-    # ------------------------------------------------------------------
-    if routentyp_col:
-        n_before = len(edges_gdf)
-        edges_gdf = edges_gdf[edges_gdf[routentyp_col].isin(KEEP_ROUTENTYP)].copy()
-        print(f"  ROUTENTYP filter: {n_before} → {len(edges_gdf)} edges")
-    else:
-        print("  Warning: ROUTENTYP column not found — no filter applied")
-
-    # Drop every column that isn't needed for topology + tagging + description
-    essential = {'geometry', 'length_m', 'node_start', 'node_end', 'verbindung', 'rw_key_nr'}
-    if routentyp_col:   essential.add(routentyp_col)
-    if planungstyp_col: essential.add(planungstyp_col)
-    edges_gdf = edges_gdf.drop(
-        columns=[c for c in edges_gdf.columns if c not in essential],
-        errors='ignore'
-    )
-    """
-    # ------------------------------------------------------------------
-    # 3. TAG Netzlücken (planned edges are developments)
-    # ------------------------------------------------------------------
-    if planungstyp_col:
-        edges_gdf['is_development'] = (
-            edges_gdf[planungstyp_col].isin(DEVELOPMENT_PLANUNGSTYP).astype(np.int8)
-        )
-        print(f"  Netzlücken: {edges_gdf['is_development'].sum()} edges tagged as developments")
-    else:
-        edges_gdf['is_development'] = np.int8(0)
-        print("  Warning: PLANUNGSTYP column not found")
-
-    # ------------------------------------------------------------------
-    # 4. TAG Schwachstellen (spatial overlay) + attach NUMMER
-    #    The OGD Schwachstellen shapefile (408.4) only carries NUMMER
-    #    (e.g. "S04_079") — that is the official identifier for each
-    #    weak segment.  We buffer each Schwachstelle by 5 m and mark
-    #    every network edge that intersects as is_schwachstelle=1.
-    #    The NUMMER of the nearest Schwachstelle is stored in sw_nummer.
-    # ------------------------------------------------------------------
-    edges_gdf['is_schwachstelle'] = np.int8(0)
-    edges_gdf['sw_nummer']        = ''
-    if os.path.exists(SCHWACHSTELLEN_PATH):
-        try:
-            sw = gpd.read_file(SCHWACHSTELLEN_PATH)[['geometry', 'NUMMER']].copy()
-            if sw.crs is None:
-                sw = sw.set_crs("EPSG:2056")
-            elif sw.crs.to_epsg() != 2056:
-                sw = sw.to_crs("EPSG:2056")
-            sw_buf = sw.copy()
-            sw_buf['geometry'] = sw_buf.geometry.buffer(SCHWACHSTELLEN_BUF_M)
-
-            joined = gpd.sjoin(
-                edges_gdf.reset_index()[['index', 'geometry']],
-                sw_buf.reset_index(drop=True)[['geometry', 'NUMMER']],
-                how='left', predicate='intersects'
-            )
-            # is_schwachstelle flag
-            hit_idx = joined.loc[joined['index_right'].notna(), 'index'].unique()
-            edges_gdf.loc[edges_gdf.index.isin(hit_idx), 'is_schwachstelle'] = np.int8(1)
-
-            # sw_nummer: take first matched NUMMER per edge
-            nummer_map = (
-                joined[joined['NUMMER'].notna()]
-                .drop_duplicates(subset='index')
-                .set_index('index')['NUMMER']
-            )
-            edges_gdf['sw_nummer'] = nummer_map.reindex(edges_gdf.index).fillna('').astype(object).values
-
-            print(f"  Schwachstellen: {edges_gdf['is_schwachstelle'].sum()} edges tagged "
-                  f"({edges_gdf['sw_nummer'].ne('').sum()} with NUMMER)")
-            del sw, sw_buf, joined
-        except Exception as e:
-            print(f"  Warning: could not load Schwachstellen: {e}")
-    else:
-        print(f"  Warning: Schwachstellen not found at {SCHWACHSTELLEN_PATH}")
+        nodes_raw = None
 
     print(f"  Loaded {len(edges_gdf)} edges")
 
-    # ------------------------------------------------------------------
-    # 5. IDENTIFY JUNCTIONS via coordinate counter (no sjoin clustering)
-    # ------------------------------------------------------------------
+    # ── Step 2: Merge nearby nodes ────────────────────────────────────────────
+    # Build a KDTree over all unique endpoints.  Any pair of endpoints within
+    # MERGE_TOL metres is clustered (Union-Find); the cluster centroid becomes
+    # the single shared node.  Edge start/end coordinates are remapped so every
+    # edge in the cluster connects to exactly one point.
+    from scipy.spatial import cKDTree
+
+    def _collect_endpoints(gdf):
+        pts = set()
+        for geom in gdf.geometry:
+            if geom is None or geom.is_empty:
+                continue
+            coords = list(geom.coords)
+            pts.add((coords[0][0],  coords[0][1]))
+            pts.add((coords[-1][0], coords[-1][1]))
+        return list(pts)
+
+    pt_list = _collect_endpoints(edges_gdf)
+    arr     = np.array(pt_list)
+    tree    = cKDTree(arr)
+    pairs   = tree.query_pairs(MERGE_TOL)
+
+    parent = list(range(len(pt_list)))
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    for i, j in pairs:
+        ri, rj = _find(i), _find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    clusters = {}
+    for i in range(len(pt_list)):
+        clusters.setdefault(_find(i), []).append(i)
+
+    remap = {}
+    for members in clusters.values():
+        pts_m = arr[members]
+        cx = round(pts_m[:, 0].mean() / 5) * 5
+        cy = round(pts_m[:, 1].mean() / 5) * 5
+        for m in members:
+            remap[pt_list[m]] = (cx, cy)
+
+    def _remap_geom(geom):
+        if geom is None or geom.is_empty:
+            return None
+        coords  = list(geom.coords)
+        s = remap.get((coords[0][0],  coords[0][1]),  (coords[0][0],  coords[0][1]))
+        e = remap.get((coords[-1][0], coords[-1][1]), (coords[-1][0], coords[-1][1]))
+        if s == e:
+            return None
+        interior = [(x, y) for x, y in coords[1:-1]]
+        return LineString([s] + interior + [e])
+
+    edges_gdf = edges_gdf.copy()
+    edges_gdf['geometry'] = edges_gdf.geometry.apply(_remap_geom)
+    edges_gdf = edges_gdf[edges_gdf.geometry.notna()].reset_index(drop=True)
+
+    n_remapped = sum(1 for o, r in remap.items() if o != r)
+    print(f"  Node merge: {n_remapped} endpoint(s) remapped into {len(clusters)} clusters "
+          f"(tol={MERGE_TOL} m) → {len(edges_gdf)} edges remain")
+
+    # ── Step 3: No additional splitting needed ────────────────────────────────
+    # import_network_GIS_ALLTAG already uses momepy.gdf_to_nx (primal approach)
+    # which nodes all LineString crossings into shared endpoints.  Re-splitting
+    # here is redundant and causes a combinatorial explosion when the buffer
+    # tolerance pulls in junction points from neighbouring edges.
+    edges_split = edges_gdf.copy()
+    print(f"  Edges after node merge: {len(edges_split)}")
+
+    # ── Step 3b: Split edges where a node lies on an edge interior ────────────
+    edges_split = _split_edges_at_nodes(edges_split, snap_tol=1.0)
+
+    # ── Step 3c: Snap dead-end nodes to nearby edge interiors ─────────────────
+    # Handles the case where a dead-end is 5–30 m from a parallel route —
+    # projects it onto the nearest edge, splits there, and adds a short stub.
+    edges_split = _snap_dead_ends_to_edges(edges_split, threshold=30.0)
+
+    # ── Step 3d: Connect dead-ends to nearest existing node ───────────────────
+    # Handles the case where a dead-end stub nearly reaches an existing junction
+    # but the nearest point is at an edge endpoint (proj_frac ≈ 0 or 1), which
+    # step 3c deliberately skips to avoid degenerate splits.
+    edges_split = _connect_dead_ends_to_nodes(edges_split, threshold=50.0)
+
     def _xy(coord):
         return (round(coord[0], COORD_ROUND), round(coord[1], COORD_ROUND))
 
-    # TODO: junction detection counts how often each rounded coordinate appears
-    # as an edge endpoint.  A count >= 3 means ≥ 3 edges share that endpoint,
-    # which is the correct heuristic for a topological intersection.
-    # However, this counts frequencies, not actual geometric connectivity — two
-    # unrelated edges that happen to round to the same coordinate will look like
-    # a junction even if they belong to disconnected sub-networks.
-    # After splitting, verify that nodes flagged as intersections actually have
-    # >= 3 incident edges in edges_split.
-    starts_xy = [_xy(g.coords[0])  for g in edges_gdf.geometry]
-    ends_xy   = [_xy(g.coords[-1]) for g in edges_gdf.geometry]
-    counts    = Counter(starts_xy + ends_xy)
-    junc_pts    = [Point(x, y) for (x, y), n in counts.items() if n >= 3]
-    through_pts = {(x, y) for (x, y), n in counts.items() if n == 2}
-    endpoint_pts = {(x, y) for (x, y), n in counts.items() if n == 1}
+    # ── Step 4: Topology cleanup ──────────────────────────────────────────────
+    # a) Drop zero/near-zero length edges
+    edges_split = edges_split[edges_split.geometry.length > 0.1].reset_index(drop=True)
 
-    junctions = gpd.GeoDataFrame(geometry=junc_pts, crs="EPSG:2056")
-    print(f"  {len(junctions)} junction nodes, "
-          f"{len(through_pts)} through-nodes, "
-          f"{len(endpoint_pts)} dead-ends")
-
-    # ------------------------------------------------------------------
-    # 6. SPLIT EDGES at hubs + junctions using STRtree (replaces MultiPoint
-    #    over all edges — only queries nearby split points per edge)
-    # ------------------------------------------------------------------
-    all_split_pts = junctions.geometry.tolist()
-
-    if not all_split_pts:
-        edges_split = edges_gdf.copy()
-    else:
-        # TODO: SNAP_TOL = 1.0 m controls which junction points are considered
-        # "on" an edge for splitting.  If two edges share a node but their
-        # coordinates differ by > 1 m before rounding (e.g. from a misaligned
-        # source shapefile), the split is skipped and they remain disconnected.
-        # Inspect the gap histogram after reformat_network() to confirm 1 m
-        # is appropriate for the ALLTAG dataset; increase if gaps persist.
-        tree = STRtree(all_split_pts)
-        new_edges = []
-        for _, edge in edges_gdf.iterrows():
-            nearby_idx = tree.query(edge.geometry.buffer(SNAP_TOL))
-            if len(nearby_idx) == 0:
-                new_edges.append(edge)
-                continue
-            try:
-                pt_coll = MultiPoint([all_split_pts[i] for i in nearby_idx])
-                snapped = snap(edge.geometry, pt_coll, SNAP_TOL)
-                parts   = split(snapped, pt_coll)
-                if len(parts.geoms) > 1:
-                    for part in parts.geoms:
-                        row = edge.copy()
-                        row['geometry'] = part
-                        row['length_m'] = part.length
-                        new_edges.append(row)
-                else:
-                    new_edges.append(edge)
-            except Exception as e:
-                print(f"  Warning: could not split edge {edge.name}: {e}")
-                new_edges.append(edge)
-
-        edges_split = gpd.GeoDataFrame(new_edges, crs="EPSG:2056").reset_index(drop=True)
-
-    edges_split = edges_split[edges_split.geometry.length > 0.1].copy()
+    # b) Assign fresh sequential edge IDs
     edges_split['ID_edge'] = range(len(edges_split))
+    edges_split['length_m'] = edges_split.geometry.length
 
-    # ------------------------------------------------------------------
-    # 7. BUILD NODE TABLE via coordinate dict (replaces two sjoin calls)
-    # ------------------------------------------------------------------
+    # c) Build deduplicated node table from actual edge endpoints
+    ep_counts   = Counter()
     coord_to_id = {}
     node_rows   = []
 
-    def _get_or_add(coord):
+    for geom in edges_split.geometry:
+        ep_counts[_xy(geom.coords[0])]  += 1
+        ep_counts[_xy(geom.coords[-1])] += 1
+
+    def _get_node(coord):
         key = _xy(coord)
         if key not in coord_to_id:
             nid = len(coord_to_id)
@@ -430,61 +708,43 @@ def reformat_network():
             node_rows.append({'ID_point': nid, 'geometry': Point(key)})
         return coord_to_id[key]
 
-    start_ids = [_get_or_add(g.coords[0])  for g in edges_split.geometry]
-    end_ids   = [_get_or_add(g.coords[-1]) for g in edges_split.geometry]
-
-    edges_split['start'] = start_ids
-    edges_split['end']   = end_ids
+    edges_split['start'] = [_get_node(g.coords[0])  for g in edges_split.geometry]
+    edges_split['end']   = [_get_node(g.coords[-1]) for g in edges_split.geometry]
 
     nodes_gdf = gpd.GeoDataFrame(node_rows, crs="EPSG:2056")
 
-    # ------------------------------------------------------------------
-    # 8. FLAG intersections, through-nodes, dead-ends and hub destinations
-    # ------------------------------------------------------------------
-    junc_keys     = {(round(pt.x, COORD_ROUND), round(pt.y, COORD_ROUND)) for pt in junc_pts}
-    nodes_gdf['is_intersection'] = nodes_gdf['geometry'].apply(
-        lambda g: int(_xy(g.coords[0]) in junc_keys)
-    ).astype(np.int8)
+    # d) Flag node types from endpoint degree
+    nodes_gdf['is_intersection'] = nodes_gdf.geometry.apply(
+        lambda g: int(ep_counts[_xy(g.coords[0])] >= 3)).astype(np.int8)
+    nodes_gdf['is_through_point'] = nodes_gdf.geometry.apply(
+        lambda g: int(ep_counts[_xy(g.coords[0])] == 2)).astype(np.int8)
+    nodes_gdf['is_endpoint'] = nodes_gdf.geometry.apply(
+        lambda g: int(ep_counts[_xy(g.coords[0])] == 1)).astype(np.int8)
 
-    nodes_gdf['is_through_point'] = nodes_gdf['geometry'].apply(
-        lambda g: int(_xy(g.coords[0]) in through_pts)
-    ).astype(np.int8)
 
-    nodes_gdf['is_endpoint'] = nodes_gdf['geometry'].apply(
-        lambda g: int(_xy(g.coords[0]) in endpoint_pts)
-    ).astype(np.int8)
+    # e) Save — drop columns that would cause GPKG case-collision or are too large
+    lc = Counter(c.lower() for c in edges_split.columns)
+    drop_upper = [c for c in edges_split.columns if c != c.lower() and lc[c.lower()] > 1]
+    for col in drop_upper + ['visual_geom']:
+        if col in edges_split.columns:
+            edges_split = edges_split.drop(columns=[col])
 
-    nodes_gdf['is_destination'] = np.int8(0)
-
-    # ------------------------------------------------------------------
-    # 9. EXPORT
-    # ------------------------------------------------------------------
     os.makedirs('data/Network/processed', exist_ok=True)
-
-    # Drop uppercase columns that have a separate lowercase duplicate.
-    # GPKG/SQLite is case-insensitive: VERBINDUNG + verbindung → "Error adding field".
-    _lower_count = Counter(c.lower() for c in edges_split.columns)
-    drop_upper = [c for c in edges_split.columns
-                  if c != c.lower() and _lower_count[c.lower()] > 1]
-    if drop_upper:
-        edges_split = edges_split.drop(columns=drop_upper)
-
-    # Also drop columns whose names would be laundered/truncated by GDAL
-    # (e.g. 'visual_geom' carrying WKT strings that belong in a separate layer)
-    for _drop in ('visual_geom',):
-        if _drop in edges_split.columns:
-            edges_split = edges_split.drop(columns=[_drop])
-
-    nodes_gdf.to_file('data/Network/processed/points.gpkg', driver='GPKG')
+    nodes_gdf.to_file('data/Network/processed/points.gpkg',  driver='GPKG')
     edges_split.to_file('data/Network/processed/edges.gpkg', driver='GPKG')
+    nodes_gdf.drop(columns='geometry').to_csv('data/Network/processed/points_export.csv', index=False)
+    edges_split.drop(columns='geometry').to_csv('data/Network/processed/edges_export.csv', index=False)
 
-    print(f"  -> {len(edges_split)} edges, {len(nodes_gdf)} nodes")
-    print(f"     {nodes_gdf['is_intersection'].sum()} intersections, "
-          f"{nodes_gdf['is_through_point'].sum()} through-nodes, "
-          f"{nodes_gdf['is_endpoint'].sum()} dead-ends, "
-          f"{nodes_gdf['is_destination'].sum()} hub destinations")
-    print(f"     {edges_split['is_development'].sum()} Netzlücken, "
-          f"{edges_split['is_schwachstelle'].sum()} Schwachstellen")
+    print(f"\n  → {len(edges_split)} edges, {len(nodes_gdf)} nodes")
+    print(f"     {nodes_gdf['is_intersection'].sum()} intersections  "
+          f"{nodes_gdf['is_through_point'].sum()} through-nodes  "
+          f"{nodes_gdf['is_endpoint'].sum()} dead-ends")
+    if 'is_development' in edges_split.columns:
+        print(f"     {edges_split['is_development'].sum()} Netzlücken  "
+              f"{edges_split['is_schwachstelle'].sum()} Schwachstellen")
+    # ── Step 5: Connect disconnected components ───────────────────────────────
+    nodes_gdf, edges_split = _connect_components(nodes_gdf, edges_split, COORD_ROUND)
+
     print("\nreformat_network: end\n")
 
     return nodes_gdf, edges_split
@@ -536,127 +796,64 @@ def plot_network_classified(nodes_gdf, edges_gdf, figsize=(14, 10)):
     plt.show()
     print("Plot saved → data/Network/processed/network_plot.png")
 
-
-
-
-
-
-
-
-
-def get_edge_attributes():
-    """
-    Assigns cycling-specific free-flow speed, comfort index, and safety risk
-    to edges based on ROUTENTYP from the ALLTAG dataset.
-
-    Empirical calibration (Bernardi et al. observed 12.5–26.5 km/h across sites):
-      - Dedicated commuter cycling highways (Velobahn):  near observed max ~25 km/h
-      - Main commuter connections (Hauptverbindung):     above avg, ~20 km/h
-      - Secondary mixed-use paths (Nebenverbindung):     matches annual avg 15–16 km/h
-      - Recreational / shared paths (Freizeitverbindung): below avg due to 5–30%
-                                                           pedestrian share → 13 km/h
-      - Default / unclassified:                          empirical avg 15 km/h
-
-    ROUTENTYP → ffs (km/h) | comfort CLI | safety risk weight:
-        Velobahn / Veloschnellroute     → 20 km/h | 1.00 | 1.0
-        Hauptverbindung                 → 20 km/h | 0.75 | 2.0
-        Nebenverbindung                 → 18 km/h | 0.50 | 3.0
-        Zusätzliche Freizeitverbindung  → 18 km/h | 0.25 | 4.0
-        default / unclassified          → 15 km/h | 0.40 | 5.0
-    """
-    ROUTENTYP_ATTRS = {
-        'Velobahn':                      {'ffs': 20, 'cli': 1.00, 'risk_w': 1.0},
-        'Veloschnellroute':              {'ffs': 20, 'cli': 1.00, 'risk_w': 1.0},
-        'Hauptverbindung':               {'ffs': 20, 'cli': 0.75, 'risk_w': 2.0},
-        'Nebenverbindung':               {'ffs': 18, 'cli': 0.50, 'risk_w': 3.0},
-        'Zusätzliche Freizeitverbindung':{'ffs': 18, 'cli': 0.25, 'risk_w': 4.0},
-    }
-    DEFAULT_ATTRS = {'ffs': 15, 'cli': 0.40, 'risk_w': 5.0}
-
-    edges = gpd.read_file('data/Network/processed/edges_with_attribute.gpkg')
-    if edges.crs is None:
-        edges = edges.set_crs("EPSG:2056")
-
-    print(f"  Edge columns: {edges.columns.tolist()}")
-
-    # ------------------------------------------------------------------
-    # 1. ROUTENTYP → ffs, comfort index, safety risk weight
-    #    Use startswith match to survive any column name truncation
-    # ------------------------------------------------------------------
-    routentyp_col = next((c for c in edges.columns if c.upper().startswith('ROUTENTYP')), None)
-
-    def lookup(routentyp, key):
-        return ROUTENTYP_ATTRS.get(str(routentyp).strip(), DEFAULT_ATTRS)[key]
-
-    if routentyp_col:
-        edges['ffs']    = edges[routentyp_col].apply(lambda r: lookup(r, 'ffs'))
-        edges['cli']    = edges[routentyp_col].apply(lambda r: lookup(r, 'cli'))
-        edges['risk_w'] = edges[routentyp_col].apply(lambda r: lookup(r, 'risk_w'))
-    else:
-        print("  Warning: ROUTENTYP column not found — applying defaults")
-        edges['ffs']    = DEFAULT_ATTRS['ffs']
-        edges['cli']    = DEFAULT_ATTRS['cli']
-        edges['risk_w'] = DEFAULT_ATTRS['risk_w']
-
-    # ------------------------------------------------------------------
-    # 2. FAHRRICHTUNGSTYP → oneway flag
-    #    startswith match handles truncation (FAHRRICHTU, FAHRRICHTUNG, etc.)
-    # ------------------------------------------------------------------
-    fahrricht_col = next((c for c in edges.columns if c.upper().startswith('FAHRRICHT')), None)
-
-    if fahrricht_col:
-        edges['oneway'] = edges[fahrricht_col].apply(
-            lambda x: 1 if str(x).strip() == 'eine Richtung' else 0
-        )
-        print(f"  Using column '{fahrricht_col}' for oneway flag")
-    else:
-        print("  Warning: FAHRRICHTUNGSTYP column not found — defaulting to bidirectional")
-        edges['oneway'] = 0
-
-    # ------------------------------------------------------------------
-    # 3. Travel time per edge [minutes] = length / ffs
-    # ------------------------------------------------------------------
-    if 'length_m' in edges.columns:
-        edges['tt_min'] = (edges['length_m'] / 1000) / edges['ffs'] * 60
-    else:
-        edges['tt_min'] = (edges.geometry.length / 1000) / edges['ffs'] * 60
-
-    # TODO: ID_edge is reassigned here as a sequential range over the entire
-    # edges_with_attribute.gpkg file.  However, edges_corridor.gpkg is written
-    # by network_in_corridor() BEFORE get_edge_attributes() runs, so the
-    # corridor file does NOT yet have ID_edge.  _build_base_gdf() in
-    # OSM_network.py tries to merge ffs from edges_with_attribute.gpkg by
-    # ID_edge.  This only works if network_in_corridor() preserves the ID_edge
-    # values from reformat_network() in its output.  Confirm the ID_edge values
-    # are consistent across both files; if not, reorder steps in main.py so
-    # get_edge_attributes() runs before network_in_corridor().
-    edges['ID_edge'] = range(len(edges))
-
-    edges.to_file('data/Network/processed/edges_with_attribute.gpkg', driver='GPKG')
-
-    print(f"  -> {len(edges)} edges attributed")
-    print(f"     ffs range:      {edges['ffs'].min()}–{edges['ffs'].max()} km/h")
-    print(f"     cli range:      {edges['cli'].min():.2f}–{edges['cli'].max():.2f}")
-    print(f"     risk_w range:   {edges['risk_w'].min():.1f}–{edges['risk_w'].max():.1f}")
-    print(f"     one-way edges:  {edges['oneway'].sum()}")
-    print(f"     tt_min range:   {edges['tt_min'].min():.1f}–{edges['tt_min'].max():.1f} min")
-
-    return edges
-
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
-import geopandas as gpd
-
 def plot_edge_attributes(edges=None):
     if edges is None:
-        edges = gpd.read_file('data/Network/processed/edges_with_attribute.gpkg')
+        edges = gpd.read_file('data/Network/processed/edges.gpkg')
+
+    edges = edges.copy()
+
+    # ── Derive ffs and tt_min from ROUTENTYP if not already present ───────────
+    _FFS = {
+        'Velobahn':                       20,
+        'Veloschnellroute':               20,
+        'Hauptverbindung':                18,
+        'Nebenverbindung':                16,
+        'Zusätzliche Freizeitverbindung': 18,
+    }
+    if 'ffs' not in edges.columns:
+        edges['ffs'] = edges['ROUTENTYP'].map(lambda rt: _FFS.get(rt, 20))
+    if 'tt_min' not in edges.columns:
+        edges['tt_min'] = (edges['length_m'] / 1000) / edges['ffs'] * 60
+
+    # ── Derive avg_incline_pct — batch all sample points in one raster read ───
+    if 'avg_incline_pct' not in edges.columns:
+        _elev_path = 'data/elevation_model/elevation.tif'
+        if os.path.exists(_elev_path):
+            N_SAMPLES = 10
+            with rasterio.open(_elev_path) as _src:
+                _elev_data      = _src.read(1).astype(float)
+                _elev_transform = _src.transform
+                _elev_nodata    = _src.nodata
+            if _elev_nodata is not None:
+                _elev_data[_elev_data == _elev_nodata] = np.nan
+            h, w = _elev_data.shape
+
+            inclines = []
+            for geom in edges.geometry:
+                if geom is None or geom.length == 0:
+                    inclines.append(np.nan)
+                    continue
+                pts  = [geom.interpolate(f, normalized=True) for f in np.linspace(0, 1, N_SAMPLES)]
+                rows, cols = rasterio.transform.rowcol(
+                    _elev_transform, [p.x for p in pts], [p.y for p in pts])
+                rows = np.clip(rows, 0, h - 1)
+                cols = np.clip(cols, 0, w - 1)
+                elevs = _elev_data[rows, cols]          # vectorised array index — no Python loop
+                valid = elevs[~np.isnan(elevs)]
+                if len(valid) < 2:
+                    inclines.append(np.nan)
+                else:
+                    seg_len = geom.length / (N_SAMPLES - 1)
+                    inclines.append(float(np.abs(np.diff(valid)).mean() / seg_len * 100))
+            edges['avg_incline_pct'] = inclines
+        else:
+            edges['avg_incline_pct'] = np.nan
 
     fig, axes = plt.subplots(1, 3, figsize=(20, 7))
 
     # --- 1. Free-flow speed ---
     ax = axes[0]
-    speed_colors = {25: '#2ecc71', 20: '#3498db', 18: '#9b59b6', 15: '#e74c3c'}
+    speed_colors = {20: '#3498db', 18: '#9b59b6', 15: '#e74c3c'}
     for speed, color in speed_colors.items():
         subset = edges[edges['ffs'] == speed]
         if len(subset):
@@ -666,26 +863,26 @@ def plot_edge_attributes(edges=None):
     ax.legend(fontsize=8)
     ax.set_aspect('equal')
 
-    # --- 2. Comfort index (CLI) ---
+    # --- 2. Average incline — single vectorised plot call with colour array ---
     ax = axes[1]
-    norm = mcolors.Normalize(vmin=0, vmax=1)
-    cmap = cm.RdYlGn
-    for _, row in edges.iterrows():
-        color = cmap(norm(row['cli']))
-        gpd.GeoDataFrame([row], crs=edges.crs).plot(ax=ax, color=[color], linewidth=1.5)
+    incline_vals = edges['avg_incline_pct'].fillna(0).values
+    norm = mcolors.Normalize(vmin=0, vmax=max(incline_vals.max(), 8))
+    cmap = cm.RdYlGn_r
+    colors = [cmap(norm(v)) for v in incline_vals]
+    edges.plot(ax=ax, color=colors, linewidth=1.5)
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    plt.colorbar(sm, ax=ax, label='Comfort index (CLI)', shrink=0.6)
-    ax.set_title('Comfort Index (CLI)', fontsize=12)
+    plt.colorbar(sm, ax=ax, label='Avg incline (%)', shrink=0.6)
+    ax.set_title('Average Incline (%)', fontsize=12)
     ax.set_aspect('equal')
 
-    # --- 3. Travel time ---
+    # --- 3. Travel time — single vectorised plot call with colour array ---
     ax = axes[2]
-    norm2 = mcolors.Normalize(vmin=edges['tt_min'].min(), vmax=edges['tt_min'].max())
+    tt_vals = edges['tt_min'].values
+    norm2 = mcolors.Normalize(vmin=tt_vals.min(), vmax=tt_vals.max())
     cmap2 = cm.Blues
-    for _, row in edges.iterrows():
-        color = cmap2(norm2(row['tt_min']))
-        gpd.GeoDataFrame([row], crs=edges.crs).plot(ax=ax, color=[color], linewidth=1.5)
+    colors2 = [cmap2(norm2(v)) for v in tt_vals]
+    edges.plot(ax=ax, color=colors2, linewidth=1.5)
     sm2 = cm.ScalarMappable(cmap=cmap2, norm=norm2)
     sm2.set_array([])
     plt.colorbar(sm2, ax=ax, label='Travel time (min)', shrink=0.6)
@@ -698,7 +895,7 @@ def plot_edge_attributes(edges=None):
     plt.show()
     print("Plot saved → data/Network/processed/edge_attributes_plot.png")
 
-def network_in_corridor(polygon, access_point_min_dist=0):
+def network_in_corridor(polygon):
     print(f"network_in_corridor(): start")
     os.makedirs('data/Network/processed', exist_ok=True)
 
@@ -748,27 +945,19 @@ def network_in_corridor(polygon, access_point_min_dist=0):
     print(f"  Access points in corridor → access_points_corridor.gpkg + .csv  ({len(access_points_corridor)} rows)")
 
     # ------------------------------------------------------------------
-    # 4. EDGES strictly inside corridor
-    # ------------------------------------------------------------------
-    edges_corridor = gpd.sjoin(edges, poly_gdf, how='inner', predicate='within') \
-                        .drop(columns=['index_right'], errors='ignore') \
-                        .reset_index(drop=True)
-    edges_corridor.to_file('data/Network/processed/edges_corridor.gpkg', driver='GPKG')
-    print(f"  Edges in corridor → edges_corridor.gpkg  ({len(edges_corridor)} rows)")
-
-    # ------------------------------------------------------------------
-    # 5. EDGES crossing the corridor border (exactly one endpoint inside)
+    # 4. FLAG edges with corridor membership
     # ------------------------------------------------------------------
     def one_endpoint_inside(geom, poly):
         return poly.contains(Point(geom.coords[0])) != poly.contains(Point(geom.coords[-1]))
 
-    edges['on_border'] = edges.geometry.apply(lambda g: one_endpoint_inside(g, poly_geom))
-    edges_border = edges[edges['on_border']].copy().reset_index(drop=True)
-    edges_border.to_file('data/Network/processed/edges_corridor_border.gpkg', driver='GPKG')
-    print(f"  Edges on border   → edges_corridor_border.gpkg  ({len(edges_border)} rows)")
+    edges['within_corridor'] = edges.geometry.apply(lambda g: poly_geom.contains(g))
+    edges['on_border']       = edges.geometry.apply(lambda g: one_endpoint_inside(g, poly_geom))
+
+    edges_corridor = edges[edges['within_corridor']].copy().reset_index(drop=True)
+    edges_border   = edges[edges['on_border']].copy().reset_index(drop=True)
 
     # ------------------------------------------------------------------
-    # 6. FLAG nodes with corridor membership
+    # 5. FLAG nodes with corridor membership
     # ------------------------------------------------------------------
     points['within_corridor'] = points.geometry.apply(lambda g: poly_geom.contains(g))
 
@@ -787,11 +976,6 @@ def network_in_corridor(polygon, access_point_min_dist=0):
         lambda x: x.notnull().any()
     )
     points['on_corridor_border'] = on_border_flag.reindex(points.index, fill_value=False).values
-
-    # ------------------------------------------------------------------
-    # 7. FLAG edges with corridor membership
-    # ------------------------------------------------------------------
-    edges['within_corridor'] = edges.geometry.apply(lambda g: poly_geom.contains(g))
 
     # ------------------------------------------------------------------
     # 8. SAVE enriched full datasets
@@ -826,80 +1010,143 @@ def network_in_corridor(polygon, access_point_min_dist=0):
     for flag in ('is_intersection', 'is_through_point', 'is_endpoint'):
         if flag in points_corridor.columns:
             print(f"    {points_corridor[flag].sum()} {flag.replace('is_', '')} in corridor")
-    print(f"    {len(edges_corridor)} / {len(edges)} edges inside corridor")
-    print(f"    {len(edges_border)} edges crossing corridor border")
+    print(f"    {edges['within_corridor'].sum()} / {len(edges)} edges inside corridor")
+    print(f"    {edges['on_border'].sum()} edges crossing corridor border")
 
     print(f"network_in_corridor(): end")
     return points_corridor, edges_corridor, edges_border
 
 
-
-
 def plot_corridor_network(polygon, points_corridor, edges_corridor, edges_border, points_full=None, edges_full=None):
-    fig, ax = plt.subplots(figsize=(14, 11))
+    import numpy as np
 
-    # --- Background: full network (optional, greyed out) ---
-    if edges_full is not None:
-        edges_full.plot(ax=ax, color='lightgray', linewidth=0.5, alpha=0.5, zorder=1)
-    if points_full is not None:
-        points_full.plot(ax=ax, color='lightgray', markersize=2, alpha=0.4, zorder=2)
+    fig, ax = plt.subplots(figsize=(22, 16))
 
-    # --- Corridor polygon ---
-    import geopandas as gpd
+    # --- Corridor polygon background only (no full-canton context) ---
     poly_gdf = gpd.GeoDataFrame({'geometry': [polygon]}, crs="EPSG:2056")
-    poly_gdf.boundary.plot(ax=ax, color='black', linewidth=1.5, linestyle='--', zorder=3)
-    poly_gdf.plot(ax=ax, color='lightyellow', alpha=0.3, zorder=2)
+    poly_gdf.plot(ax=ax, facecolor='#F7F9FC', edgecolor='none', zorder=0)
+    poly_gdf.boundary.plot(ax=ax, color='#333333', linewidth=2.0, linestyle='--', zorder=5)
 
     # --- Edges inside corridor ---
     if len(edges_corridor):
-        edges_corridor.plot(ax=ax, color='steelblue', linewidth=1.2, alpha=0.8, zorder=4)
+        edges_corridor.plot(ax=ax, color='#2166AC', linewidth=1.8, alpha=0.85, zorder=3)
 
     # --- Border-crossing edges ---
     if len(edges_border):
-        edges_border.plot(ax=ax, color='darkorange', linewidth=1.5, linestyle=':', alpha=0.9, zorder=5)
+        edges_border.plot(ax=ax, color='#D6604D', linewidth=2.0, linestyle=':', alpha=0.9, zorder=4)
 
-    # --- Nodes inside corridor: intersections vs endpoints vs through ---
+    # --- Nodes: intersections / dead-ends / through-nodes ---
+    id_col = 'ID_point' if 'ID_point' in points_corridor.columns else None
+
+    def _label_nodes(subset, fontsize=6, color='#1A1A1A', offset=3):
+        """Annotate each node with its ID_point value."""
+        if id_col is None:
+            return
+        for _, row in subset.iterrows():
+            ax.annotate(
+                str(int(row[id_col])),
+                xy=(row.geometry.x, row.geometry.y),
+                xytext=(offset, offset),
+                textcoords='offset points',
+                fontsize=fontsize,
+                color=color,
+                fontweight='bold',
+                zorder=9,
+            )
+
     if 'is_intersection' in points_corridor.columns and 'is_endpoint' in points_corridor.columns:
         intersections = points_corridor[points_corridor['is_intersection'] == 1]
-        endpoints = points_corridor[points_corridor['is_endpoint'] == 1]
-        through = points_corridor[
+        endpoints     = points_corridor[points_corridor['is_endpoint']     == 1]
+        through       = points_corridor[
             (points_corridor['is_intersection'] == 0) &
-            (points_corridor['is_endpoint'] == 0)
-            ]
+            (points_corridor['is_endpoint']     == 0)
+        ]
         if len(through):
             ax.scatter(through.geometry.x, through.geometry.y,
-                       s=10, color='gray', alpha=0.6, zorder=6)
+                       s=18, color='#888888', alpha=0.6, zorder=6, linewidths=0)
+            _label_nodes(through, fontsize=5, color='#555555')
         if len(intersections):
             ax.scatter(intersections.geometry.x, intersections.geometry.y,
-                       s=40, color='orange', alpha=0.9, zorder=7)
+                       s=60, color='#F4A800', alpha=0.95, zorder=7,
+                       edgecolors='#5C3A00', linewidths=0.5)
+            _label_nodes(intersections, fontsize=6, color='#3A2000')
         if len(endpoints):
             ax.scatter(endpoints.geometry.x, endpoints.geometry.y,
-                       s=25, color='red', alpha=0.9, zorder=7)
+                       s=40, color='#D73027', alpha=0.95, zorder=7,
+                       edgecolors='#7A0000', linewidths=0.5)
+            _label_nodes(endpoints, fontsize=6, color='#7A0000')
+
+        n_inter   = len(intersections)
+        n_ends    = len(endpoints)
+        n_through = len(through)
     else:
-        points_corridor.plot(ax=ax, color='steelblue', markersize=10, zorder=6)
+        points_corridor.plot(ax=ax, color='#2166AC', markersize=12, zorder=6)
+        if id_col:
+            _label_nodes(points_corridor, fontsize=6, color='#1A1A1A')
+        n_inter = n_ends = n_through = 0
+
+    # --- Tight view: clip axes to corridor bounding box + small margin ---
+    xmin, ymin, xmax, ymax = polygon.bounds
+    margin = max((xmax - xmin), (ymax - ymin)) * 0.03
+    ax.set_xlim(xmin - margin, xmax + margin)
+    ax.set_ylim(ymin - margin, ymax + margin)
+
+    # --- Reference grid: major lines every 1000 m, minor every 500 m (labelled in km) ---
+    grid_major = 1000   # 1 km major
+    grid_minor = 500    # 500 m minor
+
+    x0 = int(np.floor((xmin - margin) / grid_major)) * grid_major
+    x1 = int(np.ceil ((xmax + margin) / grid_major)) * grid_major
+    y0 = int(np.floor((ymin - margin) / grid_major)) * grid_major
+    y1 = int(np.ceil ((ymax + margin) / grid_major)) * grid_major
+
+    for xg in np.arange(x0, x1 + 1, grid_minor):
+        lw = 0.6 if xg % grid_major == 0 else 0.25
+        alpha = 0.35 if xg % grid_major == 0 else 0.18
+        ax.axvline(xg, color='#4A4A4A', linewidth=lw, alpha=alpha, zorder=1)
+    for yg in np.arange(y0, y1 + 1, grid_minor):
+        lw = 0.6 if yg % grid_major == 0 else 0.25
+        alpha = 0.35 if yg % grid_major == 0 else 0.18
+        ax.axhline(yg, color='#4A4A4A', linewidth=lw, alpha=alpha, zorder=1)
+
+    # Axis tick labels at every km, formatted as integers
+    xticks = np.arange(x0, x1 + 1, grid_major)
+    yticks = np.arange(y0, y1 + 1, grid_major)
+    ax.set_xticks(xticks)
+    ax.set_yticks(yticks)
+    ax.set_xticklabels([f'{int(x):,}' for x in xticks], fontsize=9, rotation=30, ha='right')
+    ax.set_yticklabels([f'{int(y):,}' for y in yticks], fontsize=9)
 
     # --- Legend ---
     legend_elements = [
-        Line2D([0], [0], color='steelblue', linewidth=1.5, label=f'Edges in corridor ({len(edges_corridor)})'),
-        Line2D([0], [0], color='darkorange', linewidth=1.5, linestyle=':', label=f'Border-crossing edges ({len(edges_border)})'),
-        Line2D([0], [0], color='black', linewidth=1.5, linestyle='--', label='Corridor boundary'),
-        mpatches.Patch(facecolor='orange', label='Intersections'),
-        mpatches.Patch(facecolor='red',    label='Dead ends'),
-        mpatches.Patch(facecolor='gray',   label='Through-nodes'),
+        Line2D([0], [0], color='#2166AC', linewidth=2.0,
+               label=f'Edges in corridor ({len(edges_corridor)})'),
+        Line2D([0], [0], color='#D6604D', linewidth=2.0, linestyle=':',
+               label=f'Border-crossing edges ({len(edges_border)})'),
+        Line2D([0], [0], color='#333333', linewidth=2.0, linestyle='--',
+               label='Corridor boundary'),
+        mpatches.Patch(facecolor='#F4A800', edgecolor='#5C3A00', label=f'Intersections ({n_inter})'),
+        mpatches.Patch(facecolor='#D73027', edgecolor='#7A0000', label=f'Dead ends ({n_ends})'),
+        mpatches.Patch(facecolor='#888888',                      label=f'Through-nodes ({n_through})'),
     ]
-    ax.legend(handles=legend_elements, loc='upper right', framealpha=0.9)
+    ax.legend(handles=legend_elements, loc='upper right',
+              fontsize=10, framealpha=0.92, edgecolor='#CCCCCC')
 
-    ax.set_title('Cycling Network — Corridor Clip', fontsize=14)
-    ax.set_xlabel('Easting (EPSG:2056)')
-    ax.set_ylabel('Northing (EPSG:2056)')
+    n_pts = len(points_corridor)
+    ax.set_title(
+        f'Cycling Network — Corridor  '
+        f'({len(edges_corridor)} edges · {n_pts} nodes · '
+        f'{len(edges_border)} border-crossing)\n'
+        f'{n_inter} intersections · {n_ends} dead-ends · {n_through} through-nodes',
+        fontsize=14, fontweight='bold', pad=12,
+    )
+    ax.set_xlabel('Easting LV95 [m]', fontsize=11)
+    ax.set_ylabel('Northing LV95 [m]', fontsize=11)
     ax.set_aspect('equal')
     plt.tight_layout()
-    plt.savefig('data/Network/processed/corridor_plot.png', dpi=150)
+    plt.savefig('data/Network/processed/corridor_plot.png', dpi=250, bbox_inches='tight')
     plt.show()
     print("Plot saved → data/Network/processed/corridor_plot.png")
-
-
-
 
 
 def only_links_to_corridor():
@@ -1103,6 +1350,20 @@ def all_protected_area_to_raster(suffix=""):
             dst.write(updated_data, 1)
 
 
+def _write_zero_raster(path, limits, rastersize=100):
+    """Write an all-zero GeoTIFF placeholder when no data exists for a corridor."""
+    width  = max(1, int((limits[2] - limits[0]) / rastersize))
+    height = max(1, int((limits[3] - limits[1]) / rastersize))
+    transform = rasterio.transform.from_bounds(
+        limits[0], limits[1], limits[2], limits[3], width, height
+    )
+    profile = dict(driver='GTiff', dtype='float64', width=width, height=height,
+                   count=1, crs='epsg:2056', transform=transform)
+    with rasterio.open(path, 'w', **profile) as dst:
+        dst.write(np.zeros((height, width), dtype=np.float64), 1)
+    print(f"  Written zero-placeholder raster → {path}")
+
+
 def landuse(limits):
     # Read the CSV file into a Pandas DataFrame
     # Arealstatistik - 1985, 1997, 2009, 2018
@@ -1127,10 +1388,15 @@ def landuse(limits):
     protected_categories = [1, 2, 3, 7, 9]
 
     protected_area = areal_stat[areal_stat["AS18_27"].isin(protected_categories)]
-    protected_area_full = fill_raster_dataframe(protected_area)
-    # Correction of the reference of each raster cell from bottom left to top left
+
+    out_path = r"data/landuse_landcover/processed/protected_area.tif"
+    protected_area_full = fill_raster_dataframe(protected_area) if not protected_area.empty else pd.DataFrame()
+    if protected_area_full.empty or protected_area_full["E_COORD"].dropna().empty:
+        _write_zero_raster(out_path, limits)
+        return
+
     protected_area_full["N_COORD"] = protected_area_full["N_COORD"] + 100
-    csv_to_tiff(protected_area_full, attribute="AS18_27", path=r"data/landuse_landcover/processed/protected_area.tif")
+    csv_to_tiff(protected_area_full, attribute="AS18_27", path=out_path)
     # print(areal_stat.head(50).to_string())
 
 
@@ -1148,12 +1414,16 @@ def get_unproductive_area(limits):
     # woody vegetation (25) are removed — cycle paths through these are common and permitted.
     unproductive_zones = [26, 27]
     unproductive_area = areal_stat[areal_stat["AS18_27"].isin(unproductive_zones)]
-    #print(unproductive_area.shape)
-    unproductive_area_full = fill_raster_dataframe(unproductive_area)
-    #print(unproductive_area_full.head(10).to_string())
+
+    out_path = r"data/landuse_landcover/processed/unproductive_area.tif"
+    unproductive_area_full = fill_raster_dataframe(unproductive_area) if not unproductive_area.empty else pd.DataFrame()
+    if unproductive_area_full.empty or unproductive_area_full["E_COORD"].dropna().empty:
+        _write_zero_raster(out_path, limits)
+        return
+
     # Correction of the reference of each raster cell from bottom left to top left
     unproductive_area_full["N_COORD"] = unproductive_area_full["N_COORD"] + 100
-    csv_to_tiff(unproductive_area_full, attribute="AS18_27", path=r"data/landuse_landcover/processed/unproductive_area.tif")
+    csv_to_tiff(unproductive_area_full, attribute="AS18_27", path=out_path)
 
     # AS85_17 17 Klassen gemäss Standardnomenklatur der Arealstatistik 1979/85
     # AS85_4  4 Hauptbereiche gemäss Standardnomenklatur der Arealstatistik 1979/85
@@ -1164,171 +1434,3 @@ def get_unproductive_area(limits):
 
 
 
-"""
-def import_pendler_matrix(
-    path_csv: str = 'data/OD/pendler_matrix.csv',
-    canton_filter: str = 'ZH',
-    cycling_mode_share: float = 0.05,
-    max_distance_km: float = 15.0,
-    output_dir: str = 'data/OD',
-):
-    
-    Import and process the BFS Pendlermatrix (OD matrix at Gemeinde level).
-
-    DATA SOURCE — download manually before running:
-      https://www.bfs.admin.ch/asset/de/ts-x-11.04.04.05-2018
-      → CSV file: "Erwerbstätige nach Wohn- und Arbeitsgemeinde"
-
-    Key columns:
-      WOHNKANTON / WOHNGEMEINDE    : residence canton + BFS Gemeinde number
-      ARBEITSKANTON / ARBEITSGEMEINDE : workplace canton + BFS Gemeinde number
-      ERWERBSTAETIGE               : number of commuters on that OD pair
-    
-    os.makedirs(output_dir, exist_ok=True)
-
-    if not os.path.exists(path_csv):
-        raise FileNotFoundError(
-            f"Missing: {path_csv}\n"
-            "Download from: https://www.bfs.admin.ch/asset/de/ts-x-11.04.04.05-2018\n"
-            "Save the CSV as data/OD/pendler_matrix.csv"
-        )
-
-    raw = pd.read_csv(path_csv, sep=';', encoding='utf-8-sig', dtype=str)
-    print(f"  Raw columns: {raw.columns.tolist()}")
-    raw.columns = raw.columns.str.strip().str.upper()
-
-    # Support both old BFS format and newer GEO_* format
-    col_map = {
-        'WOHNKANTON':      next((c for c in raw.columns if c in
-                                 ['WOHNKANTON', 'GEO_CANT_RESID']), None),
-        'WOHNGEMEINDE':    next((c for c in raw.columns if c in
-                                 ['WOHNGEMEINDE', 'GEO_COMM_RESID']), None),
-        'ARBEITSKANTON':   next((c for c in raw.columns if c in
-                                 ['ARBEITSKANTON', 'GEO_CANT_WORK']), None),
-        'ARBEITSGEMEINDE': next((c for c in raw.columns if c in
-                                 ['ARBEITSGEMEINDE', 'GEO_COMM_WORK']), None),
-        'ERWERBSTAETIGE':  next((c for c in raw.columns if c in
-                                 ['ERWERBSTAETIGE', 'VALUE']), None),
-    }
-    missing = [k for k, v in col_map.items() if v is None]
-    if missing:
-        raise KeyError(f"Could not find columns: {missing}. Available: {raw.columns.tolist()}")
-
-    od = raw.rename(columns={v: k for k, v in col_map.items() if v})[list(col_map.keys())].copy()
-    od['ERWERBSTAETIGE'] = pd.to_numeric(od['ERWERBSTAETIGE'], errors='coerce').fillna(0).astype(int)
-    print(f"  Loaded {len(od)} OD pairs, {od['ERWERBSTAETIGE'].sum():,} total commuters")
-
-    # BFS new format uses numeric canton IDs (Zürich = '1'), old format uses 'ZH'
-    # Try both so the function works with either CSV version
-    zh_ids = {canton_filter, '1', 1, 'ZH', 'zh'}
-    mask  = (od['WOHNKANTON'].astype(str).isin([str(x) for x in zh_ids])) |             (od['ARBEITSKANTON'].astype(str).isin([str(x) for x in zh_ids]))
-    od_zh = od[mask].copy().reset_index(drop=True)
-    print(f"  After canton filter ({canton_filter}): {len(od_zh)} pairs, "
-          f"{od_zh['ERWERBSTAETIGE'].sum():,} commuters")
-
-    gem_path = 'data/raw/Gemeinden/gemeinden_centroid.gpkg'
-    if os.path.exists(gem_path):
-        # tlm_hoheitsgebiet is the Gemeinde layer in the swisstopo GeoPackage
-        import fiona
-        layers = fiona.listlayers(gem_path)
-        print(f"  Layers in {gem_path}: {layers}")
-        gem_layer = next(
-            (l for l in layers if 'hoheitsgebiet' in l.lower() or 'gemeinde' in l.lower()),
-            layers[0]
-        )
-        print(f"  Using layer: {gem_layer}")
-        gemeinden = gpd.read_file(gem_path, layer=gem_layer)
-        if gemeinden.crs and gemeinden.crs.to_epsg() != 2056:
-            gemeinden = gemeinden.to_crs("EPSG:2056")
-
-        print(f"  Gemeinde columns: {gemeinden.columns.tolist()}")
-
-        # Find the BFS municipality number column — swisstopo uses OBJECTVAL or GEMNAME
-        id_col = next(
-            (c for c in gemeinden.columns
-             if c.upper() in ['GMDNR', 'BFS_NR', 'GEMEINDENR', 'NR', 'OBJECTVAL',
-                               'BFSNR', 'GEM_NR', 'NUMMER', 'GKZ',
-                               'BFS_NUMMER', 'BFSNUMMER']),
-            None
-        )
-        if id_col is None:
-            # Last resort: any column whose values look like 4-digit numbers
-            for c in gemeinden.columns:
-                if gemeinden[c].dtype in ['int64', 'float64', 'object']:
-                    sample = gemeinden[c].dropna().astype(str).str.strip()
-                    if sample.str.match(r'^[0-9]{1,4}$').mean() > 0.8:
-                        id_col = c
-                        break
-
-        if id_col is None:
-            raise KeyError(
-                f"Cannot find BFS Gemeinde ID column. "
-                f"Available columns: {gemeinden.columns.tolist()}"
-            )
-
-        print(f"  Using ID column: {id_col}")
-        gemeinden['BFS_NR'] = gemeinden[id_col].astype(str).str.strip().str.zfill(4)
-
-        # Filter to Canton Zürich only (kantonsnummer == 1) if column exists
-        if 'kantonsnummer' in gemeinden.columns:
-            # kantonsnummer may be int, float, or string — normalise before compare
-            ktn = gemeinden['kantonsnummer']
-            print(f"  kantonsnummer dtype: {ktn.dtype}, sample: {ktn.dropna().head(3).tolist()}")
-            gemeinden = gemeinden[
-                pd.to_numeric(ktn, errors='coerce').fillna(-1).astype(int) == 1
-            ].copy()
-            print(f"  Gemeinden in Zürich canton: {len(gemeinden)}")
-
-        gemeinden['x'] = gemeinden.geometry.centroid.x
-        gemeinden['y'] = gemeinden.geometry.centroid.y
-        gem_lookup = gemeinden.set_index('BFS_NR')[['x', 'y']].to_dict(orient='index')
-        print(f"  Gemeinde lookup built: {len(gem_lookup)} entries")
-
-        od_zh['WOHNGEMEINDE']    = od_zh['WOHNGEMEINDE'].astype(str).str.zfill(4)
-        od_zh['ARBEITSGEMEINDE'] = od_zh['ARBEITSGEMEINDE'].astype(str).str.zfill(4)
-        od_zh['x_wohn']   = od_zh['WOHNGEMEINDE'].map(lambda g: gem_lookup.get(g, {}).get('x'))
-        od_zh['y_wohn']   = od_zh['WOHNGEMEINDE'].map(lambda g: gem_lookup.get(g, {}).get('y'))
-        od_zh['x_arbeit'] = od_zh['ARBEITSGEMEINDE'].map(lambda g: gem_lookup.get(g, {}).get('x'))
-        od_zh['y_arbeit'] = od_zh['ARBEITSGEMEINDE'].map(lambda g: gem_lookup.get(g, {}).get('y'))
-        matched = od_zh[['x_wohn','y_wohn','x_arbeit','y_arbeit']].notna().all(axis=1).sum()
-        print(f"  OD pairs with both centroids matched: {matched} / {len(od_zh)}")
-
-        if matched == 0:
-            print("  WARNING: No centroids matched — check BFS ID format in CSV vs gpkg")
-            print(f"  Sample WOHNGEMEINDE values: {od_zh['WOHNGEMEINDE'].head(5).tolist()}")
-            print(f"  Sample BFS_NR in lookup:    {list(gem_lookup.keys())[:5]}")
-            od_zh['dist_km'] = np.nan
-        else:
-            od_zh['dist_km'] = np.sqrt(
-                (pd.to_numeric(od_zh['x_arbeit'], errors='coerce') -
-                 pd.to_numeric(od_zh['x_wohn'],   errors='coerce'))**2 +
-                (pd.to_numeric(od_zh['y_arbeit'], errors='coerce') -
-                 pd.to_numeric(od_zh['y_wohn'],   errors='coerce'))**2
-            ) / 1000
-            print(f"  Gemeinde centroids joined — dist range: "
-                  f"{od_zh['dist_km'].min():.1f}–{od_zh['dist_km'].max():.1f} km")
-    else:
-        print(f"  Warning: {gem_path} not found — skipping coord join & distance filter")
-        print(f"  Download Gemeindegrenzen from: https://data.geo.admin.ch")
-        od_zh['dist_km'] = np.nan
-
-    if od_zh['dist_km'].notna().any():
-        before  = len(od_zh)
-        od_zh   = od_zh[od_zh['dist_km'].isna() | (od_zh['dist_km'] <= max_distance_km)
-                        ].copy().reset_index(drop=True)
-        print(f"  After distance filter (<= {max_distance_km} km): "
-              f"{len(od_zh)} pairs (dropped {before - len(od_zh)})")
-
-    od_zh['commuters_total']   = od_zh['ERWERBSTAETIGE']
-    od_zh['commuters_cycling'] = (od_zh['commuters_total'] * cycling_mode_share).round().astype(int)
-    print(f"  Cycling commuters ({cycling_mode_share*100:.0f}% mode share): "
-          f"{od_zh['commuters_cycling'].sum():,}")
-
-    od_zh.to_csv(f'{output_dir}/od_matrix_zh.csv', index=False)
-    od_zh[od_zh['commuters_cycling'] > 0].to_csv(
-        f'{output_dir}/od_matrix_zh_cycling.csv', index=False)
-    print(f"  Saved → {output_dir}/od_matrix_zh.csv")
-    print(f"  Saved → {output_dir}/od_matrix_zh_cycling.csv")
-
-    return od_zh
-"""

@@ -44,11 +44,8 @@ def _get_ap_ids() -> frozenset:
     return _AP_IDS_CACHE
 
 
-def construction_costs(cycle_path, upgrade_factor=0.40):
-    """
-    cycle_path     = cost per metre of new cycle path [CHF/m]
-    upgrade_factor = fraction of cycle_path cost for Schwachstellen upgrades (default 40%)
-    """
+def construction_costs(cycle_path, upgrade):
+
     candidates = gpd.read_file(r"data/Network/processed/development_candidates.gpkg")
     # Connectivity bridges (dev_type='connectivity') are never scored — exclude them.
     candidates = candidates[
@@ -61,7 +58,7 @@ def construction_costs(cycle_path, upgrade_factor=0.40):
 
     # Differentiate build cost: Netzlücke = full build, Schwachstelle = upgrade
     candidates["unit_cost"] = candidates["dev_type"].apply(
-        lambda t: cycle_path if t == "netzluecke" else cycle_path * upgrade_factor
+        lambda t: cycle_path if t == "netzluecke" else upgrade
     )
     candidates["building_costs"] = candidates["path_len"] * candidates["unit_cost"]
 
@@ -502,46 +499,75 @@ def map_coordinates_to_developments():
     df_temp.to_file(r"data/costs/building_externalities.gpkg")
     return
 
-def route_comfort(edges_gdf, duration, VTTS=18.2, good_ffs=25.0, trips_per_year=250, n_samples=20):
+def route_comfort(
+        edges_aug,
+        od_scenarios,
+        points_corridor,
+        VTTS=18.2,
+        duration=50,
+        good_ffs=18.0,
+        trips_per_year=250,
+        scenarios=('s1', 's2', 's3'),
+        n_samples=20,
+):
     """
-    Meister et al. (2021) slope-perceived-distance comfort cost for every link.
+    Route comfort benefit per Netzlücke, per scenario (before/after path comparison).
 
-    For each edge, elevation is sampled from the DEM at n_samples points.
-    Each inter-sample segment is classified by absolute gradient:
+    Algorithm (mirrors compute_dijkstra_tts_od):
 
-      slope < 2 %  → extra perceived distance = 0 %   (flat, no penalty)
-      2 % ≤ slope < 6 %  → +41 %
-      slope ≥ 6 %        → +251 %
+    PRE-COMPUTE per-edge comfort time [h/trip]:
+      comfort_h = length_m × (slope_extra_f) × ε[ROUTENTYP] / (ffs_edge × 1000)
 
-    Source: Meister A., Felder M., Schmid B., Axhausen K.W. (2021)
-    "Route choice modeling for cyclists on urban networks"
+    PRE-COMPUTE base path comfort for all active OD pairs:
+      C_base[i,j] = Σ_{e ∈ shortest path} comfort_h[e]
 
-    Monetisation per edge:
-      extra_perceived_m = link_length_m × weighted_avg_extra_factor
-      extra_time_h      = extra_perceived_m / (good_ffs × 1000)   [h]
-      comfort_cost_chf  = extra_time_h × VTTS × trips_per_year × duration
+    FOR d IN Netzlücken:
+      G_d = G_base with edge d upgraded to good_ffs and built ROUTENTYP
+      C_d[i,j] = Σ_{e ∈ new shortest path} comfort_h[e]
+      FOR s IN scenarios:
+        benefit[d][s] = Σ_{(i,j)} trips[s][i,j] × max(0, C_base[i,j] − C_d[i,j])
+                        × VTTS × trips_per_year × duration
 
-    comfort_benefit is stored as -comfort_cost (negative = discomfort cost to
-    cyclists; steep Netzlücken reduce net benefit in the CBA).
+    Slope VoD multipliers (Meister et al. 2021):
+      < 2 %: +0 %,  2–6 %: +41 %,  ≥ 6 %: +251 %
 
-    Outputs
-    -------
-    data/costs/route_comfort.csv          — per-development CBA values
-    data/costs/route_comfort_network.gpkg — full network edge-level scores
+    Route-type discomfort multiplier ε (Table 3, methodology):
+      Veloschnellroute 1.0,  Hauptverbindung/Freizeit 1.3,
+      Nebenverbindung 1.6,  Netzlücke/connector 2.0
+
+    Saves
+    -----
+    data/costs/route_comfort.csv  — comfort_s1, comfort_s2, comfort_s3 per Netzlücke
     """
-    # Meister et al. extra-perceived-distance multipliers
-    # (fraction of actual length added due to slope class)
-    SLOPE_FLAT_MAX   = 2.0   # %
-    SLOPE_MEDIUM_MAX = 6.0   # %
-    EXTRA_FLAT       = 0.00  # < 2 %  → no penalty
-    EXTRA_MEDIUM     = 0.41  # 2–6 %  → +41 %
-    EXTRA_STEEP      = 2.51  # > 6 %  → +251 %
+    import time
+    import networkx as nx
+    from OSM_network import build_graph_direct
 
+    SLOPE_FLAT_MAX   = 2.0
+    SLOPE_MEDIUM_MAX = 6.0
+    EXTRA_FLAT       = 0.00
+    EXTRA_MEDIUM     = 0.41
+    EXTRA_STEEP      = 2.51
+
+    EPSILON = {
+        'Velobahn':                       1.0,
+        'Veloschnellroute':               1.0,
+        'Hauptverbindung':                1.3,
+        'Nebenverbindung':                1.6,
+        'Zusätzliche Freizeitverbindung': 1.3,
+        'Netzlücke':                      2.0,
+        'connector':                      2.0,
+    }
+    EPSILON_DEFAULT = 2.0
+
+    os.makedirs('data/costs', exist_ok=True)
+    print(f"\n--- ROUTE COMFORT (Dijkstra, good_ffs={good_ffs:.0f} km/h) ---")
+
+    # ── 1. Pre-compute slope extra factor per edge via DEM ────────────────────
     def _sample_elevations(geom, elev_data, elev_transform, elev_nodata):
-        """Return array of (elevation, is_valid) sampled at n_samples along geom."""
         length = geom.length
         if length == 0:
-            return np.array([]), np.array([])
+            return np.array([])
         fracs = np.linspace(0, 1, n_samples)
         pts   = [geom.interpolate(f, normalized=True) for f in fracs]
         rows, cols = rasterio.transform.rowcol(
@@ -559,237 +585,386 @@ def route_comfort(edges_gdf, duration, VTTS=18.2, good_ffs=25.0, trips_per_year=
                 elevs.append(np.nan)
         return np.array(elevs, dtype=float)
 
-    def _extra_factor(geom, elev_data, elev_transform, elev_nodata):
-        """
-        Weighted average extra-perceived-distance factor for one edge.
-        Returns 0.0 if DEM unavailable or too few valid elevation samples.
-        """
-        elevs = _sample_elevations(geom, elev_data, elev_transform, elev_nodata)
-        valid = ~np.isnan(elevs)
+    def _slope_extra_factor(geom, elev_data, elev_transform, elev_nodata):
+        elevs   = _sample_elevations(geom, elev_data, elev_transform, elev_nodata)
+        valid   = ~np.isnan(elevs)
         if valid.sum() < 2:
             return 0.0
-
-        length   = geom.length
-        seg_len  = length / (n_samples - 1)
-        elev_v   = elevs[valid]
-        # absolute gradient per segment (m rise / m run)
-        grad_pct = np.abs(np.diff(elev_v)) / seg_len * 100.0
-
+        seg_len  = geom.length / (n_samples - 1)
+        grad_pct = np.abs(np.diff(elevs[valid])) / seg_len * 100.0
         flat_len   = np.sum(grad_pct <  SLOPE_FLAT_MAX)   * seg_len
         medium_len = np.sum((grad_pct >= SLOPE_FLAT_MAX) & (grad_pct < SLOPE_MEDIUM_MAX)) * seg_len
         steep_len  = np.sum(grad_pct >= SLOPE_MEDIUM_MAX) * seg_len
         total_len  = flat_len + medium_len + steep_len
-
         if total_len == 0:
             return 0.0
+        return (flat_len * EXTRA_FLAT + medium_len * EXTRA_MEDIUM + steep_len * EXTRA_STEEP) / total_len
 
-        return (
-            flat_len   * EXTRA_FLAT   +
-            medium_len * EXTRA_MEDIUM +
-            steep_len  * EXTRA_STEEP
-        ) / total_len
-
-    # Load DEM once
-    elev_path  = r"data/elevation_model/elevation.tif"
-    elev_data      = None
-    elev_transform = None
-    elev_nodata    = None
+    elev_path = r"data/elevation_model/elevation.tif"
+    elev_data = elev_transform = elev_nodata = None
     if os.path.exists(elev_path):
         with rasterio.open(elev_path) as src:
             elev_data      = src.read(1)
             elev_transform = src.transform
             elev_nodata    = src.nodata
     else:
-        print("  [route_comfort] WARNING: DEM not found — slope discomfort set to 0 for all links")
+        print("  WARNING: DEM not found — slope discomfort set to 0 for all edges")
 
-    # speed in m/h for time conversion
-    speed_m_per_h = good_ffs * 1000.0
+    t0 = time.time()
+    edge_slope_f = {}
+    for _, row in edges_aug.iterrows():
+        coords = list(row.geometry.coords)
+        u = (round(coords[0][0], 1), round(coords[0][1], 1))
+        v = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+        sf = _slope_extra_factor(row.geometry, elev_data, elev_transform, elev_nodata) \
+             if elev_data is not None else 0.0
+        edge_slope_f[(u, v)] = sf
+        edge_slope_f[(v, u)] = sf
+    print(f"  Slope pre-computation: {len(edges_aug)} edges  [{time.time() - t0:.1f}s]")
 
-    # ── Compute per-edge comfort cost ─────────────────────────────────────────
-    network_records = []
-    for _, row in edges_gdf.iterrows():
-        length_m = float(row['length_m']) if row.get('length_m', 0) > 0 else row.geometry.length
+    # ── 2. Build base graph + add comfort_h edge attribute ────────────────────
+    G_base = build_graph_direct(edges_aug)
 
-        if elev_data is not None:
-            extra_f = _extra_factor(row.geometry, elev_data, elev_transform, elev_nodata)
-        else:
-            extra_f = 0.0
+    for _, row in edges_aug.iterrows():
+        coords    = list(row.geometry.coords)
+        u         = (round(coords[0][0],  1), round(coords[0][1],  1))
+        v         = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+        length_m  = float(row['length_m']) if row.get('length_m', 0) > 0 else row.geometry.length
+        routetype = str(row.get('ROUTENTYP', ''))
+        ffs_edge  = float(row['ffs']) if ('ffs' in row.index
+                                          and pd.notna(row.get('ffs'))
+                                          and float(row.get('ffs', 0)) > 0) else good_ffs
+        eps       = EPSILON.get(routetype, EPSILON_DEFAULT)
+        slope_f   = edge_slope_f.get((u, v), 0.0)
+        comfort_h = length_m * slope_f * eps / (ffs_edge * 1000.0)
+        for a, b in [(u, v), (v, u)]:
+            if G_base.has_edge(a, b):
+                G_base[a][b]['comfort_h'] = comfort_h
 
-        # Classify dominant slope category for reporting
-        if extra_f == 0.0:
-            slope_class = 'flat'
-        elif extra_f <= EXTRA_MEDIUM + 0.01:
-            slope_class = 'medium'
-        else:
-            slope_class = 'steep'
+    print(f"  Base graph: {G_base.number_of_nodes()} nodes, {G_base.number_of_edges()} edges")
 
-        extra_perceived_m = length_m * extra_f
-        extra_time_h      = extra_perceived_m / speed_m_per_h
-        comfort_cost      = extra_time_h * VTTS * trips_per_year * duration
+    # ── 3. Node ↔ ID_point mapping ───────────────────────────────────────────
+    id_to_node = {}
+    for _, row in points_corridor.iterrows():
+        id_pt = int(row['ID_point'])
+        node  = (round(row.geometry.x, 1), round(row.geometry.y, 1))
+        if node in G_base.nodes:
+            id_to_node[id_pt] = node
 
-        network_records.append({
-            'ID_edge':             row.get('ID_edge', -1),
-            'ROUTENTYP':          row.get('ROUTENTYP', ''),
-            'length_m':           round(length_m,          1),
-            'extra_factor':       round(extra_f,           3),
-            'extra_perceived_m':  round(extra_perceived_m, 1),
-            'extra_time_h':       round(extra_time_h,      4),
-            'slope_class':        slope_class,
-            'comfort_cost_chf':   round(comfort_cost,      2),
-            'geometry':           row.geometry,
-        })
+    # ── 4. Collect active OD pairs ───────────────────────────────────────────
+    od_by_scenario = {}
+    active_pairs   = set()
+    for s, od_df in od_scenarios.items():
+        if s not in scenarios:
+            continue
+        tmp = od_df[['origin_id', 'dest_id', 'trips']].copy()
+        tmp['origin_id'] = tmp['origin_id'].astype(int)
+        tmp['dest_id']   = tmp['dest_id'].astype(int)
+        tmp = tmp[tmp['trips'].fillna(0) > 0].loc[
+            tmp['origin_id'].isin(id_to_node) & tmp['dest_id'].isin(id_to_node)]
+        od_by_scenario[s] = dict(zip(zip(tmp['origin_id'], tmp['dest_id']), tmp['trips']))
+        active_pairs |= set(od_by_scenario[s].keys())
 
-    net_gdf = gpd.GeoDataFrame(network_records, crs=edges_gdf.crs)
-    os.makedirs(r"data/costs", exist_ok=True)
-    net_gdf.drop(columns='geometry').assign(geometry=net_gdf.geometry)
-    net_gdf.to_file(r"data/costs/route_comfort_network.gpkg", driver='GPKG')
+    dests_by_origin: dict = {}
+    for id_i, id_j in active_pairs:
+        dests_by_origin.setdefault(id_i, set()).add(id_j)
+    unique_origins = sorted(dests_by_origin.keys())
 
-    # ── Per-development CBA output (Netzlücken only) ──────────────────────────
-    nl_mask = edges_gdf.get('ROUTENTYP', pd.Series(dtype=str)) == 'Netzlücke'
-    nl_edges = edges_gdf[nl_mask].copy()
+    _base_tt_path = 'data/OD/od_base_travel_times.csv'
+    if os.path.exists(_base_tt_path):
+        _bt = pd.read_csv(_base_tt_path, usecols=['origin_id', 'dest_id'])
+        valid_pairs = set(zip(_bt['origin_id'].astype(int), _bt['dest_id'].astype(int)))
+        print(f"  Valid pairs from TTS detour filter: {len(valid_pairs):,}")
+    else:
+        valid_pairs = active_pairs
+        print(f"  od_base_travel_times.csv not found — using all active pairs")
 
-    id_col = 'ID_edge' if 'ID_edge' in nl_edges.columns else nl_edges.columns[0]
-    net_lookup = net_gdf.set_index('ID_edge')
+    print(f"  Active OD pairs: {len(active_pairs):,}  ({len(unique_origins)} unique origins)")
 
-    cba_records = []
-    for _, row in nl_edges.iterrows():
-        id_new = int(row[id_col])
-        if id_new in net_lookup.index:
-            nr = net_lookup.loc[id_new]
-            extra_f           = float(nr['extra_factor'])
-            extra_perceived_m = float(nr['extra_perceived_m'])
-            comfort_cost      = float(nr['comfort_cost_chf'])
-        else:
-            extra_f           = 0.0
-            extra_perceived_m = 0.0
-            comfort_cost      = 0.0
+    # ── 5. PRE-COMPUTE base path comfort for all active OD pairs ─────────────
+    t0     = time.time()
+    C_base = {}
+    for id_i in unique_origins:
+        node_i = id_to_node[id_i]
+        _, paths = nx.single_source_dijkstra(G_base, node_i, weight='weight')
+        for id_j in dests_by_origin[id_i]:
+            node_j = id_to_node[id_j]
+            if node_j not in paths:
+                continue
+            path = paths[node_j]
+            C_base[(id_i, id_j)] = sum(
+                G_base[path[k]][path[k + 1]].get('comfort_h', 0.0)
+                for k in range(len(path) - 1)
+            )
+    print(f"  Base comfort: {len(C_base):,} reachable pairs  [{time.time() - t0:.1f}s]")
 
-        length_m = float(row['length_m']) if row.get('length_m', 0) > 0 else row.geometry.length
+    # ── 6. Per-development loop ───────────────────────────────────────────────
+    built_rt  = NETZLUECKE_BUILT_ROUTENTYP
+    built_eps = EPSILON.get(built_rt, EPSILON_DEFAULT)
+    nl_gdf    = edges_aug[edges_aug['ROUTENTYP'] == 'Netzlücke']
+    records   = []
 
-        cba_records.append({
-            'ID_new':             id_new,
-            'length_m':           round(length_m,          1),
-            'extra_factor':       round(extra_f,           3),
-            'extra_perceived_m':  round(extra_perceived_m, 1),
-            'slope_class':        net_lookup.loc[id_new, 'slope_class'] if id_new in net_lookup.index else 'unknown',
-            'comfort_cost_chf':   round(comfort_cost,      2),
-            # negative = discomfort cost; steep links reduce net benefit
-            'comfort_benefit':    round(-comfort_cost,     2),
-        })
+    print(f"\n  Scoring {len(nl_gdf)} Netzlücken …")
+    for orig_idx, nl_row in nl_gdf.iterrows():
+        id_edge  = (int(nl_row['ID_edge'])
+                    if 'ID_edge' in nl_row.index and pd.notna(nl_row.get('ID_edge'))
+                    else orig_idx)
+        length_m = float(nl_row.get('length_m', nl_row.geometry.length))
 
-    result = pd.DataFrame(cba_records)
+        coords = list(nl_row.geometry.coords)
+        u = (round(coords[0][0],  1), round(coords[0][1],  1))
+        v = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+        slope_f       = edge_slope_f.get((u, v), 0.0)
+        new_w         = (length_m / 1000.0) / good_ffs * 3600.0
+        new_comfort_h = length_m * (1.0 + slope_f) * built_eps / (good_ffs * 1000.0)
+
+        G_d = G_base.copy()
+        for a, b in [(u, v), (v, u)]:
+            if G_d.has_edge(a, b):
+                G_d[a][b]['weight']    = new_w
+                G_d[a][b]['comfort_h'] = new_comfort_h
+
+        t0  = time.time()
+        C_d = {}
+        for id_i in unique_origins:
+            node_i = id_to_node[id_i]
+            _, paths_d = nx.single_source_dijkstra(G_d, node_i, weight='weight')
+            for id_j in dests_by_origin[id_i]:
+                node_j = id_to_node[id_j]
+                if node_j in paths_d:
+                    path = paths_d[node_j]
+                    C_d[(id_i, id_j)] = sum(
+                        G_d[path[k]][path[k + 1]].get('comfort_h', 0.0)
+                        for k in range(len(path) - 1)
+                    )
+
+        rec      = {'ID_new': id_edge, 'length_m': round(length_m, 1)}
+        s2_ben_h = 0.0
+        for s in scenarios:
+            benefit_h = sum(
+                trips * max(0.0, C_base.get((i, j), 0.0)
+                            - C_d.get((i, j), C_base.get((i, j), 0.0)))
+                for (i, j), trips in od_by_scenario.get(s, {}).items()
+                if (i, j) in valid_pairs and (i, j) in C_base
+            )
+            rec[f'comfort_{s}'] = round(benefit_h * VTTS * trips_per_year * duration, 2)
+            if s == 's2':
+                s2_ben_h = benefit_h
+        records.append(rec)
+
+        print(f"    [{id_edge:>4}] {int(length_m):>5}m | s2 comfort benefit={s2_ben_h:.4f} h/day"
+              f"  [{time.time() - t0:.1f}s]")
+
+    result = pd.DataFrame(records)
     result.to_csv(r"data/costs/route_comfort.csv", index=False)
-
-    print(f"  Route comfort saved → data/costs/route_comfort.csv  ({len(result)} Netzlücken)")
-    print(f"  Network comfort → data/costs/route_comfort_network.gpkg  ({len(net_gdf)} edges)")
-    if len(result):
-        slope_dist = result['slope_class'].value_counts().to_dict()
-        print(f"  Slope distribution: {slope_dist}")
-        print(f"  Comfort cost range: {result['comfort_cost_chf'].min():,.0f} – "
-              f"{result['comfort_cost_chf'].max():,.0f} CHF  "
-              f"(flat → 0, steep → large)")
+    print(f"\n  Route comfort → data/costs/route_comfort.csv  ({len(result)} Netzlücken)")
     return result
 
 
-# ── Per-ROUTENTYP accident risk rates ─────────────────────────────────────────
-# Unit: accidents per km per trip-year.  Calibrate from accident statistics.
-# Higher value = more dangerous infrastructure type.
-RISK_RATE = {
-    'Velobahn':                       0.10,   # segregated cycling motorway
-    'Veloschnellroute':               0.15,   # fast cycling route, largely segregated
-    'Hauptverbindung':                0.30,   # main cycling connection, partially segregated
-    'Nebenverbindung':                0.50,   # secondary connection, mixed traffic
-    'Zusätzliche Freizeitverbindung': 0.40,   # leisure / off-road route
-    'Netzlücke':                      1.00,   # gap — no dedicated infra, highest risk
-    'connector':                      1.00,   # auto-generated bridge — treated as gap
+# ── Per-ROUTENTYP monetised crash cost (CHF/Pkm) ──────────────────────────────
+# Source: KNA Limmattal; Veloschnellroute and Netzlücke are bounds,
+# intermediate values interpolated linearly across four quality levels.
+CRASH_RATE_CHF_PKM = {
+    'Velobahn':                       0.104,
+    'Veloschnellroute':               0.104,
+    'Hauptverbindung':                0.409,
+    'Nebenverbindung':                0.714,
+    'Zusätzliche Freizeitverbindung': 0.409,
+    'Netzlücke':                      1.020,
+    'connector':                      1.020,
 }
-RISK_RATE_DEFAULT = 0.40   # fallback for unknown ROUTENTYP
+CRASH_RATE_DEFAULT = 1.020   # fallback for unknown ROUTENTYP
 
 # ROUTENTYP assumed for a newly built Netzlücke.
-# Change this to reflect the planned infrastructure standard.
 NETZLUECKE_BUILT_ROUTENTYP = 'Hauptverbindung'
 
-# Monetary value per prevented accident [CHF].
-# Set to 0 to keep output in physical units (accidents prevented).
-VALUE_PER_ACCIDENT = 10   # TODO
 
-
-def safety_benefits(edges_gdf, od_scenarios, duration):
+def safety_benefits(
+        edges_aug,
+        od_scenarios,
+        points_corridor,
+        duration=50,
+        good_ffs=18.0,
+        trips_per_year=250,
+        scenarios=('s1', 's2', 's3'),
+):
     """
-    Safety benefit per Netzlücke, per scenario.
+    Safety benefit per Netzlücke, per scenario (before/after path comparison).
 
-    For each development (Netzlücke), and each OD pair in each scenario:
+    Algorithm (mirrors compute_dijkstra_tts_od):
 
-      risk_base_ij   = RISK_RATE['Netzlücke'] × length_km  (gap, no dedicated infra)
-      risk_dev_ij    = RISK_RATE[NETZLUECKE_BUILT_ROUTENTYP] × length_km  (built link)
-      risk_delta_ij  = risk_base_ij − risk_dev_ij           (accidents prevented per trip)
+    PRE-COMPUTE per-edge safety cost [CHF/trip]:
+      safety_chf = CRASH_RATE_CHF_PKM[ROUTENTYP] × length_km
 
-      safety_benefit_s = Σ_ij  trips_ij_s × risk_delta_ij  × VALUE_PER_ACCIDENT × duration
+    PRE-COMPUTE base path safety for all active OD pairs:
+      S_base[i,j] = Σ_{e ∈ shortest path} safety_chf[e]
 
-    trips_ij_s : OD demand for scenario s (from od_scenarios dict, NaN → 0).
+    FOR d IN Netzlücken:
+      G_d = G_base with edge d upgraded to good_ffs and built ROUTENTYP
+      S_d[i,j] = Σ_{e ∈ new shortest path} safety_chf[e]
+      FOR s IN scenarios:
+        benefit[d][s] = Σ_{(i,j)} trips[s][i,j] × max(0, S_base[i,j] − S_d[i,j])
+                        × trips_per_year × duration
+
+    Crash cost values (CHF/Pkm) from KNA Limmattal, Table 4 methodology.
 
     Saves
     -----
-    data/costs/safety_benefits.csv
+    data/costs/safety_benefits.csv  — safety_s1, safety_s2, safety_s3 per Netzlücke
     data/costs/safety_benefits.gpkg
     """
-    base_rate  = RISK_RATE.get('Netzlücke', RISK_RATE_DEFAULT)
-    built_rate = RISK_RATE.get(NETZLUECKE_BUILT_ROUTENTYP, RISK_RATE_DEFAULT)
-    risk_delta_per_km = base_rate - built_rate   # accidents prevented per km per trip-year
+    import time
+    import networkx as nx
+    from OSM_network import build_graph_direct
 
-    # Total OD trip volume per scenario.
-    # od_scenarios[s] is long-format: columns origin / dest / trips.
-    # Summing .values would include origin and dest node IDs → use 'trips' column only.
-    scenario_trips = {}
+    os.makedirs('data/costs', exist_ok=True)
+    print(f"\n--- SAFETY BENEFITS (Dijkstra, CHF/Pkm crash rates) ---")
+
+    # ── 1. Build base graph + add safety_chf edge attribute ──────────────────
+    t0     = time.time()
+    G_base = build_graph_direct(edges_aug)
+
+    for _, row in edges_aug.iterrows():
+        coords    = list(row.geometry.coords)
+        u         = (round(coords[0][0],  1), round(coords[0][1],  1))
+        v         = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+        length_m  = float(row['length_m']) if row.get('length_m', 0) > 0 else row.geometry.length
+        routetype = str(row.get('ROUTENTYP', ''))
+        safety_chf = CRASH_RATE_CHF_PKM.get(routetype, CRASH_RATE_DEFAULT) * (length_m / 1000.0)
+        for a, b in [(u, v), (v, u)]:
+            if G_base.has_edge(a, b):
+                G_base[a][b]['safety_chf'] = safety_chf
+
+    print(f"  Base graph: {G_base.number_of_nodes()} nodes, "
+          f"{G_base.number_of_edges()} edges  [{time.time() - t0:.1f}s]")
+
+    # ── 2. Node ↔ ID_point mapping ───────────────────────────────────────────
+    id_to_node = {}
+    for _, row in points_corridor.iterrows():
+        id_pt = int(row['ID_point'])
+        node  = (round(row.geometry.x, 1), round(row.geometry.y, 1))
+        if node in G_base.nodes:
+            id_to_node[id_pt] = node
+
+    # ── 3. Collect active OD pairs ───────────────────────────────────────────
+    od_by_scenario = {}
+    active_pairs   = set()
     for s, od_df in od_scenarios.items():
-        scenario_trips[s] = float(od_df['trips'].fillna(0.0).sum())
+        if s not in scenarios:
+            continue
+        tmp = od_df[['origin_id', 'dest_id', 'trips']].copy()
+        tmp['origin_id'] = tmp['origin_id'].astype(int)
+        tmp['dest_id']   = tmp['dest_id'].astype(int)
+        tmp = tmp[tmp['trips'].fillna(0) > 0].loc[
+            tmp['origin_id'].isin(id_to_node) & tmp['dest_id'].isin(id_to_node)]
+        od_by_scenario[s] = dict(zip(zip(tmp['origin_id'], tmp['dest_id']), tmp['trips']))
+        active_pairs |= set(od_by_scenario[s].keys())
 
-    nl_mask    = edges_gdf['ROUTENTYP'] == 'Netzlücke'
-    candidates = edges_gdf[nl_mask].copy()
+    dests_by_origin: dict = {}
+    for id_i, id_j in active_pairs:
+        dests_by_origin.setdefault(id_i, set()).add(id_j)
+    unique_origins = sorted(dests_by_origin.keys())
 
-    records = []
-    for _, row in candidates.iterrows():
-        dev_id   = int(row['ID_edge'])
-        length_m = float(row['length_m']) if row.get('length_m', 0) > 0 else row.geometry.length
-        length_km = length_m / 1000.0
+    _base_tt_path = 'data/OD/od_base_travel_times.csv'
+    if os.path.exists(_base_tt_path):
+        _bt = pd.read_csv(_base_tt_path, usecols=['origin_id', 'dest_id'])
+        valid_pairs = set(zip(_bt['origin_id'].astype(int), _bt['dest_id'].astype(int)))
+        print(f"  Valid pairs from TTS detour filter: {len(valid_pairs):,}")
+    else:
+        valid_pairs = active_pairs
+        print(f"  od_base_travel_times.csv not found — using all active pairs")
 
-        # Accidents prevented per corridor trip-year for this link
-        accidents_prevented_per_trip = risk_delta_per_km * length_km
+    print(f"  Active OD pairs: {len(active_pairs):,}  ({len(unique_origins)} unique origins)")
 
-        safety = {}
-        for s in ('s1', 's2', 's3'):
-            trips_s = scenario_trips.get(s, scenario_trips.get('s1', 1.0))
-            safety[s] = accidents_prevented_per_trip * trips_s * VALUE_PER_ACCIDENT * duration
+    # ── 4. PRE-COMPUTE base path safety cost ─────────────────────────────────
+    t0     = time.time()
+    S_base = {}
+    for id_i in unique_origins:
+        node_i = id_to_node[id_i]
+        _, paths = nx.single_source_dijkstra(G_base, node_i, weight='weight')
+        for id_j in dests_by_origin[id_i]:
+            node_j = id_to_node[id_j]
+            if node_j not in paths:
+                continue
+            path = paths[node_j]
+            S_base[(id_i, id_j)] = sum(
+                G_base[path[k]][path[k + 1]].get('safety_chf', 0.0)
+                for k in range(len(path) - 1)
+            )
+    print(f"  Base safety: {len(S_base):,} reachable pairs  [{time.time() - t0:.1f}s]")
 
-        records.append({
-            'ID_new':              dev_id,
-            'length_km':           round(length_km,                    3),
-            'risk_rate_base':      round(base_rate,                    3),
-            'risk_rate_built':     round(built_rate,                   3),
-            'built_routentyp':     NETZLUECKE_BUILT_ROUTENTYP,
-            'accidents_prev_per_trip': round(accidents_prevented_per_trip, 6),
-            'safety_s1':           round(safety['s1'],                 2),
-            'safety_s2':           round(safety['s2'],                 2),
-            'safety_s3':           round(safety['s3'],                 2),
-        })
+    # ── 5. Per-development loop ───────────────────────────────────────────────
+    built_rt   = NETZLUECKE_BUILT_ROUTENTYP
+    built_rate = CRASH_RATE_CHF_PKM.get(built_rt, CRASH_RATE_DEFAULT)
+    nl_gdf     = edges_aug[edges_aug['ROUTENTYP'] == 'Netzlücke']
+    records    = []
+
+    print(f"\n  Scoring {len(nl_gdf)} Netzlücken …")
+    print(f"  Crash rates: Netzlücke={CRASH_RATE_CHF_PKM.get('Netzlücke', CRASH_RATE_DEFAULT):.3f} → "
+          f"{built_rt}={built_rate:.3f} CHF/Pkm")
+
+    for orig_idx, nl_row in nl_gdf.iterrows():
+        id_edge  = (int(nl_row['ID_edge'])
+                    if 'ID_edge' in nl_row.index and pd.notna(nl_row.get('ID_edge'))
+                    else orig_idx)
+        length_m = float(nl_row.get('length_m', nl_row.geometry.length))
+
+        coords = list(nl_row.geometry.coords)
+        u = (round(coords[0][0],  1), round(coords[0][1],  1))
+        v = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+        new_w          = (length_m / 1000.0) / good_ffs * 3600.0
+        new_safety_chf = built_rate * (length_m / 1000.0)
+
+        G_d = G_base.copy()
+        for a, b in [(u, v), (v, u)]:
+            if G_d.has_edge(a, b):
+                G_d[a][b]['weight']     = new_w
+                G_d[a][b]['safety_chf'] = new_safety_chf
+
+        t0  = time.time()
+        S_d = {}
+        for id_i in unique_origins:
+            node_i = id_to_node[id_i]
+            _, paths_d = nx.single_source_dijkstra(G_d, node_i, weight='weight')
+            for id_j in dests_by_origin[id_i]:
+                node_j = id_to_node[id_j]
+                if node_j in paths_d:
+                    path = paths_d[node_j]
+                    S_d[(id_i, id_j)] = sum(
+                        G_d[path[k]][path[k + 1]].get('safety_chf', 0.0)
+                        for k in range(len(path) - 1)
+                    )
+
+        rec      = {'ID_new': id_edge, 'length_m': round(length_m, 1)}
+        s2_ben   = 0.0
+        for s in scenarios:
+            benefit_chf = sum(
+                trips * max(0.0, S_base.get((i, j), 0.0)
+                            - S_d.get((i, j), S_base.get((i, j), 0.0)))
+                for (i, j), trips in od_by_scenario.get(s, {}).items()
+                if (i, j) in valid_pairs and (i, j) in S_base
+            ) * trips_per_year * duration
+            rec[f'safety_{s}'] = round(benefit_chf, 2)
+            if s == 's2':
+                s2_ben = benefit_chf
+        records.append(rec)
+
+        print(f"    [{id_edge:>4}] {int(length_m):>5}m | s2 safety benefit={s2_ben:,.0f} CHF"
+              f"  [{time.time() - t0:.1f}s]")
 
     out_df = pd.DataFrame(records)
-    os.makedirs("data/costs", exist_ok=True)
     out_df.to_csv("data/costs/safety_benefits.csv", index=False)
 
-    cands_geo = edges_gdf[nl_mask][['ID_edge', 'geometry']].copy()
+    nl_mask   = edges_aug['ROUTENTYP'] == 'Netzlücke'
+    cands_geo = edges_aug[nl_mask][['ID_edge', 'geometry']].copy()
     cands_geo = cands_geo.rename(columns={'ID_edge': 'ID_new'})
     cands_geo['geometry'] = cands_geo.geometry.centroid
     out_gdf = cands_geo.merge(out_df, on='ID_new', how='right')
     if out_gdf.geometry.notna().any():
-        out_gdf = gpd.GeoDataFrame(out_gdf, geometry='geometry', crs=edges_gdf.crs)
+        out_gdf = gpd.GeoDataFrame(out_gdf, geometry='geometry', crs=edges_aug.crs)
         out_gdf.to_file("data/costs/safety_benefits.gpkg", driver="GPKG")
 
-    print(f"  Safety benefits: {len(out_df)} Netzlücken — data/costs/safety_benefits.csv / .gpkg")
-    print(f"  Risk rates: base={base_rate} → built ({NETZLUECKE_BUILT_ROUTENTYP})={built_rate}  "
-          f"Δ={risk_delta_per_km:.3f} acc/km/trip-year")
-    print(f"  OD trips: s1={scenario_trips.get('s1',0):,.0f}  "
-          f"s2={scenario_trips.get('s2',0):,.0f}  s3={scenario_trips.get('s3',0):,.0f}")
+    print(f"\n  Safety benefits → data/costs/safety_benefits.csv / .gpkg  ({len(out_df)} Netzlücken)")
     if len(out_df):
         print(f"  Benefit range (s2): {out_df['safety_s2'].min():,.0f}–"
               f"{out_df['safety_s2'].max():,.0f} CHF")
@@ -804,45 +979,80 @@ def od_fastest_paths(*args, **kwargs):
     return None
 
 def od_cycling_weighted():
-    MODAL_SHARE = 0.08
-    SCENARIOS = ['s1', 's2', 's3']
-    VORONOI_PATH = 'data/Voronoi/voronoi_developments_euclidian_values.shp'
+    MODAL_SHARE   = 0.08
+    SCENARIOS     = ['s1', 's2', 's3']
+    VORONOI_PATH  = 'data/Voronoi/voronoi_developments_euclidian_values.shp'
+    COMMUNE_OD    = 'data/OD/od_matrix_zh_cycling.csv'
+    GEMEINDE_PATH = 'data/_basic_data/Gemeindegrenzen/UP_GEMEINDEN_F.shp'
 
-    print(f"\n--- OD MATRIX (Voronoi-weighted, modal share {MODAL_SHARE * 100:.0f}%) ---")
+    print(f"\n--- OD MATRIX (commune-disaggregated, modal share {MODAL_SHARE * 100:.0f}%) ---")
 
     voronoi_vals = gpd.read_file(VORONOI_PATH)
     voronoi_vals['ID_point'] = voronoi_vals['ID_point'].astype(int)
+
+    # ── Assign commune_id to each Voronoi node via centroid spatial join ─────
+    gemeinde = gpd.read_file(GEMEINDE_PATH)[['BFS', 'geometry']]
+    vor_centroids = voronoi_vals[['ID_point', 'geometry']].copy()
+    vor_centroids['geometry'] = vor_centroids.geometry.centroid
+    vor_centroids = gpd.sjoin(
+        vor_centroids,
+        gemeinde.rename(columns={'BFS': 'commune_id'}),
+        how='left', predicate='within',
+    ).drop(columns=['index_right'], errors='ignore')
+    voronoi_vals = voronoi_vals.merge(
+        vor_centroids[['ID_point', 'commune_id']], on='ID_point', how='left'
+    )
+    # Nodes outside all Gemeinde polygons fall back to commune_id = -1
+    voronoi_vals['commune_id'] = voronoi_vals['commune_id'].fillna(-1).astype(int)
+    n_matched = (voronoi_vals['commune_id'] >= 0).sum()
+    print(f"  Commune join: {n_matched}/{len(voronoi_vals)} Voronoi nodes matched to a Gemeinde")
+
+    # ── Load commune-level OD (total commuters — modal share applied below) ──
+    commune_od = pd.read_csv(COMMUNE_OD)[['WOHNGEMEINDE', 'ARBEITSGEMEINDE', 'commuters_total']].copy()
 
     os.makedirs('data/OD', exist_ok=True)
     od_scenarios = {}
 
     for s in SCENARIOS:
-        pop_col = f'{s}_pop'
+        pop_col  = f'{s}_pop'
         empl_col = f'{s}_empl'
         if pop_col not in voronoi_vals.columns or empl_col not in voronoi_vals.columns:
             print(f"  Warning: {pop_col}/{empl_col} missing — skipping {s}")
             continue
 
-        nodes = voronoi_vals[['ID_point', pop_col, empl_col]].rename(
-            columns={pop_col: 'origin_pop', empl_col: 'dest_empl'})
+        nodes = voronoi_vals[['ID_point', 'commune_id', pop_col, empl_col]].copy()
+        nodes[pop_col]  = nodes[pop_col].clip(lower=0).fillna(0)
+        nodes[empl_col] = nodes[empl_col].clip(lower=0).fillna(0)
 
-        # Cartesian product: all i≠j pairs
-        od = (nodes[['ID_point', 'origin_pop']].rename(columns={'ID_point': 'origin_id'})
-              .assign(_key=1)
-              .merge(nodes[['ID_point', 'dest_empl']].rename(columns={'ID_point': 'dest_id'}).assign(_key=1),
-                     on='_key').drop(columns='_key'))
+        # Within-commune shares — pop drives origins, empl drives destinations
+        nodes['origin_share'] = nodes.groupby('commune_id')[pop_col].transform(
+            lambda x: x / x.sum() if x.sum() > 0 else 0.0)
+        nodes['dest_share'] = nodes.groupby('commune_id')[empl_col].transform(
+            lambda x: x / x.sum() if x.sum() > 0 else 0.0)
+
+        # Cartesian product of all node pairs (i ≠ j)
+        origins = (nodes[['ID_point', 'commune_id', 'origin_share']]
+                   .rename(columns={'ID_point': 'origin_id', 'commune_id': 'commune_id_o'})
+                   .assign(_key=1))
+        dests   = (nodes[['ID_point', 'commune_id', 'dest_share']]
+                   .rename(columns={'ID_point': 'dest_id', 'commune_id': 'commune_id_d'})
+                   .assign(_key=1))
+        od = origins.merge(dests, on='_key').drop(columns='_key')
         od = od[od['origin_id'] != od['dest_id']].reset_index(drop=True)
 
-        # trips from i → j: pop_i × share of employment at j × modal share
-        total_empl = nodes['dest_empl'].sum()
-        od['dest_share'] = od['dest_empl'] / total_empl if total_empl > 0 else 0.0
-        od['trips'] = od['origin_pop'] * od['dest_share'] * MODAL_SHARE
+        # Join commune-to-commune total commuters and disaggregate
+        od = od.merge(commune_od,
+                      left_on=['commune_id_o', 'commune_id_d'],
+                      right_on=['WOHNGEMEINDE', 'ARBEITSGEMEINDE'],
+                      how='left').drop(columns=['WOHNGEMEINDE', 'ARBEITSGEMEINDE'], errors='ignore')
+        od['commuters_total'] = od['commuters_total'].fillna(0)
+        od['trips']    = od['origin_share'] * od['dest_share'] * od['commuters_total'] * MODAL_SHARE
         od['scenario'] = s
 
         od.to_csv(f'data/OD/od_{s}.csv', index=False)
         od_scenarios[s] = od
         print(f"  {s}: {len(od):,} pairs  |  "
-              f"origin pop = {nodes['origin_pop'].sum():,.0f}  |  "
+              f"origin pop = {nodes[pop_col].sum():,.0f}  |  "
               f"daily cycling trips = {od['trips'].sum():,.0f}")
 
     if od_scenarios:
@@ -864,16 +1074,18 @@ def compute_dijkstra_tts_od(
         scenarios=('s1', 's2', 's3'),
 ):
     """
-    Travel time savings (TTS) from improving each Netzlücke.
+    Travel time savings (TTS) from upgrading each Netzlücke.
 
-    Steps
-    -----
-    1. Build base graph from edges_aug (Netzlücken already at BAD_FFS).
-    2. Run single-source Dijkstra from every corridor node → base tt + routed dist.
-    3. For each Netzlücke: copy the graph, upgrade that edge to good_ffs, re-run.
-    4. TTS_s = Σ_ij  trips_ij_s × max(0, tt_base_ij − tt_dev_ij) / 3600  [h/day]
-    5. savings_CHF = TTS_h × VTTS × trips_per_year × duration
-    6. Reroute factor = dist_routed / dist_air (straight-line) per OD pair.
+    Algorithm
+    ---------
+    PRE-COMPUTE base shortest paths for every active OD pair (trips > 0):
+      T_base[i,j], L_base[i,j] ← Dijkstra(G_base, i)  [shared across scenarios]
+
+    FOR d IN developments:
+      G_d ← G_base with edge d upgraded to good_ffs
+      T_d[i,j] ← Dijkstra(G_d, i)   for each active origin i
+      FOR s IN scenarios:
+        savings[d][s] ← Σ_{(i,j) ∈ OD[s]}  trips[s][i,j] × max(0, T_base[i,j] − T_d[i,j])
 
     Outputs
     -------
@@ -897,7 +1109,7 @@ def compute_dijkstra_tts_od(
           f"{G_base.number_of_edges()} edges  [{time.time() - t0:.1f}s]")
 
     # ── 2. Node ↔ ID_point mapping ───────────────────────────────────────────
-    id_to_node = {}  # int ID_point → (x,y) graph node
+    id_to_node = {}  # int ID_point → (x, y) graph node key
     id_to_xy   = {}  # int ID_point → (float x, float y) for straight-line dist
     for _, row in points_corridor.iterrows():
         id_pt = int(row['ID_point'])
@@ -910,51 +1122,72 @@ def compute_dijkstra_tts_od(
     print(f"  Node mapping: {len(id_to_node)} mapped, {n_unmapped} unmapped "
           f"(boundary nodes not in graph — expected)")
 
-    mapped_ids = sorted(id_to_node.keys())
+    # ── 3. Collect active OD pairs (trips > 0 in any scenario, both ends in graph) ──
+    od_by_scenario = {}   # s → {(i, j): trips}
+    active_pairs   = set()
 
-    # ── 3. Base all-pairs shortest paths ────────────────────────────────────
+    for s, od_df in od_scenarios.items():
+        if s not in scenarios:
+            continue
+        tmp = od_df[['origin_id', 'dest_id', 'trips']].copy()
+        tmp['origin_id'] = tmp['origin_id'].astype(int)
+        tmp['dest_id']   = tmp['dest_id'].astype(int)
+        tmp = tmp[
+            tmp['trips'].fillna(0) > 0
+        ].loc[
+            tmp['origin_id'].isin(id_to_node) & tmp['dest_id'].isin(id_to_node)
+        ]
+        od_by_scenario[s] = dict(zip(zip(tmp['origin_id'], tmp['dest_id']), tmp['trips']))
+        active_pairs |= set(od_by_scenario[s].keys())
+
+    # Pre-group destinations by origin for O(1) Dijkstra dispatch
+    dests_by_origin: dict = {}
+    for id_i, id_j in active_pairs:
+        dests_by_origin.setdefault(id_i, set()).add(id_j)
+
+    unique_origins = sorted(dests_by_origin.keys())
+    print(f"  Active OD pairs: {len(active_pairs):,}  "
+          f"({len(unique_origins)} unique origins across {len(od_by_scenario)} scenarios)")
+
+    # ── 4. PRE-COMPUTE base shortest paths for all active OD pairs ──────────
     t0 = time.time()
-    base_tt   = {}  # (id_i, id_j) → seconds
-    base_dist = {}  # (id_i, id_j) → routed metres
+    T_base = {}  # (i, j) → travel time [seconds]
+    L_base = {}  # (i, j) → routed distance [metres]
 
-    for id_i in mapped_ids:
+    for id_i in unique_origins:
         node_i = id_to_node[id_i]
         lengths, paths = nx.single_source_dijkstra(G_base, node_i, weight='weight')
-        for id_j in mapped_ids:
-            if id_i == id_j:
-                continue
+        for id_j in dests_by_origin[id_i]:
             node_j = id_to_node[id_j]
             if node_j not in lengths:
                 continue
             path = paths[node_j]
-            routed_m = sum(
+            T_base[(id_i, id_j)] = lengths[node_j]
+            L_base[(id_i, id_j)] = sum(
                 G_base[path[k]][path[k + 1]].get('length', 0.0)
                 for k in range(len(path) - 1)
             )
-            base_tt[(id_i, id_j)]   = lengths[node_j]
-            base_dist[(id_i, id_j)] = routed_m
 
-    print(f"  Base Dijkstra: {len(base_tt):,} reachable pairs  [{time.time() - t0:.1f}s]")
+    print(f"  Base Dijkstra: {len(T_base):,} reachable pairs  [{time.time() - t0:.1f}s]")
 
-    # ── 4. Save base OD travel times + reroute factor ────────────────────────
-    MAX_DETOUR = 5.0  # drop OD pairs routed >5× straight-line (connector artefacts)
-    _dropped_detour = 0
-    valid_pairs: set = set()  # (id_i, id_j) pairs kept after detour filter
-
+    # ── 5. Detour filter + save base OD travel times ─────────────────────────
+    MAX_DETOUR = 5.0
+    _dropped   = 0
+    valid_pairs: set = set()
     base_rows = []
-    for (id_i, id_j), tt_sec in base_tt.items():
-        xi, yi = id_to_xy.get(id_i, (None, None))
-        xj, yj = id_to_xy.get(id_j, (None, None))
-        routed_m = base_dist.get((id_i, id_j))
-        air_m    = ((xi - xj) ** 2 + (yi - yj) ** 2) ** 0.5 if (xi and xj) else None
+
+    for (id_i, id_j), tt_sec in T_base.items():
+        xi, yi   = id_to_xy.get(id_i, (None, None))
+        xj, yj   = id_to_xy.get(id_j, (None, None))
+        routed_m = L_base.get((id_i, id_j))
+        air_m    = ((xi - xj)**2 + (yi - yj)**2)**0.5 if (xi and xj) else None
         detour   = routed_m / air_m if (air_m and air_m > 0 and routed_m) else None
 
         if detour is not None and detour > MAX_DETOUR:
-            _dropped_detour += 1
-            continue  # exclude from savings computation
+            _dropped += 1
+            continue
 
-        # Clamp to ≥1.0 — sub-1 values are floating-point noise from near-coincident
-        # nodes where length_m and Euclidean distance are computed via different paths.
+        # Clamp to ≥1.0 — sub-1 is floating-point noise on near-coincident nodes
         if detour is not None and detour < 1.0:
             detour = 1.0
 
@@ -970,26 +1203,10 @@ def compute_dijkstra_tts_od(
         })
 
     pd.DataFrame(base_rows).to_csv('data/OD/od_base_travel_times.csv', index=False)
-    print(f"  Reroute factors saved → data/OD/od_base_travel_times.csv  "
-          f"({len(base_rows)} pairs, {_dropped_detour} dropped — detour >{MAX_DETOUR}×)")
+    print(f"  Base OD travel times → data/OD/od_base_travel_times.csv  "
+          f"({len(base_rows)} pairs, {_dropped} dropped — detour >{MAX_DETOUR}×)")
 
-    # ── 5. OD trip lookup per scenario ───────────────────────────────────────
-    # Build as plain dict for O(1) access during the inner loop
-    od_by_scenario = {}
-    for s, od_df in od_scenarios.items():
-        if s not in scenarios:
-            continue
-        tmp = od_df.copy()
-        tmp['origin_id'] = tmp['origin_id'].astype(int)
-        tmp['dest_id']   = tmp['dest_id'].astype(int)
-        # Fill NaN trips with 0 — nodes with no Voronoi pop/empl data have no demand
-        tmp['trips'] = tmp['trips'].fillna(0.0)
-        od_by_scenario[s] = dict(zip(
-            zip(tmp['origin_id'], tmp['dest_id']),
-            tmp['trips'],
-        ))
-
-    # ── 6. Per-Netzlücke Dijkstra ─────────────────────────────────────────────
+    # ── 6. FOR EACH DEVELOPMENT: upgrade edge, re-run Dijkstra, compute savings ──
     nl_gdf   = edges_aug[edges_aug['ROUTENTYP'] == 'Netzlücke']
     tts_rows = []
 
@@ -1001,42 +1218,40 @@ def compute_dijkstra_tts_od(
                     else orig_idx)
         length_m = float(nl_row.get('length_m', nl_row.geometry.length))
 
-        # Endpoints of this edge in the graph (rounded to 0.1 m)
         coords = list(nl_row.geometry.coords)
         u = (round(coords[0][0],  1), round(coords[0][1],  1))
         v = (round(coords[-1][0], 1), round(coords[-1][1], 1))
 
-        # Upgrade this edge in a copy of the base graph (no full rebuild needed)
-        G_dev = G_base.copy()
+        # apply_development: copy base graph and upgrade this edge to good_ffs
+        G_d   = G_base.copy()
         new_w = (length_m / 1000.0) / good_ffs * 3600.0  # seconds
-        if G_dev.has_edge(u, v): G_dev[u][v]['weight'] = new_w
-        if G_dev.has_edge(v, u): G_dev[v][u]['weight'] = new_w
+        if G_d.has_edge(u, v): G_d[u][v]['weight'] = new_w
+        if G_d.has_edge(v, u): G_d[v][u]['weight'] = new_w
 
-        # Shortest paths from all mapped origins
+        # Dijkstra from each active origin on the development graph
         t0 = time.time()
-        dev_tt = {}
-        for id_i in mapped_ids:
-            lengths_dev, _ = nx.single_source_dijkstra(
-                G_dev, id_to_node[id_i], weight='weight')
-            for id_j in mapped_ids:
-                if id_i == id_j:
-                    continue
+        T_d: dict = {}
+
+        for id_i in unique_origins:
+            node_i    = id_to_node[id_i]
+            lengths_d, _ = nx.single_source_dijkstra(G_d, node_i, weight='weight')
+            for id_j in dests_by_origin[id_i]:
                 node_j = id_to_node[id_j]
-                if node_j in lengths_dev:
-                    dev_tt[(id_i, id_j)] = lengths_dev[node_j]
+                if node_j in lengths_d:
+                    T_d[(id_i, id_j)] = lengths_d[node_j]
 
         n_improved = sum(
-            1 for k, bt in base_tt.items()
-            if k in valid_pairs and dev_tt.get(k, bt) < bt
+            1 for k in valid_pairs
+            if T_d.get(k, T_base.get(k, float('inf'))) < T_base.get(k, float('inf'))
         )
 
+        # savings[d][s] = Σ_{(i,j) ∈ OD[s]}  trips × max(0, T_base − T_d)
         s2_tts_h = 0.0
         for s in scenarios:
-            trip_map = od_by_scenario.get(s, {})
-            tts_sec  = sum(
-                trip_map.get((id_i, id_j), 0.0) * max(bt - dev_tt.get((id_i, id_j), bt), 0.0)
-                for (id_i, id_j), bt in base_tt.items()
-                if (id_i, id_j) in valid_pairs
+            tts_sec = sum(
+                trips * max(0.0, T_base[(i, j)] - T_d.get((i, j), T_base[(i, j)]))
+                for (i, j), trips in od_by_scenario.get(s, {}).items()
+                if (i, j) in valid_pairs and (i, j) in T_base
             )
             tts_h       = tts_sec / 3600.0
             savings_chf = tts_h * VTTS * trips_per_year * duration
@@ -1057,12 +1272,9 @@ def compute_dijkstra_tts_od(
 
     tts_df = pd.DataFrame(tts_rows)
     tts_df.to_csv('data/OD/traveltime_savings_od.csv', index=False)
-    print(f"\n  Detailed TTS → data/OD/traveltime_savings_od.csv  "
-          f"({len(tts_df)} rows)")
+    print(f"\n  Detailed TTS → data/OD/traveltime_savings_od.csv  ({len(tts_df)} rows)")
 
-    # ── 7. Write net_benefits()-compatible wide format ───────────────────────
-    # Sign convention: savings are negative costs in net_benefits()
-    # Scenario mapping: s1=medium growth, s2=low growth, s3=high growth
+    # ── 7. Wide format for net_benefits() ────────────────────────────────────
     if not tts_df.empty:
         wide = (
             tts_df[['ID_edge', 'scenario', 'savings_chf']]
@@ -1086,18 +1298,20 @@ def node_accessibility(
         voronoi_path='data/Voronoi/voronoi_developments_euclidian_values.shp',
         raster_template='data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif',
         beta=2.0,
-        scenarios=('s1', 's2', 's3')):
+        scenarios=('s1', 's2', 's3'),
+        travel_times_path=None):
     """
     Gravity-based accessibility score for each corridor node i under each scenario s.
 
     A) For every node i, sum the employment at all other nodes j weighted by
-       inverse distance raised to the impedance exponent beta:
+       inverse impedance raised to beta:
 
-         A_{i,s} = sum_{j != i}  empl_{j,s} / d_{ij}^beta
+         A_{i,s} = sum_{j != i}  empl_{j,s} / impedance_{ij}^beta
 
-       where d_{ij} is the Euclidean distance (m) between Voronoi centroids.
-       Scores are normalised globally across all scenarios to [0, 1] so that
-       cross-scenario differences in absolute demand are preserved.
+       Impedance is network travel time in minutes when travel_times_path is given
+       (output of compute_dijkstra_tts_od), otherwise Euclidean distance in metres.
+       Unreachable pairs contribute 0. Scores are normalised globally across all
+       scenarios to [0, 1].
 
     B) Rasterize Voronoi polygons at the resolution of the protected-area raster
        (50 m, EPSG:2056). Saves one .tif per scenario to data/Network/accessibility/.
@@ -1131,14 +1345,36 @@ def node_accessibility(
     if voronoi_gdf.crs.to_epsg() != tpl_crs.to_epsg():
         voronoi_gdf = voronoi_gdf.to_crs(tpl_crs)
 
-    # Pairwise Euclidean distances between Voronoi centroids (meters)
-    centroids = voronoi_gdf.geometry.centroid
-    cx = centroids.x.values
-    cy = centroids.y.values
-    dx = cx[:, None] - cx[None, :]
-    dy = cy[:, None] - cy[None, :]
-    dist = np.sqrt(dx**2 + dy**2)
-    np.fill_diagonal(dist, np.nan)  # exclude self-interaction
+    ids = voronoi_gdf['ID_point'].values
+    n   = len(ids)
+
+    if travel_times_path is not None and os.path.exists(travel_times_path):
+        # ── Network travel-time impedance (minutes) from Dijkstra base paths ──
+        id_to_idx = {int(id_pt): idx for idx, id_pt in enumerate(ids)}
+        tt_df = pd.read_csv(travel_times_path, usecols=['origin_id', 'dest_id', 'tt_min'])
+        dist = np.full((n, n), np.nan)
+        o_idx = tt_df['origin_id'].map(id_to_idx)
+        d_idx = tt_df['dest_id'].map(id_to_idx)
+        valid = o_idx.notna() & d_idx.notna()
+        dist[o_idx[valid].astype(int).values,
+             d_idx[valid].astype(int).values] = tt_df.loc[valid, 'tt_min'].values
+        np.fill_diagonal(dist, np.nan)
+        n_routed = int(valid.sum())
+        print(f"  Impedance: network travel time (min) — {n_routed:,} routed pairs "
+              f"from {travel_times_path}")
+    else:
+        # ── Fallback: pairwise Euclidean distances between Voronoi centroids ──
+        centroids = voronoi_gdf.geometry.centroid
+        cx = centroids.x.values
+        cy = centroids.y.values
+        dx = cx[:, None] - cx[None, :]
+        dy = cy[:, None] - cy[None, :]
+        dist = np.sqrt(dx**2 + dy**2)
+        np.fill_diagonal(dist, np.nan)
+        if travel_times_path is not None:
+            print(f"  Warning: {travel_times_path} not found — falling back to Euclidean distance")
+        else:
+            print("  Impedance: Euclidean distance (m)")
 
     # ── A) compute raw gravity scores for all scenarios first (for global normalisation) ──
     raw_scores = {}
@@ -1209,15 +1445,203 @@ def node_accessibility(
     return results
 
 
+def compute_accessibility_benefits(
+        edges_aug,
+        points_corridor,
+        voronoi_path='data/Voronoi/voronoi_developments_euclidian_values.shp',
+        beta=2.0,
+        good_ffs=25.0,
+        scenarios=('s1', 's2', 's3'),
+):
+    """
+    Population-weighted accessibility benefit per Netzlücke per scenario.
+
+    Algorithm
+    ---------
+    PRE-COMPUTE baseline:
+      A_base[s][i] = Σ_{j≠i}  empl[j,s] / T_base[i,j]^β
+      where T_base[i,j] = travel time (min) on G_base
+
+    FOR d IN Netzlücken:
+      G_d = G_base with edge d upgraded to good_ffs
+      T_d[i,j] = Dijkstra(G_d, i)  for each origin i (pop > 0)
+      A_d[s][i] = Σ_{j≠i}  empl[j,s] / T_d[i,j]^β
+      ΔA[s][i]  = A_d[s][i] - A_base[s][i]          (positive = accessibility gained)
+      benefits[d][s] = Σ_i  pop[i,s] × ΔA[s][i]     (population-weighted aggregate)
+
+    Saves
+    -----
+    data/costs/accessibility_benefits.csv  (ID_new, acc_s1, acc_s2, acc_s3)
+    """
+    import time
+    import networkx as nx
+    import numpy as np
+    from OSM_network import build_graph_direct
+
+    os.makedirs('data/costs', exist_ok=True)
+    print(f"\n--- ACCESSIBILITY BENEFITS (Dijkstra, beta={beta}, good_ffs={good_ffs:.0f} km/h) ---")
+
+    # ── 1. Build base graph ──────────────────────────────────────────────────
+    t0 = time.time()
+    G_base = build_graph_direct(edges_aug)
+    print(f"  Base graph: {G_base.number_of_nodes()} nodes, "
+          f"{G_base.number_of_edges()} edges  [{time.time() - t0:.1f}s]")
+
+    # ── 2. Node ↔ ID_point mapping ───────────────────────────────────────────
+    id_to_node = {}
+    for _, row in points_corridor.iterrows():
+        id_pt = int(row['ID_point'])
+        node  = (round(row.geometry.x, 1), round(row.geometry.y, 1))
+        if node in G_base.nodes:
+            id_to_node[id_pt] = node
+
+    # ── 3. Load pop/empl per node per scenario ───────────────────────────────
+    voronoi_gdf = gpd.read_file(voronoi_path)
+    voronoi_gdf['ID_point'] = voronoi_gdf['ID_point'].astype(int)
+
+    node_ids    = voronoi_gdf['ID_point'].values
+    node_to_idx = {int(nid): k for k, nid in enumerate(node_ids)}
+
+    pop_s  = {}   # s → float array aligned with voronoi_gdf rows
+    empl_s = {}
+    valid_scenarios = []
+    for s in scenarios:
+        pc, ec = f'{s}_pop', f'{s}_empl'
+        if pc not in voronoi_gdf.columns or ec not in voronoi_gdf.columns:
+            print(f"  Warning: {pc}/{ec} missing — skipping {s}")
+            continue
+        pop_s[s]  = voronoi_gdf[pc].clip(lower=0).fillna(0).values.astype(float)
+        empl_s[s] = voronoi_gdf[ec].clip(lower=0).fillna(0).values.astype(float)
+        valid_scenarios.append(s)
+
+    # ── 4. Identify active origins (pop > 0) and destinations (empl > 0) ────
+    any_pop  = sum(pop_s.values())
+    any_empl = sum(empl_s.values())
+
+    origin_ids = [int(node_ids[k]) for k in range(len(node_ids))
+                  if any_pop[k] > 0 and int(node_ids[k]) in id_to_node]
+    dest_ids   = [int(node_ids[k]) for k in range(len(node_ids))
+                  if any_empl[k] > 0 and int(node_ids[k]) in id_to_node]
+
+    print(f"  Active nodes: {len(origin_ids)} origins (pop>0), "
+          f"{len(dest_ids)} destinations (empl>0)")
+
+    # ── 5. PRE-COMPUTE base travel times (origin → all empl-dests) ──────────
+    t0 = time.time()
+    # T_base[id_i] = {id_j: tt_min}  — only pairs where tt > 0
+    T_base: dict = {}
+    for id_i in origin_ids:
+        lengths, _ = nx.single_source_dijkstra(G_base, id_to_node[id_i], weight='weight')
+        row = {}
+        for id_j in dest_ids:
+            if id_j == id_i:
+                continue
+            node_j = id_to_node[id_j]
+            tt_sec = lengths.get(node_j)
+            if tt_sec and tt_sec > 0:
+                row[id_j] = tt_sec / 60.0
+        T_base[id_i] = row
+
+    n_reachable = sum(len(v) for v in T_base.values())
+    print(f"  Base Dijkstra: {n_reachable:,} reachable origin→dest pairs  "
+          f"[{time.time() - t0:.1f}s]")
+
+    # ── 6. Baseline accessibility A_base[s][i] ───────────────────────────────
+    # A_base[s][i] = Σ_j  empl[j,s] / tt_base[i,j]^β
+    A_base: dict = {}
+    for s in valid_scenarios:
+        empl = empl_s[s]
+        A_base[s] = {}
+        for id_i in origin_ids:
+            A_base[s][id_i] = sum(
+                empl[node_to_idx[id_j]] / (tt ** beta)
+                for id_j, tt in T_base[id_i].items()
+            )
+
+    # ── 7. FOR EACH DEVELOPMENT: upgrade, re-run Dijkstra, compute benefits ──
+    nl_gdf   = edges_aug[edges_aug['ROUTENTYP'] == 'Netzlücke']
+    acc_rows = []
+
+    print(f"\n  Scoring {len(nl_gdf)} Netzlücken …")
+
+    for orig_idx, nl_row in nl_gdf.iterrows():
+        id_edge  = (int(nl_row['ID_edge'])
+                    if 'ID_edge' in nl_row.index and pd.notna(nl_row.get('ID_edge'))
+                    else orig_idx)
+        length_m = float(nl_row.get('length_m', nl_row.geometry.length))
+
+        coords = list(nl_row.geometry.coords)
+        u = (round(coords[0][0],  1), round(coords[0][1],  1))
+        v = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+
+        G_d   = G_base.copy()
+        new_w = (length_m / 1000.0) / good_ffs * 3600.0
+        if G_d.has_edge(u, v): G_d[u][v]['weight'] = new_w
+        if G_d.has_edge(v, u): G_d[v][u]['weight'] = new_w
+
+        # Dijkstra on G_d from each active origin
+        t0 = time.time()
+        T_d: dict = {}
+        for id_i in origin_ids:
+            lengths_d, _ = nx.single_source_dijkstra(G_d, id_to_node[id_i], weight='weight')
+            row_d = {}
+            for id_j in dest_ids:
+                if id_j == id_i:
+                    continue
+                node_j = id_to_node[id_j]
+                tt_sec = lengths_d.get(node_j)
+                if tt_sec and tt_sec > 0:
+                    row_d[id_j] = tt_sec / 60.0
+            T_d[id_i] = row_d
+
+        # benefits[d][s] = Σ_i  pop[i,s] × (A_d[s][i] − A_base[s][i])
+        rec = {'ID_new': id_edge, 'length_m': length_m}
+        s2_benefit = 0.0
+
+        for s in valid_scenarios:
+            empl = empl_s[s]
+            pop  = pop_s[s]
+            total = 0.0
+            for id_i in origin_ids:
+                pop_i = pop[node_to_idx[id_i]]
+                if pop_i <= 0:
+                    continue
+                a_d = sum(
+                    empl[node_to_idx[id_j]] / (tt ** beta)
+                    for id_j, tt in T_d[id_i].items()
+                )
+                total += pop_i * (a_d - A_base[s][id_i])
+            rec[f'acc_{s}'] = total
+            if s == 's2':
+                s2_benefit = total
+
+        for s in scenarios:
+            if f'acc_{s}' not in rec:
+                rec[f'acc_{s}'] = 0.0
+
+        acc_rows.append(rec)
+        print(f"    [{id_edge:>4}] {int(length_m):>5}m | "
+              f"s2 ΔA(pop-weighted)={s2_benefit:.2f}  [{time.time() - t0:.1f}s]")
+
+    acc_df = pd.DataFrame(acc_rows)
+    acc_df.to_csv('data/costs/accessibility_benefits.csv', index=False)
+    print(f"\n  Accessibility benefits → data/costs/accessibility_benefits.csv  "
+          f"({len(acc_df)} developments)")
+
+    return acc_df
+
+
 def net_benefits():
     """
-    Compute net benefit per development:  NB = C + M + T + R + S
+    Compute net benefit per development:  NB = C + M + T + R + S [+ A]
 
-    C  = construction cost       [CHF, negative]
-    M  = maintenance cost        [CHF, negative]
-    T  = travel time savings     [CHF, negative costs → positive NB contribution]
-    R  = route comfort benefit   [CHF, positive]
-    S  = safety benefit          [CHF, positive when value_of_safety is set]
+    C  = construction cost           [CHF, negative]
+    M  = maintenance cost            [CHF, negative]
+    T  = travel time savings         [CHF, positive]
+    R  = route comfort benefit       [CHF]
+    S  = safety benefit              [CHF, positive]
+    A  = accessibility benefit index [optional; included when
+         data/costs/accessibility_benefits.csv exists]
 
     Handles two traveltime_savings.csv formats:
       • Preferred: columns tt_low / tt_medium / tt_high  (3-scenario)
@@ -1275,16 +1699,29 @@ def net_benefits():
         c_tt = c_tt[["ID_new", "tt_low", "tt_medium", "tt_high"]]
 
     # ── Route comfort benefit ─────────────────────────────────────────────────
-    c_comfort = pd.read_csv(r"data/costs/route_comfort.csv")[["ID_new", "comfort_benefit"]]
+    c_comfort = pd.read_csv(r"data/costs/route_comfort.csv")[["ID_new", "comfort_s1", "comfort_s2", "comfort_s3"]]
     c_comfort["ID_new"] = c_comfort["ID_new"].astype(int)
 
     # ── Safety benefits ───────────────────────────────────────────────────────
     c_safety = pd.read_csv(r"data/costs/safety_benefits.csv")[["ID_new", "safety_s1", "safety_s2", "safety_s3"]]
     c_safety["ID_new"] = c_safety["ID_new"].astype(int)
 
+    # ── Accessibility benefits (optional — included when file exists) ─────────
+    _acc_path = r"data/costs/accessibility_benefits.csv"
+    has_accessibility = os.path.exists(_acc_path)
+    if has_accessibility:
+        c_acc = pd.read_csv(_acc_path)[["ID_new", "acc_s1", "acc_s2", "acc_s3"]]
+        c_acc["ID_new"] = c_acc["ID_new"].astype(int)
+        print(f"[net_benefits] Accessibility benefits loaded: {len(c_acc)} developments")
+    else:
+        print(f"[net_benefits] No accessibility_benefits.csv found — A = 0 for all developments")
+
     # ── Merge all components on ID_new ────────────────────────────────────────
     nb = c_constr.copy()
-    for df in [c_maint, c_tt, c_comfort, c_safety]:
+    merge_dfs = [c_maint, c_tt, c_comfort, c_safety]
+    if has_accessibility:
+        merge_dfs.append(c_acc)
+    for df in merge_dfs:
         nb = nb.merge(df, on="ID_new", how="left")
     nb = nb.fillna(0)
 
@@ -1299,24 +1736,31 @@ def net_benefits():
     nb["T_s2"] = nb["tt_medium"].abs()
     nb["T_s3"] = nb["tt_high"].abs()
 
-    nb["R"]    = nb["comfort_benefit"]      # negative for steep links (discomfort cost)
+    nb["R_s1"] = nb["comfort_s1"]
+    nb["R_s2"] = nb["comfort_s2"]
+    nb["R_s3"] = nb["comfort_s3"]
 
-    nb["S_s1"] = nb["safety_s1"]            # positive when monetised, else raw delta
+    nb["S_s1"] = nb["safety_s1"]
     nb["S_s2"] = nb["safety_s2"]
     nb["S_s3"] = nb["safety_s3"]
 
-    # ── Net benefit per scenario ──────────────────────────────────────────────
-    nb["NB_s1"] = nb["C"] + nb["M"] + nb["T_s1"] + nb["R"] + nb["S_s1"]
-    nb["NB_s2"] = nb["C"] + nb["M"] + nb["T_s2"] + nb["R"] + nb["S_s2"]
-    nb["NB_s3"] = nb["C"] + nb["M"] + nb["T_s3"] + nb["R"] + nb["S_s3"]
+    nb["A_s1"] = nb["acc_s1"] if has_accessibility else 0.0
+    nb["A_s2"] = nb["acc_s2"] if has_accessibility else 0.0
+    nb["A_s3"] = nb["acc_s3"] if has_accessibility else 0.0
+
+    # ── Net benefit per scenario: NB = C + M + T + R + S + A ─────────────────
+    nb["NB_s1"] = nb["C"] + nb["M"] + nb["T_s1"] + nb["R_s1"] + nb["S_s1"] + nb["A_s1"]
+    nb["NB_s2"] = nb["C"] + nb["M"] + nb["T_s2"] + nb["R_s2"] + nb["S_s2"] + nb["A_s2"]
+    nb["NB_s3"] = nb["C"] + nb["M"] + nb["T_s3"] + nb["R_s3"] + nb["S_s3"] + nb["A_s3"]
 
     # ── Save CSV ──────────────────────────────────────────────────────────────
     out_cols = [
         "ID_new",
         "C", "M",
         "T_s1", "T_s2", "T_s3",
-        "R",
+        "R_s1", "R_s2", "R_s3",
         "S_s1", "S_s2", "S_s3",
+        "A_s1", "A_s2", "A_s3",
         "NB_s1", "NB_s2", "NB_s3",
     ]
     out = nb[out_cols].copy()
@@ -1333,16 +1777,18 @@ def net_benefits():
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n[net_benefits] {len(out)} developments")
-    for label, c_col, t_col, s_col, nb_col in [
-        ("s1 (low)",    "C", "T_s1", "S_s1", "NB_s1"),
-        ("s2 (medium)", "C", "T_s2", "S_s2", "NB_s2"),
-        ("s3 (high)",   "C", "T_s3", "S_s3", "NB_s3"),
+    for label, t_col, r_col, s_col, a_col, nb_col in [
+        ("s1 (low)",    "T_s1", "R_s1", "S_s1", "A_s1", "NB_s1"),
+        ("s2 (medium)", "T_s2", "R_s2", "S_s2", "A_s2", "NB_s2"),
+        ("s3 (high)",   "T_s3", "R_s3", "S_s3", "A_s3", "NB_s3"),
     ]:
         print(f"\n  Scenario {label}:")
         print(f"    C+M  : {(out['C']+out['M']).mean():>15,.0f} CHF (mean)")
         print(f"    T    : {out[t_col].mean():>15,.0f} CHF (mean)")
-        print(f"    R    : {out['R'].mean():>15,.0f} CHF (mean)")
+        print(f"    R    : {out[r_col].mean():>15,.0f} CHF (mean)")
         print(f"    S    : {out[s_col].mean():>15,.0f} CHF (mean)")
+        if has_accessibility:
+            print(f"    A    : {out[a_col].mean():>15,.2f} (accessibility index, mean)")
         print(f"    NB   : {out[nb_col].mean():>15,.0f} CHF (mean)  "
               f"[{out[nb_col].min():,.0f} – {out[nb_col].max():,.0f}]")
     top5 = out.nlargest(5, "NB_s2")[["ID_new", "NB_s1", "NB_s2", "NB_s3"]]

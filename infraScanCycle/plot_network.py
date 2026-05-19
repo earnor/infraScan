@@ -230,7 +230,7 @@ def plot_od_results(
     # ── Panel 2: total cycling trips per scenario ─────────────────────────
     s_keys = [s for s in scenarios if s in od_scenarios]
     totals = [od_scenarios[s]['trips'].sum() for s in s_keys]
-    pops   = [od_scenarios[s]['origin_pop'].sum() for s in s_keys]
+    pops   = [voronoi_vals[f'{s}_pop'].clip(lower=0).fillna(0).sum() for s in s_keys]
 
     x = np.arange(len(s_keys))
     w = 0.35

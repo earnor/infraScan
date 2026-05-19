@@ -47,13 +47,6 @@ def print_hi(name):
     #   'schwachstelle' → only Schwachstellen
     DEV_TYPE_FILTER = 'netzluecke'
 
-    
-    # Minimum distance (m) between kept access points
-    # 0 = keep all nodes.
-    # Intersections are always kept; non-intersection nodes closer than this
-    # to any already-kept node are dropped.  Try 300–500 to reduce OD pairs ~4×.
-    ACCESS_POINT_MIN_DIST = 0 #todo remove
-
     # Define spatial limits of the research corridor
     # The coordinates must end with 000 in order to match the coordinates of the input raster data
     e_min, e_max = 2687000, 2708000
@@ -69,7 +62,7 @@ def print_hi(name):
     outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
 
     # Define the size of the resolution of the raster to 25-50 meter
-    raster_size = 50 # meters
+    # raster_size = 50 # meters todo remove
 
     ##################################################################################
     # Define variables for monetisation
@@ -83,16 +76,8 @@ def print_hi(name):
     c_structural_maint = 1.2/100 # structural maintenance [fraction of construction cost/year]
 
     # Value of Travel Time Savings [CHF/h]
-    VTTS = 18.2  # CHF/h — Swiss official value ~18.2 CHF/h for leisure cycling
-    travel_time_duration = 50  # appraisal horizon [years]
-
-    # Safety — per-ROUTENTYP accident risk rates [accidents/km/trip-year]
-    # Mirrors scoring.RISK_RATE; override here if you want run-specific values,
-    # otherwise scoring.RISK_RATE constants are used directly.
-    # ROUTENTYP of a newly built Netzlücke (sets its post-development risk rate):
-    #   'Velobahn' = 0.10 | 'Veloschnellroute' = 0.15 | 'Hauptverbindung' = 0.30
-    #   'Nebenverbindung' = 0.50 | 'Zusätzliche Freizeitverbindung' = 0.40
-    # Monetary value per prevented accident [CHF] — scoring.VALUE_PER_ACCIDENT
+    VTTS = 18.2  # CHF/h
+    travel_time_duration = 50  # appraisal horizon [years] todo
 
     runtimes["Initialize variables"] = time.time() - st
     st = time.time()
@@ -102,10 +87,10 @@ def print_hi(name):
     print("\nIMPORT RAW DATA \n")
 
     # Import shapes of lake for plots
-    get_lake_data() #ok
+    get_lake_data()
 
     # Import the file containing the locations to be plotted
-    import_locations() #ok
+    import_locations()
 
     # Define area that is protected for constructing cycling paths
     get_protected_area(limits=limits_corridor)
@@ -148,7 +133,7 @@ def print_hi(name):
     plot_network_classified(nodes_gdf, edges_final)
 
     points_corridor, edges_corridor, edges_border = network_in_corridor(
-        polygon=innerboundary, access_point_min_dist=ACCESS_POINT_MIN_DIST)
+        polygon=innerboundary)
 
     # Plot 3 — corridor only, node IDs and type counts
     plot_corridor_network(innerboundary, points_corridor, edges_corridor, edges_border,
@@ -174,35 +159,10 @@ def print_hi(name):
     print(f"\n  Added {nl_mask.sum()} Netzlücken at BAD_FFS ({BAD_FFS} km/h) to corridor graph")
 
     G_with_nl = build_graph_direct(edges_aug)
-    conn_nl   = check_network_connectivity(G_with_nl, label="corridor + Netzlücken")
-
-    # Keep only the largest connected component — drop isolated sub-graphs.
-    # Note: build_graph_direct uses (round(x,1), round(y,1)) coordinate tuples
-    # as node IDs, not ID_point integers.  Filter by matching edge geometry
-    # endpoints against the coordinate-tuple node set.
-    if not conn_nl['is_connected']:
-        import networkx as nx
-        largest_nodes = max(nx.connected_components(G_with_nl.to_undirected()),
-                            key=len)
-
-        def _coords_of(geom):
-            c = list(geom.coords)
-            return ((round(c[0][0], 1), round(c[0][1], 1)),
-                    (round(c[-1][0], 1), round(c[-1][1], 1)))
-
-        edge_mask = edges_aug.geometry.apply(
-            lambda g: all(n in largest_nodes for n in _coords_of(g))
-        )
-        edges_aug = edges_aug[edge_mask].reset_index(drop=True)
-
-        pt_mask = points_corridor.geometry.apply(
-            lambda g: (round(g.x, 1), round(g.y, 1)) in largest_nodes
-        )
-        points_corridor = points_corridor[pt_mask].reset_index(drop=True)
-
-        n_dropped = G_with_nl.number_of_nodes() - len(largest_nodes)
-        print(f"  Kept largest component: {len(largest_nodes)} nodes, "
-              f"{len(edges_aug)} edges  ({n_dropped} nodes dropped)")
+    conn_nl   = check_network_connectivity(G_with_nl, label="corridor + Netzlücken",
+                                           edges_gdf=edges_aug, nodes_gdf=points_corridor)
+    edges_aug       = conn_nl['edges_gdf']
+    points_corridor = conn_nl['nodes_gdf']
 
 
 
@@ -469,13 +429,34 @@ def print_hi(name):
 
 
     ##################################################################################
-    # 2) Node accessibility — Voronoi-catchment scoring + rasterization
+    # 2) Travel time savings — pure Dijkstra (length/speed, no congestion/capacity)
+
+
+    tts_df = compute_dijkstra_tts_od(
+        edges_aug=edges_aug,
+        od_scenarios=od_scenarios,
+        points_corridor=points_corridor,
+        VTTS=VTTS,
+        duration=travel_time_duration,
+        good_ffs=18.0,
+        trips_per_year=250,
+        scenarios=['s1', 's2', 's3'],
+    )
+
+    runtimes["Travel time savings (Dijkstra)"] = time.time() - st
+    _mem()
+    st = time.time()
+
+
+    ##################################################################################
+    # 3) Node accessibility — gravity scoring using network travel times from step 2
 
     accessibility = node_accessibility(
         voronoi_path='data/Voronoi/voronoi_developments_euclidian_values.shp',
         raster_template='data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif',
         beta=2.0,
         scenarios=['s1', 's2', 's3'],
+        travel_times_path='data/OD/od_base_travel_times.csv',
     )
 
     plot_node_accessibility(
@@ -485,38 +466,34 @@ def print_hi(name):
         save_path='data/Network/accessibility/accessibility_plot.png',
     )
 
-    runtimes["Node accessibility (Voronoi-based)"] = time.time() - st
+    runtimes["Node accessibility (network travel-time)"] = time.time() - st
     _mem()
     st = time.time()
 
-
     ##################################################################################
-    # 3) Travel time savings — pure Dijkstra (length/speed, no congestion/capacity)
+    # 4) Accessibility benefits per Netzlücke — population-weighted gravity ΔA
     #
-    # A) Base network: edges_aug with Netzlücken at BAD_FFS (15 km/h) — status quo.
-    # B) For each Netzlücke: upgrade that single edge to good_ffs (25 km/h),
-    #    re-run Dijkstra, compare every OD pair travel time to base.
-    # C) TTS_s = Σ_ij trips_ij_s × max(0, tt_base_ij − tt_dev_ij) / 3600  [h/day]
-    #    savings_CHF = TTS_h × VTTS × 250 days × duration years
-    # D) Reroute factor = routed_dist / straight-line_dist per OD pair (base network).
+    # A_base[s][i] = Σ_j empl[j,s] / tt_base[i,j]^β
+    # For each Netzlücke d: G_d upgrades that edge to good_ffs, re-run Dijkstra,
+    # compute A_d[s][i], then benefits[d][s] = Σ_i pop[i,s] × (A_d − A_base).
+    # Saved to data/costs/accessibility_benefits.csv and included in net_benefits().
 
-    tts_df = compute_dijkstra_tts_od(
+    acc_df = compute_accessibility_benefits(
         edges_aug=edges_aug,
-        od_scenarios=od_scenarios,
         points_corridor=points_corridor,
-        VTTS=VTTS,
-        duration=travel_time_duration,
+        voronoi_path='data/Voronoi/voronoi_developments_euclidian_values.shp',
+        beta=2.0,
         good_ffs=25.0,
-        trips_per_year=250,
         scenarios=['s1', 's2', 's3'],
     )
 
-    runtimes["Travel time savings (Dijkstra)"] = time.time() - st
+    runtimes["Accessibility benefits (per-development)"] = time.time() - st
     _mem()
     st = time.time()
 
+
     ##################################################################################
-    # 4) Construction and maintenance costs
+    # 5) Construction and maintenance costs
     #    Netzlücken: full build at c_cycle_path_new [CHF/m]
     #    Schwachstellen: upgrade at c_cycle_path_update [CHF/m]
 
@@ -534,7 +511,7 @@ def print_hi(name):
 
     construction_costs(
         cycle_path=c_cycle_path_new,
-        upgrade_factor=c_cycle_path_update / c_cycle_path_new,
+        upgrade=c_cycle_path_update,
     )
     maintenance_costs(
         duration=travel_time_duration,
@@ -551,10 +528,12 @@ def print_hi(name):
     #    slope ≥ 6 %       → +251 % perceived distance  (steep)
     #    comfort_cost = extra_perceived_length / speed × VTTS × trips × duration
     route_comfort(
-        edges_gdf=edges_aug,
-        duration=travel_time_duration,
+        edges_aug=edges_aug,
+        od_scenarios=od_scenarios,
+        points_corridor=points_corridor,
         VTTS=VTTS,
-        good_ffs=20.0,
+        duration=travel_time_duration,
+        good_ffs=18.0,
         trips_per_year=250,
     )
     runtimes["Route comfort"] = time.time() - st
@@ -562,13 +541,15 @@ def print_hi(name):
 
     ##################################################################################
     # 6) Safety benefits
-    #    Per-ROUTENTYP risk rates in scoring.RISK_RATE [accidents/km/trip-year].
+    #    Crash cost (CHF/Pkm) from KNA Limmattal in scoring.CRASH_RATE_CHF_PKM.
     #    Built ROUTENTYP in scoring.NETZLUECKE_BUILT_ROUTENTYP.
-    #    Monetary value per accident in scoring.VALUE_PER_ACCIDENT [CHF].
     safety_benefits(
-        edges_gdf=edges_aug,
+        edges_aug=edges_aug,
         od_scenarios=od_scenarios,
+        points_corridor=points_corridor,
         duration=travel_time_duration,
+        good_ffs=18.0,
+        trips_per_year=250,
     )
     runtimes["Safety benefits"] = time.time() - st
     st = time.time()
@@ -589,7 +570,8 @@ def print_hi(name):
     access_points = gpd.read_file(r"data/Network/processed/points_corridor_attribute.gpkg")
 
     gdf_nb_raw = gpd.read_file(r"data/costs/net_benefits.gpkg")
-    money_cols = ["C", "M", "T_s1", "T_s2", "T_s3", "R",
+    money_cols = ["C", "M", "T_s1", "T_s2", "T_s3",
+                  "R_s1", "R_s2", "R_s3",
                   "S_s1", "S_s2", "S_s3", "NB_s1", "NB_s2", "NB_s3"]
     gdf_nb = gdf_nb_raw.copy()
     for col in money_cols:
@@ -614,7 +596,7 @@ def print_hi(name):
         ("C",    "construction cost",     "comp_construction"),
         ("M",    "maintenance cost",      "comp_maintenance"),
         ("T_s2", "travel time savings",   "comp_traveltime"),
-        ("R",    "route comfort benefit", "comp_comfort"),
+        ("R_s2", "route comfort benefit", "comp_comfort"),
         ("S_s2", "safety benefit",        "comp_safety"),
     ]:
         plot_single_cost_result(
@@ -644,11 +626,11 @@ def print_hi(name):
     )
 
     gdf_nb_comp = gdf_nb.copy()
-    for c in ["C", "M", "T_s2", "R", "S_s2"]:
+    for c in ["C", "M", "T_s2", "R_s2", "S_s2"]:
         gdf_nb_comp[c] = gdf_nb_comp[c].astype(int)
     plot_benefit_distribution_line_multi(
         df_costs=gdf_nb_comp,
-        columns=["C", "M", "T_s2", "R", "S_s2"],
+        columns=["C", "M", "T_s2", "R_s2", "S_s2"],
         labels=["Construction (C)", "Maintenance (M)",
                 "Travel time savings (T)", "Route comfort (R)", "Safety (S)"],
         plot_name="nb_components",
