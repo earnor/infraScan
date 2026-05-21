@@ -504,7 +504,7 @@ def plot_benefit_distribution_bar_single(df_costs, column):
 
 def plot_benefit_distribution_line_multi(df_costs, columns, labels, plot_name, legend_title):
     # Define bin width
-    bin_width = 100
+    bin_width = 5
     # Automatically calculate bin edges and create a new column 'bin'
     # Calculate the desired bin edges
     min_value = df_costs[columns].min().min()
@@ -533,50 +533,45 @@ def plot_benefit_distribution_line_multi(df_costs, columns, labels, plot_name, l
         # Create a dict with column names as keys and labels as values
         legend_labels = dict(zip(columns, labels))
 
-    linestyles = ['solid', 'dashdot', 'dashed', 'dotted', 'solid']
-    line_colors = ['darkgray', 'gray', 'dimgray', 'black', 'lightgray']
+    bar_colors = ['#2980b9', '#8e44ad', '#27ae60', '#e67e22', '#c0392b']
 
     fig, ax = plt.subplots(figsize=(13, 6))
+    x_pos      = np.arange(len(bin_counts))
+    n_cols     = len(columns)
+    bar_w      = 0.8 / n_cols          # width of each individual bar
 
-    # Create a line plot with legends
+    # Grouped bars: each series sits next to the others within the same bin
     for i, column in enumerate(columns):
-        ax.plot(bin_counts.index.astype(str), bin_counts[f'bin_{column}'], label=legend_labels[column], color=line_colors[i % len(line_colors)], linestyle=linestyles[i % len(linestyles)])
-        ax.legend(bbox_to_anchor=(1.02, 0), loc="lower left", borderaxespad=0., title=legend_title, fontsize=12, title_fontsize=14, frameon=False)
+        offset = (i - n_cols / 2 + 0.5) * bar_w
+        ax.bar(x_pos + offset, bin_counts[f'bin_{column}'],
+               width=bar_w, label=legend_labels[column],
+               color=bar_colors[i % len(bar_colors)],
+               alpha=0.9, zorder=3)
+
+    ax.legend(bbox_to_anchor=(1.02, 0), loc="lower left", borderaxespad=0.,
+              title=legend_title, fontsize=12, title_fontsize=14, frameon=False)
 
     plt.xlabel('Net benefit [Mio CHF]', fontsize=14)
     plt.ylabel('Occurrence', fontsize=14)
-    plt.xticks(rotation=90)
 
-    # Locate the legend right beside the plot
-    #legend = ax.legend(title=legend_title, loc='upper left', bbox_to_anchor=(1, 1), fontsize=10, title_fontsize=12, bbox_transform=ax.transAxes)
+    # x-tick labels: every 2nd bin edge shown
+    tick_labels = [str(int(v)) if j % 2 == 0 else ''
+                   for j, v in enumerate(bin_edges[:-1])]
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(tick_labels, rotation=90, fontsize=12)
 
-    # Shift the x-tick positions by 0.5 to the left
-    current_xticks = plt.xticks()[0]  # Get current x-tick locations
-    new_xtick_locations = [x + 0.5 for x in current_xticks]
-    # only keep every second x-tick
-    # Generate labels: keep every second label, replace others with empty strings
-    current_labels = [label.get_text() for label in plt.gca().get_xticklabels()]
-    new_labels = [label if i % 2 == 0 else '' for i, label in enumerate(current_labels)]
-
-    # Set new x-tick positions with adjusted labels
-    plt.xticks(ticks=new_xtick_locations, labels=new_labels)
-
-    # Add vertical lines to all ticks with low linewidth and alpha
     plt.grid(axis='x', linestyle='-', linewidth=0.5, alpha=0.5)
-
-    # Increase the size of the ticks with labels
-    plt.tick_params(axis='x', which='major', length=6, width=1, labelsize=12)  # Adjust length and labelsize as needed
+    plt.tick_params(axis='x', which='major', length=6, width=1, labelsize=12)
 
     max_occurrence = bin_counts.max().max()
     y_tick_step = 1
     while max_occurrence > 10 * y_tick_step:
         y_tick_step *= 2
-
     y_ticks = np.arange(0, max_occurrence + y_tick_step, y_tick_step)
     plt.yticks(y_ticks, fontsize=12)
 
     min_shaded_region = next((i for i, val in enumerate(bin_edges) if val >= 0), None)
-    plt.axvspan(-0.5, min_shaded_region + 0.5, color='lightgray', alpha=0.5)
+    ax.axvspan(-0.5, min_shaded_region - 0.5, color='lightgray', alpha=0.4, zorder=1)
 
     plt.xlim(-0.5, len(bin_counts.index) - 0.5)
     plt.grid(axis='y', linestyle='--', alpha=0.7, zorder=1)
@@ -584,6 +579,131 @@ def plot_benefit_distribution_line_multi(df_costs, columns, labels, plot_name, l
     plt.tight_layout()
     plt.savefig(fr"plot/results/04_distribution_line_{plot_name}.png", dpi=500)
     plt.show()
+
+
+def plot_scenario_grouped_bar(plot_name="scenario_grouped_bar"):
+    """
+    Grouped horizontal bar chart: for each development (sorted by NB_s2) three
+    bars are shown side by side — one per growth scenario (s1 / s2 / s3).
+    Makes the scenario spread directly readable per development.
+
+    Reads:  data/costs/net_benefits.csv
+            data/Network/processed/development_candidates.gpkg
+    Saves:  plot/results/{plot_name}.png
+    """
+    nb_path   = "data/costs/net_benefits.csv"
+    devs_path = "data/Network/processed/development_candidates.gpkg"
+    for p in [nb_path, devs_path]:
+        if not os.path.exists(p):
+            print(f"[plot_scenario_grouped_bar] Missing: {p} — skipping")
+            return
+
+    nb   = pd.read_csv(nb_path)
+    devs = gpd.read_file(devs_path)[["ID_new", "dev_type"]]
+    nb   = nb.merge(devs, on="ID_new", how="left")
+    nb   = nb.sort_values("NB_s2", ascending=True).reset_index(drop=True)
+
+    for c in ["NB_s1", "NB_s2", "NB_s3"]:
+        nb[c] = nb[c] / 1e6
+
+    n     = len(nb)
+    y     = np.arange(n)
+    bar_h = 0.25
+
+    scenarios = [
+        ("NB_s1", "#74b9ff", "Low growth (s1)"),
+        ("NB_s2", "#0984e3", "Medium growth (s2)"),
+        ("NB_s3", "#2d3436", "High growth (s3)"),
+    ]
+
+    fig, ax = plt.subplots(figsize=(11, max(6, n * 0.55)))
+
+    for i, (col, color, label) in enumerate(scenarios):
+        offset = (i - 1) * bar_h   # –1 / 0 / +1
+        ax.barh(y + offset, nb[col], height=bar_h,
+                color=color, alpha=0.85, label=label, zorder=3)
+
+    ax.axvline(0, color="black", lw=1.0, zorder=5)
+    ax.set_yticks(y)
+    ax.set_yticklabels(nb["ID_new"].astype(int).astype(str), fontsize=9)
+    ax.set_xlabel("Net Benefit [Mio. CHF]", fontsize=11)
+    ax.set_title("Net Benefit per Development — all growth scenarios\n(sorted by medium scenario)",
+                 fontsize=12, pad=8)
+    ax.legend(loc="lower right", fontsize=9)
+    ax.grid(axis="x", linestyle="--", alpha=0.5, zorder=0)
+
+    plt.tight_layout()
+    os.makedirs("plot/results", exist_ok=True)
+    plt.savefig(f"plot/results/{plot_name}.png", dpi=300, bbox_inches="tight")
+    plt.show()
+    print(f"[plot_scenario_grouped_bar] saved → plot/results/{plot_name}.png")
+
+
+def plot_cost_benefit_scatter(plot_name="cost_benefit_scatter"):
+    """
+    Scatter plot: X = total costs |C+M|, Y = total benefits T+R+S (medium
+    scenario). The dashed diagonal is the break-even line (NB = 0).
+    Points above = positive NB (green), below = negative NB (red).
+    Shows immediately whether a development fails due to high costs or low
+    benefits.
+
+    Reads:  data/costs/net_benefits.gpkg
+    Saves:  plot/results/{plot_name}.png
+    """
+    nb_path = "data/costs/net_benefits.gpkg"
+    if not os.path.exists(nb_path):
+        print(f"[plot_cost_benefit_scatter] Missing: {nb_path} — skipping")
+        return
+
+    nb = gpd.read_file(nb_path)
+    nb["costs_m"]    = (nb["C"].abs() + nb["M"].abs()) / 1e6
+    nb["benefits_m"] = (nb["T_s2"] + nb["R_s2"] + nb["S_s2"]) / 1e6
+    nb["NB_m"]       = nb["NB_s2"] / 1e6
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+
+    # Break-even diagonal
+    max_val = max(nb["costs_m"].max(), nb["benefits_m"].max()) * 1.12
+    ax.plot([0, max_val], [0, max_val], color="black", lw=1.2,
+            linestyle="--", alpha=0.45, label="Break-even  (NB = 0)", zorder=1)
+
+    colors = nb["NB_m"].apply(lambda v: "#27ae60" if v >= 0 else "#e74c3c")
+    ax.scatter(nb["costs_m"], nb["benefits_m"],
+               c=colors, s=90, alpha=0.85, zorder=3, edgecolors="white", linewidths=0.5)
+
+    for _, row in nb.iterrows():
+        ax.annotate(str(int(row["ID_new"])),
+                    (row["costs_m"], row["benefits_m"]),
+                    fontsize=8, ha="left", va="bottom",
+                    xytext=(4, 3), textcoords="offset points")
+
+    # Shaded region: above diagonal = positive NB
+    ax.fill_between([0, max_val], [0, max_val], max_val,
+                    color="#27ae60", alpha=0.04, zorder=0)
+    ax.fill_between([0, max_val], 0, [0, max_val],
+                    color="#e74c3c", alpha=0.04, zorder=0)
+
+    legend_handles = [
+        mpatches.Patch(color="#27ae60", label="Positive NB  (benefits > costs)"),
+        mpatches.Patch(color="#e74c3c", label="Negative NB  (costs > benefits)"),
+        plt.Line2D([0], [0], color="black", lw=1.2, linestyle="--",
+                   alpha=0.6, label="Break-even  (NB = 0)"),
+    ]
+    ax.legend(handles=legend_handles, fontsize=9, loc="upper left")
+
+    ax.set_xlabel("Total Costs  |C + M|  [Mio. CHF]", fontsize=11)
+    ax.set_ylabel("Total Benefits  T + R + S  [Mio. CHF]", fontsize=11)
+    ax.set_title("Cost-Benefit Balance per Development\n(medium growth scenario)",
+                 fontsize=12, pad=8)
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+    ax.grid(linestyle="--", alpha=0.3, zorder=0)
+
+    plt.tight_layout()
+    os.makedirs("plot/results", exist_ok=True)
+    plt.savefig(f"plot/results/{plot_name}.png", dpi=300, bbox_inches="tight")
+    plt.show()
+    print(f"[plot_cost_benefit_scatter] saved → plot/results/{plot_name}.png")
 
 
 def plot_best_worse(df):
@@ -1181,15 +1301,15 @@ def plot_priority_ranking(plot_name="priority_ranking"):
     Saves:  plot/results/{plot_name}.png
     """
     nb_path   = "data/costs/net_benefits.csv"
-    devs_path = "data/Network/processed/developments_list.csv"
+    devs_path = "data/Network/processed/development_candidates.gpkg"
     for p in [nb_path, devs_path]:
         if not os.path.exists(p):
             print(f"[plot_priority_ranking] Missing: {p} — skipping")
             return
 
     nb   = pd.read_csv(nb_path)
-    devs = pd.read_csv(devs_path)
-    nb   = nb.merge(devs[["ID_new", "dev_type", "description"]], on="ID_new", how="left")
+    devs = gpd.read_file(devs_path)[["ID_new", "dev_type"]]
+    nb   = nb.merge(devs, on="ID_new", how="left")
     nb   = nb.sort_values("NB_s2").reset_index(drop=True)
 
     # Convert to Mio. CHF
@@ -1211,11 +1331,7 @@ def plot_priority_ranking(plot_name="priority_ranking"):
             color=colors, capsize=3, alpha=0.85, error_kw={"lw": 1.2, "ecolor": "#333333"})
     ax.axvline(0, color="black", lw=1.0, zorder=5)
 
-    labels = nb.apply(
-        lambda r: (str(int(r["ID_new"])) + "  " +
-                   str(r.get("description", ""))[:48].rstrip()),
-        axis=1
-    )
+    labels = nb["ID_new"].astype(int).astype(str)
     ax.set_yticks(y)
     ax.set_yticklabels(labels, fontsize=8)
     ax.set_xlabel("Net Benefit — medium scenario [Mio. CHF]", fontsize=11)
@@ -1223,12 +1339,19 @@ def plot_priority_ranking(plot_name="priority_ranking"):
                  fontsize=12, pad=8)
     ax.grid(axis="x", linestyle="--", alpha=0.5, zorder=0)
 
+    present_types = nb["dev_type"].dropna().unique().tolist()
+    type_meta = {
+        "netzluecke":    ("#c0392b", "Netzlücke"),
+        "schwachstelle": ("#e67e22", "Schwachstelle"),
+        "connectivity":  ("#7f8c8d", "Connectivity bridge"),
+    }
     legend_handles = [
-        mpatches.Patch(color="#c0392b", label="Netzlücke"),
-        mpatches.Patch(color="#e67e22", label="Schwachstelle"),
-        mpatches.Patch(color="#7f8c8d", label="Connectivity bridge"),
+        mpatches.Patch(color=col, label=lbl)
+        for key, (col, lbl) in type_meta.items()
+        if key in present_types
     ]
-    ax.legend(handles=legend_handles, loc="lower right", fontsize=9)
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc="lower right", fontsize=9)
 
     plt.tight_layout()
     os.makedirs("plot/results", exist_ok=True)
@@ -1274,11 +1397,11 @@ def plot_nb_components_waterfall(plot_name="nb_components_waterfall"):
 
     # ── Benefits (extend right, stacked) ─────────────────────────────────────
     ax.barh(y, nb["T_s2"] / M, color="#27ae60", alpha=0.85, label="Travel-time savings (T)")
-    ax.barh(y, nb["R"] / M,
+    ax.barh(y, nb["R_s2"] / M,
             left=nb["T_s2"] / M,
             color="#2ecc71", alpha=0.85, label="Route comfort (R)")
     ax.barh(y, nb["S_s2"] / M,
-            left=(nb["T_s2"] + nb["R"]) / M,
+            left=(nb["T_s2"] + nb["R_s2"]) / M,
             color="#3498db", alpha=0.85, label="Safety (S)")
 
     ax.axvline(0, color="black", lw=1.0, zorder=5)

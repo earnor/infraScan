@@ -21,8 +21,8 @@ from OSM_network import build_network_from_shapefile, check_network_connectivity
 # will break if the module is imported from a different entry point.
 # Remove this line and rely on main.py to set the working directory, or
 # use pathlib.Path(__file__).parent for all relative paths in this module.
-os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
-# os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
+#os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
+os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
 
 
 def _merge_close_endpoints(df, tolerance=5.0):

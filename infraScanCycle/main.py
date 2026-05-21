@@ -30,8 +30,8 @@ def _mem():
 def print_hi(name):
     # TODO: hardcoded path — replace with pathlib.Path(__file__).parent or a
     # config variable so the script runs on any machine without editing.
-    os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
-    #os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
+    #os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
+    os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
     sys.setrecursionlimit(2000)
     tracemalloc.start()
     runtimes = {}
@@ -604,24 +604,11 @@ def print_hi(name):
 
     boxplot(gdf_nb, nbr=15)
 
-    plot_benefit_distribution_line_multi(
-        df_costs=gdf_nb.copy(),
-        columns=["NB_s1", "NB_s2", "NB_s3"],
-        labels=["low growth", "medium growth", "high growth"],
-        plot_name="nb_all_scenarios", legend_title="Growth scenario",
-    )
+    # Grouped bar: all 3 growth scenarios per development side-by-side
+    plot_scenario_grouped_bar(plot_name="scenario_grouped_bar")
 
-    gdf_nb_comp = gdf_nb.copy()
-    for c in ["C", "M", "T_s2", "R_s2", "S_s2"]:
-        gdf_nb_comp[c] = gdf_nb_comp[c].astype(int)
-    plot_benefit_distribution_line_multi(
-        df_costs=gdf_nb_comp,
-        columns=["C", "M", "T_s2", "R_s2", "S_s2"],
-        labels=["Construction (C)", "Maintenance (M)",
-                "Travel time savings (T)", "Route comfort (R)", "Safety (S)"],
-        plot_name="nb_components",
-        legend_title="NB component\n(medium scenario)",
-    )
+    # Scatter: total costs vs. total benefits — break-even diagonal shows NB=0
+    plot_cost_benefit_scatter(plot_name="cost_benefit_scatter")
 
     # ── DEVELOPMENT RESULT VISUALIZATIONS ────────────────────────────────────
 

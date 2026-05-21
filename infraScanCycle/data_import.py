@@ -885,24 +885,33 @@ def plot_edge_attributes(edges=None):
         else:
             edges['avg_incline_pct'] = np.nan
 
+    # Shared spatial extent for all three subplots
+    xmin, ymin, xmax, ymax = edges.total_bounds
+    pad_x = (xmax - xmin) * 0.02
+    pad_y = (ymax - ymin) * 0.02
+
     fig, axes = plt.subplots(1, 3, figsize=(20, 7))
 
     # --- 1. Free-flow speed ---
     ax = axes[0]
-    speed_colors = {20: '#3498db', 18: '#9b59b6', 15: '#e74c3c'}
+    speed_colors = {20: '#3498db', 18: '#9b59b6', 16: '#27ae60', 13: '#e74c3c'}
     for speed, color in speed_colors.items():
         subset = edges[edges['ffs'] == speed]
         if len(subset):
             subset.plot(ax=ax, color=color, linewidth=1.5, alpha=0.8,
                         label=f'{speed} km/h ({len(subset)})')
     ax.set_title('Free-flow Speed (km/h)', fontsize=12)
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=8, loc='lower right')
     ax.set_aspect('equal')
+    ax.set_xlim(xmin - pad_x, xmax + pad_x)
+    ax.set_ylim(ymin - pad_y, ymax + pad_y)
+    ax.set_xticks([])
+    ax.set_yticks([])
 
     # --- 2. Average incline — single vectorised plot call with colour array ---
     ax = axes[1]
     incline_vals = edges['avg_incline_pct'].fillna(0).values
-    norm = mcolors.Normalize(vmin=0, vmax=max(incline_vals.max(), 8))
+    norm = mcolors.Normalize(vmin=0, vmax=10)
     cmap = cm.RdYlGn_r
     colors = [cmap(norm(v)) for v in incline_vals]
     edges.plot(ax=ax, color=colors, linewidth=1.5)
@@ -911,6 +920,10 @@ def plot_edge_attributes(edges=None):
     plt.colorbar(sm, ax=ax, label='Avg incline (%)', shrink=0.6)
     ax.set_title('Average Incline (%)', fontsize=12)
     ax.set_aspect('equal')
+    ax.set_xlim(xmin - pad_x, xmax + pad_x)
+    ax.set_ylim(ymin - pad_y, ymax + pad_y)
+    ax.set_xticks([])
+    ax.set_yticks([])
 
     # --- 3. Travel time — single vectorised plot call with colour array ---
     ax = axes[2]
@@ -924,6 +937,10 @@ def plot_edge_attributes(edges=None):
     plt.colorbar(sm2, ax=ax, label='Travel time (min)', shrink=0.6)
     ax.set_title('Travel Time (min)', fontsize=12)
     ax.set_aspect('equal')
+    ax.set_xlim(xmin - pad_x, xmax + pad_x)
+    ax.set_ylim(ymin - pad_y, ymax + pad_y)
+    ax.set_xticks([])
+    ax.set_yticks([])
 
     plt.suptitle('Edge Attributes — Cycling Network', fontsize=14, y=1.01)
     plt.tight_layout()
