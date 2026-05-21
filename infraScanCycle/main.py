@@ -2,6 +2,7 @@
 import os
 import math
 import time
+import numpy as np
 import pandas as pd
 import geopandas as gpd
 import sys
@@ -27,11 +28,12 @@ def _mem():
 
 
 
+
 def print_hi(name):
     # TODO: hardcoded path — replace with pathlib.Path(__file__).parent or a
     # config variable so the script runs on any machine without editing.
-    #os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
-    os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
+    os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
+    #os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
     sys.setrecursionlimit(2000)
     tracemalloc.start()
     runtimes = {}
@@ -387,14 +389,26 @@ def print_hi(name):
 
 
     ##################################################################################
+    # 0) Build/refresh the base commune-level OD matrix from the BFS Pendlermatrix.
+    #    Applies 8% cycling modal share (no distance filter — all pairs kept).
+    #    Saves od_matrix_zh_cycling.csv with commuters_cycling baked in.
+    print("\n--- OD BASE MATRIX (BFS Pendlermatrix, 8% modal share) ---")
+    import_pendler_matrix(
+        path_csv='data/OD/pendler_matrix.csv',
+        canton_filter='ZH',
+        cycling_mode_share=0.08,
+        output_dir='data/OD',
+    )
+
+    ##################################################################################
     # 1) OD matrix — commune-disaggregated cycling trips for each scenario
     #
     # A) Each Voronoi node is assigned to a Gemeinde via centroid spatial join.
-    #    Commune-level commuter totals (od_matrix_zh_cycling.csv) provide the
-    #    base flow between each pair of Gemeinden.
+    #    Commune-level cycling commuters (od_matrix_zh_cycling.csv, 8% mode share)
+    #    provide the base flow between each pair of Gemeinden.
     # B) Within each Gemeinde, flows are disaggregated to nodes using within-commune
     #    shares: population drives origin shares, employment drives destination shares.
-    #    trips_ij_s = origin_share_i × dest_share_j × commuters_ij × MODAL_SHARE
+    #    trips_ij_s = origin_share_i × dest_share_j × commuters_cycling_ij
     # C) Save od_s1/s2/s3.csv per scenario and combined od_scenarios.csv.
 
     od_scenarios, voronoi_vals = od_cycling_weighted()

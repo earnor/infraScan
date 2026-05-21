@@ -929,14 +929,164 @@ def od_fastest_paths(*args, **kwargs):
     print("[od_fastest_paths] Skipped — use travel_cost_developments() instead.")
     return None
 
+
+def import_pendler_matrix(
+    path_csv: str = 'data/OD/pendler_matrix.csv',
+    canton_filter: str = 'ZH',
+    cycling_mode_share: float = 0.08,
+    output_dir: str = 'data/OD',
+):
+    """
+    Import and process the BFS Pendlermatrix (OD matrix at Gemeinde level).
+
+    DATA SOURCE — download manually before running:
+      https://www.bfs.admin.ch/asset/de/ts-x-11.04.04.05-2018
+      -> CSV file: "Erwerbstätige nach Wohn- und Arbeitsgemeinde"
+
+    Key columns:
+      WOHNKANTON / WOHNGEMEINDE       : residence canton + BFS Gemeinde number
+      ARBEITSKANTON / ARBEITSGEMEINDE : workplace canton + BFS Gemeinde number
+      ERWERBSTAETIGE                  : number of commuters on that OD pair
+
+    Saves:
+      od_matrix_zh.csv         — all canton-filtered pairs with commuters_total & commuters_cycling
+      od_matrix_zh_cycling.csv — same, filtered to commuters_cycling > 0
+    """
+    import numpy as np
+    import fiona
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    if not os.path.exists(path_csv):
+        raise FileNotFoundError(
+            f"Missing: {path_csv}\n"
+            "Download from: https://www.bfs.admin.ch/asset/de/ts-x-11.04.04.05-2018\n"
+            "Save the CSV as data/OD/pendler_matrix.csv"
+        )
+
+    raw = pd.read_csv(path_csv, sep=';', encoding='utf-8-sig', dtype=str)
+    print(f"  Raw columns: {raw.columns.tolist()}")
+    raw.columns = raw.columns.str.strip().str.upper()
+
+    # Support both old BFS format and newer GEO_* format
+    col_map = {
+        'WOHNKANTON':      next((c for c in raw.columns if c in
+                                 ['WOHNKANTON', 'GEO_CANT_RESID']), None),
+        'WOHNGEMEINDE':    next((c for c in raw.columns if c in
+                                 ['WOHNGEMEINDE', 'GEO_COMM_RESID']), None),
+        'ARBEITSKANTON':   next((c for c in raw.columns if c in
+                                 ['ARBEITSKANTON', 'GEO_CANT_WORK']), None),
+        'ARBEITSGEMEINDE': next((c for c in raw.columns if c in
+                                 ['ARBEITSGEMEINDE', 'GEO_COMM_WORK']), None),
+        'ERWERBSTAETIGE':  next((c for c in raw.columns if c in
+                                 ['ERWERBSTAETIGE', 'VALUE']), None),
+    }
+    missing = [k for k, v in col_map.items() if v is None]
+    if missing:
+        raise KeyError(f"Could not find columns: {missing}. Available: {raw.columns.tolist()}")
+
+    od = raw.rename(columns={v: k for k, v in col_map.items() if v})[list(col_map.keys())].copy()
+    od['ERWERBSTAETIGE'] = pd.to_numeric(od['ERWERBSTAETIGE'], errors='coerce').fillna(0).astype(int)
+    print(f"  Loaded {len(od)} OD pairs, {od['ERWERBSTAETIGE'].sum():,} total commuters")
+
+    # BFS new format uses numeric canton IDs (Zürich = '1'), old format uses 'ZH'
+    zh_ids = {canton_filter, '1', 1, 'ZH', 'zh'}
+    mask  = (od['WOHNKANTON'].astype(str).isin([str(x) for x in zh_ids])) | \
+            (od['ARBEITSKANTON'].astype(str).isin([str(x) for x in zh_ids]))
+    od_zh = od[mask].copy().reset_index(drop=True)
+    print(f"  After canton filter ({canton_filter}): {len(od_zh)} pairs, "
+          f"{od_zh['ERWERBSTAETIGE'].sum():,} commuters")
+
+    gem_path = 'data/raw/Gemeinden/gemeinden_centroid.gpkg'
+    if os.path.exists(gem_path):
+        layers = fiona.listlayers(gem_path)
+        gem_layer = next(
+            (l for l in layers if 'hoheitsgebiet' in l.lower() or 'gemeinde' in l.lower()),
+            layers[0]
+        )
+        gemeinden = gpd.read_file(gem_path, layer=gem_layer)
+        if gemeinden.crs and gemeinden.crs.to_epsg() != 2056:
+            gemeinden = gemeinden.to_crs("EPSG:2056")
+
+        id_col = next(
+            (c for c in gemeinden.columns
+             if c.upper() in ['GMDNR', 'BFS_NR', 'GEMEINDENR', 'NR', 'OBJECTVAL',
+                               'BFSNR', 'GEM_NR', 'NUMMER', 'GKZ',
+                               'BFS_NUMMER', 'BFSNUMMER']),
+            None
+        )
+        if id_col is None:
+            for c in gemeinden.columns:
+                if gemeinden[c].dtype in ['int64', 'float64', 'object']:
+                    sample = gemeinden[c].dropna().astype(str).str.strip()
+                    if sample.str.match(r'^\d{1,4}$').mean() > 0.8:
+                        id_col = c
+                        break
+        if id_col is None:
+            raise KeyError(
+                f"Cannot find BFS Gemeinde ID column. "
+                f"Available columns: {gemeinden.columns.tolist()}"
+            )
+
+        gemeinden['BFS_NR'] = gemeinden[id_col].astype(str).str.strip().str.zfill(4)
+        if 'kantonsnummer' in gemeinden.columns:
+            ktn = gemeinden['kantonsnummer']
+            gemeinden = gemeinden[
+                pd.to_numeric(ktn, errors='coerce').fillna(-1).astype(int) == 1
+            ].copy()
+            print(f"  Gemeinden in Zürich canton: {len(gemeinden)}")
+
+        gemeinden['x'] = gemeinden.geometry.centroid.x
+        gemeinden['y'] = gemeinden.geometry.centroid.y
+        gem_lookup = gemeinden.set_index('BFS_NR')[['x', 'y']].to_dict(orient='index')
+        print(f"  Gemeinde lookup built: {len(gem_lookup)} entries")
+
+        od_zh['WOHNGEMEINDE']    = od_zh['WOHNGEMEINDE'].astype(str).str.zfill(4)
+        od_zh['ARBEITSGEMEINDE'] = od_zh['ARBEITSGEMEINDE'].astype(str).str.zfill(4)
+        od_zh['x_wohn']   = od_zh['WOHNGEMEINDE'].map(lambda g: gem_lookup.get(g, {}).get('x'))
+        od_zh['y_wohn']   = od_zh['WOHNGEMEINDE'].map(lambda g: gem_lookup.get(g, {}).get('y'))
+        od_zh['x_arbeit'] = od_zh['ARBEITSGEMEINDE'].map(lambda g: gem_lookup.get(g, {}).get('x'))
+        od_zh['y_arbeit'] = od_zh['ARBEITSGEMEINDE'].map(lambda g: gem_lookup.get(g, {}).get('y'))
+        matched = od_zh[['x_wohn', 'y_wohn', 'x_arbeit', 'y_arbeit']].notna().all(axis=1).sum()
+        print(f"  OD pairs with both centroids matched: {matched} / {len(od_zh)}")
+
+        if matched == 0:
+            print("  WARNING: No centroids matched — check BFS ID format in CSV vs gpkg")
+            od_zh['dist_km'] = np.nan
+        else:
+            od_zh['dist_km'] = np.sqrt(
+                (pd.to_numeric(od_zh['x_arbeit'], errors='coerce') -
+                 pd.to_numeric(od_zh['x_wohn'],   errors='coerce'))**2 +
+                (pd.to_numeric(od_zh['y_arbeit'], errors='coerce') -
+                 pd.to_numeric(od_zh['y_wohn'],   errors='coerce'))**2
+            ) / 1000
+            print(f"  Distance range: "
+                  f"{od_zh['dist_km'].min():.1f}–{od_zh['dist_km'].max():.1f} km")
+    else:
+        print(f"  Warning: {gem_path} not found — skipping coord join")
+        od_zh['dist_km'] = np.nan
+
+    od_zh['commuters_total']   = od_zh['ERWERBSTAETIGE']
+    od_zh['commuters_cycling'] = (od_zh['commuters_total'] * cycling_mode_share).round().astype(int)
+    print(f"  Cycling commuters ({cycling_mode_share * 100:.0f}% mode share): "
+          f"{od_zh['commuters_cycling'].sum():,}")
+
+    od_zh.to_csv(f'{output_dir}/od_matrix_zh.csv', index=False)
+    od_zh[od_zh['commuters_cycling'] > 0].to_csv(
+        f'{output_dir}/od_matrix_zh_cycling.csv', index=False)
+    print(f"  Saved -> {output_dir}/od_matrix_zh.csv")
+    print(f"  Saved -> {output_dir}/od_matrix_zh_cycling.csv")
+
+    return od_zh
+
+
 def od_cycling_weighted():
-    MODAL_SHARE   = 0.08
     SCENARIOS     = ['s1', 's2', 's3']
     VORONOI_PATH  = 'data/Voronoi/voronoi_developments_euclidian_values.shp'
     COMMUNE_OD    = 'data/OD/od_matrix_zh_cycling.csv'
     GEMEINDE_PATH = 'data/_basic_data/Gemeindegrenzen/UP_GEMEINDEN_F.shp'
 
-    print(f"\n--- OD MATRIX (commune-disaggregated, modal share {MODAL_SHARE * 100:.0f}%) ---")
+    print(f"\n--- OD MATRIX (commune-disaggregated) ---")
 
     voronoi_vals = gpd.read_file(VORONOI_PATH)
     voronoi_vals['ID_point'] = voronoi_vals['ID_point'].astype(int)
@@ -958,8 +1108,8 @@ def od_cycling_weighted():
     n_matched = (voronoi_vals['commune_id'] >= 0).sum()
     print(f"  Commune join: {n_matched}/{len(voronoi_vals)} Voronoi nodes matched to a Gemeinde")
 
-    # ── Load commune-level OD (total commuters — modal share applied below) ──
-    commune_od = pd.read_csv(COMMUNE_OD)[['WOHNGEMEINDE', 'ARBEITSGEMEINDE', 'commuters_total']].copy()
+    # ── Load commune-level OD (cycling commuters — modal share already baked in) ──
+    commune_od = pd.read_csv(COMMUNE_OD)[['WOHNGEMEINDE', 'ARBEITSGEMEINDE', 'commuters_cycling']].copy()
 
     os.makedirs('data/OD', exist_ok=True)
     od_scenarios = {}
@@ -996,8 +1146,8 @@ def od_cycling_weighted():
                       left_on=['commune_id_o', 'commune_id_d'],
                       right_on=['WOHNGEMEINDE', 'ARBEITSGEMEINDE'],
                       how='left').drop(columns=['WOHNGEMEINDE', 'ARBEITSGEMEINDE'], errors='ignore')
-        od['commuters_total'] = od['commuters_total'].fillna(0)
-        od['trips']    = od['origin_share'] * od['dest_share'] * od['commuters_total'] * MODAL_SHARE
+        od['commuters_cycling'] = od['commuters_cycling'].fillna(0)
+        od['trips']    = od['origin_share'] * od['dest_share'] * od['commuters_cycling']
         od['scenario'] = s
 
         od.to_csv(f'data/OD/od_{s}.csv', index=False)
