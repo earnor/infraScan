@@ -74,6 +74,46 @@ def _base_map(ax, network, access_points, boundary):
         sp.set_linewidth(1); sp.set_zorder(1000)
 
 
+def _add_duebendorf_inset(ax, network=None, pos=(0.62, 0.03, 0.36, 0.44)):
+    """
+    Add a zoomed detail inset of the Dübendorf area (NW corner of the
+    corridor, approx. E 2 687 000–2 697 500 / N 1 247 000–1 254 000 LV95).
+    A zoom-indicator rectangle is drawn on the parent axes.
+    Returns the inset axes so the caller can layer the coloured feature.
+    pos – (x0, y0, width, height) in axes-fraction coordinates.
+    """
+    DUB_E_MIN, DUB_E_MAX = 2_687_000, 2_697_500
+    DUB_N_MIN, DUB_N_MAX = 1_247_000, 1_254_000
+
+    ax_ins = ax.inset_axes(pos)
+    ax_ins.set_xlim(DUB_E_MIN, DUB_E_MAX)
+    ax_ins.set_ylim(DUB_N_MIN, DUB_N_MAX)
+    ax_ins.set_xticks([])
+    ax_ins.set_yticks([])
+
+    lakes_path = r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
+    if os.path.exists(lakes_path):
+        gpd.read_file(lakes_path).plot(ax=ax_ins, color="lightblue", zorder=9)
+
+    if isinstance(network, gpd.GeoDataFrame):
+        network.plot(ax=ax_ins, color="#888888", lw=0.8, zorder=10, alpha=0.55)
+
+    for sp in ax_ins.spines.values():
+        sp.set_visible(True)
+        sp.set_edgecolor("black")
+        sp.set_linewidth(2)
+        sp.set_zorder(1000)
+
+    ax_ins.set_title("Dübendorf (detail)", fontsize=8, pad=3, fontweight="bold")
+
+    try:
+        ax.indicate_inset_zoom(ax_ins, edgecolor="black", alpha=0.6, linewidth=1.5)
+    except Exception:
+        pass  # older matplotlib versions
+
+    return ax_ins
+
+
 class CustomBasemap:
     def __init__(self, boundary=None, network=None, access_points=None, frame=None, canton=False):
         # Create a figure and axis
@@ -1697,3 +1737,169 @@ def plot_nb_on_network(boundary=None, network=None, access_points=None,
     plt.savefig(f"plot/results/{plot_name}.png", dpi=300, bbox_inches="tight")
     plt.show()
     print(f"[plot_nb_on_network] saved → plot/results/{plot_name}.png")
+
+
+def plot_duebendorf_zoom(df_costs, banned_area, title_bar, network=None,
+                         access_points=None, plot_name="duebendorf_zoom",
+                         col="NB_s2"):
+    """
+    Stand-alone zoomed map of the Dübendorf sub-area
+    (E 2 687 000–2 697 500 / N 1 247 000–1 254 000, LV95/EPSG:2056).
+    Same colour scheme as plot_cost_result so the two maps can be read
+    side by side.  Development IDs are labelled at each line's midpoint.
+
+    Reads:  data/Network/processed/development_candidates.gpkg
+            data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp
+    Saves:  plot/results/{plot_name}.png
+    """
+    DUB_E_MIN, DUB_E_MAX = 2_687_000, 2_697_500
+    DUB_N_MIN, DUB_N_MAX = 1_247_000, 1_254_000
+
+    # ── Join NB values to LineString edge geometries ──────────────────────────
+    dev_geom = gpd.read_file(
+        "data/Network/processed/development_candidates.gpkg")[["ID_new", "geometry"]]
+    dev_geom["ID_new"] = dev_geom["ID_new"].astype(int)
+    df_costs = df_costs.copy()
+    df_costs["ID_new"] = df_costs["ID_new"].astype(int)
+    df_plot = dev_geom.merge(
+        df_costs.drop(columns=["geometry"], errors="ignore"),
+        on="ID_new", how="inner")
+    df_plot = gpd.GeoDataFrame(df_plot, geometry="geometry", crs="EPSG:2056")
+    df_plot = df_plot.dropna(subset=[col])
+
+    # ── Clip to Dübendorf extent ──────────────────────────────────────────────
+    df_dub = df_plot.cx[DUB_E_MIN:DUB_E_MAX, DUB_N_MIN:DUB_N_MAX].copy()
+    if df_dub.empty:
+        print(f"[plot_duebendorf_zoom] No developments in Dübendorf extent — skipping")
+        return
+
+    # Same diverging colormap as the full corridor maps
+    min_val, max_val = df_plot[col].min(), df_plot[col].max()
+    cmap = _make_diverging_cmap(min_val, max_val)
+    norm = mcolors.Normalize(vmin=min_val, vmax=max_val)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # ── Base layers ───────────────────────────────────────────────────────────
+    lakes_path = r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
+    if os.path.exists(lakes_path):
+        gpd.read_file(lakes_path).plot(ax=ax, color="lightblue", zorder=9)
+
+    if isinstance(network, gpd.GeoDataFrame):
+        network.plot(ax=ax, color="#888888", lw=1.0, zorder=10, alpha=0.55)
+
+    if isinstance(access_points, gpd.GeoDataFrame):
+        access_points.plot(ax=ax, color="black", markersize=40, zorder=12)
+
+    # ── Coloured development lines ────────────────────────────────────────────
+    df_dub.plot(ax=ax, column=col, cmap=cmap, norm=norm,
+                linewidth=7, zorder=11, legend=False, capstyle="round")
+
+    # ── ID labels ─────────────────────────────────────────────────────────────
+    for _, row in df_dub.iterrows():
+        if row.geometry is None or row.geometry.is_empty:
+            continue
+        mid = row.geometry.interpolate(0.5, normalized=True)
+        ax.annotate(str(int(row["ID_new"])), xy=(mid.x, mid.y),
+                    xytext=(4, 4), textcoords="offset points",
+                    fontsize=10, fontweight="bold", color="black", zorder=16,
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white",
+                              alpha=0.8, ec="none"))
+
+    # ── Raster overlay ────────────────────────────────────────────────────────
+    raster = rasterio.open(banned_area)
+    rasterio.plot.show(raster, ax=ax,
+                       cmap=ListedColormap(["white", "white"]), zorder=3)
+
+    # ── Colorbar ──────────────────────────────────────────────────────────────
+    sm = mcm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="3%", pad=0.4)
+    cbar = plt.colorbar(sm, cax=cax)
+    cbar.set_label(f"{title_bar} [Mio. CHF]", rotation=90, labelpad=16, fontsize=12)
+    cbar.ax.tick_params(labelsize=11)
+
+    # ── Map extent, scale bar, north arrow ───────────────────────────────────
+    ax.set_xlim(DUB_E_MIN, DUB_E_MAX)
+    ax.set_ylim(DUB_N_MIN, DUB_N_MAX)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.add_artist(ScaleBar(1, location="lower right"))
+    ax.text(0.96, 0.92, "N", fontsize=22, weight="bold",
+            ha="center", va="center", transform=ax.transAxes, zorder=1000)
+    ax.add_patch(FancyArrowPatch((0.96, 0.89), (0.96, 0.97), color="black", lw=2,
+                                 arrowstyle="->", mutation_scale=20,
+                                 transform=ax.transAxes, zorder=1000))
+    for sp in ax.spines.values():
+        sp.set_visible(True); sp.set_edgecolor("black")
+        sp.set_linewidth(1); sp.set_zorder(1000)
+
+    water_patch = mpatches.Patch(facecolor="lightblue", label="Water bodies",
+                                 edgecolor="black", linewidth=1)
+    ax.legend(handles=[water_patch], loc="upper center",
+              bbox_to_anchor=(0.5, -0.02), fontsize=12, frameon=False)
+
+    ax.set_title(f"Dübendorf detail — {title_bar}", fontsize=13, pad=8)
+
+    plt.tight_layout()
+    os.makedirs("plot/results", exist_ok=True)
+    plt.savefig(f"plot/results/{plot_name}.png", dpi=300, bbox_inches="tight")
+    plt.show()
+    print(f"[plot_duebendorf_zoom] saved → plot/results/{plot_name}.png")
+
+
+def plot_bcr_bar(plot_name="bcr_bar"):
+    """
+    Horizontal bar chart of Benefit-Cost Ratio (BCR) per development,
+    sorted ascending.  BCR = (T_s2 + R_s2 + S_s2) / |C + M|.
+    A vertical dashed line at BCR = 1 marks the break-even threshold.
+    Bars are green (BCR ≥ 1) or red (BCR < 1).
+
+    Reads:  data/costs/net_benefits.gpkg
+    Saves:  plot/results/{plot_name}.png
+    """
+    nb_path = "data/costs/net_benefits.gpkg"
+    if not os.path.exists(nb_path):
+        print(f"[plot_bcr_bar] Missing: {nb_path} — skipping")
+        return
+
+    nb = gpd.read_file(nb_path)
+    for c in ["C", "M", "T_s2", "R_s2", "S_s2"]:
+        nb[c] = pd.to_numeric(nb[c], errors="coerce")
+
+    nb["total_costs"]    = nb["C"].abs() + nb["M"].abs()
+    nb["total_benefits"] = nb["T_s2"] + nb["R_s2"] + nb["S_s2"]
+    nb = nb[nb["total_costs"] > 0].copy()
+    nb["BCR"] = nb["total_benefits"] / nb["total_costs"]
+    nb = nb.sort_values("BCR", ascending=True).reset_index(drop=True)
+
+    colors = ["#27ae60" if v >= 1 else "#e74c3c" for v in nb["BCR"]]
+
+    fig, ax = plt.subplots(figsize=(9, max(5, len(nb) * 0.45)))
+    y = np.arange(len(nb))
+    ax.barh(y, nb["BCR"], color=colors, alpha=0.85,
+            edgecolor="white", linewidth=0.5, zorder=3)
+    ax.axvline(1.0, color="black", lw=1.5, linestyle="--", zorder=5)
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(nb["ID_new"].astype(int).astype(str), fontsize=9)
+    ax.set_xlabel("Benefit-Cost Ratio  (T + R + S) / |C + M|", fontsize=11)
+    ax.set_title("Benefit-Cost Ratio per Development\n"
+                 "(medium growth scenario  ·  BCR > 1 = net positive)",
+                 fontsize=12, pad=8)
+    ax.grid(axis="x", linestyle="--", alpha=0.5, zorder=0)
+
+    legend_handles = [
+        mpatches.Patch(color="#27ae60", label="BCR ≥ 1  (benefits exceed costs)"),
+        mpatches.Patch(color="#e74c3c", label="BCR < 1  (costs exceed benefits)"),
+        plt.Line2D([0], [0], color="black", lw=1.5, linestyle="--",
+                   label="Break-even  (BCR = 1)"),
+    ]
+    ax.legend(handles=legend_handles, fontsize=9, loc="lower right")
+
+    plt.tight_layout()
+    os.makedirs("plot/results", exist_ok=True)
+    plt.savefig(f"plot/results/{plot_name}.png", dpi=300, bbox_inches="tight")
+    plt.show()
+    print(f"[plot_bcr_bar] saved → plot/results/{plot_name}.png")

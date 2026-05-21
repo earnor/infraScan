@@ -890,57 +890,68 @@ def plot_edge_attributes(edges=None):
     pad_x = (xmax - xmin) * 0.02
     pad_y = (ymax - ymin) * 0.02
 
-    fig, axes = plt.subplots(1, 3, figsize=(20, 7))
+    # Use GridSpec so all three map panels have identical frame sizes.
+    # Each panel gets a dedicated (thin) colorbar column; cax1 is hidden
+    # because the speed panel uses an internal legend instead.
+    from matplotlib.gridspec import GridSpec
+    fig = plt.figure(figsize=(21, 7))
+    gs  = GridSpec(1, 6, figure=fig,
+                   width_ratios=[1, 0.06, 1, 0.06, 1, 0.06],
+                   wspace=0.30)
+    ax1  = fig.add_subplot(gs[0, 0])
+    cax1 = fig.add_subplot(gs[0, 1])   # hidden — speed uses a legend
+    ax2  = fig.add_subplot(gs[0, 2])
+    cax2 = fig.add_subplot(gs[0, 3])
+    ax3  = fig.add_subplot(gs[0, 4])
+    cax3 = fig.add_subplot(gs[0, 5])
+    cax1.set_visible(False)
 
     # --- 1. Free-flow speed ---
-    ax = axes[0]
     speed_colors = {20: '#3498db', 18: '#9b59b6', 16: '#27ae60', 13: '#e74c3c'}
     for speed, color in speed_colors.items():
         subset = edges[edges['ffs'] == speed]
         if len(subset):
-            subset.plot(ax=ax, color=color, linewidth=1.5, alpha=0.8,
+            subset.plot(ax=ax1, color=color, linewidth=1.5, alpha=0.8,
                         label=f'{speed} km/h ({len(subset)})')
-    ax.set_title('Free-flow Speed (km/h)', fontsize=12)
-    ax.legend(fontsize=8, loc='lower right')
-    ax.set_aspect('equal')
-    ax.set_xlim(xmin - pad_x, xmax + pad_x)
-    ax.set_ylim(ymin - pad_y, ymax + pad_y)
-    ax.set_xticks([])
-    ax.set_yticks([])
+    ax1.set_title('Free-flow Speed (km/h)', fontsize=12)
+    ax1.legend(fontsize=8, loc='lower right')
+    ax1.set_aspect('equal')
+    ax1.set_xlim(xmin - pad_x, xmax + pad_x)
+    ax1.set_ylim(ymin - pad_y, ymax + pad_y)
+    ax1.set_xticks([])
+    ax1.set_yticks([])
 
-    # --- 2. Average incline — single vectorised plot call with colour array ---
-    ax = axes[1]
+    # --- 2. Average incline ---
     incline_vals = edges['avg_incline_pct'].fillna(0).values
     norm = mcolors.Normalize(vmin=0, vmax=10)
     cmap = cm.RdYlGn_r
     colors = [cmap(norm(v)) for v in incline_vals]
-    edges.plot(ax=ax, color=colors, linewidth=1.5)
+    edges.plot(ax=ax2, color=colors, linewidth=1.5)
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    plt.colorbar(sm, ax=ax, label='Avg incline (%)', shrink=0.6)
-    ax.set_title('Average Incline (%)', fontsize=12)
-    ax.set_aspect('equal')
-    ax.set_xlim(xmin - pad_x, xmax + pad_x)
-    ax.set_ylim(ymin - pad_y, ymax + pad_y)
-    ax.set_xticks([])
-    ax.set_yticks([])
+    fig.colorbar(sm, cax=cax2, label='Avg incline (%)')
+    ax2.set_title('Average Incline (%)', fontsize=12)
+    ax2.set_aspect('equal')
+    ax2.set_xlim(xmin - pad_x, xmax + pad_x)
+    ax2.set_ylim(ymin - pad_y, ymax + pad_y)
+    ax2.set_xticks([])
+    ax2.set_yticks([])
 
-    # --- 3. Travel time — single vectorised plot call with colour array ---
-    ax = axes[2]
+    # --- 3. Travel time ---
     tt_vals = edges['tt_min'].values
     norm2 = mcolors.Normalize(vmin=tt_vals.min(), vmax=tt_vals.max())
     cmap2 = cm.Blues
     colors2 = [cmap2(norm2(v)) for v in tt_vals]
-    edges.plot(ax=ax, color=colors2, linewidth=1.5)
+    edges.plot(ax=ax3, color=colors2, linewidth=1.5)
     sm2 = cm.ScalarMappable(cmap=cmap2, norm=norm2)
     sm2.set_array([])
-    plt.colorbar(sm2, ax=ax, label='Travel time (min)', shrink=0.6)
-    ax.set_title('Travel Time (min)', fontsize=12)
-    ax.set_aspect('equal')
-    ax.set_xlim(xmin - pad_x, xmax + pad_x)
-    ax.set_ylim(ymin - pad_y, ymax + pad_y)
-    ax.set_xticks([])
-    ax.set_yticks([])
+    fig.colorbar(sm2, cax=cax3, label='Travel time (min)')
+    ax3.set_title('Travel Time (min)', fontsize=12)
+    ax3.set_aspect('equal')
+    ax3.set_xlim(xmin - pad_x, xmax + pad_x)
+    ax3.set_ylim(ymin - pad_y, ymax + pad_y)
+    ax3.set_xticks([])
+    ax3.set_yticks([])
 
     plt.suptitle('Edge Attributes — Cycling Network', fontsize=14, y=1.01)
     plt.tight_layout()

@@ -32,8 +32,8 @@ def _mem():
 def print_hi(name):
     # TODO: hardcoded path — replace with pathlib.Path(__file__).parent or a
     # config variable so the script runs on any machine without editing.
-    os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
-    #os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
+    #os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
+    os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
     sys.setrecursionlimit(2000)
     tracemalloc.start()
     runtimes = {}
@@ -67,11 +67,11 @@ def print_hi(name):
     # Define variables for monetisation
 
     # Construction costs [CHF/m]
-    c_cycle_path_new    = 1000   # new path (Netzlücke)    TODO: calibrate
-    c_cycle_path_update = 300    # upgrade (Schwachstelle)  TODO: calibrate
+    c_cycle_path_new    = 1800   # new path (Netzlücke)    TODO: calibrate
+    c_cycle_path_update = 20    # upgrade (Schwachstelle)  TODO: calibrate
 
     # Maintenance costs
-    c_om_cycle_path    = 100     # operational maintenance [CHF/m/year]  TODO: calibrate
+    c_om_cycle_path    = 20     # operational maintenance [CHF/m/year]  TODO: calibrate
     c_structural_maint = 1.2/100 # structural maintenance [fraction of construction cost/year]
 
     # Value of Travel Time Savings [CHF/h]
@@ -623,6 +623,17 @@ def print_hi(name):
 
     # Scatter: total costs vs. total benefits — break-even diagonal shows NB=0
     plot_cost_benefit_scatter(plot_name="cost_benefit_scatter")
+
+    # BCR bar: benefit-to-cost ratio per development, sorted, break-even at 1
+    plot_bcr_bar(plot_name="bcr_bar")
+
+    # Dübendorf detail map: zoomed view of the NW sub-area
+    plot_duebendorf_zoom(
+        df_costs=gdf_nb.copy(), banned_area=tif_path_plot,
+        title_bar="cycling net benefit — medium growth (s2)",
+        network=network, access_points=access_points,
+        plot_name="duebendorf_zoom", col="NB_s2",
+    )
 
     # ── DEVELOPMENT RESULT VISUALIZATIONS ────────────────────────────────────
 
