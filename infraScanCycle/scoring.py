@@ -639,7 +639,7 @@ def route_comfort(
                                           and float(row.get('ffs', 0)) > 0) else 13.0
         eps       = EPSILON.get(routetype, EPSILON_DEFAULT)
         slope_f   = edge_slope_f.get((u, v), 0.0)
-        comfort_h = length_m * slope_f * eps / (ffs_edge * 1000.0)
+        comfort_h = length_m * (1.0 + slope_f) * eps / (ffs_edge * 1000.0)
         edge_comfort[(u, v)] = comfort_h
         edge_comfort[(v, u)] = comfort_h
 
