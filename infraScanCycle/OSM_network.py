@@ -56,9 +56,10 @@ def check_parallel_edges_gdf(gdf):
 
 
 def _load_corridor_gdf(only_existing=True):
-    """Load the pre-filtered corridor edges (231 in-corridor + 32 on-border).
+    """Load the pre-filtered corridor edges from edges_corridor.gpkg and
+    edges_corridor_border.gpkg, concatenate them, and explode MultiLineStrings.
 
-    only_existing: drop rows where is_development == True (Netzlücken).
+    only_existing: if True, drop rows where is_development == 1 (Netzlücken).
     """
     inside = gpd.read_file(_EDGES_CORRIDOR_PATH)
     border = gpd.read_file(_EDGES_BORDER_PATH)
@@ -348,7 +349,7 @@ def _build_base_gdf():
         ffs_col = pd.Series(20.0, index=gdf.index)
     gdf['tt_min'] = (seg_len / 1000) / ffs_col * 60
 
-    # Override Netzlücken only to BAD_FFS — Schwachstellen keep their ROUTENTYP ffs (20 km/h)
+    # Override Netzlücken to BAD_FFS — Schwachstellen keep their ROUTENTYP-based ffs
     bad_mask = pd.Series(False, index=gdf.index)
     if 'is_development' in gdf.columns:
         bad_mask |= gdf['is_development'].astype(bool)
@@ -378,6 +379,90 @@ def _build_base_gdf():
 build_graph_direct = _build_graph_direct   # public alias — use this outside this module
 
 
+def augment_with_netzluecken(edges_corridor, points_corridor,
+                              c_cycle_path_new=1000,
+                              c_om_cycle_path=100,
+                              c_structural_maint=0.012):
+    """
+    Label Netzlücken (is_development==1) with ROUTENTYP='Netzlücke' and BAD_FFS,
+    store the original ROUTENTYP and ffs as routentyp_built / ffs_built so
+    scoring functions can use the correct per-edge built speed, rebuild
+    connectivity, and write a scoring CSV skeleton to
+    data/Network/processed/netzluecken_scoring.csv.
+
+    CSV columns: length, type/speed before (unbuilt) & after (built),
+    construction and maintenance costs.  Scoring columns (comfort,
+    accessibility, safety) are left blank to be filled by the respective
+    scoring functions.
+
+    Returns (edges_aug, points_corridor).
+    """
+    edges_aug = edges_corridor.copy()
+
+    # Derive ffs from ROUTENTYP if the corridor edges were saved before
+    # get_edge_attributes / plot_edge_attributes ran (edges.gpkg lacks ffs).
+    if 'ffs' not in edges_aug.columns:
+        _FFS_MAP = {
+            'Velobahn':                       20.0,
+            'Veloschnellroute':               20.0,
+            'Hauptverbindung':                18.0,
+            'Nebenverbindung':                16.0,
+            'Zusätzliche Freizeitverbindung': 18.0,
+        }
+        edges_aug['ffs'] = edges_aug['ROUTENTYP'].map(
+            lambda rt: _FFS_MAP.get(rt, 20.0))
+        print(f"  augment_with_netzluecken: ffs derived from ROUTENTYP "
+              f"(column was missing from edges_corridor)")
+
+    if 'tt_min' not in edges_aug.columns:
+        edges_aug['tt_min'] = (edges_aug['length_m'] / 1000) / edges_aug['ffs'] * 60
+
+    nl_mask = edges_aug['is_development'] == 1
+
+    # Snapshot original values before overwriting — these become the "after"
+    # columns (what the edge looks like once the Netzlücke is built).
+    nl_orig = edges_aug.loc[nl_mask, ['length_m', 'ROUTENTYP', 'ffs']].copy()
+
+    edges_aug.loc[nl_mask, 'ffs_built']       = nl_orig['ffs'].values
+    edges_aug.loc[nl_mask, 'routentyp_built'] = nl_orig['ROUTENTYP'].values
+    edges_aug.loc[nl_mask, 'ROUTENTYP'] = 'Netzlücke'
+    edges_aug.loc[nl_mask, 'ffs']       = BAD_FFS
+    edges_aug.loc[nl_mask, 'tt_min']    = (
+        edges_aug.loc[nl_mask, 'length_m'] / 1000) / BAD_FFS * 60
+    print(f"\n  Added {nl_mask.sum()} Netzlücken at BAD_FFS ({BAD_FFS} km/h) to corridor graph")
+
+    G_with_nl = build_graph_direct(edges_aug)
+    conn_nl   = check_network_connectivity(G_with_nl, label="corridor + Netzlücken",
+                                           edges_gdf=edges_aug, nodes_gdf=points_corridor)
+    edges_aug       = conn_nl['edges_gdf']
+    points_corridor = conn_nl['nodes_gdf']
+
+    # Build scoring CSV: before = current unbuilt state, after = once built
+    nl_scoring = pd.DataFrame({
+        'length_m':                    nl_orig['length_m'].values,
+        'type_before':                 'Netzlücke',
+        'type_after':                  nl_orig['ROUTENTYP'].values,
+        'speed_before_kmh':            BAD_FFS,
+        'speed_after_kmh':             nl_orig['ffs'].values,
+        'route_comfort_index_before':  None,
+        'route_comfort_index_after':   None,
+        'accessibility_scoring':       None,
+        'route_comfort_scoring':       None,
+        'safety_index_before':         None,
+        'safety_index_after':          None,
+        'safety_scoring':              None,
+        'construction_cost_chf':       nl_orig['length_m'].values * c_cycle_path_new,
+        'maintenance_cost_chf_yr':     nl_orig['length_m'].values * (
+            c_om_cycle_path + c_structural_maint * c_cycle_path_new),
+    })
+
+    os.makedirs('data/Network/processed', exist_ok=True)
+    nl_scoring.to_csv('data/Network/processed/netzluecken_scoring.csv', index=False)
+    print(f"  Netzlücken scoring CSV → netzluecken_scoring.csv ({len(nl_scoring)} rows)")
+
+    return edges_aug, points_corridor
+
+
 _MAX_DETOUR_FACTOR = 2.5   # drop OD pairs where network path > 2.5× straight-line distance
 
 
@@ -394,7 +479,7 @@ def compute_od_matrix(max_dist_m=25_000, cycling_speed_kmh=15):
         — flags paths routed through long connectivity bridges rather than
           real cycling infrastructure.
     """
-    access_pts = gpd.read_file('data/Network/processed/access_points_corridor.gpkg')
+    access_pts = gpd.read_file('data/Network/processed/points_corridor.gpkg')
 
     # Precompute straight-line lookup: ID_point → (x, y) in LV95
     id_to_xy = {
@@ -563,7 +648,7 @@ def travel_cost_polygon(frame, raster_file=r"data/Network/OSM_tif/cycling_speed_
     network: existing edges at their surveyed speeds, Netzlücken / Schwachstellen
     at BAD_FFS, and connectivity bridges at WORST_FFS.
     """
-    points_all = gpd.read_file(r"data/Network/processed/access_points_corridor.gpkg")
+    points_all = gpd.read_file(r"data/Network/processed/points_corridor.gpkg")
 
     # Build full base graph
     t0 = time.time()
@@ -776,7 +861,7 @@ def travel_cost_developments(frame, raster_file=r"data/Network/OSM_tif/cycling_s
     for f in glob.glob(r'data/Network/travel_time/developments/*'):
         os.remove(f)
 
-    points = gpd.read_file(r"data/Network/processed/access_points_corridor.gpkg")
+    points = gpd.read_file(r"data/Network/processed/points_corridor.gpkg")
 
     # Official candidates only — connectivity bridges are not scored
     all_candidates = gpd.read_file(r"data/Network/processed/development_candidates.gpkg")

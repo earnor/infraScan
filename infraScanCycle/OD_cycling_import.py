@@ -233,7 +233,7 @@ print("\n── 04 Generated candidates ──")
 edges      = gpd.read_file(r"data/Network/processed/edges_corridor.gpkg")
 gen_nodes  = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
 candidates = gpd.read_file(r"data/Network/processed/new_links_realistic.gpkg")
-access_pts = gpd.read_file(r"data/Network/processed/access_points_corridor.gpkg")
+access_pts = gpd.read_file(r"data/Network/processed/points_corridor.gpkg")
 for gdf in [edges, gen_nodes, candidates, access_pts]:
     if gdf.crs and gdf.crs.to_epsg() != 2056:
         gdf.to_crs(CRS, inplace=True)
@@ -613,7 +613,7 @@ except FileNotFoundError as e:
     od_has_coords = False
 
 if od_zh is not None:
-    PATH_ACCESS_PTS = r"data/Network/processed/access_points_corridor.gpkg"
+    PATH_ACCESS_PTS = r"data/Network/processed/points_corridor.gpkg"
     access_pts = None
     if os.path.exists(PATH_ACCESS_PTS):
         access_pts = gpd.read_file(PATH_ACCESS_PTS)

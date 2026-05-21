@@ -25,8 +25,8 @@ def _make_diverging_cmap(min_val, max_val):
     if min_val < 0 and max_val > 0:
         total = abs(min_val) + abs(max_val)
         neg_p, pos_p = abs(min_val) / total, abs(max_val) / total
-        neg_c = plt.cm.Reds_r(np.linspace(0.15, 0.8,  int(n * neg_p)))
-        pos_c = plt.cm.Blues( np.linspace(0.3,  0.95, int(n * pos_p)))
+        neg_c = plt.cm.Reds_r(np.linspace(0.15, 0.8,  max(1, int(n * neg_p))))
+        pos_c = plt.cm.Blues( np.linspace(0.3,  0.95, max(1, int(n * pos_p))))
         tl = int(n * 0.2)
         all_c = np.vstack((neg_c[:-1],
                            np.linspace(neg_c[-1], gray, tl),

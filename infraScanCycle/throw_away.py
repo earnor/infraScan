@@ -61,7 +61,7 @@ if __name__ == "__main__":
     # 4. Check the points with mapped attributes (Input A for connection)
     check_file(
         "CURRENT ACCESS POINTS (WITH ATTR)",
-        "data/Network/processed/points_corridor_attribute.gpkg"
+        "data/Network/processed/points_corridor.gpkg"
     )
 
     # 5. Check the generated potential sites (Input B for connection)

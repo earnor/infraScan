@@ -182,6 +182,21 @@ def polygon_from_points(bounds=None, e_min=None, e_max=None, n_min=None, n_max=N
 
 
 
+_ROUTENTYP_RANK = {
+    'Velobahn':                        4,
+    'Veloschnellroute':                4,
+    'Hauptverbindung':                 3,
+    'Zusätzliche Freizeitverbindung':  2,
+    'Nebenverbindung':                 1,
+}
+
+def _lowest_routentyp(types):
+    known = [(t, _ROUTENTYP_RANK[t]) for t in types if t in _ROUTENTYP_RANK]
+    if not known:
+        return 'Nebenverbindung'
+    return min(known, key=lambda x: x[1])[0]
+
+
 def _connect_dead_ends_to_nodes(edges_gdf, threshold=50.0):
     """
     For each remaining dead-end endpoint, find the nearest other endpoint
@@ -206,6 +221,14 @@ def _connect_dead_ends_to_nodes(edges_gdf, threshold=50.0):
     all_nodes = list(ep_count.keys())
     if not dead_ends or len(all_nodes) < 2:
         return edges_gdf
+
+    # Build endpoint → ROUTENTYP lookup for inherited type on connectors
+    ep_to_rt = {}
+    for _, row in edges_gdf.iterrows():
+        rt = row.get('ROUTENTYP', '')
+        for xy in [(row.geometry.coords[0][0], row.geometry.coords[0][1]),
+                   (row.geometry.coords[-1][0], row.geometry.coords[-1][1])]:
+            ep_to_rt.setdefault(xy, []).append(rt)
 
     # Build direct-connection lookup: which node pairs already share an edge?
     connected_pairs = set()
@@ -245,7 +268,9 @@ def _connect_dead_ends_to_nodes(edges_gdf, threshold=50.0):
             stub['is_connector']     = 1
             stub['is_development']   = 0
             stub['is_schwachstelle'] = 0
-            stub['ROUTENTYP']        = 'Connector'
+            stub['ROUTENTYP']        = _lowest_routentyp(
+                ep_to_rt.get(dead_xy, []) + ep_to_rt.get(target_xy, [])
+            )
             new_rows.append(stub)
             connected_pairs.add((dead_xy, target_xy))
             connected_pairs.add((target_xy, dead_xy))
@@ -351,7 +376,12 @@ def _snap_dead_ends_to_edges(edges_gdf, threshold=30.0):
             stub['is_connector']     = 1
             stub['is_development']   = 0
             stub['is_schwachstelle'] = 0
-            stub['ROUTENTYP']        = 'Connector'
+            dead_types = [edges_gdf.loc[i, 'ROUTENTYP']
+                          for i in ep_to_edges.get(dead_xy, [])
+                          if 'ROUTENTYP' in edges_gdf.columns]
+            stub['ROUTENTYP'] = _lowest_routentyp(
+                dead_types + [target_row.get('ROUTENTYP', '')]
+            )
             new_rows.append(stub)
 
         n_snapped += 1
@@ -484,6 +514,13 @@ def _connect_components(nodes_gdf, edges_gdf, coord_round=2):
     id_to_xy = {int(row['ID_point']): (row.geometry.x, row.geometry.y)
                 for _, row in nodes_gdf.iterrows()}
 
+    # Index: node ID → list of ROUTENTYP values on connected edges
+    node_to_rt: dict = {}
+    for _, e in edges_gdf.iterrows():
+        rt = e.get('ROUTENTYP', '')
+        for nid in [int(e['start']), int(e['end'])]:
+            node_to_rt.setdefault(nid, []).append(rt)
+
     new_edges = []
     # Iteratively bridge the two closest components until fully connected
     while True:
@@ -529,7 +566,9 @@ def _connect_components(nodes_gdf, edges_gdf, coord_round=2):
         row['is_connector']    = 1
         row['is_development']  = 0
         row['is_schwachstelle']= 0
-        row['ROUTENTYP']       = 'Connector'
+        row['ROUTENTYP']       = _lowest_routentyp(
+            node_to_rt.get(na, []) + node_to_rt.get(nb, [])
+        )
         new_edges.append(row)
         G.add_edge(na, nb)
         print(f"    Bridge added: node {na} ↔ {nb}  ({best_dist:.0f} m)")
@@ -658,26 +697,23 @@ def reformat_network():
     print(f"  Node merge: {n_remapped} endpoint(s) remapped into {len(clusters)} clusters "
           f"(tol={MERGE_TOL} m) → {len(edges_gdf)} edges remain")
 
-    # ── Step 3: No additional splitting needed ────────────────────────────────
-    # import_network_GIS_ALLTAG already uses momepy.gdf_to_nx (primal approach)
-    # which nodes all LineString crossings into shared endpoints.  Re-splitting
-    # here is redundant and causes a combinatorial explosion when the buffer
-    # tolerance pulls in junction points from neighbouring edges.
+    # ── Step 3: Targeted topology fixes ──────────────────────────────────────
+    # Full re-split is skipped — import_network_GIS_ALLTAG uses momepy (primal
+    # approach) which already nodes all LineString crossings into shared endpoints.
+    # Only three targeted passes are applied here:
     edges_split = edges_gdf.copy()
     print(f"  Edges after node merge: {len(edges_split)}")
 
-    # ── Step 3b: Split edges where a node lies on an edge interior ────────────
+    # 3a: Split edges where an existing node lies on an edge interior
     edges_split = _split_edges_at_nodes(edges_split, snap_tol=1.0)
 
-    # ── Step 3c: Snap dead-end nodes to nearby edge interiors ─────────────────
-    # Handles the case where a dead-end is 5–30 m from a parallel route —
-    # projects it onto the nearest edge, splits there, and adds a short stub.
+    # 3b: Snap dead-end nodes to nearby edge interiors (within 30 m) —
+    #     projects onto the nearest edge, splits there, and adds a short stub.
     edges_split = _snap_dead_ends_to_edges(edges_split, threshold=30.0)
 
-    # ── Step 3d: Connect dead-ends to nearest existing node ───────────────────
-    # Handles the case where a dead-end stub nearly reaches an existing junction
-    # but the nearest point is at an edge endpoint (proj_frac ≈ 0 or 1), which
-    # step 3c deliberately skips to avoid degenerate splits.
+    # 3c: Connect remaining dead-ends to the nearest existing node (within 50 m) —
+    #     catches cases where proj_frac ≈ 0 or 1 (endpoint), which 3b skips
+    #     to avoid degenerate zero-length splits.
     edges_split = _connect_dead_ends_to_nodes(edges_split, threshold=50.0)
 
     def _xy(coord):
@@ -933,16 +969,6 @@ def network_in_corridor(polygon):
     )
     print(f"  Nodes in corridor → points_corridor.gpkg + .csv  ({len(points_corridor)} rows)")
 
-    # ------------------------------------------------------------------
-    # 3. ACCESS POINTS inside corridor — all corridor nodes are access points
-    # ------------------------------------------------------------------
-    access_points_corridor = points_corridor.copy().reset_index(drop=True)
-    access_points_corridor['ID_access'] = range(len(access_points_corridor))
-    access_points_corridor.to_file('data/Network/processed/access_points_corridor.gpkg', driver='GPKG')
-    access_points_corridor.drop(columns='geometry').to_csv(
-        'data/Network/processed/access_points_corridor.csv', index=False
-    )
-    print(f"  Access points in corridor → access_points_corridor.gpkg + .csv  ({len(access_points_corridor)} rows)")
 
     # ------------------------------------------------------------------
     # 4. FLAG edges with corridor membership
@@ -990,23 +1016,12 @@ def network_in_corridor(polygon):
     )
     print(f"  Full attributed nodes/edges saved (with within_corridor + on_corridor_border flags)")
 
-    # ------------------------------------------------------------------
-    # 9. SAVE corridor points with attributes
-    # ------------------------------------------------------------------
-    points_corridor_attribute = points[points['within_corridor']].copy().reset_index(drop=True)
-    points_corridor_attribute.to_file(
-        'data/Network/processed/points_corridor_attribute.gpkg', driver='GPKG'
-    )
-    points_corridor_attribute.drop(columns='geometry').to_csv(
-        'data/Network/processed/points_corridor_attribute.csv', index=False
-    )
-    print(f"  Corridor nodes with attributes → points_corridor_attribute.gpkg  ({len(points_corridor_attribute)} rows)")
 
     # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
     print(f"\n  Summary:")
-    print(f"    {len(points_corridor)} / {len(points)} nodes inside corridor (all are access points)")
+    print(f"    {len(points_corridor)} / {len(points)} nodes inside corridor")
     for flag in ('is_intersection', 'is_through_point', 'is_endpoint'):
         if flag in points_corridor.columns:
             print(f"    {points_corridor[flag].sum()} {flag.replace('is_', '')} in corridor")
@@ -1152,7 +1167,7 @@ def plot_corridor_network(polygon, points_corridor, edges_corridor, edges_border
 def only_links_to_corridor():
     # 1. Load data
     all_links = gpd.read_file(r"data/Network/processed/new_links.gpkg")
-    all_access_points = gpd.read_file(r"data/Network/processed/points_corridor_attribute.gpkg")
+    all_access_points = gpd.read_file(r"data/Network/processed/points_corridor.gpkg")
 
     # 2. Determine available columns to prevent KeyError
     # We always need ID_point for the join
