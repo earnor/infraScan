@@ -826,13 +826,13 @@ def plot_network_classified(nodes_gdf, edges_gdf, figsize=(14, 10)):
     ax.set_xlabel('Easting (EPSG:2056)')
     ax.set_ylabel('Northing (EPSG:2056)')
     ax.legend(loc='upper right', framealpha=0.9)
-    ax.set_aspect('equal')
+    ax.set_aspect('equal', adjustable='datalim')
     plt.tight_layout()
     plt.savefig('data/Network/processed/network_plot.png', dpi=150)
     plt.show()
     print("Plot saved → data/Network/processed/network_plot.png")
 
-def plot_edge_attributes(edges=None):
+def plot_edge_attributes(edges=None, boundary=None):
     if edges is None:
         edges = gpd.read_file('data/Network/processed/edges.gpkg')
 
@@ -886,9 +886,15 @@ def plot_edge_attributes(edges=None):
             edges['avg_incline_pct'] = np.nan
 
     # Shared spatial extent for all three subplots
-    xmin, ymin, xmax, ymax = edges.total_bounds
-    pad_x = (xmax - xmin) * 0.02
-    pad_y = (ymax - ymin) * 0.02
+    # Use boundary if provided (corridor extent), otherwise fall back to edges bounds
+    if boundary is not None:
+        xmin, ymin, xmax, ymax = boundary.bounds
+        pad_x = 0
+        pad_y = 0
+    else:
+        xmin, ymin, xmax, ymax = edges.total_bounds
+        pad_x = (xmax - xmin) * 0.02
+        pad_y = (ymax - ymin) * 0.02
 
     # Use GridSpec so all three map panels have identical frame sizes.
     # Each panel gets a dedicated (thin) colorbar column; cax1 is hidden
@@ -1185,7 +1191,7 @@ def plot_corridor_network(polygon, points_corridor, edges_corridor, edges_border
     )
     ax.set_xlabel('Easting LV95 [m]', fontsize=11)
     ax.set_ylabel('Northing LV95 [m]', fontsize=11)
-    ax.set_aspect('equal')
+    ax.set_aspect('equal', adjustable='datalim')
     plt.tight_layout()
     plt.savefig('data/Network/processed/corridor_plot.png', dpi=250, bbox_inches='tight')
     plt.show()
