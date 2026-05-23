@@ -18,7 +18,7 @@ def plot_node_accessibility(
     import geopandas as gpd
 
     # s1 = reference extrapolation, s2 = s1 − Δ/3 (low), s3 = s1 + Δ/3 (high)
-    LABELS   = {'s1': 'Medium growth (s1)', 's2': 'Low growth (s2)', 's3': 'High growth (s3)'}
+    LABELS   = {'s1': 'Low growth (s1)', 's2': 'Medium growth (s2)', 's3': 'High growth (s3)'}
     S_COLORS = {'s1': '#78909C', 's2': '#1565C0', 's3': '#E53935'}
 
     avail = [s for s in scenarios if s in accessibility_results]
@@ -140,6 +140,8 @@ def plot_od_results(
         points_gdf,
         corridor_polygon=None,
         scenarios=('s1', 's2', 's3'),
+        edges_gdf=None,
+        lakes_gdf=None,
         save_path="data/OD/od_plot.png"):
     """
     Three-panel OD summary (no routing — Voronoi-weighted):
@@ -156,7 +158,7 @@ def plot_od_results(
     import numpy as np
     import geopandas as gpd
 
-    LABELS   = {'s1': 'Medium (s1)', 's2': 'Low (s2)', 's3': 'High (s3)'}
+    LABELS   = {'s1': 'Low (s1)', 's2': 'Medium (s2)', 's3': 'High (s3)'}
     S_COLORS = {'s1': '#78909C', 's2': '#1565C0', 's3': '#E53935'}
 
     fig, axes = plt.subplots(1, 3, figsize=(22, 9),
@@ -198,8 +200,17 @@ def plot_od_results(
             ax=ax_map, facecolor='#F5F5F5', edgecolor='#90A4AE',
             linewidth=1.2, zorder=0, alpha=0.5)
 
+    # water bodies (lakes)
+    if lakes_gdf is not None and len(lakes_gdf) > 0:
+        lakes_gdf.plot(ax=ax_map, facecolor='#AED6F1', edgecolor='#5DADE2',
+                       linewidth=0.5, zorder=1, alpha=0.8)
+
+    # cycling network edges
+    if edges_gdf is not None and len(edges_gdf) > 0:
+        edges_gdf.plot(ax=ax_map, color='#B0BEC5', linewidth=0.4, zorder=2, alpha=0.6)
+
     # grey base nodes
-    points_gdf.plot(ax=ax_map, color='#CFD8DC', markersize=3, zorder=1, alpha=0.5)
+    points_gdf.plot(ax=ax_map, color='#CFD8DC', markersize=3, zorder=3, alpha=0.5)
 
     # scaled bubbles coloured by employment (destination attractiveness)
     max_pop  = node_df['pop'].max() or 1
@@ -210,7 +221,7 @@ def plot_od_results(
     colors   = [cmap(norm(v)) for v in node_df['empl']]
 
     sc = ax_map.scatter(node_df.geometry.x, node_df.geometry.y,
-                        s=sizes, c=colors, zorder=3, alpha=0.85,
+                        s=sizes, c=colors, zorder=5, alpha=0.85,
                         edgecolors='white', linewidths=0.4)
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
@@ -227,6 +238,13 @@ def plot_od_results(
                      f'Scenario {ref_s or "—"} — {len(node_df)} nodes', fontsize=10)
     ax_map.set_axis_off()
 
+    # zoom to corridor perimeter
+    if corridor_polygon is not None:
+        minx, miny, maxx, maxy = corridor_polygon.bounds
+        margin = 500  # metres
+        ax_map.set_xlim(minx - margin, maxx + margin)
+        ax_map.set_ylim(miny - margin, maxy + margin)
+
     # ── Panel 2: total cycling trips per scenario ─────────────────────────
     s_keys = [s for s in scenarios if s in od_scenarios]
     totals = [od_scenarios[s]['trips'].sum() for s in s_keys]
@@ -234,10 +252,10 @@ def plot_od_results(
 
     x = np.arange(len(s_keys))
     w = 0.35
-    b1 = ax_bar.bar(x - w/2, pops,   width=w, label='Total origin pop',
+    b1 = ax_bar.bar(x - w/2, pops,   width=w, label='Total origin population',
                     color='#90CAF9', edgecolor='white')
     b2 = ax_bar.bar(x + w/2, totals, width=w, label='Daily cycling trips',
-                    color=[S_COLORS.get(s, '#BDBDBD') for s in s_keys], edgecolor='white')
+                    color='#78909C', edgecolor='white')
     for bar, val in zip(list(b1)+list(b2), pops+totals):
         ax_bar.text(bar.get_x()+bar.get_width()/2, bar.get_height()*1.01,
                     f'{val:,.0f}', ha='center', va='bottom', fontsize=7, rotation=45)

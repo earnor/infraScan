@@ -690,11 +690,10 @@ def plot_scenario_grouped_bar(plot_name="scenario_grouped_bar"):
 
 def plot_cost_benefit_scatter(plot_name="cost_benefit_scatter"):
     """
-    Scatter plot: X = total costs |C+M|, Y = total benefits T+R+S (medium
-    scenario). The dashed diagonal is the break-even line (NB = 0).
-    Points above = positive NB (green), below = negative NB (red).
-    Shows immediately whether a development fails due to high costs or low
-    benefits.
+    Two-panel scatter: X = total costs |C+M|, Y = total benefits T+R+S (S2).
+    Left panel: full scale (all 21 developments including outliers).
+    Right panel: zoomed to 0–32 Mio. CHF on both axes; out-of-range points
+    (IDs 676, 79, 385) are shown as arrows at the top edge with their labels.
 
     Reads:  data/costs/net_benefits.gpkg
     Saves:  plot/results/{plot_name}.png
@@ -708,29 +707,9 @@ def plot_cost_benefit_scatter(plot_name="cost_benefit_scatter"):
     nb["costs_m"]    = (nb["C"].abs() + nb["M"].abs()) / 1e6
     nb["benefits_m"] = (nb["T_s2"] + nb["R_s2"] + nb["S_s2"]) / 1e6
     nb["NB_m"]       = nb["NB_s2"] / 1e6
+    nb["color"]      = nb["NB_m"].apply(lambda v: "#27ae60" if v >= 0 else "#e74c3c")
 
-    fig, ax = plt.subplots(figsize=(9, 7))
-
-    # Break-even diagonal
-    max_val = max(nb["costs_m"].max(), nb["benefits_m"].max()) * 1.12
-    ax.plot([0, max_val], [0, max_val], color="black", lw=1.2,
-            linestyle="--", alpha=0.45, label="Break-even  (NB = 0)", zorder=1)
-
-    colors = nb["NB_m"].apply(lambda v: "#27ae60" if v >= 0 else "#e74c3c")
-    ax.scatter(nb["costs_m"], nb["benefits_m"],
-               c=colors, s=90, alpha=0.85, zorder=3, edgecolors="white", linewidths=0.5)
-
-    for _, row in nb.iterrows():
-        ax.annotate(str(int(row["ID_new"])),
-                    (row["costs_m"], row["benefits_m"]),
-                    fontsize=8, ha="left", va="bottom",
-                    xytext=(4, 3), textcoords="offset points")
-
-    # Shaded region: above diagonal = positive NB
-    ax.fill_between([0, max_val], [0, max_val], max_val,
-                    color="#27ae60", alpha=0.04, zorder=0)
-    ax.fill_between([0, max_val], 0, [0, max_val],
-                    color="#e74c3c", alpha=0.04, zorder=0)
+    ZOOM = 32.0   # upper limit of zoom panel (Mio. CHF)
 
     legend_handles = [
         mpatches.Patch(color="#27ae60", label="Positive NB  (benefits > costs)"),
@@ -738,16 +717,63 @@ def plot_cost_benefit_scatter(plot_name="cost_benefit_scatter"):
         plt.Line2D([0], [0], color="black", lw=1.2, linestyle="--",
                    alpha=0.6, label="Break-even  (NB = 0)"),
     ]
-    ax.legend(handles=legend_handles, fontsize=9, loc="upper left")
 
-    ax.set_xlabel("Total Costs  |C + M|  [Mio. CHF]", fontsize=11)
-    ax.set_ylabel("Total Benefits  T + R + S  [Mio. CHF]", fontsize=11)
-    ax.set_title("Cost-Benefit Balance per Development\n(medium growth scenario)",
-                 fontsize=12, pad=8)
-    ax.set_xlim(left=0)
-    ax.set_ylim(bottom=0)
-    ax.grid(linestyle="--", alpha=0.3, zorder=0)
+    def _draw_panel(ax, xlim, ylim, title, show_legend=False):
+        """Draw the scatter on ax with given axis limits."""
+        ax.fill_between([0, xlim], [0, xlim], ylim,
+                        color="#27ae60", alpha=0.05, zorder=0)
+        ax.fill_between([0, xlim], 0, [0, min(xlim, ylim)],
+                        color="#e74c3c", alpha=0.05, zorder=0)
+        ax.plot([0, min(xlim, ylim)], [0, min(xlim, ylim)],
+                color="black", lw=1.2, linestyle="--", alpha=0.45, zorder=1)
 
+        # Points inside range
+        inside = nb[(nb["costs_m"] <= xlim) & (nb["benefits_m"] <= ylim)]
+        ax.scatter(inside["costs_m"], inside["benefits_m"],
+                   c=inside["color"], s=90, alpha=0.88,
+                   zorder=3, edgecolors="white", linewidths=0.6)
+        for _, row in inside.iterrows():
+            ax.annotate(str(int(row["ID_new"])),
+                        (row["costs_m"], row["benefits_m"]),
+                        fontsize=8.5, ha="left", va="bottom",
+                        xytext=(4, 3), textcoords="offset points", zorder=4)
+
+        # Out-of-range points: draw arrow at top of panel + label
+        outside = nb[nb["benefits_m"] > ylim]
+        for _, row in outside.iterrows():
+            x = min(row["costs_m"], xlim * 0.97)
+            ax.annotate(
+                f"ID {int(row['ID_new'])}\n({row['benefits_m']:.0f})",
+                xy=(x, ylim), xytext=(x, ylim * 0.88),
+                fontsize=7.5, ha="center", va="top", color=row["color"],
+                fontweight="bold",
+                arrowprops=dict(arrowstyle="->", color=row["color"],
+                                lw=1.2, shrinkA=0, shrinkB=2),
+                zorder=5,
+            )
+
+        ax.set_xlim(0, xlim)
+        ax.set_ylim(0, ylim)
+        ax.set_xlabel("Total Costs  |C + M|  [Mio. CHF]", fontsize=10)
+        ax.set_ylabel("Total Benefits  T + R + S  [Mio. CHF]", fontsize=10)
+        ax.set_title(title, fontsize=10, pad=6)
+        ax.grid(linestyle="--", alpha=0.3, zorder=0)
+        if show_legend:
+            ax.legend(handles=legend_handles, fontsize=8.5, loc="upper left")
+
+    fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(15, 6.5))
+
+    max_x = nb["costs_m"].max() * 1.08
+    max_y = nb["benefits_m"].max() * 1.06
+    _draw_panel(ax_full, xlim=max_x, ylim=max_y,
+                title="Full scale  (all 21 developments)",
+                show_legend=True)
+
+    _draw_panel(ax_zoom, xlim=ZOOM, ylim=ZOOM,
+                title=f"Zoom: 0 – {ZOOM:.0f} Mio. CHF  (out-of-range shown as arrows)")
+
+    fig.suptitle("Cost–Benefit Balance per Development  (medium growth scenario, S2)",
+                 fontsize=12, y=1.01)
     plt.tight_layout()
     os.makedirs("plot/results", exist_ok=True)
     plt.savefig(f"plot/results/{plot_name}.png", dpi=300, bbox_inches="tight")
@@ -1750,12 +1776,16 @@ def plot_nb_on_network(boundary=None, network=None, access_points=None,
 
 def plot_duebendorf_zoom(df_costs, banned_area, title_bar, network=None,
                          access_points=None, plot_name="duebendorf_zoom",
-                         col="NB_s2"):
+                         col="NB_s2", scale_to_mio=False):
     """
     Stand-alone zoomed map of the Dübendorf sub-area
     (E 2 687 000–2 697 500 / N 1 247 000–1 254 000, LV95/EPSG:2056).
     Same colour scheme as plot_cost_result so the two maps can be read
     side by side.  Development IDs are labelled at each line's midpoint.
+
+    scale_to_mio : if True, divide col by 1e6 before plotting (use when
+                   passing raw CHF values from net_benefits.gpkg, e.g. for
+                   component maps C, M, T_s2, R_s2, S_s2).
 
     Reads:  data/Network/processed/development_candidates.gpkg
             data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp
@@ -1770,6 +1800,8 @@ def plot_duebendorf_zoom(df_costs, banned_area, title_bar, network=None,
     dev_geom["ID_new"] = dev_geom["ID_new"].astype(int)
     df_costs = df_costs.copy()
     df_costs["ID_new"] = df_costs["ID_new"].astype(int)
+    if scale_to_mio:
+        df_costs[col] = df_costs[col] / 1e6
     df_plot = dev_geom.merge(
         df_costs.drop(columns=["geometry"], errors="ignore"),
         on="ID_new", how="inner")
@@ -1858,12 +1890,138 @@ def plot_duebendorf_zoom(df_costs, banned_area, title_bar, network=None,
     print(f"[plot_duebendorf_zoom] saved → plot/results/{plot_name}.png")
 
 
+def plot_duebendorf_zoom_network(network=None, access_points=None,
+                                 plot_name="duebendorf_zoom_network"):
+    """
+    Zoomed Dübendorf detail map using the same rendering as plot_nb_on_network
+    (actual edge geometries, line width ∝ construction cost, colour = NB_s2).
+    Extent: E 2 687 000–2 697 500 / N 1 247 000–1 254 000, LV95/EPSG:2056.
+
+    Reads:  data/Network/processed/development_candidates.gpkg
+            data/costs/net_benefits.gpkg
+            data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp
+    Saves:  plot/results/{plot_name}.png
+    """
+    DUB_E_MIN, DUB_E_MAX = 2_687_000, 2_697_500
+    DUB_N_MIN, DUB_N_MAX = 1_247_000, 1_254_000
+
+    cands_path = "data/Network/processed/development_candidates.gpkg"
+    nb_path    = "data/costs/net_benefits.gpkg"
+    lakes_path = r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
+
+    for p in [cands_path, nb_path]:
+        if not os.path.exists(p):
+            print(f"[plot_duebendorf_zoom_network] Missing: {p} — skipping")
+            return
+
+    cands  = gpd.read_file(cands_path)
+    nb     = gpd.read_file(nb_path)[["ID_new", "NB_s2", "C"]]
+    nb["NB_s2"] = pd.to_numeric(nb["NB_s2"], errors="coerce")
+    nb["C"]     = pd.to_numeric(nb["C"],     errors="coerce")
+    merged = cands.merge(nb, on="ID_new", how="inner")
+    if merged.empty:
+        print("[plot_duebendorf_zoom_network] No matching rows — skipping")
+        return
+
+    # Clip to Dübendorf extent
+    merged_dub = merged.cx[DUB_E_MIN:DUB_E_MAX, DUB_N_MIN:DUB_N_MAX].copy()
+    if merged_dub.empty:
+        print("[plot_duebendorf_zoom_network] No developments in Dübendorf extent — skipping")
+        return
+
+    # Same colormap as plot_nb_on_network (based on full dataset range)
+    nb_vals = merged["NB_s2"] / 1e6
+    min_val, max_val = nb_vals.min(), nb_vals.max()
+    n_intervals = 256
+    gray_color  = [0.83, 0.83, 0.83, 1]
+    if min_val < 0 and max_val > 0:
+        total_range = abs(min_val) + abs(max_val)
+        neg_c = plt.cm.Reds_r(np.linspace(0.15, 0.8, int(n_intervals * abs(min_val) / total_range)))
+        pos_c = plt.cm.Blues( np.linspace(0.3,  0.95, int(n_intervals * abs(max_val) / total_range)))
+        tr = int(n_intervals * 0.2)
+        all_colors = np.vstack((neg_c[:-1],
+                                np.linspace(neg_c[-1], gray_color, tr),
+                                np.linspace(gray_color, pos_c[0], tr),
+                                pos_c[1:]))
+    elif min_val >= 0:
+        pos_c = plt.cm.Blues(np.linspace(0.3, 0.9, n_intervals))
+        all_colors = np.vstack((np.linspace(gray_color, pos_c[0], int(n_intervals * 0.3)), pos_c[1:]))
+    else:
+        neg_c = plt.cm.Reds_r(np.linspace(0.2, 0.8, n_intervals))
+        all_colors = np.vstack((neg_c[:-1], np.linspace(neg_c[-1], gray_color, int(n_intervals * 0.3))))
+    cmap = LinearSegmentedColormap.from_list("nb_edge_cmap", all_colors)
+    vabs = float(nb_vals.abs().quantile(0.95)) or 1.0
+    norm = plt.Normalize(vmin=-vabs, vmax=vabs)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    if os.path.exists(lakes_path):
+        gpd.read_file(lakes_path).plot(ax=ax, color="lightblue", zorder=1)
+    if isinstance(network, gpd.GeoDataFrame):
+        network.plot(ax=ax, color="#bbbbbb", lw=1.0, zorder=2, alpha=0.6)
+
+    c_min = merged["C"].abs().min() or 1.0
+    c_max = merged["C"].abs().max() or 1.0
+    for _, row in merged_dub.iterrows():
+        nb_m  = row["NB_s2"] / 1e6
+        color = cmap(norm(nb_m))
+        c_abs = abs(row["C"]) if pd.notna(row["C"]) else c_min
+        lw    = 2.5 + 5.0 * (c_abs - c_min) / max(c_max - c_min, 1)
+        gpd.GeoDataFrame([row], crs=cands.crs).plot(ax=ax, color=[color], lw=lw, zorder=5)
+        try:
+            mid = row.geometry.interpolate(0.5, normalized=True)
+            ax.annotate(str(int(row["ID_new"])), xy=(mid.x, mid.y),
+                        xytext=(4, 4), textcoords="offset points",
+                        fontsize=10, fontweight="bold", color="black", zorder=10,
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8, ec="none"))
+        except Exception:
+            pass
+
+    if isinstance(access_points, gpd.GeoDataFrame):
+        access_points.plot(ax=ax, color="black", markersize=40, zorder=6)
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="3%", pad=0.4)
+    cbar = plt.colorbar(sm, cax=cax)
+    cbar.set_label("Net Benefit NBₛ₂ [Mio. CHF]\n(line width ∝ construction cost)",
+                   rotation=90, labelpad=16, fontsize=12)
+    cbar.ax.tick_params(labelsize=11)
+
+    ax.set_xlim(DUB_E_MIN, DUB_E_MAX)
+    ax.set_ylim(DUB_N_MIN, DUB_N_MAX)
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.add_artist(ScaleBar(1, location="lower right"))
+    ax.text(0.96, 0.92, "N", fontsize=22, weight="bold",
+            ha="center", va="center", transform=ax.transAxes, zorder=1000)
+    ax.add_patch(FancyArrowPatch((0.96, 0.89), (0.96, 0.97), color="black", lw=2,
+                                 arrowstyle="->", mutation_scale=20,
+                                 transform=ax.transAxes, zorder=1000))
+    for sp in ax.spines.values():
+        sp.set_visible(True); sp.set_edgecolor("black")
+        sp.set_linewidth(1); sp.set_zorder(1000)
+
+    water_patch = mpatches.Patch(facecolor="lightblue", label="Water bodies",
+                                 edgecolor="black", linewidth=1)
+    ax.legend(handles=[water_patch], loc="upper center",
+              bbox_to_anchor=(0.5, -0.02), fontsize=12, frameon=False)
+    ax.set_title("Dübendorf detail — Net Benefit on Network (NBₛ₂)", fontsize=13, pad=8)
+
+    plt.tight_layout()
+    os.makedirs("plot/results", exist_ok=True)
+    plt.savefig(f"plot/results/{plot_name}.png", dpi=300, bbox_inches="tight")
+    plt.show()
+    print(f"[plot_duebendorf_zoom_network] saved → plot/results/{plot_name}.png")
+
+
 def plot_bcr_bar(plot_name="bcr_bar"):
     """
-    Horizontal bar chart of Benefit-Cost Ratio (BCR) per development,
-    sorted ascending.  BCR = (T_s2 + R_s2 + S_s2) / |C + M|.
-    A vertical dashed line at BCR = 1 marks the break-even threshold.
-    Bars are green (BCR ≥ 1) or red (BCR < 1).
+    Horizontal bar chart of Cost-Benefit Ratio (CBR) per development,
+    sorted descending.  CBR = |C + M| / (T_s2 + R_s2 + S_s2).
+    A vertical dashed line at CBR = 1 marks the break-even threshold.
+    Bars are green (CBR ≤ 1) or red (CBR > 1).
+    Developments with zero benefits (CBR = ∞) are capped and labelled.
 
     Reads:  data/costs/net_benefits.gpkg
     Saves:  plot/results/{plot_name}.png
@@ -1880,32 +2038,61 @@ def plot_bcr_bar(plot_name="bcr_bar"):
     nb["total_costs"]    = nb["C"].abs() + nb["M"].abs()
     nb["total_benefits"] = nb["T_s2"] + nb["R_s2"] + nb["S_s2"]
     nb = nb[nb["total_costs"] > 0].copy()
-    nb["BCR"] = nb["total_benefits"] / nb["total_costs"]
-    nb = nb.sort_values("BCR", ascending=True).reset_index(drop=True)
 
-    colors = ["#27ae60" if v >= 1 else "#e74c3c" for v in nb["BCR"]]
+    # CBR = costs / benefits; NaN where benefits = 0
+    nb["CBR"] = nb.apply(
+        lambda r: r["total_costs"] / r["total_benefits"]
+        if r["total_benefits"] > 0 else np.nan, axis=1)
+
+    # sort descending (worst first at top); NaN always at top
+    nb = nb.sort_values("CBR", ascending=False, na_position="first").reset_index(drop=True)
+    nb["is_inf"] = nb["CBR"].isna()
+
+    # cap: place infinite bars clearly beyond the largest finite bar
+    finite_max = nb["CBR"].dropna().max()
+    CAP = finite_max * 2.0          # 2× gap makes infinite bars visually distinct
+    nb["CBR_plot"] = nb["CBR"].fillna(CAP)
+
+    # colours: infinite → green (CBR > 1), finite ≤ 1 → red, finite > 1 → green
+    colors = []
+    for i in range(len(nb)):
+        if nb["is_inf"].iloc[i]:
+            colors.append("#e74c3c")
+        elif nb["CBR"].iloc[i] <= 1:
+            colors.append("#27ae60")
+        else:
+            colors.append("#e74c3c")
 
     fig, ax = plt.subplots(figsize=(9, max(5, len(nb) * 0.45)))
     y = np.arange(len(nb))
-    ax.barh(y, nb["BCR"], color=colors, alpha=0.85,
+    ax.barh(y, nb["CBR_plot"], color=colors, alpha=0.85,
             edgecolor="white", linewidth=0.5, zorder=3)
     ax.axvline(1.0, color="black", lw=1.5, linestyle="--", zorder=5)
+    ax.set_xlim(0, CAP * 1.05)
+
+    # label and arrow for infinite bars
+    for pos in nb.index[nb["is_inf"]]:
+        ax.annotate("∞  (no benefits)",
+                    xy=(CAP, pos), xytext=(CAP * 0.75, pos),
+                    va="center", ha="left", fontsize=8,
+                    color="white", fontweight="bold",
+                    arrowprops=dict(arrowstyle="->", color="white", lw=1.2))
 
     ax.set_yticks(y)
     ax.set_yticklabels(nb["ID_new"].astype(int).astype(str), fontsize=9)
-    ax.set_xlabel("Benefit-Cost Ratio  (T + R + S) / |C + M|", fontsize=11)
-    ax.set_title("Benefit-Cost Ratio per Development\n"
-                 "(medium growth scenario  ·  BCR > 1 = net positive)",
+    ax.set_xlabel("Cost-Benefit Ratio  |C + M| / (T + R + S)", fontsize=11)
+    ax.set_title("Cost-Benefit Ratio per Development\n"
+                 "(medium growth scenario  ·  CBR < 1 = net positive)",
                  fontsize=12, pad=8)
     ax.grid(axis="x", linestyle="--", alpha=0.5, zorder=0)
 
     legend_handles = [
-        mpatches.Patch(color="#27ae60", label="BCR ≥ 1  (benefits exceed costs)"),
-        mpatches.Patch(color="#e74c3c", label="BCR < 1  (costs exceed benefits)"),
+        mpatches.Patch(color="#27ae60", label="CBR ≤ 1  (benefits exceed costs)"),
+        mpatches.Patch(color="#e74c3c", label="CBR > 1  (costs exceed benefits)"),
         plt.Line2D([0], [0], color="black", lw=1.5, linestyle="--",
-                   label="Break-even  (BCR = 1)"),
+                   label="Break-even  (CBR = 1)"),
     ]
-    ax.legend(handles=legend_handles, fontsize=9, loc="lower right")
+    ax.legend(handles=legend_handles, fontsize=9, loc="upper right")
 
     plt.tight_layout()
     os.makedirs("plot/results", exist_ok=True)

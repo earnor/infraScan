@@ -33,7 +33,7 @@ def print_hi(name):
     # Set working directory to the script's own folder so all relative paths work
     # regardless of where Python is invoked from.
     # TODO: replace with pathlib.Path(__file__).parent for a fully portable solution.
-    os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
+    os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
     sys.setrecursionlimit(2000)
     tracemalloc.start()
     runtimes = {}
@@ -424,6 +424,8 @@ def print_hi(name):
         points_gdf=points_corridor,
         corridor_polygon=innerboundary,
         scenarios=['s1', 's2', 's3'],
+        edges_gdf=gpd.read_file(r"data/Network/processed/edges_with_attribute.gpkg"),
+        lakes_gdf=gpd.read_file(r"data/landuse_landcover/processed/lake_data_zh.gpkg"),
         save_path='data/OD/od_plot.png',
     )
 
