@@ -30,10 +30,10 @@ def _mem():
 
 
 def print_hi(name):
-    # TODO: hardcoded path — replace with pathlib.Path(__file__).parent or a
-    # config variable so the script runs on any machine without editing.
-    #os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
-    os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
+    # Set working directory to the script's own folder so all relative paths work
+    # regardless of where Python is invoked from.
+    # TODO: replace with pathlib.Path(__file__).parent for a fully portable solution.
+    os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
     sys.setrecursionlimit(2000)
     tracemalloc.start()
     runtimes = {}
@@ -74,9 +74,9 @@ def print_hi(name):
     c_om_cycle_path    = 20     # operational maintenance [CHF/m/year]  TODO: calibrate
     c_structural_maint = 1.2/100 # structural maintenance [fraction of construction cost/year]
 
-    # Value of Travel Time Savings [CHF/h]
-    VTTS = 18.2  # CHF/h
-    appraisal_horizon = 50  # years
+    # Value of Travel Time Savings — ARE 2023, cycling, short-distance [CHF/h]
+    VTTS = 21.1  # CHF/h
+    appraisal_horizon = 50  # years  (standard Swiss infrastructure appraisal horizon)
 
     runtimes["Initialize variables"] = time.time() - st
     st = time.time()
@@ -209,12 +209,17 @@ def print_hi(name):
     )
 
 
+    # ── DISABLED SECTION (infrastructure generation via random points) ───────────
+    # The block below generates candidate cycling links from random points, routes
+    # them around protected areas, filters by slope/distance, and builds a combined
+    # network.  It is currently disabled because the Netzlücken from the ALLTAG
+    # shapefile are used directly instead.  Re-enable if you want to score
+    # algorithmically generated alternatives in addition to the GIS-derived ones.
     """
     ##################################################################################
-    # 3a) OPTION A: Generate developments (new access points) and connection to existing infrastructure
+    # 3a) Generate candidate developments from random points
 
-    # Make random points within the perimeter (extent) and filter them
-    num_rand = 1000 #Todo: change to 1000
+    num_rand = 1000
     random_gdf = generated_access_points(extent=innerboundary, number=num_rand)
 
 
@@ -401,15 +406,15 @@ def print_hi(name):
     )
 
     ##################################################################################
-    # 1) OD matrix — commune-disaggregated cycling trips for each scenario
+    # 1) OD matrix — disaggregate commune-level cycling trips to Voronoi nodes
     #
-    # A) Each Voronoi node is assigned to a Gemeinde via centroid spatial join.
-    #    Commune-level cycling commuters (od_matrix_zh_cycling.csv, 8% mode share)
-    #    provide the base flow between each pair of Gemeinden.
-    # B) Within each Gemeinde, flows are disaggregated to nodes using within-commune
-    #    shares: population drives origin shares, employment drives destination shares.
-    #    trips_ij_s = origin_share_i × dest_share_j × commuters_cycling_ij
-    # C) Save od_s1/s2/s3.csv per scenario and combined od_scenarios.csv.
+    # A) Assign each Voronoi node to a Gemeinde (BFS) via centroid spatial join.
+    # B) Read commune-to-commune commuters_cycling from od_matrix_zh_cycling.csv
+    #    (8% modal share was applied once in step 0 — no further multiplier here).
+    # C) Disaggregate to node pairs using within-commune population/employment shares:
+    #      trips_ij_s = origin_share_i × dest_share_j × commuters_cycling_ij
+    #    where origin_share is population-weighted, dest_share is employment-weighted.
+    # D) Save od_s1/s2/s3.csv per scenario and combined od_scenarios.csv.
 
     od_scenarios, voronoi_vals = od_cycling_weighted()
 
@@ -446,6 +451,11 @@ def print_hi(name):
     _mem()
     st = time.time()
 
+    # ── DISABLED: node accessibility + per-development accessibility benefits ────
+    # Steps 3 and 4 below run gravity-based accessibility scoring and compute ΔA
+    # per Netzlücke.  They are disabled because compute_accessibility_benefits()
+    # is computationally expensive and accessibility is currently set to A=0 in
+    # net_benefits().  Re-enable both blocks together when ready.
     """
     ##################################################################################
     # 3) Node accessibility — gravity scoring using network travel times from step 2
@@ -494,8 +504,11 @@ def print_hi(name):
     """
     ##################################################################################
     # 5) Construction and maintenance costs
-    #    Netzlücken: full build at c_cycle_path_new [CHF/m]
-    #    Schwachstellen: upgrade at c_cycle_path_update [CHF/m]
+    #    Construction: Netzlücken at c_cycle_path_new [CHF/m], Schwachstellen at c_cycle_path_update [CHF/m]
+    #    Maintenance:  (c_om_cycle_path + c_structural_maint × c_cycle_path_new) × length_m × duration
+    #    With current defaults: total lifecycle cost ≈ 6,600 CHF/m over 50 years.
+    #    NOTE: c_om_cycle_path=100 CHF/m/year is likely too high — calibrate against
+    #    Swiss ASTRA/VöV benchmarks before interpreting negative NB results.
 
     # Build development_candidates.gpkg from live Netzlücken in edges_aug
     nl_devs = edges_aug[edges_aug['ROUTENTYP'] == 'Netzlücke'].copy()
@@ -522,11 +535,12 @@ def print_hi(name):
     st = time.time()
 
     ##################################################################################
-    # 6) Route comfort — Meister et al. (2021) perceived-distance slope model
-    #    slope < 2 %       → +0 % perceived distance   (flat)
-    #    2 % ≤ slope < 6 % → +41 % perceived distance  (moderate)
-    #    slope ≥ 6 %       → +251 % perceived distance  (steep)
-    #    comfort_cost = extra_perceived_length / speed × VTTS × trips × duration
+    # 6) Route comfort — Meister et al. (2021) slope discomfort model
+    #    Per-edge comfort cost [h/trip]:
+    #      comfort_h = length_m × (1 + slope_extra_f) × ε / (ffs_edge × 1000)
+    #    Slope extra factors:  < 2% → +0%,  2–6% → +41%,  ≥ 6% → +251%
+    #    Discomfort ε: Netzlücke=2.0, Nebenverbindung=1.6, Hauptverbindung=1.3, Velobahn=1.0
+    #    Benefit = Σ_ij trips × (C_base − C_built) × VTTS × trips_per_year × duration
     route_comfort(
         edges_aug=edges_aug,
         od_scenarios=od_scenarios,
@@ -541,8 +555,11 @@ def print_hi(name):
 
     ##################################################################################
     # 7) Safety benefits
-    #    Crash cost (CHF/Pkm) from KNA Limmattal in scoring.CRASH_RATE_CHF_PKM.
-    #    Built ROUTENTYP read from routentyp_built on each edge.
+    #    Per-edge cost [CHF/trip] = CRASH_RATE_CHF_PKM[ROUTENTYP] × length_km
+    #    Rates from KNA Limmattal: Velobahn=0.104, Hauptverbindung=0.409,
+    #    Nebenverbindung=0.714, Netzlücke=1.020 CHF/Pkm.
+    #    Benefit = Σ_ij trips × (S_base − S_built) × trips_per_year × duration
+    #    Netzlücken not traversed by any OD path produce zero benefit.
     safety_benefits(
         edges_aug=edges_aug,
         od_scenarios=od_scenarios,
@@ -555,7 +572,10 @@ def print_hi(name):
     st = time.time()
 
     ##################################################################################
-    # 8) Net benefits: NB = C + M + T + R + S  per scenario
+    # 8) Net benefits: NB = C + M + T + R + S  [CHF] per scenario
+    #    C = construction cost (negative), M = maintenance over appraisal_horizon (negative)
+    #    T = travel time savings, R = route comfort benefit, S = safety benefit (all positive)
+    #    A = accessibility benefit — currently set to 0 (re-enable in scoring.net_benefits)
     nb_df = net_benefits()
     runtimes["Net benefits"] = time.time() - st
     st = time.time()

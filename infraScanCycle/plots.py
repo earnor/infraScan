@@ -19,7 +19,16 @@ import matplotlib.lines as mlines
 
 
 def _make_diverging_cmap(min_val, max_val):
-    """Red→grey→blue diverging colormap anchored at zero."""
+    """
+    Red→grey→blue diverging colormap anchored at zero.
+
+    The proportions of red and blue are scaled to the magnitude of the
+    negative and positive ranges respectively, so the grey midpoint always
+    falls at NB=0 regardless of how asymmetric the range is.
+
+    max(1, ...) guards against an empty colour array when one side of the
+    range is extremely dominant (e.g. all-negative or near-zero positive).
+    """
     n = 256
     gray = [0.83, 0.83, 0.83, 1.0]
     if min_val < 0 and max_val > 0:

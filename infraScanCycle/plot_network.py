@@ -836,3 +836,94 @@ def plot_developments(edges_gdf, corridor_polygon=None, save_path="data/Network/
     plt.savefig(save_path, dpi=150)
     plt.close()
     print(f"  Plot saved → {save_path}")
+
+
+def plot_network_netzluecken_ids(
+        edges_corridor_path="data/Network/processed/edges_corridor.gpkg",
+        points_corridor_path="data/Network/processed/points_corridor.gpkg",
+        development_candidates_path="data/Network/processed/development_candidates.gpkg",
+        save_path="data/Network/processed/network_netzluecken_ids.png"):
+    """
+    Corridor network with all nodes and edges. Netzlücken are drawn in red dashed
+    and annotated with their ID_new at the midpoint of each edge.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import matplotlib.lines as mlines
+    import geopandas as gpd
+    import os
+
+    edges = gpd.read_file(edges_corridor_path)
+    points = gpd.read_file(points_corridor_path)
+    nl = gpd.read_file(development_candidates_path)
+    nl = nl[nl['dev_type'] == 'netzluecke'] if 'dev_type' in nl.columns else nl
+
+    is_nl_mask = edges['is_development'] == 1 if 'is_development' in edges.columns else (edges.index < 0)
+    base = edges[~is_nl_mask]
+
+    fig, ax = plt.subplots(figsize=(18, 15))
+
+    # base edges
+    base.plot(ax=ax, color='#B0BEC5', linewidth=0.8, alpha=0.75, zorder=1)
+
+    # Netzlücken edges (from development_candidates for correct ID mapping)
+    nl.plot(ax=ax, color='#E53935', linewidth=2.5, linestyle='--', alpha=0.92, zorder=3)
+
+    # annotate each Netzlücke with its ID at the midpoint
+    for _, row in nl.iterrows():
+        mid = row.geometry.interpolate(0.5, normalized=True)
+        ax.annotate(
+            str(int(row['ID_new'])),
+            xy=(mid.x, mid.y),
+            xytext=(4, 4),
+            textcoords='offset points',
+            fontsize=7,
+            fontweight='bold',
+            color='#B71C1C',
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='#E53935',
+                      linewidth=0.8, alpha=0.85),
+            zorder=5,
+        )
+
+    # nodes — colour by type
+    NODE_STYLE = {
+        'is_intersection':  dict(color='#1565C0', size=20, marker='o', label='Intersection',  zorder=6),
+        'is_through_point': dict(color='#43A047', size=8,  marker='o', label='Through-point', zorder=5),
+        'is_endpoint':      dict(color='#FF6F00', size=28, marker='^', label='Dead-end',      zorder=7),
+    }
+    node_handles = []
+    for col, style in NODE_STYLE.items():
+        if col not in points.columns:
+            continue
+        subset = points[points[col] == 1]
+        if len(subset) == 0:
+            continue
+        ax.scatter(subset.geometry.x, subset.geometry.y,
+                   s=style['size'], c=style['color'],
+                   marker=style['marker'], zorder=style['zorder'], alpha=0.9)
+        node_handles.append(mpatches.Patch(color=style['color'],
+                                           label=f"{style['label']} ({len(subset)})"))
+
+    # legend
+    edge_handles = [
+        mlines.Line2D([], [], color='#B0BEC5', linewidth=1.5, label=f'Existing edges ({len(base)})'),
+        mlines.Line2D([], [], color='#E53935', linewidth=2.0, linestyle='--',
+                      label=f'Netzlücken ({len(nl)}) — labelled by ID'),
+    ]
+    leg1 = ax.legend(handles=edge_handles, title='Edges', loc='lower left',
+                     fontsize=9, title_fontsize=10, framealpha=0.93)
+    ax.add_artist(leg1)
+    ax.legend(handles=node_handles, title='Nodes', loc='lower right',
+              fontsize=9, title_fontsize=10, framealpha=0.93)
+
+    ax.set_title(
+        f'Corridor Network — Netzlücken highlighted with ID numbers\n'
+        f'{len(edges)} edges total  |  {len(points)} nodes  |  {len(nl)} Netzlücken',
+        fontsize=13, fontweight='bold')
+    ax.set_axis_off()
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
+    plt.savefig(save_path, dpi=180, bbox_inches='tight')
+    plt.close()
+    print(f"  Plot saved → {save_path}")

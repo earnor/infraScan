@@ -16,11 +16,15 @@ from shapely.validation import make_valid
 _EDGES_CORRIDOR_PATH = r'data/Network/processed/edges_corridor.gpkg'
 _EDGES_BORDER_PATH   = r'data/Network/processed/edges_corridor_border.gpkg'
 
-# Placeholder speeds for gap edges in the base network.
-# Netzlücken / Schwachstellen: present but below quality — slow cycling path
-# Connectivity bridges:         auto-generated cycling links — same degraded speed
-BAD_FFS   = 13.0  # km/h
-WORST_FFS = 13.0  # km/h
+# Placeholder free-flow speeds used in the BASE graph for unbuilt edges.
+# A Netzlücke is given BAD_FFS in the base graph so Dijkstra routes around it
+# whenever a better alternative exists.  After "construction", the edge is
+# upgraded to ffs_built (16–20 km/h depending on routentyp_built).
+# NOTE: BAD_FFS = 13 km/h equals many ffs_built values, so the travel-time
+# improvement from building a Netzlücke is driven by route-type change,
+# NOT by raw speed increase.  Route comfort and safety capture the quality gap.
+BAD_FFS   = 13.0  # km/h — base speed for Netzlücken / Schwachstellen
+WORST_FFS = 13.0  # km/h — base speed for auto-generated connectivity bridges
 
 
 # TODO: check_parallel_edges_gdf() is defined but never called in the pipeline.
@@ -72,19 +76,24 @@ def _load_corridor_gdf(only_existing=True):
 def _build_graph_direct(gdf, cycling_speed_kmh=15):
     """
     Build a routable DiGraph from a GeoDataFrame of LineStrings by iterating
-    edges directly.  Uses the stored start/end coordinates of each edge as
-    nodes — no topology splitting.  Use this for networks (like the corridor
-    files) whose topology is already correct.
+    edges directly.  Uses stored start/end coordinates (rounded to 1 decimal
+    place) as node keys — no topology splitting.
 
-    # TODO: no explicit connectivity validation after graph construction.
-    # If two edges share a junction whose coordinates differ by >0.1 m before
-    # snapping, they produce two separate nodes and leave a gap.
-    # After building G, check nx.number_connected_components(G.to_undirected())
-    # and print a warning if > 1 so gaps are caught early.
+    Edge weight (seconds):
+      - If the GDF has a `tt_min` column: weight = tt_min × 60.
+        augment_with_netzluecken() sets tt_min for all edges, so this path
+        is used in the main scoring pipeline.
+      - Otherwise: weight = length / (cycling_speed_kmh × 1000/3600).
 
-    When the GDF has a `tt_min` column the stored per-edge travel time (in
-    minutes) is used as the edge weight (converted to seconds).  Otherwise
-    the weight is computed from length and cycling_speed_kmh.
+    Use this function for networks whose topology is already correct (corridor
+    files from network_in_corridor / augment_with_netzluecken).  For new
+    geometry that may cross existing edges, use _build_graph_from_gdf() which
+    splits edges at mutual intersections first.
+
+    TODO: no connectivity check after construction.  Two edges sharing a
+    junction whose coordinates differ by >0.1 m produce separate nodes and a
+    silent gap.  Call check_network_connectivity() after building and warn if
+    len(connected_components) > 1.
     """
     speed_ms   = cycling_speed_kmh * 1000 / 3600
     G          = nx.DiGraph()
@@ -386,14 +395,24 @@ def augment_with_netzluecken(edges_corridor, points_corridor,
     """
     Label Netzlücken (is_development==1) with ROUTENTYP='Netzlücke' and BAD_FFS,
     store the original ROUTENTYP and ffs as routentyp_built / ffs_built so
-    scoring functions can use the correct per-edge built speed, rebuild
-    connectivity, and write a scoring CSV skeleton to
+    scoring functions can use the correct per-edge built speed, check
+    network connectivity, and write a scoring CSV skeleton to
     data/Network/processed/netzluecken_scoring.csv.
 
-    CSV columns: length, type/speed before (unbuilt) & after (built),
-    construction and maintenance costs.  Scoring columns (comfort,
-    accessibility, safety) are left blank to be filled by the respective
-    scoring functions.
+    Workflow:
+    1. Derive ffs from ROUTENTYP if the column is missing (edges.gpkg lacks it).
+    2. Snapshot routentyp_built / ffs_built from the original (pre-override) values.
+    3. Override ROUTENTYP → 'Netzlücke' and ffs → BAD_FFS for all development edges.
+    4. Recompute tt_min from length/ffs for all edges.
+    5. Build graph and call check_network_connectivity — if the network is
+       disconnected, small isolated components are dropped and the GDF is
+       reset-indexed.  This means ID_edge values in the returned GDF match
+       those in edges.gpkg (the source), not a renumbered sequence.
+    6. Write netzluecken_scoring.csv with cost estimates for each Netzlücke.
+
+    NOTE: Netzlücken that are not traversed by any OD-optimal path produce zero
+    comfort, safety, and travel-time benefits.  This is a valid model result
+    indicating the edge does not create a useful shortcut for any demand pair.
 
     Returns (edges_aug, points_corridor).
     """

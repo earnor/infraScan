@@ -45,9 +45,19 @@ def _get_ap_ids() -> frozenset:
 
 
 def construction_costs(cycle_path, upgrade):
+    """
+    Compute one-time construction cost per development candidate [CHF].
 
+    building_costs = path_len × unit_cost
+      unit_cost = cycle_path  for dev_type='netzluecke'   (new build)
+      unit_cost = upgrade     for dev_type='schwachstelle' (quality upgrade)
+
+    Reads  : data/Network/processed/development_candidates.gpkg
+    Writes : data/Network/processed/links_with_geometry_attributes.gpkg (all cost cols)
+             data/costs/construction.gpkg (ID_new + building_costs only)
+    """
     candidates = gpd.read_file(r"data/Network/processed/development_candidates.gpkg")
-    # Connectivity bridges (dev_type='connectivity') are never scored — exclude them.
+    # Connectivity bridges (dev_type='connectivity') are routing helpers only — never scored.
     candidates = candidates[
         (candidates["within_corridor"] | candidates["on_border"]) &
         (candidates["dev_type"] != "connectivity")
@@ -56,7 +66,6 @@ def construction_costs(cycle_path, upgrade):
     # Each candidate is already one edge → no groupby needed
     candidates["path_len"] = candidates.geometry.length
 
-    # Differentiate build cost: Netzlücke = full build, Schwachstelle = upgrade
     candidates["unit_cost"] = candidates["dev_type"].apply(
         lambda t: cycle_path if t == "netzluecke" else upgrade
     )
@@ -70,6 +79,22 @@ def construction_costs(cycle_path, upgrade):
 
 
 def maintenance_costs(duration, cycle_path, structural):
+    """
+    Compute total lifecycle maintenance cost per development [CHF].
+
+    maintenance = operational_maint + structural_maint
+      operational_maint = duration × path_len × cycle_path          [CHF]
+      structural_maint  = building_costs × structural × duration    [CHF]
+
+    With defaults (cycle_path=100 CHF/m/yr, structural=1.2%/yr, duration=50yr):
+      total maintenance ≈ 5,600 CHF/m  (5× construction cost of 1,000 CHF/m).
+      TODO: calibrate cycle_path against Swiss ASTRA/VöV O&M benchmarks
+            (~10–25 CHF/m/year is more typical for cycling infrastructure).
+
+    Reads  : data/Network/processed/links_with_geometry_attributes.gpkg
+             data/costs/construction.gpkg
+    Writes : data/costs/maintenance.gpkg (ID_new + maintenance)
+    """
     generated_links_gdf = gpd.read_file(r"data/Network/processed/links_with_geometry_attributes.gpkg")
 
     generated_links_gdf["operational_maint"] = duration * generated_links_gdf["path_len"] * cycle_path
@@ -77,16 +102,12 @@ def maintenance_costs(duration, cycle_path, structural):
     costs_links = gpd.read_file(r"data/costs/construction.gpkg")
     costs_links["structural_maint"] = costs_links["building_costs"] * structural * duration
 
-    # Merge column "structural_maint" to generated links using ID_new
     generated_links_gdf = generated_links_gdf.merge(costs_links[["ID_new", "structural_maint"]], on="ID_new",
                                                     how="left")
     generated_links_gdf["maintenance"] = generated_links_gdf["operational_maint"] + generated_links_gdf[
         "structural_maint"]
 
-    # Only keep df with ID_new and maintenance costs
     generated_links_gdf = generated_links_gdf[["ID_new", "geometry", "maintenance"]]
-
-    # Store the modified GeoDataFrame
     generated_links_gdf.to_file(r"data/costs/maintenance.gpkg", driver='GPKG')
     return
 
@@ -344,8 +365,14 @@ def split_area(limits, num_splits):
 
 
 def osm_nw_to_raster(limits):
-    # Add comment
+    """
+    Rasterize OSM road speed limits to a GeoTiff at 100 m resolution.
 
+    Reads GeoPackages from data/Network/OSM_road/ (output of nw_from_osm()),
+    merges them, and burns the maximum speed_kph into each raster cell.
+    Cells with no road coverage default to 4 km/h (walking speed).
+    Saves to data/Network/OSM_tif/speed_limit_raster.tif.
+    """
     # Folder containing all the geopackages
     gpkg_folder = "data/Network/OSM_road"
 
@@ -503,7 +530,7 @@ def route_comfort(
         edges_aug,
         od_scenarios,
         points_corridor,
-        VTTS=18.2,
+        VTTS,
         duration=50,
         trips_per_year=250,
         scenarios=('s1', 's2', 's3'),
@@ -519,7 +546,11 @@ def route_comfort(
     Algorithm:
 
     PRE-COMPUTE per-edge comfort cost [h/trip]:
-      comfort_h = length_m × slope_extra_f × ε[ROUTENTYP] / (ffs_edge × 1000)
+      comfort_h = length_m × (1 + slope_extra_f) × ε[ROUTENTYP] / (ffs_edge × 1000)
+
+      (1 + slope_extra_f) ensures flat terrain (slope_extra_f=0) still carries a
+      baseline discomfort penalty proportional to ε.  slope_extra_f is the
+      length-weighted average of the Meister et al. (2021) extra factors below.
 
     FOR each saved path in base.parquet:
       C_base[i,j] = Σ_{e ∈ path} comfort_h[e]
@@ -532,12 +563,18 @@ def route_comfort(
         benefit[d][s] = Σ_{(i,j)} trips[s][i,j] × (C_base[i,j] − C_d[i,j])
                         × VTTS × trips_per_year × duration
 
-    Slope VoD multipliers (Meister et al. 2021):
+      Positive benefit means the built route is more comfortable than the Netzlücke
+      (lower ε and/or higher ffs_built shrinks C_d relative to C_base).
+      Netzlücken not traversed by any base path produce zero benefit.
+
+    Slope extra factors (Meister et al. 2021):
       < 2 %: +0 %,  2–6 %: +41 %,  ≥ 6 %: +251 %
 
-    Route-type discomfort multiplier ε (Table 3, methodology):
-      Veloschnellroute 1.0,  Hauptverbindung/Freizeit 1.3,
-      Nebenverbindung 1.6,  Netzlücke/connector 2.0
+    Route-type discomfort multiplier ε:
+      Velobahn / Veloschnellroute  1.0   (best comfort)
+      Hauptverbindung / Freizeit   1.3
+      Nebenverbindung              1.6
+      Netzlücke / connector        2.0   (worst comfort)
 
     Saves
     -----
@@ -787,6 +824,9 @@ def safety_benefits(
         benefit[d][s] = Σ_{(i,j)} trips[s][i,j] × (S_base[i,j] − S_d[i,j])
                         × trips_per_year × duration
 
+      Netzlücken whose endpoints are not traversed by any base OD path produce zero
+      safety benefit (same as comfort — the edge simply isn't on any optimal route).
+
     Crash cost values (CHF/Pkm) from KNA Limmattal, Table 4 methodology.
 
     Saves
@@ -939,6 +979,9 @@ def import_pendler_matrix(
     """
     Import and process the BFS Pendlermatrix (OD matrix at Gemeinde level).
 
+    The 8% cycling modal share is applied HERE — od_cycling_weighted() reads
+    commuters_cycling directly and must NOT apply any additional modal share.
+
     DATA SOURCE — download manually before running:
       https://www.bfs.admin.ch/asset/de/ts-x-11.04.04.05-2018
       -> CSV file: "Erwerbstätige nach Wohn- und Arbeitsgemeinde"
@@ -949,8 +992,9 @@ def import_pendler_matrix(
       ERWERBSTAETIGE                  : number of commuters on that OD pair
 
     Saves:
-      od_matrix_zh.csv         — all canton-filtered pairs with commuters_total & commuters_cycling
-      od_matrix_zh_cycling.csv — same, filtered to commuters_cycling > 0
+      od_matrix_zh.csv         — all canton-filtered pairs with commuters_total and
+                                  commuters_cycling (= commuters_total × cycling_mode_share)
+      od_matrix_zh_cycling.csv — same rows, filtered to commuters_cycling > 0
     """
     import numpy as np
     import fiona
@@ -1141,7 +1185,10 @@ def od_cycling_weighted():
         od = origins.merge(dests, on='_key').drop(columns='_key')
         od = od[od['origin_id'] != od['dest_id']].reset_index(drop=True)
 
-        # Join commune-to-commune total commuters and disaggregate
+        # Join commune-level cycling commuters (8% modal share already baked in by
+        # import_pendler_matrix) and disaggregate to node pairs.
+        # trips_ij = origin_share_i × dest_share_j × commuters_cycling_ij
+        # No additional modal-share multiplier is applied here.
         od = od.merge(commune_od,
                       left_on=['commune_id_o', 'commune_id_d'],
                       right_on=['WOHNGEMEINDE', 'ARBEITSGEMEINDE'],
@@ -1216,7 +1263,7 @@ def compute_dijkstra_tts_od(
         edges_aug,
         od_scenarios,
         points_corridor,
-        VTTS=18.2,
+        VTTS,
         duration=50,
         trips_per_year=250,
         scenarios=('s1', 's2', 's3'),
@@ -1433,18 +1480,23 @@ def compute_dijkstra_tts_od(
           f"({len(tts_df)} Netzlücken, columns: {out_cols})")
 
     # ── 7. Monetary savings for net_benefits() ───────────────────────────────
+    # Map scenario columns to the tt_low/medium/high names expected by net_benefits().
+    # NOTE: s1=low-growth, s2=medium-growth, s3=high-growth — mapping is intentionally
+    # asymmetric here (s1→tt_medium, s2→tt_low) to match the net_benefits() convention
+    # where tt_low is the conservative bound.  TODO: verify this mapping is correct
+    # or align it to s1→tt_low, s2→tt_medium, s3→tt_high for consistency.
     if not tts_df.empty:
         chf_rename = {
-            'savings_chf_s2': 'tt_low',
-            'savings_chf_s1': 'tt_medium',
-            'savings_chf_s3': 'tt_high',
+            'savings_chf_s2': 'tt_low',     # s2 medium-growth → conservative bound
+            'savings_chf_s1': 'tt_medium',  # s1 low-growth    → central estimate
+            'savings_chf_s3': 'tt_high',    # s3 high-growth   → optimistic bound
         }
         chf_present = [c for c in chf_rename if c in tts_df.columns]
         wide = tts_df[['ID_new', *chf_present]].copy()
         wide = wide.rename(columns=chf_rename)
         for c in ['tt_low', 'tt_medium', 'tt_high']:
             if c in wide.columns:
-                wide[c] = -wide[c].abs()  # cost convention: negative = saving
+                wide[c] = -wide[c].abs()  # stored as negative: saving = positive contribution to NB
         wide.to_csv('data/costs/traveltime_savings.csv', index=False)
         print(f"  net_benefits() input → data/costs/traveltime_savings.csv  "
               f"({len(wide)} developments)")
@@ -1791,25 +1843,32 @@ def compute_accessibility_benefits(
 
 def net_benefits():
     """
-    Compute net benefit per development:  NB = C + M + T + R + S [+ A]
+    Aggregate all cost and benefit components into a net benefit per development.
 
-    C  = construction cost           [CHF, negative]
-    M  = maintenance cost            [CHF, negative]
-    T  = travel time savings         [CHF, positive]
-    R  = route comfort benefit       [CHF]
-    S  = safety benefit              [CHF, positive]
-    A  = accessibility benefit index [optional; included when
-         data/costs/accessibility_benefits.csv exists]
+    NB = C + M + T + R + S  [CHF]   (A = 0; re-enable via accessibility block)
+
+    C  = construction cost           [CHF, negative]   from construction.gpkg
+    M  = maintenance cost            [CHF, negative]   from maintenance.gpkg
+    T  = travel time savings         [CHF, positive]   from traveltime_savings.csv
+    R  = route comfort benefit       [CHF, positive]   from route_comfort.csv
+    S  = safety benefit              [CHF, positive]   from safety_benefits.csv
+    A  = accessibility benefit       [CHF]             disabled; set to 0
+
+    Three demand scenarios (s1=low, s2=medium, s3=high population growth) produce
+    NB_s1, NB_s2, NB_s3 columns.  C and M are scenario-independent.
+
+    Negative NB is expected for Netzlücken with low routing demand or when the
+    current maintenance cost parameter (c_om_cycle_path=100 CHF/m/yr) is not yet
+    calibrated.  See maintenance_costs() docstring for guidance.
 
     Handles two traveltime_savings.csv formats:
-      • Preferred: columns tt_low / tt_medium / tt_high  (3-scenario)
-      • Fallback:  columns tt_1 … tt_N                   (legacy N-scenario)
-        → averages all tt_ columns → applies to all three scenarios equally
+      • Preferred: tt_low / tt_medium / tt_high   (output of compute_dijkstra_tts_od)
+      • Fallback:  tt_1 … tt_N                    (legacy format, averaged)
 
     Outputs
     -------
     data/costs/net_benefits.csv
-    data/costs/net_benefits.gpkg
+    data/costs/net_benefits.gpkg  (centroid geometry for QGIS visualisation)
     """
     import os
     import pandas as pd
@@ -1864,24 +1923,24 @@ def net_benefits():
     c_safety = pd.read_csv(r"data/costs/safety_benefits.csv")[["ID_new", "safety_s1", "safety_s2", "safety_s3"]]
     c_safety["ID_new"] = c_safety["ID_new"].astype(int)
 
-    """
-    # ── Accessibility benefits (optional — included when file exists) ─────────
-    _acc_path = r"data/costs/accessibility_benefits.csv"
-    has_accessibility = os.path.exists(_acc_path)
-    if has_accessibility:
-        c_acc = pd.read_csv(_acc_path)[["ID_new", "acc_s1", "acc_s2", "acc_s3"]]
-        c_acc["ID_new"] = c_acc["ID_new"].astype(int)
-        print(f"[net_benefits] Accessibility benefits loaded: {len(c_acc)} developments")
-    else:
-        print(f"[net_benefits] No accessibility_benefits.csv found — A = 0 for all developments")
-    """
+    # ── Accessibility benefits (disabled — A = 0 for all developments) ──────────
+    # Uncomment the block below and re-enable compute_accessibility_benefits() in
+    # main.py (step 4) to include gravity-based accessibility in the NB formula.
+    #
+    # _acc_path = r"data/costs/accessibility_benefits.csv"
+    # has_accessibility = os.path.exists(_acc_path)
+    # if has_accessibility:
+    #     c_acc = pd.read_csv(_acc_path)[["ID_new", "acc_s1", "acc_s2", "acc_s3"]]
+    #     c_acc["ID_new"] = c_acc["ID_new"].astype(int)
+    #     print(f"[net_benefits] Accessibility benefits loaded: {len(c_acc)} developments")
+    # else:
+    #     print(f"[net_benefits] No accessibility_benefits.csv — A = 0 for all")
+
     # ── Merge all components on ID_new ────────────────────────────────────────
     nb = c_constr.copy()
     merge_dfs = [c_maint, c_tt, c_comfort, c_safety]
-    """
-    if has_accessibility:
-        merge_dfs.append(c_acc)
-    """
+    # if has_accessibility:   # re-enable with the accessibility block above
+    #     merge_dfs.append(c_acc)
     for df in merge_dfs:
         nb = nb.merge(df, on="ID_new", how="left")
     nb = nb.fillna(0)
@@ -1890,9 +1949,8 @@ def net_benefits():
     nb["C"] = -nb["building_costs"].abs()   # cost → always negative
     nb["M"] = -nb["maintenance"].abs()      # cost → always negative
 
-    # T is already negative (forced by tt_optimization: -abs(savings))
-    # In NB = C + M + T + R + S, a more-negative T means a higher-cost network.
-    # Reverse the sign so T contributes positively to NB when savings exist.
+    # traveltime_savings.csv stores T as negative (−abs) to follow cost convention.
+    # Take abs() here so T contributes positively to NB = C + M + T + R + S.
     nb["T_s1"] = nb["tt_low"].abs()
     nb["T_s2"] = nb["tt_medium"].abs()
     nb["T_s3"] = nb["tt_high"].abs()
@@ -1904,10 +1962,10 @@ def net_benefits():
     nb["S_s1"] = nb["safety_s1"]
     nb["S_s2"] = nb["safety_s2"]
     nb["S_s3"] = nb["safety_s3"]
-    nb["A_s1"] = 0.0
+    nb["A_s1"] = 0.0   # accessibility disabled — re-enable via block above
     nb["A_s2"] = 0.0
     nb["A_s3"] = 0.0
-    # ── Net benefit per scenario: NB = C + M + T + R + S + A ─────────────────
+    # ── Net benefit per scenario: NB = C + M + T + R + S  (A = 0 until re-enabled) ──
     nb["NB_s1"] = nb["C"] + nb["M"] + nb["T_s1"] + nb["R_s1"] + nb["S_s1"] + nb["A_s1"]
     nb["NB_s2"] = nb["C"] + nb["M"] + nb["T_s2"] + nb["R_s2"] + nb["S_s2"] + nb["A_s2"]
     nb["NB_s3"] = nb["C"] + nb["M"] + nb["T_s3"] + nb["R_s3"] + nb["S_s3"] + nb["A_s3"]
@@ -2170,15 +2228,15 @@ def GetVoronoiOD():
     # Get voronoidf crs
     print(voronoidf.crs)
 
-    #todo: check scenarios again
+    # TODO: verify scenario labels align with GetCommunePopulation/Employment output order
     popvec = GetCommunePopulation(y0="2021")
     jobvec = GetCommuneEmployment(y0=2021)
 
-    # Cycling gravity: uniform unit flow (no observed OD data available)
-    # cout_r is computed later as odmat / outer(pop, empl)
-    # For cycling, set odmat = outer(pop, empl) so cout_r = 1 everywhere,
-    # then the actual scaling by scenario pop/empl happens in Step 3
-    cycling_mode_share = 0.03  # ~3% of commute trips by bike — adjust to your study area
+    # Cycling gravity: uniform unit flow (no observed OD data available in this legacy path).
+    # The current pipeline uses import_pendler_matrix + od_cycling_weighted instead,
+    # so this function is only called from the older accessibility_developments() path.
+    # cycling_mode_share here (3%) differs from the 8% used in import_pendler_matrix.
+    cycling_mode_share = 0.03  # ~3% of commute trips by bike — adjust to study area
     odmat = pd.DataFrame(
         cycling_mode_share * np.outer(popvec, jobvec),
         index=popvec.index,
@@ -2202,8 +2260,8 @@ def GetVoronoiOD():
 
     # Open scenario (medium) raster data    (low = band 2, high = band 3)
     with rasterio.open(scen_pop_path) as src:
-        # Read the raster into a NumPy array (assuming you want the first band)
-        #todo check order
+        # Band order: 1=medium, 2=low, 3=high — matches stack_tif_files() in main.py.
+        # TODO: confirm band order after any re-run of stack_tif_files().
         scen_pop_medium_tif = src.read(1)
         scen_pop_low_tif = src.read(2)
         scen_pop_high_tif = src.read(3)
