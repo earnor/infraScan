@@ -32,42 +32,7 @@ from matplotlib.lines import Line2D
 
 
 
-def import_data(limits):
 
-    # Arealstatistik - 1985, 1997, 2009, 2018
-    #areal_stat = pd.read_csv(r'data/landuse_landcover/landcover/ag-b-00.03-37-area-csv.csv', sep=";")
-    #areal_stat = areal_stat.drop(areal_stat.columns[[3,4,5,6,7,8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31,32,33,34,35]], axis=1)
-    #areal_stat = areal_stat[["E", "N", "AS18_17", "AS18_4", "LU18_10", "LU18_4"]]
-    #print(areal_stat.head(50).to_string())
-    # AS85_17 17 Klassen gemäss Standardnomenklatur der Arealstatistik 1979/85
-    # AS85_4  4 Hauptbereiche gemäss Standardnomenklatur der Arealstatistik 1979/85
-    # LU85_10 10 Klassen der Bodennutzung der Arealstatistik 1979/85
-    # LU85_4  4 Hauptbereiche der Bodennutzung der Arealstatistik 1979/85
-
-
-    betriebzaehlung20 = pd.read_csv(r"data/independent_variable/statent/ag-b-00.03-22-STATENT2020/STATENT_2020.csv", sep=";")
-    # BXXS2: Arbeitsstätte Sektor 2, BxxVZAS2: Vollzeitäquivalent Sektor 2
-    betriebzaehlung20 = betriebzaehlung20[["B08VZAT", "E_KOORD", "N_KOORD"]].rename(
-        {'B08VZAT': 'empl20'}, axis=1)
-    empl20_ch = fill_raster_dataframe(betriebzaehlung20)
-    csv_to_tiff(empl20_ch, attribute="empl20", path=r"data/independent_variable/processed/raw/empl20_ch.tif")
-
-    empl20 = empl20_ch[(empl20_ch["E_COORD"] >= limits[0]) & (empl20_ch["E_COORD"] <= limits[2] - 100) & (empl20_ch["N_COORD"] >= limits[1]) & (empl20_ch["N_COORD"] <= limits[3] - 100)]
-    csv_to_tiff(empl20, attribute="empl20", path=r"data/independent_variable/processed/raw/empl20.tif")
-
-    population20 = pd.read_csv(r"data/independent_variable/statpop/ag-b-00.03-vz2020statpop/STATPOP2020.csv", sep=";")
-    population20 = population20[["B20BTOT", "E_KOORD", "N_KOORD"]].rename({"B20BTOT": "pop20"}, axis=1)
-    pop20_ch = fill_raster_dataframe(population20)
-    csv_to_tiff(pop20_ch, attribute="pop20", path=r"data/independent_variable/processed/raw/pop20_ch.tif")
-    pop20 = pop20_ch[
-        (pop20_ch["E_COORD"] >= limits[0]) & (pop20_ch["E_COORD"] <= limits[2] - 100) & (pop20_ch["N_COORD"] >= limits[1]) & (
-                    pop20_ch["N_COORD"] <= limits[3] - 100)]
-    csv_to_tiff(pop20, attribute="pop20", path=r"data/independent_variable/processed/raw/pop20.tif")
-
-    # Store the restructured dataset as csv file
-    #population20.to_csv(r"data/temp/pop_filtered.csv")
-    #betriebzaehlung20.to_csv(r"data/temp/empl_filtered.csv")
-    return
 
 
 
@@ -202,9 +167,6 @@ def _connect_dead_ends_to_nodes(edges_gdf, threshold=50.0):
     For each remaining dead-end endpoint, find the nearest other endpoint
     (any node) within `threshold` metres that it is NOT already directly
     connected to.  Add a short straight connector edge between them.
-
-    This handles the case where a dead-end stub nearly reaches an existing
-    junction node but falls just outside the merge tolerance.
     """
     from scipy.spatial import cKDTree
 
@@ -293,9 +255,6 @@ def _snap_dead_ends_to_edges(edges_gdf, threshold=30.0):
     is within `threshold` metres.  Project the dead-end onto that edge,
     split the edge at the projected point, and add a short connector stub
     from the dead-end to the projected point.
-
-    This connects dangling stubs that are close to—but not touching—a
-    neighbouring route, without requiring exact coordinate overlap.
     """
     # Count endpoint degrees
     ep_count = {}
@@ -404,10 +363,6 @@ def _split_edges_at_nodes(edges_gdf, snap_tol=1.0):
     """
     Find nodes that lie ON the interior of an existing edge (within snap_tol metres)
     but are not connected to it, and split the edge at that point.
-
-    This catches the case where edge A runs from node 1 → node 2 passing
-    directly through the location of node 3, but the graph has no edge
-    from 1→3 or 3→2.  After splitting, node 3 is a proper junction.
     """
     # Collect all unique endpoints — these are the nodes we want to test
     endpoint_set = set()
@@ -490,9 +445,6 @@ def _connect_components(nodes_gdf, edges_gdf, coord_round=2):
     Find all disconnected components in the network and connect them by adding
     a synthetic straight-line edge between the closest pair of nodes from each
     component pair.  Repeats until the network is fully connected.
-
-    Synthetic edges are marked with is_connector=1 so they can be handled
-    differently during scoring (never scored, always present for routing).
     """
     import networkx as nx
     from scipy.spatial import cKDTree
@@ -635,10 +587,7 @@ def reformat_network():
     print(f"  Loaded {len(edges_gdf)} edges")
 
     # ── Step 2: Merge nearby nodes ────────────────────────────────────────────
-    # Build a KDTree over all unique endpoints.  Any pair of endpoints within
-    # MERGE_TOL metres is clustered (Union-Find); the cluster centroid becomes
-    # the single shared node.  Edge start/end coordinates are remapped so every
-    # edge in the cluster connects to exactly one point.
+
     from scipy.spatial import cKDTree
 
     def _collect_endpoints(gdf):
@@ -698,9 +647,7 @@ def reformat_network():
           f"(tol={MERGE_TOL} m) → {len(edges_gdf)} edges remain")
 
     # ── Step 3: Targeted topology fixes ──────────────────────────────────────
-    # Full re-split is skipped — import_network_GIS_ALLTAG uses momepy (primal
-    # approach) which already nodes all LineString crossings into shared endpoints.
-    # Only three targeted passes are applied here:
+
     edges_split = edges_gdf.copy()
     print(f"  Edges after node merge: {len(edges_split)}")
 
@@ -1198,67 +1145,7 @@ def plot_corridor_network(polygon, points_corridor, edges_corridor, edges_border
     print("Plot saved → data/Network/processed/corridor_plot.png")
 
 
-def only_links_to_corridor():
-    # 1. Load data
-    all_links = gpd.read_file(r"data/Network/processed/new_links.gpkg")
-    all_access_points = gpd.read_file(r"data/Network/processed/points_corridor.gpkg")
 
-    # 2. Determine available columns to prevent KeyError
-    # We always need ID_point for the join
-    cols_to_use = ["ID_point"]
-
-    if "cor_1" in all_access_points.columns:
-        # Filter for corridor points if attribute exists
-        access_corridor = all_access_points[all_access_points["cor_1"] == "1"].copy()
-        cols_to_use.append("cor_1")
-    else:
-        print("Warning: 'cor_1' column not found. Skipping attribute filter and using all points.")
-        access_corridor = all_access_points.copy()
-
-    # 3. Join links to corridor points
-    # We join all_links.ID_current to access_corridor.ID_point
-    all_links["ID_current"] = all_links["ID_current"].astype(str)
-    access_corridor["ID_point"] = access_corridor["ID_point"].astype(str)
-
-    links_corridor = all_links.merge(
-        right=access_corridor[cols_to_use],
-        left_on="ID_current",
-        right_on="ID_point"
-    )
-
-    print(f"Links connected to points within the corridor: {links_corridor.shape[0]} of {all_links.shape[0]}")
-
-    # 4. Save processed links
-    if "ID_current" in links_corridor.columns:
-        links_corridor = links_corridor.drop(columns=["ID_current"])
-
-    links_corridor.to_file(r"data/Network/processed/developments_to_corridor_attribute.gpkg")
-
-    # 5. Process generated access points
-    generated_points = gpd.read_file(r"data/Network/processed/generated_nodes.gpkg")
-
-    # Ensure ID_new is also treated as string for the merge
-    generated_points["ID_new"] = generated_points["ID_new"].astype(str)
-    links_corridor["ID_new"] = links_corridor["ID_new"].astype(str)
-
-    # Merge to filter only generated points that successfully found a link
-    temp = generated_points.merge(right=links_corridor, on="ID_new")
-
-    # geometry_x is the location of the NEW generated point
-    generated_points_corridor = temp[["ID_new", "geometry_x", "ID_point"]].copy()
-
-    # Rename geometry column to standard 'geometry'
-    generated_points_corridor = generated_points_corridor.rename(columns={"geometry_x": "geometry"})
-
-    # Convert back to a proper GeoDataFrame
-    gdf_nodes_out = gpd.GeoDataFrame(
-        generated_points_corridor,
-        geometry="geometry",
-        crs=generated_points.crs
-    )
-
-    gdf_nodes_out.to_file(r"data/Network/processed/generated_nodes_connecting_corridor.gpkg")
-    print("Infrastructure generation step complete.")
 
 def get_protected_area(limits):
     bln = gpd.read_file(r"data/landuse_landcover/Schutzzonen/BLN/N2017_Revision_landschaftnaturdenkmal_20170727_20221110.shp")
