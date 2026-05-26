@@ -2017,11 +2017,10 @@ def plot_duebendorf_zoom_network(network=None, access_points=None,
 
 def plot_bcr_bar(plot_name="bcr_bar"):
     """
-    Horizontal bar chart of Cost-Benefit Ratio (CBR) per development,
-    sorted descending.  CBR = |C + M| / (T_s2 + R_s2 + S_s2).
-    A vertical dashed line at CBR = 1 marks the break-even threshold.
-    Bars are green (CBR ≤ 1) or red (CBR > 1).
-    Developments with zero benefits (CBR = ∞) are capped and labelled.
+    Horizontal bar chart of Benefit-Cost Ratio (BCR) per development,
+    sorted ascending.  BCR = (T_s2 + R_s2 + S_s2) / |C + M|.
+    A vertical dashed line at BCR = 1 marks the break-even threshold.
+    Bars are green (BCR ≥ 1) or red (BCR < 1).
 
     Reads:  data/costs/net_benefits.gpkg
     Saves:  plot/results/{plot_name}.png
@@ -2038,61 +2037,32 @@ def plot_bcr_bar(plot_name="bcr_bar"):
     nb["total_costs"]    = nb["C"].abs() + nb["M"].abs()
     nb["total_benefits"] = nb["T_s2"] + nb["R_s2"] + nb["S_s2"]
     nb = nb[nb["total_costs"] > 0].copy()
+    nb["BCR"] = nb["total_benefits"] / nb["total_costs"]
+    nb = nb.sort_values("BCR", ascending=True).reset_index(drop=True)
 
-    # CBR = costs / benefits; NaN where benefits = 0
-    nb["CBR"] = nb.apply(
-        lambda r: r["total_costs"] / r["total_benefits"]
-        if r["total_benefits"] > 0 else np.nan, axis=1)
-
-    # sort descending (worst first at top); NaN always at top
-    nb = nb.sort_values("CBR", ascending=False, na_position="first").reset_index(drop=True)
-    nb["is_inf"] = nb["CBR"].isna()
-
-    # cap: place infinite bars clearly beyond the largest finite bar
-    finite_max = nb["CBR"].dropna().max()
-    CAP = finite_max * 2.0          # 2× gap makes infinite bars visually distinct
-    nb["CBR_plot"] = nb["CBR"].fillna(CAP)
-
-    # colours: infinite → green (CBR > 1), finite ≤ 1 → red, finite > 1 → green
-    colors = []
-    for i in range(len(nb)):
-        if nb["is_inf"].iloc[i]:
-            colors.append("#e74c3c")
-        elif nb["CBR"].iloc[i] <= 1:
-            colors.append("#27ae60")
-        else:
-            colors.append("#e74c3c")
+    colors = ["#27ae60" if v >= 1 else "#e74c3c" for v in nb["BCR"]]
 
     fig, ax = plt.subplots(figsize=(9, max(5, len(nb) * 0.45)))
     y = np.arange(len(nb))
-    ax.barh(y, nb["CBR_plot"], color=colors, alpha=0.85,
+    ax.barh(y, nb["BCR"], color=colors, alpha=0.85,
             edgecolor="white", linewidth=0.5, zorder=3)
     ax.axvline(1.0, color="black", lw=1.5, linestyle="--", zorder=5)
-    ax.set_xlim(0, CAP * 1.05)
-
-    # label and arrow for infinite bars
-    for pos in nb.index[nb["is_inf"]]:
-        ax.annotate("∞  (no benefits)",
-                    xy=(CAP, pos), xytext=(CAP * 0.75, pos),
-                    va="center", ha="left", fontsize=8,
-                    color="white", fontweight="bold",
-                    arrowprops=dict(arrowstyle="->", color="white", lw=1.2))
 
     ax.set_yticks(y)
     ax.set_yticklabels(nb["ID_new"].astype(int).astype(str), fontsize=9)
-    ax.set_xlabel("Cost-Benefit Ratio  |C + M| / (T + R + S)", fontsize=11)
-    ax.set_title("Cost-Benefit Ratio per Development\n"
-                 "(medium growth scenario  ·  CBR < 1 = net positive)",
+    ax.set_xlabel("Benefit-Cost Ratio  (T + R + S) / |C + M|", fontsize=11)
+    ax.set_title("Benefit-Cost Ratio per Development\n"
+                 "(medium growth scenario  ·  BCR ≥ 1 = net positive)",
                  fontsize=12, pad=8)
     ax.grid(axis="x", linestyle="--", alpha=0.5, zorder=0)
 
     legend_handles = [
-        mpatches.Patch(color="#27ae60", label="CBR ≤ 1  (benefits exceed costs)"),
-        mpatches.Patch(color="#e74c3c", label="CBR > 1  (costs exceed benefits)"),
+        mpatches.Patch(color="#27ae60", label="BCR ≥ 1  (benefits exceed costs)"),
+        mpatches.Patch(color="#e74c3c", label="BCR < 1  (costs exceed benefits)"),
         plt.Line2D([0], [0], color="black", lw=1.5, linestyle="--",
-                   label="Break-even  (CBR = 1)"),
+                   label="Break-even  (BCR = 1)"),
     ]
-    ax.legend(handles=legend_handles, fontsize=9, loc="upper right")
+    ax.legend(handles=legend_handles, fontsize=9, loc="lower right")
 
     plt.tight_layout()
     os.makedirs("plot/results", exist_ok=True)
