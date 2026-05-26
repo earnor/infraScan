@@ -24,13 +24,6 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 def _merge_close_endpoints(df, tolerance=5.0):
     """
     Merge edge endpoints that are within `tolerance` metres of each other.
-
-    After grid-snapping two endpoints may still land on adjacent 5 m cells
-    (e.g. 2.4 m and 2.6 m from the same grid line → cells 0 m and 5 m apart).
-    This function collects every unique snapped endpoint, uses a KDTree to find
-    all pairs within `tolerance`, clusters them via Union-Find, and replaces
-    each cluster with a single grid-snapped centroid coordinate.  Edges that
-    become degenerate (start == end after merging) are dropped.
     """
     import numpy as np
     from scipy.spatial import cKDTree
@@ -102,79 +95,7 @@ def _merge_close_endpoints(df, tolerance=5.0):
     return df
 
 
-def _connect_nearby_dead_ends(df, tolerance=20.0):
-    """
-    Add short synthetic edges between pairs of degree-1 (dead-end) endpoints
-    that are within `tolerance` metres of each other but not yet connected.
 
-    Works at the coordinate level (before momepy), so it runs after
-    _merge_close_endpoints and before gdf_to_nx.  Synthetic edges inherit
-    column values from the edge whose endpoint is closest to the new connector.
-    """
-    import numpy as np
-    from scipy.spatial import cKDTree
-
-    # Count how many times each endpoint coordinate appears across all edges
-    counts = {}
-    for geom in df.geometry:
-        if geom is None or geom.is_empty:
-            continue
-        coords = list(geom.coords)
-        s = (coords[0][0],  coords[0][1])
-        e = (coords[-1][0], coords[-1][1])
-        counts[s] = counts.get(s, 0) + 1
-        counts[e] = counts.get(e, 0) + 1
-
-    dead_ends = [pt for pt, n in counts.items() if n == 1]
-    if len(dead_ends) < 2:
-        return df
-
-    arr  = np.array(dead_ends)
-    tree = cKDTree(arr)
-    pairs = tree.query_pairs(tolerance)
-
-    if not pairs:
-        print(f"  _connect_nearby_dead_ends: 0 connections added (no pairs within {tolerance} m)")
-        return df
-
-    # Build index: endpoint → row index in df for attribute inheritance
-    ep_to_row = {}
-    for idx, geom in enumerate(df.geometry):
-        if geom is None or geom.is_empty:
-            continue
-        coords = list(geom.coords)
-        s = (coords[0][0],  coords[0][1])
-        e = (coords[-1][0], coords[-1][1])
-        ep_to_row[s] = idx
-        ep_to_row[e] = idx
-
-    # Greedy connect: sort by distance, skip if either endpoint is already
-    # claimed by a new edge (keeps the graph clean — avoids multi-star clusters)
-    pair_list = sorted(pairs, key=lambda p: np.linalg.norm(arr[p[0]] - arr[p[1]]))
-    claimed   = set()
-    new_rows  = []
-    for i, j in pair_list:
-        if i in claimed or j in claimed:
-            continue
-        claimed.add(i)
-        claimed.add(j)
-        pt_i = dead_ends[i]
-        pt_j = dead_ends[j]
-        # Inherit attributes from whichever row owns endpoint i
-        src_row = df.iloc[ep_to_row.get(pt_i, ep_to_row.get(pt_j, 0))].copy()
-        src_row['geometry'] = LineString([pt_i, pt_j])
-        src_row['length_m'] = src_row['geometry'].length
-        new_rows.append(src_row)
-
-    if not new_rows:
-        print(f"  _connect_nearby_dead_ends: 0 connections added (all pairs claimed)")
-        return df
-
-    additions = gpd.GeoDataFrame(new_rows, crs=df.crs).reset_index(drop=True)
-    result    = pd.concat([df, additions], ignore_index=True)
-    print(f"  _connect_nearby_dead_ends: {len(new_rows)} synthetic edge(s) added "
-          f"(tol={tolerance} m, {len(dead_ends)} dead-ends found)")
-    return result
 
 
 def import_network_GIS_ALLTAG() -> Any:
@@ -245,8 +166,7 @@ def import_network_GIS_ALLTAG() -> Any:
     print(f"  Netzlücken (is_development=1): {n_dev} edges")
 
     # ── Step 4: Schwachstellen flag ───────────────────────────────────────────
-    # Load Schwachstellen from data/raw/SCHWACHSTELLEN/. Each feature is kept as
-    # a single whole geometry (no explode) so one Schwachstelle = one spatial unit.
+    # Load Schwachstellen from data/raw/SCHWACHSTELLEN/
     # Any ALLTAG edge whose geometry intersects a buffered Schwachstelle gets
     # is_schwachstelle = 1. Only existing (bestehend) edges can be weak spots.
     path_sw = 'data/raw/SCHWACHSTELLEN/TBA_VNP_SCHWACHSTELLEN_L.shp'
@@ -282,10 +202,7 @@ def import_network_GIS_ALLTAG() -> Any:
         print(f"    Schwachstellen join failed: {exc} — is_schwachstelle set to 0 for all edges")
 
     # ── Step 5: Endpoint snapping to 5 m grid ────────────────────────────────
-    # Forces topologically shared nodes to identical coordinates so momepy
-    # merges them into one graph node.
-    # MultiLineStrings that survived linemerge (disconnected parts) are exploded
-    # here so every row passed to momepy is a plain LineString.
+
     if df.geometry.geom_type.isin(['MultiLineString']).any():
         df = df.explode(index_parts=False).reset_index(drop=True)
 
@@ -310,8 +227,7 @@ def import_network_GIS_ALLTAG() -> Any:
 
 
     # ── Step 7: Extract start/end node coordinates ────────────────────────────
-    # These are the snapped, merged endpoint coordinates — used by routing and
-    # for building the explicit node table.
+
     def _start(geom):
         c = list(geom.coords)
         return c[0][0], c[0][1]
@@ -381,151 +297,5 @@ def import_network_GIS_ALLTAG() -> Any:
 
 
 
-def import_osmnx_feeder_data():
-    # Dübendorf - Hinwil corridor (bounding box in WGS84)
-    left, bottom, right, top = 8.5800, 47.2700, 8.8700, 47.4200
-    G = osmnx.graph_from_bbox(bbox=(left, bottom, right, top), network_type='bike', simplify=True)
-
-    # Convert OSMnx graph to GeoDataFrames and reproject to Swiss LV95
-    gdf_nodes, gdf_edges = osmnx.graph_to_gdfs(G)
-    gdf_nodes = gdf_nodes.to_crs(epsg=2056)
-    gdf_edges = gdf_edges.to_crs(epsg=2056)
-
-    # Reset index so node IDs and edge u/v/key become regular columns
-    gdf_nodes = gdf_nodes.reset_index()
-    gdf_edges = gdf_edges.reset_index()
-
-    # Keep only relevant columns for the feeder network
-    node_cols = ['osmid', 'x', 'y', 'geometry']
-    edge_cols = [
-        'u', 'v', 'key',
-        'osmid',
-        'name',
-        'highway',        # road/path type (cycleway, residential, etc.)
-        'oneway',
-        'length',         # edge length in meters (from OSMnx, WGS84-based)
-        'maxspeed',
-        'geometry',
-    ]
-
-    # Only keep columns that actually exist in the data (OSMnx output varies by area)
-    gdf_nodes = gdf_nodes[[c for c in node_cols if c in gdf_nodes.columns]]
-    gdf_edges = gdf_edges[[c for c in edge_cols if c in gdf_edges.columns]]
-
-    # Recompute length in meters using projected CRS (more accurate than OSMnx default)
-    gdf_edges['length_m'] = gdf_edges.geometry.length
-
-    # Store original winding geometry as WKT for later visualization
-    gdf_edges['visual_geom'] = gdf_edges.geometry.apply(lambda g: g.wkt)
-
-    # Save outputs
-    os.makedirs('data/Network/processed', exist_ok=True)
-    gdf_nodes.to_file('data/Network/processed/osmnx_feeder_nodes.gpkg', driver='GPKG')
-    gdf_edges.to_file('data/Network/processed/osmnx_feeder_edges.gpkg', driver='GPKG')
-
-    return gdf_nodes, gdf_edges
 
 
-def plot_network(
-    network,
-    source_col: str = None,
-    target_col: str = None,
-    directed: bool = False,
-    node_color: str = "#4C9BE8",
-    edge_color: str = "#888888",
-    node_size: int = 10,          # small — there are thousands of nodes
-    with_labels: bool = False,    # off by default for geo networks
-    title: str = "Network Graph",
-    figsize: tuple = (12, 9),
-    layout: str = "spring",
-) -> None:
-
-    G = nx.DiGraph() if directed else nx.Graph()
-    pos = {}
-
-    # ── Case 1: GeoDataFrame with geometry ────────────────────────────────
-    if isinstance(network, gpd.GeoDataFrame) and "geometry" in network.columns:
-
-        if isinstance(source_col, str) and isinstance(target_col, str):
-            # Explicit node-ID columns — use those
-            for _, row in network.iterrows():
-                G.add_edge(row[source_col], row[target_col])
-            layout_fn = {
-                "spring": nx.spring_layout, "circular": nx.circular_layout,
-                "kamada_kawai": nx.kamada_kawai_layout, "spectral": nx.spectral_layout,
-                "shell": nx.shell_layout, "random": nx.random_layout,
-            }.get(layout, nx.spring_layout)
-            pos = layout_fn(G, seed=42)
-
-        else:
-            # Derive nodes from LineString endpoints, snap to integer grid
-            # to merge nearby points into the same node
-            SNAP = 10  # meters — adjust if network has gaps
-
-            def snap(xy):
-                return (round(xy[0] / SNAP) * SNAP, round(xy[1] / SNAP) * SNAP)
-
-            for _, row in network.iterrows():
-                geom = row.geometry
-                if geom is None or geom.is_empty:
-                    continue
-                lines = [geom] if geom.geom_type == "LineString" else list(geom.geoms)
-                for line in lines:
-                    coords = list(line.coords)
-                    u = snap(coords[0])
-                    v = snap(coords[-1])
-                    if u != v:
-                        G.add_edge(u, v)
-                        pos[u] = u  # x, y coords used directly as position
-                        pos[v] = v
-
-    # ── Case 2: plain list of tuples ──────────────────────────────────────
-    elif isinstance(network, list):
-        for edge in network:
-            if len(edge) == 3:
-                u, v, w = edge
-                G.add_edge(u, v, weight=w)
-            else:
-                G.add_edge(*edge)
-        pos = nx.spring_layout(G, seed=42)
-
-    # ── Case 3: plain DataFrame with source/target columns ────────────────
-    elif isinstance(network, pd.DataFrame) and source_col and target_col:
-        for _, row in network.iterrows():
-            G.add_edge(row[source_col], row[target_col])
-        pos = nx.spring_layout(G, seed=42)
-
-    else:
-        raise TypeError(
-            f"Cannot build graph from type {type(network)}. "
-            "Pass a GeoDataFrame with geometry, a list of tuples, "
-            "or a DataFrame with source_col/target_col."
-        )
-
-    print(f"  Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
-
-    # ── Draw ──────────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=figsize)
-
-    nx.draw_networkx_edges(
-        G, pos,
-        edge_color=edge_color,
-        width=0.8,
-        alpha=0.6,
-        ax=ax,
-    )
-    nx.draw_networkx_nodes(
-        G, pos,
-        node_color=node_color,
-        node_size=node_size,
-        alpha=0.85,
-        ax=ax,
-    )
-    if with_labels:
-        nx.draw_networkx_labels(G, pos, font_size=6, ax=ax)
-
-    ax.set_title(title, fontsize=14, fontweight="bold")
-    ax.set_aspect("equal")   # keep geographic proportions correct
-    ax.axis("off")
-    plt.tight_layout()
-    plt.show()

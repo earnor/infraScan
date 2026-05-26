@@ -178,52 +178,123 @@ def get_voronoi_status_quo(corridor_polygon=None, nodes_gdf=None):
 
 
 def plot_voronoi_status_quo(voronoi_gdf, access_nodes=None, edges_gdf=None, corridor_polygon=None):
+    """
+    2 × 3 choropleth of Voronoi catchments coloured by scenario growth.
+
+    Rows    : Population (top) · Employment (bottom)
+    Columns : S2 — Low · S1 — Medium · S3 — High   (ordered low → high)
+
+    Requires voronoi_gdf to have columns s1_pop, s2_pop, s3_pop,
+    s1_empl, s2_empl, s3_empl (added in-place by scenario_to_voronoi).
+    """
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
     import matplotlib.colors as mcolors
     import geopandas as gpd
     import numpy as np
+    from shapely.geometry import box
 
-    fig, axes = plt.subplots(1, 2, figsize=(18, 8))
+    # ── Zoom to corridor bounds (+ 5 % padding) ───────────────────────────────
+    if corridor_polygon is not None:
+        minx, miny, maxx, maxy = corridor_polygon.bounds
+    else:
+        minx, miny, maxx, maxy = voronoi_gdf.total_bounds
+    pad_x = (maxx - minx) * 0.05
+    pad_y = (maxy - miny) * 0.05
+    xlim = (minx - pad_x, maxx + pad_x)
+    ylim = (miny - pad_y, maxy + pad_y)
 
-    for ax, color_by_area in zip(axes, [False, True]):
-        # Corridor boundary
-        if corridor_polygon is not None:
-            gpd.GeoDataFrame({'geometry': [corridor_polygon]}, crs="EPSG:2056").boundary.plot(
-                ax=ax, color='black', linewidth=1.5, linestyle='--', zorder=4)
+    clip_box     = box(xlim[0], ylim[0], xlim[1], ylim[1])
+    voronoi_clip = voronoi_gdf.clip(clip_box)
+    edges_clip   = edges_gdf.clip(clip_box) if edges_gdf is not None else None
+    pts_in       = (access_nodes[access_nodes.geometry.within(clip_box)]
+                    if access_nodes is not None else None)
 
-        if color_by_area:
-            # Colour cells by area — large = underserved
-            voronoi_gdf = voronoi_gdf.copy()
-            voronoi_gdf['area_m2'] = voronoi_gdf.geometry.area
-            norm = mcolors.Normalize(vmin=voronoi_gdf['area_m2'].min(),
-                                     vmax=voronoi_gdf['area_m2'].max())
-            cmap = cm.RdYlGn_r  # red = large catchment = underserved
-            voronoi_gdf.plot(ax=ax, column='area_m2', cmap='RdYlGn_r',
-                             edgecolor='white', linewidth=0.5, alpha=0.7, zorder=1)
-            sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-            sm.set_array([])
-            plt.colorbar(sm, ax=ax, label='Catchment area (m²)', shrink=0.6)
-            ax.set_title('Voronoi Cells — coloured by catchment size\n(red = underserved)', fontsize=11)
-        else:
-            voronoi_gdf.plot(ax=ax, facecolor='lightyellow', edgecolor='steelblue',
-                             linewidth=0.8, alpha=0.7, zorder=1)
-            ax.set_title('Voronoi Status Quo — catchment areas', fontsize=11)
+    # Scenario columns ordered low → medium → high
+    scenario_cols = [
+        ("s2_pop",  "s2_empl",  "S2 — Low growth"),
+        ("s1_pop",  "s1_empl",  "S1 — Medium growth"),
+        ("s3_pop",  "s3_empl",  "S3 — High growth"),
+    ]
+    row_specs = [
+        ("pop",  ["s2_pop",  "s1_pop",  "s3_pop"],  "Population",  "YlOrRd"),
+        ("empl", ["s2_empl", "s1_empl", "s3_empl"], "Employment",  "YlGnBu"),
+    ]
 
-        # Network edges
-        if edges_gdf is not None:
-            edges_gdf.plot(ax=ax, color='steelblue', linewidth=0.8, alpha=0.6, zorder=2)
+    fig, axes = plt.subplots(2, 3, figsize=(19, 11),
+                             facecolor="white", constrained_layout=True)
 
-        # Access points
-        if access_nodes is not None:
-            ax.scatter(access_nodes.geometry.x, access_nodes.geometry.y,
-                       s=15, color='black', alpha=0.8, zorder=3, label='Access points')
-            ax.legend(fontsize=8)
+    for row_idx, (_, cols, var_label, cmap_name) in enumerate(row_specs):
+        # Shared colour scale across the three scenario panels for this variable
+        valid = voronoi_clip[cols].replace(0, np.nan)
+        vmin  = valid.min().min()
+        vmax  = valid.max().max()
+        norm  = mcolors.Normalize(vmin=vmin, vmax=vmax)
+        cmap  = plt.cm.get_cmap(cmap_name)
 
-        ax.set_aspect('equal')
+        for col_idx, (pop_col, empl_col, scen_title) in enumerate(scenario_cols):
+            ax  = axes[row_idx, col_idx]
+            col = cols[col_idx]   # the right column for this row & scenario
 
-    plt.suptitle('Voronoi Tessellation — Cycling Network Status Quo', fontsize=13)
-    plt.tight_layout()
-    plt.savefig('data/Voronoi/voronoi_status_quo_plot.png', dpi=150, bbox_inches='tight')
+            # Voronoi choropleth
+            voronoi_clip.plot(
+                column=col, ax=ax, cmap=cmap, norm=norm,
+                edgecolor="#BDBDBD", linewidth=0.4, alpha=0.90,
+                missing_kwds={"color": "#EEEEEE"},
+            )
+
+            # Network edges
+            if edges_clip is not None:
+                edges_clip.plot(ax=ax, color="#444444", linewidth=0.7,
+                                alpha=0.5, zorder=3)
+
+            # Corridor boundary
+            if corridor_polygon is not None:
+                gpd.GeoDataFrame(
+                    {"geometry": [corridor_polygon]}, crs="EPSG:2056"
+                ).boundary.plot(ax=ax, color="black", linewidth=1.5,
+                                linestyle="--", zorder=5)
+
+            # Access-point nodes
+            if pts_in is not None:
+                ax.scatter(pts_in.geometry.x, pts_in.geometry.y,
+                           s=8, color="black", alpha=0.7, zorder=6)
+
+            ax.set_xlim(*xlim)
+            ax.set_ylim(*ylim)
+            ax.set_aspect("equal")
+            ax.axis("off")
+
+            # Column title (top row only)
+            if row_idx == 0:
+                ax.set_title(scen_title, fontsize=11,
+                             fontweight="bold" if col_idx == 1 else "normal", pad=5)
+
+            # Scenario total as subtitle (bottom row)
+            total = voronoi_clip[col].sum()
+            ax.annotate(f"total: {total:,.0f}", xy=(0.5, 0.02),
+                        xycoords="axes fraction", ha="center", fontsize=8,
+                        color="#333333")
+
+        # Row label
+        axes[row_idx, 0].set_ylabel(var_label, fontsize=10)
+
+        # Shared colour bar for this row
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cb = fig.colorbar(sm, ax=axes[row_idx, :], shrink=0.50,
+                          pad=0.01, aspect=28)
+        cb.set_label(f"{var_label} per Voronoi catchment", fontsize=9)
+        cb.ax.tick_params(labelsize=8)
+
+    fig.suptitle(
+        "Voronoi Tessellation — Scenario Growth (corridor close-up)\n"
+        "columns: Low (S2) · Medium (S1) · High (S3)   ·   "
+        "grey lines = network   ·   dots = nodes",
+        fontsize=13, fontweight="bold",
+    )
+
+    plt.savefig("data/Voronoi/voronoi_status_quo_plot.png", dpi=150,
+                bbox_inches="tight", facecolor="white")
     plt.show()
     print("Plot saved → data/Voronoi/voronoi_status_quo_plot.png")

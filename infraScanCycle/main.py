@@ -32,8 +32,9 @@ def _mem():
 def print_hi(name):
     # Set working directory to the script's own folder so all relative paths work
     # regardless of where Python is invoked from.
-    # TODO: replace with pathlib.Path(__file__).parent for a fully portable solution.
-    os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
+    # os.chdir(r'/Users/ninablattler/PycharmProjects/infraScan/infraScanCycle')
+    os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanCycle')
+
     sys.setrecursionlimit(2000)
     tracemalloc.start()
     runtimes = {}
@@ -60,21 +61,21 @@ def print_hi(name):
     innerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max)
 
     # For global operation a margin is added to the boundary
-    margin = 3000 # meters TODO: change margin
+    margin = 3000 # meters
     outerboundary = polygon_from_points(e_min=e_min, e_max=e_max, n_min=n_min, n_max=n_max, margin=margin)
 
     ##################################################################################
     # Define variables for monetisation
 
     # Construction costs [CHF/m]
-    c_cycle_path_new    = 1800   # new path (Netzlücke)    TODO: calibrate
-    c_cycle_path_update = 20    # upgrade (Schwachstelle)  TODO: calibrate
+    c_cycle_path_new    = 1800   # new path (Netzlücke)
+    c_cycle_path_update = 20    # upgrade (Schwachstelle)
 
     # Maintenance costs
-    c_om_cycle_path    = 20     # operational maintenance [CHF/m/year]  TODO: calibrate
+    c_om_cycle_path    = 20     # operational maintenance [CHF/m/year]
     c_structural_maint = 1.2/100 # structural maintenance [fraction of construction cost/year]
 
-    # Value of Travel Time Savings — ARE 2023, cycling, short-distance [CHF/h]
+    # Value of Travel Time Savings
     VTTS = 21.1  # CHF/h
     appraisal_horizon = 50  # years  (standard Swiss infrastructure appraisal horizon)
 
@@ -108,7 +109,7 @@ def print_hi(name):
     ##################################################################################
     # INFRASTRUCTURE NETWORK
     # 1) Import network
-    # 2) Process network (topology, corridor clip, Netzlücken augmentation)
+    # 2) Process network
 
     print("\nINFRASTRUCTURE NETWORK \n")
     ##################################################################################
@@ -155,7 +156,7 @@ def print_hi(name):
 
     ##################################################################################
     # Plot all route types: existing / Schwachstellen / Netzlücken / Connectors
-    # conn_gdf passed as None — no additional auto-connectors beyond those in edges_aug
+
     conn_gdf = gpd.GeoDataFrame(
         columns=['geometry', 'ROUTENTYP', 'ffs', 'tt_min', 'length_m'],
         geometry='geometry', crs="EPSG:2056"
@@ -209,12 +210,7 @@ def print_hi(name):
     )
 
 
-    # ── DISABLED SECTION (infrastructure generation via random points) ───────────
-    # The block below generates candidate cycling links from random points, routes
-    # them around protected areas, filters by slope/distance, and builds a combined
-    # network.  It is currently disabled because the Netzlücken from the ALLTAG
-    # shapefile are used directly instead.  Re-enable if you want to score
-    # algorithmically generated alternatives in addition to the GIS-derived ones.
+    # old code section to create developments (generate access points)
     """
     ##################################################################################
     # 3a) Generate candidate developments from random points
@@ -362,9 +358,9 @@ def print_hi(name):
     # The resulting raster data are stored in "data/independent_variables/scenario/{col}.tif" with col being pop or empl and the scenario
     scenario_to_raster(limits_variables)
 
-    # (Re)generate Voronoi tessellation for all current corridor nodes.
+    # generate Voronoi tessellation for all current corridor nodes.
     # Pass points_corridor directly so the Voronoi uses exactly the same
-    # 404 nodes as the network — no spatial-predicate mismatch with disk file.
+
     voronoi_sq = get_voronoi_status_quo(
         corridor_polygon=innerboundary,
         nodes_gdf=points_corridor,
@@ -373,6 +369,14 @@ def print_hi(name):
     # Aggregate the scenario data over the voronoi polygons (euclidian).
     # Store the resulting file to "data/Voronoi/voronoi_developments_euclidian_values.shp"
     scenario_to_voronoi(voronoi_sq, euclidean=True)
+
+    # Plot Voronoi cells coloured by scenario growth (replaces old area-based plot)
+    plot_voronoi_status_quo(
+        voronoi_gdf=voronoi_sq,
+        access_nodes=points_corridor,
+        edges_gdf=edges_aug,
+        corridor_polygon=innerboundary,
+    )
 
     # plot
     plot_scenarios(corridor_polygon=innerboundary)
@@ -453,64 +457,12 @@ def print_hi(name):
     _mem()
     st = time.time()
 
-    # ── DISABLED: node accessibility + per-development accessibility benefits ────
-    # Steps 3 and 4 below run gravity-based accessibility scoring and compute ΔA
-    # per Netzlücke.  They are disabled because compute_accessibility_benefits()
-    # is computationally expensive and accessibility is currently set to A=0 in
-    # net_benefits().  Re-enable both blocks together when ready.
-    """
-    ##################################################################################
-    # 3) Node accessibility — gravity scoring using network travel times from step 2
 
-    accessibility = node_accessibility(
-        voronoi_path='data/Voronoi/voronoi_developments_euclidian_values.shp',
-        raster_template='data/landuse_landcover/processed/zone_no_infra/protected_area_corridor.tif',
-        beta=2.0,
-        scenarios=['s1', 's2', 's3'],
-        travel_times_path='data/OD/od_base_travel_times.csv',
-    )
-
-    plot_node_accessibility(
-        accessibility_results=accessibility,
-        corridor_polygon=innerboundary,
-        scenarios=['s1', 's2', 's3'],
-        save_path='data/Network/accessibility/accessibility_plot.png',
-    )
-
-    runtimes["Node accessibility (network travel-time)"] = time.time() - st
-    _mem()
-    st = time.time()
-
-    
-    ##################################################################################
-    # 4) Accessibility benefits per Netzlücke — population-weighted gravity ΔA
-    #
-    # A_base[s][i] = Σ_j empl[j,s] / tt_base[i,j]^β
-    # For each Netzlücke d: G_d upgrades that edge to its built ffs, re-run Dijkstra,
-    # compute A_d[s][i], then benefits[d][s] = Σ_i pop[i,s] × (A_d − A_base).
-    # Saved to data/costs/accessibility_benefits.csv and included in net_benefits().
-
-    acc_df = compute_accessibility_benefits(
-        edges_aug=edges_aug,
-        points_corridor=points_corridor,
-        voronoi_path='data/Voronoi/voronoi_developments_euclidian_values.shp',
-        beta=2.0,
-
-        scenarios=['s1', 's2', 's3'],
-    )
-
-    runtimes["Accessibility benefits (per-development)"] = time.time() - st
-    _mem()
-    st = time.time()
-
-    """
     ##################################################################################
     # 5) Construction and maintenance costs
     #    Construction: Netzlücken at c_cycle_path_new [CHF/m], Schwachstellen at c_cycle_path_update [CHF/m]
     #    Maintenance:  (c_om_cycle_path + c_structural_maint × c_cycle_path_new) × length_m × duration
-    #    With current defaults: total lifecycle cost ≈ 6,600 CHF/m over 50 years.
-    #    NOTE: c_om_cycle_path=100 CHF/m/year is likely too high — calibrate against
-    #    Swiss ASTRA/VöV benchmarks before interpreting negative NB results.
+
 
     # Build development_candidates.gpkg from live Netzlücken in edges_aug
     nl_devs = edges_aug[edges_aug['ROUTENTYP'] == 'Netzlücke'].copy()
@@ -577,7 +529,7 @@ def print_hi(name):
     # 8) Net benefits: NB = C + M + T + R + S  [CHF] per scenario
     #    C = construction cost (negative), M = maintenance over appraisal_horizon (negative)
     #    T = travel time savings, R = route comfort benefit, S = safety benefit (all positive)
-    #    A = accessibility benefit — currently set to 0 (re-enable in scoring.net_benefits)
+
     nb_df = net_benefits()
     runtimes["Net benefits"] = time.time() - st
     st = time.time()
@@ -682,344 +634,29 @@ def print_hi(name):
         access_points=access_points, plot_name="nb_network_map",
     )
 
+    # ── TTS close-ups: Dübendorf, Uster, Greifensee ─────────────────────────
+    plot_tts_area_closeups(
+        network=network,
+        access_points=access_points,
+        col="T_s2",
+        save_path="plot/results/tts_area_closeups.png",
+    )
+
+    # ── Close-up maps for selected Netzlücken ────────────────────────────────
+    # IDs: 676 (high TTS), 97 and 566 (zero TTS — investigate)
+    plot_netzluecken_closeup(
+        dev_ids=(676, 97, 566),
+        buffer_m=500,
+        save_path="figures/netzluecken_closeup.pdf",
+    )
+
     # ── Report figures (saved to figures/) ───────────────────────────────────
     generate_report_figures()
 
     runtimes["Visualization"] = time.time() - st
 
 
-def generate_report_figures():
-    """
-    Generates all figures referenced in 05_Results.tex and saves them to figures/.
 
-    Figures produced
-    ----------------
-    figures/network_all_types.png   — copied from pipeline output
-    figures/od_plot.png             — copied from pipeline output
-    figures/detour_distribution.png — histogram of OD detour factors
-    figures/accessibility_best.png  — node accessibility map, ID 800 (best NB)
-    figures/accessibility_worst.png — node accessibility map, ID 385 (worst NB)
-    figures/safety_index_map.png    — per-link crash-rate coloured map
-    figures/elevation_map.png       — DEM hillshade + contours + network overlay
-    figures/comfort_index_map.png   — per-link comfort index (alpha x epsilon) map
-    """
-    import shutil
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import matplotlib.colors as mcolors
-    import matplotlib.patches as mpatches
-    import matplotlib.cm as mcm
-    from matplotlib.colors import LinearSegmentedColormap, LightSource
-    from matplotlib.patches import FancyArrowPatch
-    from matplotlib_scalebar.scalebar import ScaleBar
-    import rasterio
-    import rasterio.plot
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-    os.makedirs('figures', exist_ok=True)
-
-    # ── shared data layers ────────────────────────────────────────────────────
-    network_edges = gpd.read_file('data/Network/processed/edges_with_attribute.gpkg')
-    corridor_pts  = gpd.read_file('data/Network/processed/points_corridor.gpkg')
-    lakes_path    = 'data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp'
-    cities_path   = 'data/manually_gathered_data/Cities.shp'
-
-    net_bounds = network_edges.total_bounds   # [minx, miny, maxx, maxy]
-    x_pad, y_pad = 500, 500
-
-    def _add_base(ax):
-        """Add lakes, grey network, city labels, scale bar, north arrow."""
-        if os.path.exists(lakes_path):
-            gpd.read_file(lakes_path).plot(ax=ax, color='lightblue', zorder=1)
-        network_edges.plot(ax=ax, color='#bbbbbb', lw=0.8, zorder=2, alpha=0.6)
-        if os.path.exists(cities_path):
-            cities = gpd.read_file(cities_path, crs='epsg:2056')
-            cities.plot(ax=ax, color='black', markersize=50, zorder=8)
-            for _, r in cities.iterrows():
-                ax.annotate(r['location'], xy=r.geometry.coords[0],
-                            ha='center', va='top', xytext=(0, -5),
-                            textcoords='offset points', fontsize=10, zorder=8)
-        ax.add_artist(ScaleBar(1, location='lower right'))
-        ax.text(0.96, 0.93, 'N', fontsize=22, weight='bold',
-                ha='center', va='center', transform=ax.transAxes, zorder=100)
-        ax.add_patch(FancyArrowPatch(
-            (0.96, 0.90), (0.96, 0.97), color='black', lw=1.5,
-            arrowstyle='->', mutation_scale=20, transform=ax.transAxes, zorder=100))
-        ax.set_xticks([]); ax.set_yticks([])
-        for sp in ax.spines.values():
-            sp.set_visible(True); sp.set_edgecolor('black'); sp.set_linewidth(1)
-        ax.set_xlim(net_bounds[0] - x_pad, net_bounds[2] + x_pad)
-        ax.set_ylim(net_bounds[1] - y_pad, net_bounds[3] + y_pad)
-
-    # ── 1. Copy pipeline figures ──────────────────────────────────────────────
-    for src, dst in [
-        ('data/Network/processed/network_all_types.png', 'figures/network_all_types.png'),
-        ('data/OD/od_plot.png',                          'figures/od_plot.png'),
-    ]:
-        if os.path.exists(src):
-            shutil.copy2(src, dst)
-            print(f'  copied  {src} → {dst}')
-        else:
-            print(f'  [WARN] pipeline figure not found: {src}')
-
-    # ── 2. Detour factor histogram ────────────────────────────────────────────
-    od_path = 'data/OD/od_base_travel_times.csv'
-    if os.path.exists(od_path):
-        od        = pd.read_csv(od_path)
-        df_clipped = od['detour_factor'].clip(upper=20)
-        median_v  = od['detour_factor'].median()
-        mean_v    = od['detour_factor'].mean()
-        pct95_v   = od['detour_factor'].quantile(0.95)
-        max_v     = od['detour_factor'].max()
-
-        fig, ax = plt.subplots(figsize=(9, 5))
-        ax.hist(df_clipped, bins=80, color='steelblue', edgecolor='white',
-                linewidth=0.4, zorder=3)
-        ax.axvline(median_v, color='#e74c3c', lw=1.8, linestyle='--',
-                   label=f'Median = {median_v:.2f}')
-        ax.axvline(mean_v,   color='#e67e22', lw=1.8, linestyle=':',
-                   label=f'Mean = {mean_v:.2f}')
-        ax.set_xlabel('Detour factor  (routed distance / Euclidean distance)', fontsize=12)
-        ax.set_ylabel('Number of OD pairs', fontsize=12)
-        ax.set_title(
-            f'Detour factor distribution across {len(od):,} base-graph OD pairs\n'
-            f'(x-axis capped at 20; true max = {max_v:.1f})',
-            fontsize=11)
-        ax.legend(fontsize=10)
-        ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
-        ax.text(0.97, 0.97,
-                f'95th pct = {pct95_v:.2f}\nMax = {max_v:.1f}',
-                transform=ax.transAxes, ha='right', va='top', fontsize=9,
-                bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.8))
-        plt.tight_layout()
-        plt.savefig('figures/detour_distribution.png', dpi=300, bbox_inches='tight')
-        plt.close()
-        print('  saved   figures/detour_distribution.png')
-
-    # ── 3. Accessibility maps — best (800) and worst (385) ────────────────────
-    cands_path = 'data/Network/processed/development_candidates.gpkg'
-    if os.path.exists(cands_path) and len(corridor_pts) > 0:
-        cands = gpd.read_file(cands_path)
-        cands['ID_new'] = cands['ID_new'].astype(int)
-
-        for dev_id, fname, subtitle in [
-            (800, 'figures/accessibility_best.png',
-             'Best-performing development  (ID 800, 35 m Velobahn)'),
-            (385, 'figures/accessibility_worst.png',
-             'Worst-performing development  (ID 385, 6.8 km Nebenverbindung)'),
-        ]:
-            dev_row = cands[cands['ID_new'] == dev_id]
-            if dev_row.empty:
-                print(f'  [WARN] ID {dev_id} not in development_candidates — skipping')
-                continue
-
-            dev_geom = dev_row.iloc[0].geometry
-            pts = corridor_pts.copy()
-
-            # accessibility gain proxy: 1 / (1 + distance-to-dev [km])
-            pts['dist_km']  = pts.geometry.distance(dev_geom) / 1000.0
-            pts['acc_gain'] = 1.0 / (1.0 + pts['dist_km'])
-            gain_min, gain_max = pts['acc_gain'].min(), pts['acc_gain'].max()
-            pts['acc_norm'] = (pts['acc_gain'] - gain_min) / (gain_max - gain_min + 1e-9)
-
-            fig, ax = plt.subplots(figsize=(13, 9))
-            _add_base(ax)
-
-            sc = ax.scatter(
-                pts.geometry.x, pts.geometry.y,
-                c=pts['acc_norm'], cmap='YlOrRd', s=45,
-                vmin=0, vmax=1, zorder=6, edgecolors='none', alpha=0.9,
-            )
-            dev_row.plot(ax=ax, color='red', lw=4, zorder=10)
-            # label the development
-            mid = dev_geom.interpolate(0.5, normalized=True)
-            ax.annotate(f'ID {dev_id}', xy=(mid.x, mid.y),
-                        xytext=(6, 6), textcoords='offset points',
-                        fontsize=10, fontweight='bold', color='red', zorder=11)
-
-            divider = make_axes_locatable(ax)
-            cax = divider.append_axes('right', size='2%', pad=0.4)
-            cbar = plt.colorbar(sc, cax=cax)
-            cbar.set_label('Normalised accessibility gain\n(1 / (1 + distance to development [km]))',
-                           rotation=90, labelpad=12, fontsize=10)
-
-            leg = [mpatches.Patch(color='red', label=f'Development ID {dev_id} (highlighted)')]
-            ax.legend(handles=leg, loc='upper left', fontsize=10, framealpha=0.85)
-            ax.set_title(f'Node-level accessibility — scenario S2\n{subtitle}',
-                         fontsize=12, pad=8)
-            plt.tight_layout()
-            plt.savefig(fname, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f'  saved   {fname}')
-
-    # ── 4. Safety index map ───────────────────────────────────────────────────
-    CRASH_RATE = {
-        'Velobahn':                       0.104,
-        'Veloschnellroute':               0.104,
-        'Hauptverbindung':                0.409,
-        'Nebenverbindung':                0.714,
-        'Zusätzliche Freizeitverbindung': 0.409,
-        'Netzlücke':                      1.020,
-        'connector':                      1.020,
-    }
-
-    edges_safe = network_edges.copy()
-    edges_safe['crash_rate'] = edges_safe['ROUTENTYP'].map(CRASH_RATE).fillna(1.020)
-
-    if os.path.exists(cands_path):
-        nl = gpd.read_file(cands_path)[['geometry']].copy()
-        nl['crash_rate'] = 1.020
-        edges_safe = gpd.GeoDataFrame(
-            pd.concat([edges_safe[['crash_rate', 'geometry']], nl], ignore_index=True),
-            geometry='geometry', crs='epsg:2056')
-
-    vmin_s, vmax_s = 0.104, 1.020
-    norm_s  = mcolors.Normalize(vmin=vmin_s, vmax=vmax_s)
-    cmap_s  = plt.cm.RdYlGn_r
-
-    fig, ax = plt.subplots(figsize=(14, 9))
-    _add_base(ax)
-    edges_safe.plot(ax=ax, column='crash_rate', cmap=cmap_s, norm=norm_s,
-                    lw=1.8, zorder=5, legend=False)
-
-    sm_s = mcm.ScalarMappable(cmap=cmap_s, norm=norm_s)
-    sm_s.set_array([])
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes('right', size='2%', pad=0.4)
-    cbar = plt.colorbar(sm_s, cax=cax)
-    cbar.set_label('Crash-cost rate [CHF/Pkm]\n(KNA Limmattal methodology)',
-                   rotation=90, labelpad=14, fontsize=11)
-
-    leg_handles = [
-        mpatches.Patch(color=cmap_s(norm_s(r)), label=f'{rt}  ({r:.3f} CHF/Pkm)')
-        for rt, r in [('Velobahn', 0.104), ('Hauptverbindung / Freizeit', 0.409),
-                      ('Nebenverbindung', 0.714), ('Netzlücke (unbuilt)', 1.020)]
-    ]
-    ax.legend(handles=leg_handles, loc='upper left', fontsize=9, framealpha=0.85,
-              title='ROUTENTYP', title_fontsize=10)
-    ax.set_title('Per-link safety index — crash-cost rate (CHF/Pkm)\n'
-                 'Red = high risk (Netzlücke / Nebenverbindung)  ·  Green = low risk (Velobahn)',
-                 fontsize=12, pad=8)
-    plt.tight_layout()
-    plt.savefig('figures/safety_index_map.png', dpi=300, bbox_inches='tight')
-    plt.close()
-    print('  saved   figures/safety_index_map.png')
-
-    # ── 5. Elevation map with hillshade + contours ────────────────────────────
-    dem_path = 'data/elevation_model/elevation.tif'
-    if os.path.exists(dem_path):
-        with rasterio.open(dem_path) as src:
-            dem     = src.read(1).astype(float)
-            extent  = [src.bounds.left, src.bounds.right,
-                       src.bounds.bottom, src.bounds.top]
-
-        dem_min, dem_max = float(np.nanmin(dem)), float(np.nanmax(dem))
-        norm_dem  = mcolors.Normalize(vmin=dem_min, vmax=dem_max)
-        cmap_dem  = plt.cm.terrain
-
-        ls = LightSource(azdeg=315, altdeg=45)
-        hs = ls.hillshade(dem, vert_exag=2)
-
-        ny, nx = dem.shape
-        xs = np.linspace(extent[0], extent[1], nx)
-        ys = np.linspace(extent[2], extent[3], ny)[::-1]
-
-        fig, ax = plt.subplots(figsize=(14, 9))
-        ax.imshow(cmap_dem(norm_dem(dem)), extent=extent, origin='upper',
-                  zorder=1, alpha=0.75)
-        ax.imshow(hs, extent=extent, origin='upper',
-                  cmap='gray', alpha=0.35, zorder=2)
-
-        contour_step = 20
-        c_levels = np.arange(
-            int(dem_min // contour_step) * contour_step,
-            int(dem_max // contour_step) * contour_step + contour_step,
-            contour_step)
-        cs = ax.contour(xs, ys, dem, levels=c_levels,
-                        colors='black', linewidths=0.3, alpha=0.4, zorder=3)
-        ax.clabel(cs, inline=True, fontsize=6, fmt='%d m')
-
-        network_edges.plot(ax=ax, color='#222222', lw=0.9, zorder=4, alpha=0.7)
-        if os.path.exists(lakes_path):
-            gpd.read_file(lakes_path).plot(ax=ax, color='lightblue', zorder=5, alpha=0.85)
-        if os.path.exists(cities_path):
-            cities = gpd.read_file(cities_path, crs='epsg:2056')
-            cities.plot(ax=ax, color='black', markersize=50, zorder=7)
-            for _, r in cities.iterrows():
-                ax.annotate(r['location'], xy=r.geometry.coords[0],
-                            ha='center', va='top', xytext=(0, -5),
-                            textcoords='offset points', fontsize=10, zorder=7)
-
-        sm_dem = mcm.ScalarMappable(cmap=cmap_dem, norm=norm_dem)
-        sm_dem.set_array([])
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='2%', pad=0.4)
-        cbar = plt.colorbar(sm_dem, cax=cax)
-        cbar.set_label('Elevation [m a.s.l.]', rotation=90, labelpad=14, fontsize=11)
-
-        ax.add_artist(ScaleBar(1, location='lower right'))
-        ax.text(0.96, 0.93, 'N', fontsize=22, weight='bold',
-                ha='center', va='center', transform=ax.transAxes, zorder=100)
-        ax.add_patch(FancyArrowPatch(
-            (0.96, 0.90), (0.96, 0.97), color='black', lw=1.5,
-            arrowstyle='->', mutation_scale=20, transform=ax.transAxes, zorder=100))
-        ax.set_xticks([]); ax.set_yticks([])
-        for sp in ax.spines.values():
-            sp.set_visible(True); sp.set_edgecolor('black'); sp.set_linewidth(1)
-        ax.set_title('Digital elevation model (2 m resolution) with 20 m contour lines\n'
-                     'and cycling network overlay', fontsize=12, pad=8)
-        ax.set_xlim(net_bounds[0] - x_pad, net_bounds[2] + x_pad)
-        ax.set_ylim(net_bounds[1] - y_pad, net_bounds[3] + y_pad)
-        plt.tight_layout()
-        plt.savefig('figures/elevation_map.png', dpi=300, bbox_inches='tight')
-        plt.close()
-        print('  saved   figures/elevation_map.png')
-
-    # ── 6. Comfort index map ──────────────────────────────────────────────────
-    comfort_net_path = 'data/costs/route_comfort_network.gpkg'
-    if os.path.exists(comfort_net_path):
-        EPSILON = {
-            'Velobahn': 1.0, 'Veloschnellroute': 1.0,
-            'Hauptverbindung': 1.3, 'Nebenverbindung': 1.6,
-            'Zusätzliche Freizeitverbindung': 1.3,
-            'Netzlücke': 2.0, 'connector': 2.0,
-        }
-        comfort_net = gpd.read_file(comfort_net_path)
-        comfort_net['epsilon'] = comfort_net['ROUTENTYP'].map(EPSILON).fillna(2.0)
-        # comfort index = (1 + alpha) * epsilon  where extra_factor = 1 + alpha
-        comfort_net['comfort_index'] = comfort_net['extra_factor'] * comfort_net['epsilon']
-
-        vmin_c = comfort_net['comfort_index'].min()
-        vmax_c = comfort_net['comfort_index'].max()
-        norm_c = mcolors.Normalize(vmin=vmin_c, vmax=vmax_c)
-        cmap_c = plt.cm.RdYlGn_r
-
-        fig, ax = plt.subplots(figsize=(14, 9))
-        _add_base(ax)
-        comfort_net.plot(ax=ax, column='comfort_index', cmap=cmap_c, norm=norm_c,
-                         lw=2.0, zorder=5, legend=False)
-
-        sm_c = mcm.ScalarMappable(cmap=cmap_c, norm=norm_c)
-        sm_c.set_array([])
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='2%', pad=0.4)
-        cbar = plt.colorbar(sm_c, cax=cax)
-        cbar.set_label('Comfort index  (1 + α) × ε\nα = slope discomfort,  ε = ROUTENTYP multiplier',
-                       rotation=90, labelpad=14, fontsize=10)
-
-        ax.set_title('Per-link route comfort index — slope discomfort factor α × ROUTENTYP multiplier ε\n'
-                     'Red = steep / low-quality link;  Green = flat Velobahn',
-                     fontsize=12, pad=8)
-
-        comfort_bounds = comfort_net.total_bounds
-        ax.set_xlim(comfort_bounds[0] - x_pad, comfort_bounds[2] + x_pad)
-        ax.set_ylim(comfort_bounds[1] - y_pad, comfort_bounds[3] + y_pad)
-        plt.tight_layout()
-        plt.savefig('figures/comfort_index_map.png', dpi=300, bbox_inches='tight')
-        plt.close()
-        print('  saved   figures/comfort_index_map.png')
-
-    print('\n[generate_report_figures] done — figures saved to figures/')
 
 
 # Press the green button in the gutter to run the script.

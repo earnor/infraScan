@@ -18,6 +18,339 @@ import math
 import matplotlib.lines as mlines
 
 
+def generate_report_figures():
+    """
+    Generates all figures referenced in 05_Results.tex and saves them to figures/.
+
+    Figures produced
+    ----------------
+    figures/network_all_types.png   — copied from pipeline output
+    figures/od_plot.png             — copied from pipeline output
+    figures/detour_distribution.png — histogram of OD detour factors
+    figures/accessibility_best.png  — node accessibility map, ID 800 (best NB)
+    figures/accessibility_worst.png — node accessibility map, ID 385 (worst NB)
+    figures/safety_index_map.png    — per-link crash-rate coloured map
+    figures/elevation_map.png       — DEM hillshade + contours + network overlay
+    figures/comfort_index_map.png   — per-link comfort index (alpha x epsilon) map
+    """
+    import shutil
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    import matplotlib.patches as mpatches
+    import matplotlib.cm as mcm
+    from matplotlib.colors import LinearSegmentedColormap, LightSource
+    from matplotlib.patches import FancyArrowPatch
+    from matplotlib_scalebar.scalebar import ScaleBar
+    import rasterio
+    import rasterio.plot
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    os.makedirs('figures', exist_ok=True)
+
+    # ── shared data layers ────────────────────────────────────────────────────
+    network_edges = gpd.read_file('data/Network/processed/edges_with_attribute.gpkg')
+    corridor_pts  = gpd.read_file('data/Network/processed/points_corridor.gpkg')
+    lakes_path    = 'data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp'
+    cities_path   = 'data/manually_gathered_data/Cities.shp'
+
+    net_bounds = network_edges.total_bounds   # [minx, miny, maxx, maxy]
+    x_pad, y_pad = 500, 500
+
+    def _add_base(ax):
+        """Add lakes, grey network, city labels, scale bar, north arrow."""
+        if os.path.exists(lakes_path):
+            gpd.read_file(lakes_path).plot(ax=ax, color='lightblue', zorder=1)
+        network_edges.plot(ax=ax, color='#bbbbbb', lw=0.8, zorder=2, alpha=0.6)
+        if os.path.exists(cities_path):
+            cities = gpd.read_file(cities_path, crs='epsg:2056')
+            cities.plot(ax=ax, color='black', markersize=50, zorder=8)
+            for _, r in cities.iterrows():
+                ax.annotate(r['location'], xy=r.geometry.coords[0],
+                            ha='center', va='top', xytext=(0, -5),
+                            textcoords='offset points', fontsize=10, zorder=8)
+        ax.add_artist(ScaleBar(1, location='lower right'))
+        ax.text(0.96, 0.93, 'N', fontsize=22, weight='bold',
+                ha='center', va='center', transform=ax.transAxes, zorder=100)
+        ax.add_patch(FancyArrowPatch(
+            (0.96, 0.90), (0.96, 0.97), color='black', lw=1.5,
+            arrowstyle='->', mutation_scale=20, transform=ax.transAxes, zorder=100))
+        ax.set_xticks([]); ax.set_yticks([])
+        for sp in ax.spines.values():
+            sp.set_visible(True); sp.set_edgecolor('black'); sp.set_linewidth(1)
+        ax.set_xlim(net_bounds[0] - x_pad, net_bounds[2] + x_pad)
+        ax.set_ylim(net_bounds[1] - y_pad, net_bounds[3] + y_pad)
+
+    # ── 1. Copy pipeline figures ──────────────────────────────────────────────
+    for src, dst in [
+        ('data/Network/processed/network_all_types.png', 'figures/network_all_types.png'),
+        ('data/OD/od_plot.png',                          'figures/od_plot.png'),
+    ]:
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+            print(f'  copied  {src} → {dst}')
+        else:
+            print(f'  [WARN] pipeline figure not found: {src}')
+
+    # ── 2. Detour factor histogram ────────────────────────────────────────────
+    od_path = 'data/OD/od_base_travel_times.csv'
+    if os.path.exists(od_path):
+        od        = pd.read_csv(od_path)
+        df_clipped = od['detour_factor'].clip(upper=20)
+        median_v  = od['detour_factor'].median()
+        mean_v    = od['detour_factor'].mean()
+        pct95_v   = od['detour_factor'].quantile(0.95)
+        max_v     = od['detour_factor'].max()
+
+        fig, ax = plt.subplots(figsize=(9, 5))
+        ax.hist(df_clipped, bins=80, color='steelblue', edgecolor='white',
+                linewidth=0.4, zorder=3)
+        ax.axvline(median_v, color='#e74c3c', lw=1.8, linestyle='--',
+                   label=f'Median = {median_v:.2f}')
+        ax.axvline(mean_v,   color='#e67e22', lw=1.8, linestyle=':',
+                   label=f'Mean = {mean_v:.2f}')
+        ax.set_xlabel('Detour factor  (routed distance / Euclidean distance)', fontsize=12)
+        ax.set_ylabel('Number of OD pairs', fontsize=12)
+        ax.set_title(
+            f'Detour factor distribution across {len(od):,} base-graph OD pairs\n'
+            f'(x-axis capped at 20; true max = {max_v:.1f})',
+            fontsize=11)
+        ax.legend(fontsize=10)
+        ax.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
+        ax.text(0.97, 0.97,
+                f'95th pct = {pct95_v:.2f}\nMax = {max_v:.1f}',
+                transform=ax.transAxes, ha='right', va='top', fontsize=9,
+                bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.8))
+        plt.tight_layout()
+        plt.savefig('figures/detour_distribution.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print('  saved   figures/detour_distribution.png')
+
+    # ── 3. Accessibility maps — best (800) and worst (385) ────────────────────
+    cands_path = 'data/Network/processed/development_candidates.gpkg'
+    if os.path.exists(cands_path) and len(corridor_pts) > 0:
+        cands = gpd.read_file(cands_path)
+        cands['ID_new'] = cands['ID_new'].astype(int)
+
+        for dev_id, fname, subtitle in [
+            (800, 'figures/accessibility_best.png',
+             'Best-performing development  (ID 800, 35 m Velobahn)'),
+            (385, 'figures/accessibility_worst.png',
+             'Worst-performing development  (ID 385, 6.8 km Nebenverbindung)'),
+        ]:
+            dev_row = cands[cands['ID_new'] == dev_id]
+            if dev_row.empty:
+                print(f'  [WARN] ID {dev_id} not in development_candidates — skipping')
+                continue
+
+            dev_geom = dev_row.iloc[0].geometry
+            pts = corridor_pts.copy()
+
+            # accessibility gain proxy: 1 / (1 + distance-to-dev [km])
+            pts['dist_km']  = pts.geometry.distance(dev_geom) / 1000.0
+            pts['acc_gain'] = 1.0 / (1.0 + pts['dist_km'])
+            gain_min, gain_max = pts['acc_gain'].min(), pts['acc_gain'].max()
+            pts['acc_norm'] = (pts['acc_gain'] - gain_min) / (gain_max - gain_min + 1e-9)
+
+            fig, ax = plt.subplots(figsize=(13, 9))
+            _add_base(ax)
+
+            sc = ax.scatter(
+                pts.geometry.x, pts.geometry.y,
+                c=pts['acc_norm'], cmap='YlOrRd', s=45,
+                vmin=0, vmax=1, zorder=6, edgecolors='none', alpha=0.9,
+            )
+            dev_row.plot(ax=ax, color='red', lw=4, zorder=10)
+            # label the development
+            mid = dev_geom.interpolate(0.5, normalized=True)
+            ax.annotate(f'ID {dev_id}', xy=(mid.x, mid.y),
+                        xytext=(6, 6), textcoords='offset points',
+                        fontsize=10, fontweight='bold', color='red', zorder=11)
+
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes('right', size='2%', pad=0.4)
+            cbar = plt.colorbar(sc, cax=cax)
+            cbar.set_label('Normalised accessibility gain\n(1 / (1 + distance to development [km]))',
+                           rotation=90, labelpad=12, fontsize=10)
+
+            leg = [mpatches.Patch(color='red', label=f'Development ID {dev_id} (highlighted)')]
+            ax.legend(handles=leg, loc='upper left', fontsize=10, framealpha=0.85)
+            ax.set_title(f'Node-level accessibility — scenario S2\n{subtitle}',
+                         fontsize=12, pad=8)
+            plt.tight_layout()
+            plt.savefig(fname, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f'  saved   {fname}')
+
+    # ── 4. Safety index map ───────────────────────────────────────────────────
+    CRASH_RATE = {
+        'Velobahn':                       0.104,
+        'Veloschnellroute':               0.104,
+        'Hauptverbindung':                0.409,
+        'Nebenverbindung':                0.714,
+        'Zusätzliche Freizeitverbindung': 0.409,
+        'Netzlücke':                      1.020,
+        'connector':                      1.020,
+    }
+
+    edges_safe = network_edges.copy()
+    edges_safe['crash_rate'] = edges_safe['ROUTENTYP'].map(CRASH_RATE).fillna(1.020)
+
+    if os.path.exists(cands_path):
+        nl = gpd.read_file(cands_path)[['geometry']].copy()
+        nl['crash_rate'] = 1.020
+        edges_safe = gpd.GeoDataFrame(
+            pd.concat([edges_safe[['crash_rate', 'geometry']], nl], ignore_index=True),
+            geometry='geometry', crs='epsg:2056')
+
+    vmin_s, vmax_s = 0.104, 1.020
+    norm_s  = mcolors.Normalize(vmin=vmin_s, vmax=vmax_s)
+    cmap_s  = plt.cm.RdYlGn_r
+
+    fig, ax = plt.subplots(figsize=(14, 9))
+    _add_base(ax)
+    edges_safe.plot(ax=ax, column='crash_rate', cmap=cmap_s, norm=norm_s,
+                    lw=1.8, zorder=5, legend=False)
+
+    sm_s = mcm.ScalarMappable(cmap=cmap_s, norm=norm_s)
+    sm_s.set_array([])
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='2%', pad=0.4)
+    cbar = plt.colorbar(sm_s, cax=cax)
+    cbar.set_label('Crash-cost rate [CHF/Pkm]\n(KNA Limmattal methodology)',
+                   rotation=90, labelpad=14, fontsize=11)
+
+    leg_handles = [
+        mpatches.Patch(color=cmap_s(norm_s(r)), label=f'{rt}  ({r:.3f} CHF/Pkm)')
+        for rt, r in [('Velobahn', 0.104), ('Hauptverbindung / Freizeit', 0.409),
+                      ('Nebenverbindung', 0.714), ('Netzlücke (unbuilt)', 1.020)]
+    ]
+    ax.legend(handles=leg_handles, loc='upper left', fontsize=9, framealpha=0.85,
+              title='ROUTENTYP', title_fontsize=10)
+    ax.set_title('Per-link safety index — crash-cost rate (CHF/Pkm)\n'
+                 'Red = high risk (Netzlücke / Nebenverbindung)  ·  Green = low risk (Velobahn)',
+                 fontsize=12, pad=8)
+    plt.tight_layout()
+    plt.savefig('figures/safety_index_map.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print('  saved   figures/safety_index_map.png')
+
+    # ── 5. Elevation map with hillshade + contours ────────────────────────────
+    dem_path = 'data/elevation_model/elevation.tif'
+    if os.path.exists(dem_path):
+        with rasterio.open(dem_path) as src:
+            dem     = src.read(1).astype(float)
+            extent  = [src.bounds.left, src.bounds.right,
+                       src.bounds.bottom, src.bounds.top]
+
+        dem_min, dem_max = float(np.nanmin(dem)), float(np.nanmax(dem))
+        norm_dem  = mcolors.Normalize(vmin=dem_min, vmax=dem_max)
+        cmap_dem  = plt.cm.terrain
+
+        ls = LightSource(azdeg=315, altdeg=45)
+        hs = ls.hillshade(dem, vert_exag=2)
+
+        ny, nx = dem.shape
+        xs = np.linspace(extent[0], extent[1], nx)
+        ys = np.linspace(extent[2], extent[3], ny)[::-1]
+
+        fig, ax = plt.subplots(figsize=(14, 9))
+        ax.imshow(cmap_dem(norm_dem(dem)), extent=extent, origin='upper',
+                  zorder=1, alpha=0.75)
+        ax.imshow(hs, extent=extent, origin='upper',
+                  cmap='gray', alpha=0.35, zorder=2)
+
+        contour_step = 20
+        c_levels = np.arange(
+            int(dem_min // contour_step) * contour_step,
+            int(dem_max // contour_step) * contour_step + contour_step,
+            contour_step)
+        cs = ax.contour(xs, ys, dem, levels=c_levels,
+                        colors='black', linewidths=0.3, alpha=0.4, zorder=3)
+        ax.clabel(cs, inline=True, fontsize=6, fmt='%d m')
+
+        network_edges.plot(ax=ax, color='#222222', lw=0.9, zorder=4, alpha=0.7)
+        if os.path.exists(lakes_path):
+            gpd.read_file(lakes_path).plot(ax=ax, color='lightblue', zorder=5, alpha=0.85)
+        if os.path.exists(cities_path):
+            cities = gpd.read_file(cities_path, crs='epsg:2056')
+            cities.plot(ax=ax, color='black', markersize=50, zorder=7)
+            for _, r in cities.iterrows():
+                ax.annotate(r['location'], xy=r.geometry.coords[0],
+                            ha='center', va='top', xytext=(0, -5),
+                            textcoords='offset points', fontsize=10, zorder=7)
+
+        sm_dem = mcm.ScalarMappable(cmap=cmap_dem, norm=norm_dem)
+        sm_dem.set_array([])
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='2%', pad=0.4)
+        cbar = plt.colorbar(sm_dem, cax=cax)
+        cbar.set_label('Elevation [m a.s.l.]', rotation=90, labelpad=14, fontsize=11)
+
+        ax.add_artist(ScaleBar(1, location='lower right'))
+        ax.text(0.96, 0.93, 'N', fontsize=22, weight='bold',
+                ha='center', va='center', transform=ax.transAxes, zorder=100)
+        ax.add_patch(FancyArrowPatch(
+            (0.96, 0.90), (0.96, 0.97), color='black', lw=1.5,
+            arrowstyle='->', mutation_scale=20, transform=ax.transAxes, zorder=100))
+        ax.set_xticks([]); ax.set_yticks([])
+        for sp in ax.spines.values():
+            sp.set_visible(True); sp.set_edgecolor('black'); sp.set_linewidth(1)
+        ax.set_title('Digital elevation model (2 m resolution) with 20 m contour lines\n'
+                     'and cycling network overlay', fontsize=12, pad=8)
+        ax.set_xlim(net_bounds[0] - x_pad, net_bounds[2] + x_pad)
+        ax.set_ylim(net_bounds[1] - y_pad, net_bounds[3] + y_pad)
+        plt.tight_layout()
+        plt.savefig('figures/elevation_map.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print('  saved   figures/elevation_map.png')
+
+    # ── 6. Comfort index map ──────────────────────────────────────────────────
+    comfort_net_path = 'data/costs/route_comfort_network.gpkg'
+    if os.path.exists(comfort_net_path):
+        EPSILON = {
+            'Velobahn': 1.0, 'Veloschnellroute': 1.0,
+            'Hauptverbindung': 1.3, 'Nebenverbindung': 1.6,
+            'Zusätzliche Freizeitverbindung': 1.3,
+            'Netzlücke': 2.0, 'connector': 2.0,
+        }
+        comfort_net = gpd.read_file(comfort_net_path)
+        comfort_net['epsilon'] = comfort_net['ROUTENTYP'].map(EPSILON).fillna(2.0)
+        # comfort index = (1 + alpha) * epsilon  where extra_factor = 1 + alpha
+        comfort_net['comfort_index'] = comfort_net['extra_factor'] * comfort_net['epsilon']
+
+        vmin_c = comfort_net['comfort_index'].min()
+        vmax_c = comfort_net['comfort_index'].max()
+        norm_c = mcolors.Normalize(vmin=vmin_c, vmax=vmax_c)
+        cmap_c = plt.cm.RdYlGn_r
+
+        fig, ax = plt.subplots(figsize=(14, 9))
+        _add_base(ax)
+        comfort_net.plot(ax=ax, column='comfort_index', cmap=cmap_c, norm=norm_c,
+                         lw=2.0, zorder=5, legend=False)
+
+        sm_c = mcm.ScalarMappable(cmap=cmap_c, norm=norm_c)
+        sm_c.set_array([])
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='2%', pad=0.4)
+        cbar = plt.colorbar(sm_c, cax=cax)
+        cbar.set_label('Comfort index  (1 + α) × ε\nα = slope discomfort,  ε = ROUTENTYP multiplier',
+                       rotation=90, labelpad=14, fontsize=10)
+
+        ax.set_title('Per-link route comfort index — slope discomfort factor α × ROUTENTYP multiplier ε\n'
+                     'Red = steep / low-quality link;  Green = flat Velobahn',
+                     fontsize=12, pad=8)
+
+        comfort_bounds = comfort_net.total_bounds
+        ax.set_xlim(comfort_bounds[0] - x_pad, comfort_bounds[2] + x_pad)
+        ax.set_ylim(comfort_bounds[1] - y_pad, comfort_bounds[3] + y_pad)
+        plt.tight_layout()
+        plt.savefig('figures/comfort_index_map.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print('  saved   figures/comfort_index_map.png')
+
+    print('\n[generate_report_figures] done — figures saved to figures/')
+
 def _make_diverging_cmap(min_val, max_val):
     """
     Red→grey→blue diverging colormap anchored at zero.
@@ -83,121 +416,9 @@ def _base_map(ax, network, access_points, boundary):
         sp.set_linewidth(1); sp.set_zorder(1000)
 
 
-def _add_duebendorf_inset(ax, network=None, pos=(0.62, 0.03, 0.36, 0.44)):
-    """
-    Add a zoomed detail inset of the Dübendorf area (NW corner of the
-    corridor, approx. E 2 687 000–2 697 500 / N 1 247 000–1 254 000 LV95).
-    A zoom-indicator rectangle is drawn on the parent axes.
-    Returns the inset axes so the caller can layer the coloured feature.
-    pos – (x0, y0, width, height) in axes-fraction coordinates.
-    """
-    DUB_E_MIN, DUB_E_MAX = 2_687_000, 2_697_500
-    DUB_N_MIN, DUB_N_MAX = 1_247_000, 1_254_000
-
-    ax_ins = ax.inset_axes(pos)
-    ax_ins.set_xlim(DUB_E_MIN, DUB_E_MAX)
-    ax_ins.set_ylim(DUB_N_MIN, DUB_N_MAX)
-    ax_ins.set_xticks([])
-    ax_ins.set_yticks([])
-
-    lakes_path = r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
-    if os.path.exists(lakes_path):
-        gpd.read_file(lakes_path).plot(ax=ax_ins, color="lightblue", zorder=9)
-
-    if isinstance(network, gpd.GeoDataFrame):
-        network.plot(ax=ax_ins, color="#888888", lw=0.8, zorder=10, alpha=0.55)
-
-    for sp in ax_ins.spines.values():
-        sp.set_visible(True)
-        sp.set_edgecolor("black")
-        sp.set_linewidth(2)
-        sp.set_zorder(1000)
-
-    ax_ins.set_title("Dübendorf (detail)", fontsize=8, pad=3, fontweight="bold")
-
-    try:
-        ax.indicate_inset_zoom(ax_ins, edgecolor="black", alpha=0.6, linewidth=1.5)
-    except Exception:
-        pass  # older matplotlib versions
-
-    return ax_ins
 
 
-class CustomBasemap:
-    def __init__(self, boundary=None, network=None, access_points=None, frame=None, canton=False):
-        # Create a figure and axis
-        self.fig, self.ax = plt.subplots(figsize=(15, 10))
 
-        # Plot cantonal border
-        if canton==True:
-            canton = gpd.read_file(r"data/Scenario/Boundaries/Gemeindegrenzen/UP_KANTON_F.shp")
-            canton[canton["KANTON"] == 'Zürich'].boundary.plot(ax=self.ax, color="black", lw=2)
-
-        # Plot lakes
-        lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
-        lakes.plot(ax=self.ax, color="lightblue")
-
-        # Add scale bar
-        self.ax.add_artist(ScaleBar(1, location="lower right"))
-
-        if isinstance(network, gpd.GeoDataFrame):
-            network.plot(ax=self.ax, color="black", lw=2)
-
-        if isinstance(access_points, gpd.GeoDataFrame):
-            access_points.plot(ax=self.ax, color="black", markersize=50)
-
-        location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
-        # Plot the location as points
-        location.plot(ax=self.ax, color="black", markersize=75)
-        # Add city names to the plot
-        for idx, row in location.iterrows():
-            self.ax.annotate(row['location'], xy=row["geometry"].coords[0], ha="center", va="top", xytext=(0, -6),
-                        textcoords='offset points', fontsize=15)
-
-        self.ax.set_xticks([])
-        self.ax.set_yticks([])
-
-        if boundary:
-            min_x, min_y, max_x, max_y = boundary.bounds
-            self.ax.set_xlim(min_x, max_x)
-            self.ax.set_ylim(min_y, max_y)
-
-        if frame:
-            x, y = frame.exterior.xy  # Extract the exterior coordinates
-            self.ax.plot(x, y, color='b', alpha=0.7, linewidth=2)
-
-
-    def savefig(self, path):
-        plt.savefig(path+".png", ax=self.ax, dpi=500)
-
-
-    def show(self):
-        plt.show()
-
-    def new_development(self, new_links=None, new_nodes=None):
-        if isinstance(new_links, gpd.GeoDataFrame):
-            print("ploting links")
-            new_links.plot(ax=self.ax, color="darkgray", lw=2)
-
-        if isinstance(new_nodes, gpd.GeoDataFrame):
-            print("ploting nodes")
-            new_nodes.plot(ax=self.ax, color="blue", markersize=50)
-
-
-    def single_development(self, id ,new_links=None, new_nodes=None):
-        if isinstance(new_links, gpd.GeoDataFrame):
-            #print("ploting links")
-            new_links[new_links["ID_new"] == id].plot(ax=self.ax, color="darkgray", lw=2)
-
-        if isinstance(new_nodes, gpd.GeoDataFrame):
-            #print("ploting nodes")
-            new_nodes[new_nodes["ID"] == id].plot(ax=self.ax, color="blue", markersize=50)
-
-    def voronoi(self, id, gdf_voronoi):
-        gdf_voronoi["ID"] = gdf_voronoi["ID"].astype(int)
-        #print(gdf_voronoi[gdf_voronoi["ID"] == id].head(9).to_string())
-        gdf_voronoi[gdf_voronoi["ID"] == id].plot(ax=self.ax, edgecolor='red', facecolor='none' , lw=2)
-        plt.savefig(r"plot/Voronoi/developments/dev_" + str(id) + ".png", dpi=400)
 
 
 def plot_cost_result(df_costs, banned_area, title_bar, boundary=None, network=None,
@@ -488,146 +709,10 @@ def plot_cost_uncertainty(df_costs, banned_area, col, legend_title, boundary=Non
     return
 
 
-def plot_benefit_distribution_bar_single(df_costs, column):
-    # Define bin width
-    bin_width = 100
-    # Automatically calculate bin edges and create a new column 'bin'
-    # Calculate the desired bin edges
-    min_value = df_costs[column].min()
-    min_value = math.floor(min_value / bin_width) * bin_width
-    if min_value % (2*bin_width) != 0:
-        min_value = min_value - bin_width
-    max_value = df_costs[column].max()
-    max_value = math.ceil(max_value / bin_width) * bin_width
-
-    # Calculate the number of bins based on the bin width
-    num_bins = int((max_value - min_value) / bin_width)
-    # Create bin edges that end with "00"
-    bin_edges = [min_value + bin_width *i for i in range(num_bins + 1)]
-    df_costs['bin'] = pd.cut(df_costs[column], bins=bin_edges, include_lowest=True)
-
-    # Count occurrences in each bin
-    bin_counts = df_costs['bin'].value_counts().sort_index()
-
-    # Create a bar plot
-    plt.bar(bin_counts.index.astype(str), bin_counts.values, color="black", zorder=3)
-
-    # Set labels and title
-    plt.xlabel('Net benefit [Mio CHF]', fontsize=12)
-    plt.ylabel('Occurrence' , fontsize=12)
-    # Define custom x-axis tick positions and labels based on bin boundaries
-    bin_boundaries = [bin.left for bin in bin_counts.index] + [bin_counts.index[-1].right]
-    custom_ticks = np.arange(len(bin_boundaries)) - 0.5  # One tick per bin boundary
-    custom_labels = [f"{int(boundary)}" if i % 2 == 0 else '' for i, boundary in enumerate(bin_boundaries)]
-    # Apply custom ticks and labels to the x-axis
-    plt.xticks(custom_ticks, custom_labels, rotation=90)
-
-    # Determine the appropriate y-axis tick step size dynamically
-    max_occurrence = bin_counts.max()
-    y_tick_step = 1
-    while max_occurrence > 10 * y_tick_step:
-        y_tick_step *= 2
-
-    # Set y-axis ticks as integer multiples of the determined step size
-    y_ticks = np.arange(0, max_occurrence + y_tick_step, y_tick_step)
-    plt.yticks(y_ticks)
-
-    # Calculate the actual bin boundaries for the shaded region
-    min_shaded_region = next((i for i, val in enumerate(bin_edges) if val >= 0), None)
-    plt.axvspan(min_shaded_region-0.5, custom_ticks.max()+0.5, color='lightgray', alpha=0.5)
-
-    # Set x-axis limits
-    plt.xlim(custom_ticks.min()-0.5, custom_ticks.max()+0.5)
-
-    # Add light horizontal grid lines for each y-axis tick
-    plt.grid(axis='y', linestyle='--', alpha=0.7, zorder=1)
-
-    plt.tight_layout()
-
-    # Safe figure
-    plt.savefig(r"plot/results/benefit_distribution.png", dpi=500)
-
-    # Show the plot
-    plt.show()
 
 
-def plot_benefit_distribution_line_multi(df_costs, columns, labels, plot_name, legend_title):
-    # Define bin width
-    bin_width = 5
-    # Automatically calculate bin edges and create a new column 'bin'
-    # Calculate the desired bin edges
-    min_value = df_costs[columns].min().min()
-    min_value = math.floor(min_value / bin_width) * bin_width - bin_width * 2
-    max_value = df_costs[columns].max().max()
-    max_value = math.ceil(max_value / bin_width) * bin_width + bin_width*4
 
-    num_bins = int((max_value - min_value) / bin_width)
-    bin_edges = [min_value + bin_width * i for i in range(num_bins + 1)]
 
-    for column in columns:
-        df_costs[f'bin_{column}'] = pd.cut(df_costs[column], bins=bin_edges, include_lowest=True)
-
-    # Count occurrences per bin for each column, indexed by left bin edge
-    bin_counts = pd.DataFrame(index=bin_edges[:-1])
-    for column in columns:
-        column_counts = df_costs.groupby(f'bin_{column}', observed=False)[column].count()
-        column_counts.index = column_counts.index.map(lambda iv: iv.left)
-        bin_counts[f'bin_{column}'] = column_counts
-
-    # Define labels
-    # Check if labels len is same as columns len
-    if len(labels) != len(columns):
-        print("Labels and columns length are not the same")
-    else:
-        # Create a dict with column names as keys and labels as values
-        legend_labels = dict(zip(columns, labels))
-
-    bar_colors = ['#2980b9', '#8e44ad', '#27ae60', '#e67e22', '#c0392b']
-
-    fig, ax = plt.subplots(figsize=(13, 6))
-    x_pos      = np.arange(len(bin_counts))
-    n_cols     = len(columns)
-    bar_w      = 0.8 / n_cols          # width of each individual bar
-
-    # Grouped bars: each series sits next to the others within the same bin
-    for i, column in enumerate(columns):
-        offset = (i - n_cols / 2 + 0.5) * bar_w
-        ax.bar(x_pos + offset, bin_counts[f'bin_{column}'],
-               width=bar_w, label=legend_labels[column],
-               color=bar_colors[i % len(bar_colors)],
-               alpha=0.9, zorder=3)
-
-    ax.legend(bbox_to_anchor=(1.02, 0), loc="lower left", borderaxespad=0.,
-              title=legend_title, fontsize=12, title_fontsize=14, frameon=False)
-
-    plt.xlabel('Net benefit [Mio CHF]', fontsize=14)
-    plt.ylabel('Occurrence', fontsize=14)
-
-    # x-tick labels: every 2nd bin edge shown
-    tick_labels = [str(int(v)) if j % 2 == 0 else ''
-                   for j, v in enumerate(bin_edges[:-1])]
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(tick_labels, rotation=90, fontsize=12)
-
-    plt.grid(axis='x', linestyle='-', linewidth=0.5, alpha=0.5)
-    plt.tick_params(axis='x', which='major', length=6, width=1, labelsize=12)
-
-    max_occurrence = bin_counts.max().max()
-    y_tick_step = 1
-    while max_occurrence > 10 * y_tick_step:
-        y_tick_step *= 2
-    y_ticks = np.arange(0, max_occurrence + y_tick_step, y_tick_step)
-    plt.yticks(y_ticks, fontsize=12)
-
-    min_shaded_region = next((i for i, val in enumerate(bin_edges) if val >= 0), None)
-    ax.axvspan(-0.5, min_shaded_region - 0.5, color='lightgray', alpha=0.4, zorder=1)
-
-    plt.xlim(-0.5, len(bin_counts.index) - 0.5)
-    plt.grid(axis='y', linestyle='--', alpha=0.7, zorder=1)
-
-    plt.tight_layout()
-    plt.savefig(fr"plot/results/04_distribution_line_{plot_name}.png", dpi=500)
-    plt.show()
 
 
 def plot_scenario_grouped_bar(plot_name="scenario_grouped_bar"):
@@ -781,52 +866,7 @@ def plot_cost_benefit_scatter(plot_name="cost_benefit_scatter"):
     print(f"[plot_cost_benefit_scatter] saved → plot/results/{plot_name}.png")
 
 
-def plot_best_worse(df):
 
-    # Sort the DataFrame by "total_medium" in ascending and descending order
-    df_top5 = df.nlargest(5, 'total_medium')
-    df_bottom5 = df.nsmallest(5, 'total_medium')
-
-    # Specify the columns to plot
-    columns_to_plot = ['building_costs', 'local_s1', 'externalities', 'tt_medium', 'noise_s1']
-
-    # Create a figure with two subplots
-    fig, axs = plt.subplots(1, 2, figsize=(12, 6), sharey=True)
-
-    # Function to dynamically determine costs and benefits
-    def categorize_values(row):
-        costs = [val if val < 0 else 0 for val in row]
-        benefits = [val if val >= 0 else 0 for val in row]
-        return costs, benefits
-
-    # Plot the top 5 rows in the first subplot
-    for i, row in df_top5.iterrows():
-        observation = row['ID_new']
-        costs, benefits = categorize_values(row[columns_to_plot])
-
-        axs[0].bar(columns_to_plot, costs, color='red', label=f'{observation} - Costs')
-        axs[0].bar(columns_to_plot, benefits, bottom=costs, color='blue', label=f'{observation} - Benefits')
-
-    # Plot the bottom 5 rows in the second subplot
-    for i, row in df_bottom5.iterrows():
-        observation = row['ID_new']
-        costs, benefits = categorize_values(row[columns_to_plot])
-
-        axs[1].bar(columns_to_plot, costs, color='red', label=f'{observation} - Costs')
-        axs[1].bar(columns_to_plot, benefits, bottom=costs, color='blue', label=f'{observation} - Benefits')
-
-    # Set labels and legend for each subplot
-    axs[0].set_title('Top 5 Rows')
-    axs[1].set_title('Bottom 5 Rows')
-    axs[0].set_xlabel('Categories (Costs/Benefits)')
-    axs[1].set_xlabel('Categories (Costs/Benefits)')
-    axs[0].set_ylabel('Value')
-    axs[0].legend(title='Legend', loc='upper left', bbox_to_anchor=(1, 1))
-    axs[1].legend(title='Legend', loc='upper left', bbox_to_anchor=(1, 1))
-
-    # Adjust layout and show the plot
-    plt.tight_layout()
-    plt.show()
 
 
 def boxplot(df, nbr):
@@ -857,507 +897,6 @@ def boxplot(df, nbr):
     plt.show()
 
 
-def plot_2x3_subplots(gdf, limits, network, location):
-    """
-    This function plots the relative population and employment development for all districts considered and for all
-    three scenarios defined
-    :param gdf: Geopandas DataFrame containing the growth values
-    :param lim: List of coordinates defining the perimeter investigated
-    :return:
-    """
-    lim = gdf.total_bounds
-    vmin, vmax = 1, 1.75
-
-    # Create a figure with 6 subplots arranged in two rows and three columns
-    fig, axs = plt.subplots(nrows=2, ncols=3, figsize=(12, 8))
-
-    # Loop through each column of the dataframe and plot it on its corresponding subplot
-    index = [0, 1, 2, 3, 4, 5]
-    columns = ["s2_pop", "s1_pop", "s3_pop", "s2_empl", "s1_empl", "s3_empl"]
-    title = ["Population - low", "Population - medium", "Population - high",
-             "Employment - low", "Employment - medium", "Employment - high"]
-    for i in range(6):
-        row = index[i] // 3
-        col = index[i] % 3
-        ax = axs[row, col]
-        gdf.plot(column=columns[i], ax=ax, cmap='summer_r', edgecolor = "gray", vmin=vmin, vmax=vmax, lw=0.2)
-        network.plot(ax=ax, color="black", linewidth=0.5)
-        # Plot the location as points
-        location.plot(ax=ax, color="black", markersize=20, zorder=7)
-        for idx, row in location.iterrows():
-            ax.annotate(row['location'], xy=row["geometry"].coords[0], ha="right", va="top", xytext=(0, -4),
-                            textcoords='offset points', fontsize=7.5)
-
-        ax.set_ylim(lim[1], lim[3])
-        ax.set_xlim(lim[0], lim[2])
-        ax.axis('off')
-        ax.set_title(title[i], fontsize=9)
-
-    # Set a common colorbar for all subplots
-    norm = plt.Normalize(vmin=vmin, vmax=vmax)
-    sm = plt.cm.ScalarMappable(cmap='summer_r', norm=norm)
-    sm.set_array([])
-
-    # Add the colorbar to the figure
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-    title_ax = fig.add_axes([0.97, 0.45, 0.05, 0.1])
-    cbar = fig.colorbar(sm, cax=cbar_ax)
-    # cbar.ax.set_title("Relative population increase", rotation=90)
-    # cbar.ax.yaxis.set_label_position('right')
-    title_ax.axis('off')  # Hide the frame around the title axis
-    title_ax.text(0.5, 0.5, 'Relative population and employment increase compared to 2020', rotation=90,
-                  horizontalalignment='center', verticalalignment='center')
-
-    # Show the plot
-    plt.savefig(r"plot/Scenario/5_all_scen.png", dpi=450, bbox_inches='tight', pad_inches=0.1)
-    plt.show()
-
-
-def plot_points_gen(points, edges, banned_area, points_2=None, boundary=None, network=None, access_points=None, plot_name=False, all_zones=False):
-
-    # Import other zones
-    schutzzonen = gpd.read_file(r"data/landuse_landcover/Schutzzonen/Schutzanordnungen_Natur_und_Landschaft_-SAO-_-OGD/FNS_SCHUTZZONE_F.shp")
-    forest = gpd.read_file(r"data/landuse_landcover/Schutzzonen/Waldareal_-OGD/WALD_WALDAREAL_F.shp")
-    fff = gpd.read_file(r"data/landuse_landcover/Schutzzonen/Fruchtfolgeflachen_-OGD/FFF_F.shp")
-
-    fig, ax = plt.subplots(figsize=(13,9))
-    # Plot lakes
-    lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
-    lakes.plot(ax=ax, color="lightblue", zorder=9)
-
-    # Add scale bar
-    ax.add_artist(ScaleBar(1, location="lower right"))
-
-    if isinstance(network, gpd.GeoDataFrame):
-        network.plot(ax=ax, color="black", lw=2, zorder=11)
-
-    if isinstance(access_points, gpd.GeoDataFrame):
-        access_points.plot(ax=ax, color="black", markersize=50, zorder=12)
-
-    location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
-    # Plot the location as points
-    location.plot(ax=ax, color="black", markersize=75, zorder=200)
-    # Add city names to the plot
-    for idx, row in location.iterrows():
-        ax.annotate(row['location'], xy=row["geometry"].coords[0], ha="center", va="top", xytext=(0, -6),
-                         textcoords='offset points', fontsize=15, zorder=200)
-
-    # Plot points
-    points.plot(ax=ax, zorder=100, edgecolor='darkslateblue', linewidth=2, color='white', markersize=70)
-
-    # Plot edges
-    edges.plot(ax=ax, zorder=90, linewidth=1, color='darkslateblue')
-
-    if all_zones:
-        # Plot other zones in lightgray
-        schutzzonen.plot(ax=ax, color="lightgray", zorder=5)
-        forest.plot(ax=ax, color="lightgray", zorder=5)
-        #fff.plot(ax=ax, color="lightgray", zorder=5)
-
-
-    raster = rasterio.open(banned_area)
-    cmap_raster = ListedColormap(["lightgray", "lightgray"])
-    rasterio.plot.show(raster, ax=ax, cmap=cmap_raster, zorder=3)
-
-    # Create custom legend elements
-    water_body_patch = mpatches.Patch(facecolor="lightblue", label='Water bodies', edgecolor='black', linewidth=1)
-    protected_area_patch = mpatches.Patch(facecolor='lightgray', label='Infeasible area',
-                                          edgecolor='black', linewidth=1)
-    # Add existing network, generated points and generated links to the legend
-    network_line = mlines.Line2D([], [], color='black', label='Current highway\nnetwork', linewidth=2)
-    points_marker = mlines.Line2D([], [], color='white', marker='o', markersize=10, label='Generated points',
-                                  markeredgecolor='darkslateblue', linestyle='None', linewidth=3)
-    edges_line = mlines.Line2D([], [], color='darkslateblue', label='Generated links', linewidth=1.5)
-
-    legend_handles = [network_line, points_marker, edges_line, water_body_patch, protected_area_patch]
-
-    if isinstance(points_2, gpd.GeoDataFrame):
-        points_2.plot(ax=ax, zorder=101, color='lightseagreen', markersize=70, edgecolor='black', linewidth=1.5)
-        deleted_points_marker = mlines.Line2D([], [], color='lightseagreen', marker='o', markersize=10,
-                                              label='Deleted points',markeredgecolor='black', linestyle='None', linewidth=1)
-        legend_handles.insert(2, deleted_points_marker)
-
-    # Create the legend below the plot
-    legend = ax.legend(handles=legend_handles, loc='lower left', bbox_to_anchor=(1.02, 0), fontsize=16, frameon=False,
-                       title="Legend", title_fontsize=20)
-    legend._legend_box.align = "left"
-
-    # Add a north arrow
-    # Add the letter "N"
-    ax.text(0.96, 0.925, "N", fontsize=20, weight=1, ha='center', va='center', transform=ax.transAxes, zorder=1000)
-
-    # Add a custom north arrow
-    arrow = FancyArrowPatch((0.96, 0.90), (0.96, 0.975), color='black', lw=2, arrowstyle='->', mutation_scale=20, transform=ax.transAxes, zorder=1000)
-    ax.add_patch(arrow)
-
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-    # Get plot limits
-    min_x, min_y, max_x, max_y = boundary.bounds
-    ax.set_xlim(min_x - 100, max_x + 100)
-    ax.set_ylim(min_y - 100, max_y + 100)
-
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_edgecolor('black')
-        spine.set_linewidth(1)  # Adjust linewidth for frame thickness
-        spine.set_zorder(1000)
-
-    plt.tight_layout()
-    if plot_name != False:
-        plt.tight_layout()
-        plt.savefig(fr"plot/results/04_{plot_name}.png", dpi=500, bbox_inches='tight')
-
-    plt.show()
-    return
-
-
-def plot_voronoi_comp(eucledian, traveltime, boundary=None, network=None, access_points=None, plot_name=False, all_zones=False):
-    fig, ax = plt.subplots(figsize=(13, 9))
-    # Plot lakes
-    lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
-    lakes.plot(ax=ax, color="lightblue", zorder=4)
-
-    # Add scale bar
-    ax.add_artist(ScaleBar(1, location="lower right"))
-
-    if isinstance(network, gpd.GeoDataFrame):
-        network.plot(ax=ax, color="black", lw=2, zorder=11)
-
-    if isinstance(access_points, gpd.GeoDataFrame):
-        access_points.plot(ax=ax, color="black", markersize=50, zorder=12)
-
-    location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
-    # Plot the location as points
-    location.plot(ax=ax, color="black", markersize=75, zorder=200)
-    # Add city names to the plot
-    for idx, row in location.iterrows():
-        ax.annotate(row['location'], xy=row["geometry"].coords[0], ha="center", va="top", xytext=(0, -6),
-                         textcoords='offset points', fontsize=15, zorder=200)
-
-    # Plot boundaries of eucledian
-    eucledian.boundary.plot(ax=ax, color="lightgray", linewidth=3, zorder=4)
-    # Plot boundaries of traveltime
-    traveltime.boundary.plot(ax=ax, color="darkslateblue", linewidth=1.5, zorder=5)
-
-
-    # Create custom legend elements
-    water_body_patch = mpatches.Patch(facecolor="lightblue", label='Water bodies', edgecolor='black', linewidth=1)
-    eucledian_patch = mpatches.Patch(facecolor='white', label='Euclidian Voronoi tiling',
-                                          edgecolor='lightgray', linewidth=3)
-    traveltime_patch = mpatches.Patch(facecolor='white', label='Travel time Voronoi tiling',
-                                          edgecolor='darkslateblue', linewidth=1)
-    # Add existing network, generated points and generated links to the legend
-    network_line = mlines.Line2D([], [], color='black', label='Current highway\nnetwork', linewidth=2)
-
-
-    legend_handles = [network_line, eucledian_patch, traveltime_patch, water_body_patch]
-
-
-    # Create the legend below the plot
-    legend = ax.legend(handles=legend_handles, loc='lower left', bbox_to_anchor=(1.02, 0), fontsize=16, frameon=False,
-                       title="Legend", title_fontsize=20)
-    legend._legend_box.align = "left"
-
-    # Add a north arrow
-    # Add the letter "N"
-    ax.text(0.96, 0.925, "N", fontsize=16, weight=1, ha='center', va='center', transform=ax.transAxes, zorder=1000)
-
-    # Add a custom north arrow
-    arrow = FancyArrowPatch((0.96, 0.90), (0.96, 0.975), color='black', lw=1.5, arrowstyle='->', mutation_scale=14, transform=ax.transAxes, zorder=1000)
-    ax.add_patch(arrow)
-
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-    # Get plot limits
-    min_x, min_y, max_x, max_y = boundary.bounds
-    ax.set_xlim(min_x - 100, max_x + 100)
-    ax.set_ylim(min_y - 100, max_y + 100)
-
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_edgecolor('black')
-        spine.set_linewidth(1)  # Adjust linewidth for frame thickness
-        spine.set_zorder(1000)
-
-
-    if plot_name != False:
-        plt.tight_layout()
-        plt.savefig(fr"plot/results/04_{plot_name}.png", dpi=500)
-
-    plt.show()
-    return
-
-
-def plot_voronoi_development(statusquo, development_voronoi, development_point, boundary=None, network=None, access_points=None, plot_name=False, all_zones=False):
-    fig, ax = plt.subplots(figsize=(13, 9))
-    # Plot lakes
-    lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
-    lakes.plot(ax=ax, color="lightblue", zorder=4)
-
-    # Add scale bar
-    ax.add_artist(ScaleBar(1, location="lower right"))
-
-    if isinstance(network, gpd.GeoDataFrame):
-        network.plot(ax=ax, color="black", lw=2, zorder=11)
-
-    if isinstance(access_points, gpd.GeoDataFrame):
-        access_points.plot(ax=ax, color="black", markersize=50, zorder=12)
-
-    location = gpd.read_file(r'data/manually_gathered_data/Cities.shp', crs="epsg:2056")
-    # Plot the location as points
-    location.plot(ax=ax, color="black", markersize=75, zorder=200)
-    # Add city names to the plot
-    for idx, row in location.iterrows():
-        ax.annotate(row['location'], xy=row["geometry"].coords[0], ha="center", va="top", xytext=(0, -6),
-                         textcoords='offset points', fontsize=15, zorder=200)
-
-    # Plot boundaries of eucledian
-    statusquo.boundary.plot(ax=ax, color="darkgray", linewidth=2, zorder=4)
-    # Plot boundaries of traveltime
-
-    # Filter development we want
-    # Plot according point and polygon
-    i = 779
-    ii = development_voronoi["ID_point"].max()
-    development_point[development_point["ID_new"] == i].plot(ax=ax, color="darkslateblue", markersize=80, zorder=12)
-    development_voronoi[development_voronoi["ID_point"] == ii].plot(ax=ax, facecolor="darkslateblue", alpha=0.3, edgecolor="black", linewidth=2, zorder=11)
-
-    # Create custom legend elements
-    water_body_patch = mpatches.Patch(facecolor="lightblue", label='Water bodies', edgecolor='black', linewidth=1)
-    current_patch = mpatches.Patch(facecolor='white', label='Voronoi tiling for\ncurrent access points',
-                                          edgecolor='darkgray', linewidth=3)
-    newpoly_patch = mpatches.Patch(facecolor='darkslateblue', alpha=0.3, label='Voronoi polygon of the\ngenerated access point',
-                                          edgecolor='black', linewidth=1)
-    # Add existing network, generated points and generated links to the legend
-    newpoint_path = mlines.Line2D([], [], color='darkslateblue', marker='o', markersize=15,
-                                  label='Generated access point', linestyle='None')
-    # Add existing network, generated points and generated links to the legend
-    network_line = mlines.Line2D([], [], color='black', marker='o', markersize=10, label='Current highway\nnetwork', linewidth=2)
-
-
-    legend_handles = [network_line, current_patch, newpoint_path, newpoly_patch, water_body_patch]
-
-
-    # Create the legend below the plot
-    legend = ax.legend(handles=legend_handles, loc='lower left', bbox_to_anchor=(1.02, 0), fontsize=16, frameon=False,
-                       title="Legend", title_fontsize=20)
-    legend._legend_box.align = "left"
-
-    # Add a north arrow
-    # Add the letter "N"
-    ax.text(0.96, 0.925, "N", fontsize=24, weight=1, ha='center', va='center', transform=ax.transAxes, zorder=1000)
-
-    # Add a custom north arrow
-    arrow = FancyArrowPatch((0.96, 0.90), (0.96, 0.975), color='black', lw=1.5, arrowstyle='->', mutation_scale=18, transform=ax.transAxes, zorder=1000)
-    ax.add_patch(arrow)
-
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-    # Get plot limits
-    min_x, min_y, max_x, max_y = boundary.bounds
-    ax.set_xlim(min_x - 100, max_x + 1000)
-    ax.set_ylim(min_y - 100, max_y)
-
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_edgecolor('black')
-        spine.set_linewidth(1)  # Adjust linewidth for frame thickness
-        spine.set_zorder(1000)
-
-
-    if plot_name != False:
-        plt.tight_layout()
-        plt.savefig(fr"plot/results/04_{plot_name}.png", dpi=500)
-
-    plt.show()
-    return
-
-def plot_example_od_path(boundary=None, network=None, access_points=None,
-                         plot_name="example_od_path"):
-    """
-    Plot one example fastest path from data/costs/od_fastest_paths.csv.
-
-    Picks the status-quo row with the highest travel time whose average speed
-    implies it uses real network edges (≥ 8 km/h — excludes pure 5 km/h gap
-    penalty paths).  Rebuilds the same graph as od_fastest_paths (real edges +
-    connectivity bridges + gap links) so Dijkstra finds the identical route.
-
-    Segments are coloured by type:
-      solid red   — real surveyed edge
-      dashed orange — connectivity bridge or gap penalty edge
-    """
-    import networkx as nx
-    from shapely.geometry import LineString, MultiLineString
-    from scipy.spatial import cKDTree
-
-    paths_csv = "data/costs/od_fastest_paths.csv"
-    if not os.path.exists(paths_csv):
-        print("[plot_example_od_path] od_fastest_paths.csv not found — skipping")
-        return
-
-    df = pd.read_csv(paths_csv)
-    sq = df[df["scenario"] == "status_quo"].copy()
-    if sq.empty:
-        print("[plot_example_od_path] No status-quo rows — skipping")
-        return
-
-    # Filter out gap-dominated paths (avg speed < 8 km/h → pure penalty path)
-    sq["speed_kmh"] = (sq["length_m"] / 1000) / (sq["tt_min"] / 60)
-    real_paths = sq[sq["speed_kmh"] >= 8.0]
-    pool = real_paths if not real_paths.empty else sq
-    row    = pool.loc[pool["tt_min"].idxmax()]
-    origin = int(row["origin"])
-    dest   = int(row["dest"])
-    print(f"[plot_example_od_path] node {origin} → {dest}  "
-          f"({row['tt_min']:.1f} min, {row['length_m']/1000:.2f} km, "
-          f"{row['speed_kmh']:.1f} km/h avg)")
-
-    # ── Rebuild graph (real edges + bridges + gap links) ──────────────────────
-    points = gpd.read_file("data/Network/processed/points_with_attribute.gpkg")
-    edges  = gpd.read_file("data/Network/processed/edges_with_attribute.gpkg")
-    edges  = edges.set_crs("epsg:2056", allow_override=True)
-    edges["length_m"] = edges.geometry.length
-
-    G = nx.Graph()
-    for _, pt in points.iterrows():
-        G.add_node(int(pt["ID_point"]), x=pt.geometry.x, y=pt.geometry.y)
-    edges_clean = edges.dropna(subset=["start", "end"])
-    for _, e in edges_clean.iterrows():
-        u, v = int(e["start"]), int(e["end"])
-        tt = float(e["tt_min"])
-        if G.has_edge(u, v):
-            if tt < G[u][v].get("tt", 1e9):
-                G[u][v].update({"tt": tt, "length_m": float(e["length_m"])})
-        else:
-            G.add_edge(u, v, tt=tt, length_m=float(e["length_m"]), is_real=True)
-
-    # Connectivity bridges
-    conn_path = "data/Network/processed/connectivity_developments.gpkg"
-    if os.path.exists(conn_path):
-        node_list = list(G.nodes())
-        node_arr  = np.array([[G.nodes[n]["x"], G.nodes[n]["y"]] for n in node_list])
-        kd = cKDTree(node_arr)
-        for _, br in gpd.read_file(conn_path).iterrows():
-            coords = list(br.geometry.coords)
-            _, i_u = kd.query([coords[0][0],  coords[0][1]])
-            _, i_v = kd.query([coords[-1][0], coords[-1][1]])
-            u2, v2 = node_list[i_u], node_list[i_v]
-            if u2 != v2 and not G.has_edge(u2, v2):
-                lm = br.geometry.length
-                G.add_edge(u2, v2, tt=(lm/1000)/5.0*60, length_m=lm,
-                           is_bridge=True, is_real=False)
-
-    # Gap links between disconnected OD nodes (mirrors od_fastest_paths logic)
-    all_od = set(df["origin"].astype(int)) | set(df["dest"].astype(int))
-    all_od.discard(9999)
-    od_valid = [n for n in all_od if n in G]
-    comp_map = {n: i for i, c in enumerate(nx.connected_components(G)) for n in c}
-    seen_gap = set()
-    for o in od_valid:
-        for d in od_valid:
-            if o == d:
-                continue
-            pair = (min(o, d), max(o, d))
-            if pair in seen_gap or comp_map.get(o) == comp_map.get(d):
-                continue
-            seen_gap.add(pair)
-            ox2 = G.nodes[o].get("x", 0); oy2 = G.nodes[o].get("y", 0)
-            dx2 = G.nodes[d].get("x", 0); dy2 = G.nodes[d].get("y", 0)
-            gap_dist = ((ox2-dx2)**2 + (oy2-dy2)**2)**0.5 * 1.4
-            G.add_edge(o, d, tt=gap_dist/5000*60*3.6,
-                       length_m=gap_dist, is_gap=True, is_real=False)
-
-    if origin not in G or dest not in G:
-        print("[plot_example_od_path] Origin or destination not in graph — skipping")
-        return
-    try:
-        _, node_path = nx.single_source_dijkstra(G, origin, dest, weight="tt")
-    except nx.NetworkXNoPath:
-        print("[plot_example_od_path] No path found — skipping")
-        return
-
-    # ── Reconstruct geometry, split real vs penalty segments ─────────────────
-    edge_lookup = {}
-    for _, e in edges_clean.iterrows():
-        u, v = int(e["start"]), int(e["end"])
-        edge_lookup[(u, v)] = e.geometry
-        edge_lookup[(v, u)] = e.geometry
-
-    real_segs, gap_segs = [], []
-    for u, v in zip(node_path[:-1], node_path[1:]):
-        attr = G[u][v]
-        geom = edge_lookup.get((u, v))
-        if geom is None:
-            geom = LineString([(G.nodes[u]["x"], G.nodes[u]["y"]),
-                               (G.nodes[v]["x"], G.nodes[v]["y"])])
-        if attr.get("is_real", False):
-            real_segs.append(geom)
-        else:
-            gap_segs.append(geom)
-
-    # ── Plot ─────────────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(15, 10))
-    lakes = gpd.read_file(r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp")
-    lakes.plot(ax=ax, color="lightblue", zorder=1)
-    ax.add_artist(ScaleBar(1, location="lower right"))
-
-    if isinstance(network, gpd.GeoDataFrame):
-        network.plot(ax=ax, color="#aaaaaa", lw=1.2, zorder=2, label="Network")
-    if isinstance(access_points, gpd.GeoDataFrame):
-        access_points.plot(ax=ax, color="#555555", markersize=20, zorder=3)
-
-    if real_segs:
-        gpd.GeoDataFrame(geometry=real_segs, crs="epsg:2056").plot(
-            ax=ax, color="#e63946", lw=3, zorder=10, label="Real network path"
-        )
-    if gap_segs:
-        gpd.GeoDataFrame(geometry=gap_segs, crs="epsg:2056").plot(
-            ax=ax, color="#f4a261", lw=2.5, zorder=10,
-            linestyle="dashed", label="Gap / bridge hop"
-        )
-
-    ox, oy = G.nodes[origin]["x"], G.nodes[origin]["y"]
-    dx, dy = G.nodes[dest]["x"],   G.nodes[dest]["y"]
-    ax.scatter([ox], [oy], s=160, color="#2a9d8f", zorder=12,
-               marker="o", label=f"Origin ({origin})")
-    ax.scatter([dx], [dy], s=160, color="#e76f51", zorder=12,
-               marker="s", label=f"Destination ({dest})")
-    ax.annotate(f"O: {origin}", xy=(ox, oy), xytext=(6, 6),
-                textcoords="offset points", fontsize=9, fontweight="bold",
-                color="#2a9d8f", zorder=13)
-    ax.annotate(f"D: {dest}", xy=(dx, dy), xytext=(6, 6),
-                textcoords="offset points", fontsize=9, fontweight="bold",
-                color="#e76f51", zorder=13)
-
-    location = gpd.read_file(r"data/manually_gathered_data/Cities.shp", crs="epsg:2056")
-    location.plot(ax=ax, color="black", markersize=60, zorder=11)
-    for _, loc_row in location.iterrows():
-        ax.annotate(loc_row["location"], xy=loc_row["geometry"].coords[0],
-                    ha="center", va="top", xytext=(0, -6),
-                    textcoords="offset points", fontsize=13, zorder=11)
-
-    if boundary:
-        xmin, ymin, xmax, ymax = boundary.bounds
-        ax.set_xlim(xmin, xmax)
-        ax.set_ylim(ymin, ymax)
-
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_title(
-        f"Example fastest path  ·  node {origin} → {dest}"
-        f"  ·  {row['tt_min']:.1f} min  ·  {row['length_m']/1000:.2f} km",
-        fontsize=13, pad=10,
-    )
-    ax.legend(loc="upper left", fontsize=10)
-    plt.tight_layout()
-    os.makedirs("plot/results", exist_ok=True)
-    plt.savefig(f"plot/results/{plot_name}.png", dpi=400)
-    plt.show()
-    return
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1890,129 +1429,6 @@ def plot_duebendorf_zoom(df_costs, banned_area, title_bar, network=None,
     print(f"[plot_duebendorf_zoom] saved → plot/results/{plot_name}.png")
 
 
-def plot_duebendorf_zoom_network(network=None, access_points=None,
-                                 plot_name="duebendorf_zoom_network"):
-    """
-    Zoomed Dübendorf detail map using the same rendering as plot_nb_on_network
-    (actual edge geometries, line width ∝ construction cost, colour = NB_s2).
-    Extent: E 2 687 000–2 697 500 / N 1 247 000–1 254 000, LV95/EPSG:2056.
-
-    Reads:  data/Network/processed/development_candidates.gpkg
-            data/costs/net_benefits.gpkg
-            data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp
-    Saves:  plot/results/{plot_name}.png
-    """
-    DUB_E_MIN, DUB_E_MAX = 2_687_000, 2_697_500
-    DUB_N_MIN, DUB_N_MAX = 1_247_000, 1_254_000
-
-    cands_path = "data/Network/processed/development_candidates.gpkg"
-    nb_path    = "data/costs/net_benefits.gpkg"
-    lakes_path = r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
-
-    for p in [cands_path, nb_path]:
-        if not os.path.exists(p):
-            print(f"[plot_duebendorf_zoom_network] Missing: {p} — skipping")
-            return
-
-    cands  = gpd.read_file(cands_path)
-    nb     = gpd.read_file(nb_path)[["ID_new", "NB_s2", "C"]]
-    nb["NB_s2"] = pd.to_numeric(nb["NB_s2"], errors="coerce")
-    nb["C"]     = pd.to_numeric(nb["C"],     errors="coerce")
-    merged = cands.merge(nb, on="ID_new", how="inner")
-    if merged.empty:
-        print("[plot_duebendorf_zoom_network] No matching rows — skipping")
-        return
-
-    # Clip to Dübendorf extent
-    merged_dub = merged.cx[DUB_E_MIN:DUB_E_MAX, DUB_N_MIN:DUB_N_MAX].copy()
-    if merged_dub.empty:
-        print("[plot_duebendorf_zoom_network] No developments in Dübendorf extent — skipping")
-        return
-
-    # Same colormap as plot_nb_on_network (based on full dataset range)
-    nb_vals = merged["NB_s2"] / 1e6
-    min_val, max_val = nb_vals.min(), nb_vals.max()
-    n_intervals = 256
-    gray_color  = [0.83, 0.83, 0.83, 1]
-    if min_val < 0 and max_val > 0:
-        total_range = abs(min_val) + abs(max_val)
-        neg_c = plt.cm.Reds_r(np.linspace(0.15, 0.8, int(n_intervals * abs(min_val) / total_range)))
-        pos_c = plt.cm.Blues( np.linspace(0.3,  0.95, int(n_intervals * abs(max_val) / total_range)))
-        tr = int(n_intervals * 0.2)
-        all_colors = np.vstack((neg_c[:-1],
-                                np.linspace(neg_c[-1], gray_color, tr),
-                                np.linspace(gray_color, pos_c[0], tr),
-                                pos_c[1:]))
-    elif min_val >= 0:
-        pos_c = plt.cm.Blues(np.linspace(0.3, 0.9, n_intervals))
-        all_colors = np.vstack((np.linspace(gray_color, pos_c[0], int(n_intervals * 0.3)), pos_c[1:]))
-    else:
-        neg_c = plt.cm.Reds_r(np.linspace(0.2, 0.8, n_intervals))
-        all_colors = np.vstack((neg_c[:-1], np.linspace(neg_c[-1], gray_color, int(n_intervals * 0.3))))
-    cmap = LinearSegmentedColormap.from_list("nb_edge_cmap", all_colors)
-    vabs = float(nb_vals.abs().quantile(0.95)) or 1.0
-    norm = plt.Normalize(vmin=-vabs, vmax=vabs)
-
-    fig, ax = plt.subplots(figsize=(10, 8))
-
-    if os.path.exists(lakes_path):
-        gpd.read_file(lakes_path).plot(ax=ax, color="lightblue", zorder=1)
-    if isinstance(network, gpd.GeoDataFrame):
-        network.plot(ax=ax, color="#bbbbbb", lw=1.0, zorder=2, alpha=0.6)
-
-    c_min = merged["C"].abs().min() or 1.0
-    c_max = merged["C"].abs().max() or 1.0
-    for _, row in merged_dub.iterrows():
-        nb_m  = row["NB_s2"] / 1e6
-        color = cmap(norm(nb_m))
-        c_abs = abs(row["C"]) if pd.notna(row["C"]) else c_min
-        lw    = 2.5 + 5.0 * (c_abs - c_min) / max(c_max - c_min, 1)
-        gpd.GeoDataFrame([row], crs=cands.crs).plot(ax=ax, color=[color], lw=lw, zorder=5)
-        try:
-            mid = row.geometry.interpolate(0.5, normalized=True)
-            ax.annotate(str(int(row["ID_new"])), xy=(mid.x, mid.y),
-                        xytext=(4, 4), textcoords="offset points",
-                        fontsize=10, fontweight="bold", color="black", zorder=10,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8, ec="none"))
-        except Exception:
-            pass
-
-    if isinstance(access_points, gpd.GeoDataFrame):
-        access_points.plot(ax=ax, color="black", markersize=40, zorder=6)
-
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="3%", pad=0.4)
-    cbar = plt.colorbar(sm, cax=cax)
-    cbar.set_label("Net Benefit NBₛ₂ [Mio. CHF]\n(line width ∝ construction cost)",
-                   rotation=90, labelpad=16, fontsize=12)
-    cbar.ax.tick_params(labelsize=11)
-
-    ax.set_xlim(DUB_E_MIN, DUB_E_MAX)
-    ax.set_ylim(DUB_N_MIN, DUB_N_MAX)
-    ax.set_xticks([]); ax.set_yticks([])
-    ax.add_artist(ScaleBar(1, location="lower right"))
-    ax.text(0.96, 0.92, "N", fontsize=22, weight="bold",
-            ha="center", va="center", transform=ax.transAxes, zorder=1000)
-    ax.add_patch(FancyArrowPatch((0.96, 0.89), (0.96, 0.97), color="black", lw=2,
-                                 arrowstyle="->", mutation_scale=20,
-                                 transform=ax.transAxes, zorder=1000))
-    for sp in ax.spines.values():
-        sp.set_visible(True); sp.set_edgecolor("black")
-        sp.set_linewidth(1); sp.set_zorder(1000)
-
-    water_patch = mpatches.Patch(facecolor="lightblue", label="Water bodies",
-                                 edgecolor="black", linewidth=1)
-    ax.legend(handles=[water_patch], loc="upper center",
-              bbox_to_anchor=(0.5, -0.02), fontsize=12, frameon=False)
-    ax.set_title("Dübendorf detail — Net Benefit on Network (NBₛ₂)", fontsize=13, pad=8)
-
-    plt.tight_layout()
-    os.makedirs("plot/results", exist_ok=True)
-    plt.savefig(f"plot/results/{plot_name}.png", dpi=300, bbox_inches="tight")
-    plt.show()
-    print(f"[plot_duebendorf_zoom_network] saved → plot/results/{plot_name}.png")
 
 
 def plot_bcr_bar(plot_name="bcr_bar"):
@@ -2069,3 +1485,262 @@ def plot_bcr_bar(plot_name="bcr_bar"):
     plt.savefig(f"plot/results/{plot_name}.png", dpi=300, bbox_inches="tight")
     plt.show()
     print(f"[plot_bcr_bar] saved → plot/results/{plot_name}.png")
+
+
+
+
+def plot_netzluecken_closeup(
+        dev_ids=(676, 97, 566),
+        buffer_m=500,
+        save_path="figures/netzluecken_closeup.pdf",
+):
+    """
+    1 × 3 close-up map for each specified Netzlücke ID.
+
+    Each panel shows:
+      • OSM basemap (contextily, EPSG:3857)
+      • Surrounding network clipped to a buffer around the edge (grey)
+      • The highlighted Netzlücke edge (red, thick)
+      • Voronoi node centroids (blue dots)
+      • Title: ID · ΔT [h/day] · TTS [MCHF] · NB [MCHF]
+
+    Data read from:
+      data/Network/processed/network_full_annotated_edges.gpkg
+      data/Voronoi/voronoi_developments_euclidian_values.shp
+      data/OD/traveltime_savings_od.csv
+      data/costs/net_benefits.csv
+    """
+    try:
+        import contextily as ctx
+        HAS_CTX = True
+    except ImportError:
+        HAS_CTX = False
+        print("[plot_netzluecken_closeup] contextily not installed — basemap skipped")
+
+    # ── Load data ────────────────────────────────────────────────────────────
+    # Netzlücken geometries keyed by ID_new (original IDs preserved here)
+    nl_all  = gpd.read_file("data/Network/processed/development_candidates.gpkg")
+    nl_all["ID_new"] = nl_all["ID_new"].astype(int)
+
+    # Full network for background (all route types)
+    edges   = gpd.read_file("data/Network/processed/network_full_annotated_edges.gpkg")
+    voronoi = gpd.read_file("data/Voronoi/voronoi_developments_euclidian_values.shp")
+    tts_df  = pd.read_csv("data/OD/traveltime_savings_od.csv")
+    nb_df   = pd.read_csv("data/costs/net_benefits.csv")
+
+    # Voronoi node centroids
+    voronoi_pts = voronoi.copy()
+    voronoi_pts["geometry"] = voronoi_pts.geometry.centroid
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 7), facecolor="white")
+
+    for ax, dev_id in zip(axes, dev_ids):
+
+        # ── Lookup this Netzlücke ─────────────────────────────────────────────
+        nl_row = nl_all[nl_all["ID_new"] == dev_id]
+        if nl_row.empty:
+            ax.set_title(f"ID {dev_id} — not found", fontsize=11)
+            ax.axis("off")
+            continue
+
+        # ── TTS / NB labels ───────────────────────────────────────────────────
+        tts_row = tts_df[tts_df["ID_new"] == dev_id]
+        nb_row  = nb_df[nb_df["ID_new"]  == dev_id]
+        dt_hday = tts_row["T_s2"].values[0]   if len(tts_row) else 0.0
+        nb_mchf = nb_row["NB_s2"].values[0] / 1e6 if len(nb_row) else 0.0
+        tts_mchf = (nb_row["T_s2"].values[0] / 1e6
+                    if "T_s2" in nb_row.columns and len(nb_row) else 0.0)
+
+        # ── Reproject to EPSG:3857 for basemap ───────────────────────────────
+        nl_3857     = nl_row.to_crs(epsg=3857)
+        edges_3857  = edges.to_crs(epsg=3857)
+        voronoi_3857 = voronoi_pts.to_crs(epsg=3857)
+
+        # ── Buffer around the Netzlücke → plot extent ────────────────────────
+        buf         = nl_3857.geometry.buffer(buffer_m).unary_union
+        minx, miny, maxx, maxy = buf.bounds
+
+        # ── Clip network and Voronoi to buffer ────────────────────────────────
+        from shapely.geometry import box as shapely_box
+        clip_geom       = shapely_box(minx, miny, maxx, maxy)
+        edges_clip      = edges_3857[edges_3857.geometry.intersects(clip_geom)]
+        voronoi_clip    = voronoi_3857[voronoi_3857.geometry.within(clip_geom)]
+
+        # ── Draw layers ───────────────────────────────────────────────────────
+        # Background network
+        edges_clip.plot(ax=ax, color="#888888", linewidth=1.0,
+                        alpha=0.6, zorder=2)
+
+        # Netzlücke edge (highlighted)
+        nl_3857.plot(ax=ax, color="#e74c3c", linewidth=4.0,
+                     zorder=4, label=f"Netzlücke ID {dev_id}")
+
+        # Voronoi centroids
+        if len(voronoi_clip) > 0:
+            ax.scatter(voronoi_clip.geometry.x, voronoi_clip.geometry.y,
+                       s=20, color="#2980b9", zorder=5, alpha=0.8,
+                       label="Voronoi nodes")
+
+        # ── Basemap ───────────────────────────────────────────────────────────
+        if HAS_CTX:
+            try:
+                ctx.add_basemap(ax, crs="EPSG:3857",
+                                source=ctx.providers.OpenStreetMap.Mapnik,
+                                zoom="auto", alpha=0.6, zorder=1)
+            except Exception as e:
+                print(f"  [basemap] ID {dev_id}: {e}")
+
+        # ── Extent and labels ─────────────────────────────────────────────────
+        ax.set_xlim(minx, maxx)
+        ax.set_ylim(miny, maxy)
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        # Midpoint label on the edge
+        mid = nl_3857.geometry.iloc[0].interpolate(0.5, normalized=True)
+        ax.annotate(f"ID {dev_id}", xy=(mid.x, mid.y),
+                    xytext=(6, 6), textcoords="offset points",
+                    fontsize=10, fontweight="bold", color="#c0392b",
+                    zorder=6,
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white",
+                              alpha=0.7, ec="none"))
+
+        length_m = tts_row["length_m"].values[0] if len(tts_row) else 0.0
+        note = "\n← zero benefit: not on any OD path" if dt_hday == 0 else ""
+        ax.set_title(
+            f"ID {dev_id}  ·  {length_m:.0f} m\n"
+            f"ΔT = {dt_hday:.2f} h/day  ·  "
+            f"NB = {nb_mchf:.2f} MCHF{note}",
+            fontsize=9, pad=6,
+        )
+
+        ax.legend(fontsize=7, loc="lower left", framealpha=0.8)
+
+    fig.suptitle(
+        "Netzlücken close-up — IDs 676, 97, 566  "
+        "(medium-growth scenario S2, 50-year appraisal)",
+        fontsize=13, fontweight="bold", y=1.01,
+    )
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.savefig(save_path, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"[plot_netzluecken_closeup] saved → {save_path}")
+
+
+def plot_tts_area_closeups(
+        network=None,
+        access_points=None,
+        col="T_s2",
+        save_path="plot/results/tts_area_closeups.png",
+):
+    """
+    1 × 3 close-up panels of travel-time savings (same visual style as
+    plot_duebendorf_zoom / plot_single_cost_result) for three sub-areas:
+
+      Panel 1 — Dübendorf cluster  (IDs 77, 78, 79, 90, 415, 676, 703, 799, 800, 908)
+      Panel 2 — Uster              (ID 566)
+      Panel 3 — Greifensee / lake  (IDs 97, 385)
+
+    Development lines are coloured by TTS [Mio. CHF] using the corridor-wide
+    diverging colourmap so all three panels share one consistent scale.
+    """
+    lakes_path = r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
+
+    # ── Load and prepare data ─────────────────────────────────────────────────
+    dev_geom = gpd.read_file(
+        "data/Network/processed/development_candidates.gpkg")[["ID_new", "geometry"]]
+    dev_geom["ID_new"] = dev_geom["ID_new"].astype(int)
+
+    nb_df = pd.read_csv("data/costs/net_benefits.csv")
+    nb_df["ID_new"] = nb_df["ID_new"].astype(int)
+    nb_df[col] = nb_df[col] / 1e6   # CHF → Mio. CHF
+
+    df_plot = dev_geom.merge(
+        nb_df[["ID_new", col]].drop_duplicates("ID_new"),
+        on="ID_new", how="inner",
+    )
+    df_plot = gpd.GeoDataFrame(df_plot, geometry="geometry", crs="EPSG:2056")
+    df_plot = df_plot.dropna(subset=[col])
+
+    # Corridor-wide colour scale so all panels are comparable
+    min_val, max_val = df_plot[col].min(), df_plot[col].max()
+    cmap = _make_diverging_cmap(min_val, max_val)
+    norm = mcolors.Normalize(vmin=min_val, vmax=max_val)
+
+    # ── Three sub-area extents (EPSG:2056, LV95) ─────────────────────────────
+    areas = [
+        ("Dübendorf",        2_685_790, 2_692_550, 1_248_135, 1_253_237),
+        ("Uster",            2_694_960, 2_698_400, 1_243_775, 1_247_078),
+        ("Greifensee / lake",2_685_825, 2_693_293, 1_238_425, 1_246_696),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(21, 8), facecolor="white")
+
+    for ax, (area_name, e_min, e_max, n_min, n_max) in zip(axes, areas):
+
+        # ── Base layers ───────────────────────────────────────────────────────
+        if os.path.exists(lakes_path):
+            gpd.read_file(lakes_path).plot(ax=ax, color="lightblue", zorder=1)
+
+        if isinstance(network, gpd.GeoDataFrame):
+            network.plot(ax=ax, color="#888888", lw=1.0, zorder=2, alpha=0.55)
+
+        if isinstance(access_points, gpd.GeoDataFrame):
+            access_points.plot(ax=ax, color="black", markersize=30, zorder=4)
+
+        # ── Development lines coloured by TTS ────────────────────────────────
+        df_area = df_plot.cx[e_min:e_max, n_min:n_max].copy()
+        if not df_area.empty:
+            df_area.plot(ax=ax, column=col, cmap=cmap, norm=norm,
+                         linewidth=7, zorder=3, legend=False, capstyle="round")
+
+            for _, row in df_area.iterrows():
+                if row.geometry is None or row.geometry.is_empty:
+                    continue
+                mid = row.geometry.interpolate(0.5, normalized=True)
+                ax.annotate(
+                    str(int(row["ID_new"])), xy=(mid.x, mid.y),
+                    xytext=(4, 4), textcoords="offset points",
+                    fontsize=10, fontweight="bold", color="black", zorder=6,
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white",
+                              alpha=0.85, ec="none"),
+                )
+
+        # ── Extent, ticks, scale, north arrow ────────────────────────────────
+        ax.set_xlim(e_min, e_max)
+        ax.set_ylim(n_min, n_max)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.add_artist(ScaleBar(1, location="lower right"))
+        ax.text(0.96, 0.92, "N", fontsize=18, weight="bold",
+                ha="center", va="center", transform=ax.transAxes, zorder=100)
+        ax.add_patch(FancyArrowPatch(
+            (0.96, 0.89), (0.96, 0.97), color="black", lw=1.5,
+            arrowstyle="->", mutation_scale=16,
+            transform=ax.transAxes, zorder=100))
+        for sp in ax.spines.values():
+            sp.set_visible(True)
+            sp.set_edgecolor("black")
+            sp.set_linewidth(1)
+
+        ax.set_title(area_name, fontsize=12, pad=6)
+
+    # ── Shared colourbar ──────────────────────────────────────────────────────
+    sm = mcm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes, shrink=0.55, pad=0.01, aspect=30)
+    cbar.set_label("Travel-time savings [Mio. CHF]  (medium growth S2, 50-year appraisal)",
+                   rotation=90, labelpad=14, fontsize=11)
+    cbar.ax.tick_params(labelsize=10)
+
+    fig.suptitle("Travel-Time Savings — close-up by sub-area",
+                 fontsize=14, fontweight="bold")
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.show()
+    print(f"[plot_tts_area_closeups] saved → {save_path}")
