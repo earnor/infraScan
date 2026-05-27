@@ -21,7 +21,7 @@ def print_hi(name):
     # Use a breakpoint in the code line below to debug your script.
     #os.chdir(r"C:\Users\Fabrice\Desktop\HS23\Thesis\Code")
     #os.chdir(r"G:\IM\09 - Teaching\11 - Masters - Projects\2023 - FS\Marggi\04_Submission\Submission\FS2023 - MScProject - Marggi\06 - Developments\01 - Code\01 - Python")
-    os.chdir(r"C:/Users/spadmin/PycharmProjects/infraScan/infraScanRoad")
+    os.chdir(r'/Users/ruki/PycharmProjects/infraScan/infraScanRoad')
 #    os.chdir(r"/local/home/earnor/infraScan/")
     #os.chdir(r"/home/earnor/infraScan/")
 
@@ -39,7 +39,7 @@ def print_hi(name):
     n_min, n_max = 1237000, 1254000     # 1238000, 1252000 - 1237000, 1252000
     limits_corridor = [e_min, n_min, e_max, n_max]
 
-    # Boudary for plot
+    # Boundary for plot
     boundary_plot = polygon_from_points(e_min=e_min+1000, e_max=e_max-500, n_min=n_min+1000, n_max=n_max-2000)
 
     # Get a polygon as limits for teh corridor
