@@ -19,20 +19,7 @@ import matplotlib.lines as mlines
 
 
 def generate_report_figures():
-    """
-    Generates all figures referenced in 05_Results.tex and saves them to figures/.
 
-    Figures produced
-    ----------------
-    figures/network_all_types.png   — copied from pipeline output
-    figures/od_plot.png             — copied from pipeline output
-    figures/detour_distribution.png — histogram of OD detour factors
-    figures/accessibility_best.png  — node accessibility map, ID 800 (best NB)
-    figures/accessibility_worst.png — node accessibility map, ID 385 (worst NB)
-    figures/safety_index_map.png    — per-link crash-rate coloured map
-    figures/elevation_map.png       — DEM hillshade + contours + network overlay
-    figures/comfort_index_map.png   — per-link comfort index (alpha x epsilon) map
-    """
     import shutil
     import numpy as np
     import matplotlib.pyplot as plt
@@ -352,16 +339,7 @@ def generate_report_figures():
     print('\n[generate_report_figures] done — figures saved to figures/')
 
 def _make_diverging_cmap(min_val, max_val):
-    """
-    Red→grey→blue diverging colormap anchored at zero.
 
-    The proportions of red and blue are scaled to the magnitude of the
-    negative and positive ranges respectively, so the grey midpoint always
-    falls at NB=0 regardless of how asymmetric the range is.
-
-    max(1, ...) guards against an empty colour array when one side of the
-    range is extremely dominant (e.g. all-negative or near-zero positive).
-    """
     n = 256
     gray = [0.83, 0.83, 0.83, 1.0]
     if min_val < 0 and max_val > 0:
@@ -592,15 +570,7 @@ def plot_cost_uncertainty(df_costs, banned_area, col, legend_title, boundary=Non
     for idx, row in location.iterrows():
         ax.annotate(row['location'], xy=row["geometry"].coords[0], ha="center", va="top", xytext=(0, -6),
                          textcoords='offset points', fontsize=15, zorder=13)
-    """
-    # Comopute markersize based on cv value but they should range within 2 - 50
-    # Assuming 'df' is your DataFrame and 'value_column' is the column you want to normalize
-    min_val, max_val = df_costs['std'].min(), df_costs['std'].max()
-    scale_min, scale_max = 10, 400
-    # Normalize the column
-    df_costs['markersize'] = scale_max - (((df_costs['std'] - min_val) / (max_val - min_val)) * (scale_max - scale_min))
-    # Plot points
-    """
+
     scale_min, scale_max = 30, 500
     # Apply a non-linear transformation (log) — clip to avoid log(0) = -inf
     df_costs[f'log_{col}'] = np.log(df_costs[col].clip(lower=1e-6))
@@ -716,15 +686,7 @@ def plot_cost_uncertainty(df_costs, banned_area, col, legend_title, boundary=Non
 
 
 def plot_scenario_grouped_bar(plot_name="scenario_grouped_bar"):
-    """
-    Grouped horizontal bar chart: for each development (sorted by NB_s2) three
-    bars are shown side by side — one per growth scenario (s1 / s2 / s3).
-    Makes the scenario spread directly readable per development.
 
-    Reads:  data/costs/net_benefits.csv
-            data/Network/processed/development_candidates.gpkg
-    Saves:  plot/results/{plot_name}.png
-    """
     nb_path   = "data/costs/net_benefits.csv"
     devs_path = "data/Network/processed/development_candidates.gpkg"
     for p in [nb_path, devs_path]:
@@ -774,15 +736,7 @@ def plot_scenario_grouped_bar(plot_name="scenario_grouped_bar"):
 
 
 def plot_cost_benefit_scatter(plot_name="cost_benefit_scatter"):
-    """
-    Two-panel scatter: X = total costs |C+M|, Y = total benefits T+R+S (S2).
-    Left panel: full scale (all 21 developments including outliers).
-    Right panel: zoomed to 0–32 Mio. CHF on both axes; out-of-range points
-    (IDs 676, 79, 385) are shown as arrows at the top edge with their labels.
 
-    Reads:  data/costs/net_benefits.gpkg
-    Saves:  plot/results/{plot_name}.png
-    """
     nb_path = "data/costs/net_benefits.gpkg"
     if not os.path.exists(nb_path):
         print(f"[plot_cost_benefit_scatter] Missing: {nb_path} — skipping")
@@ -904,16 +858,7 @@ def boxplot(df, nbr):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_priority_ranking(plot_name="priority_ranking"):
-    """
-    Horizontal bar chart: one bar per development, sorted by NB_s2 (medium
-    scenario), with error bars spanning NB_s1 → NB_s3 as scenario uncertainty.
-    Bars are coloured by dev_type (red = Netzlücke, orange = Schwachstelle).
-    A vertical line at 0 separates net-positive from net-negative candidates.
 
-    Reads:  data/costs/net_benefits.csv
-            data/Network/processed/developments_list.csv
-    Saves:  plot/results/{plot_name}.png
-    """
     nb_path   = "data/costs/net_benefits.csv"
     devs_path = "data/Network/processed/development_candidates.gpkg"
     for p in [nb_path, devs_path]:
@@ -975,16 +920,7 @@ def plot_priority_ranking(plot_name="priority_ranking"):
 
 
 def plot_nb_components_waterfall(plot_name="nb_components_waterfall"):
-    """
-    Stacked horizontal bar chart: for each development (sorted by NB_s2)
-    the negative side shows Construction (C) + Maintenance (M) and the
-    positive side shows Travel-time savings (T_s2) + Comfort (R) + Safety (S_s2).
-    Makes it immediately clear what component drives each result.
 
-    Reads:  data/costs/net_benefits.gpkg
-            data/Network/processed/developments_list.csv
-    Saves:  plot/results/{plot_name}.png
-    """
     nb_path   = "data/costs/net_benefits.gpkg"
     devs_path = "data/Network/processed/developments_list.csv"
     for p in [nb_path, devs_path]:
@@ -1037,18 +973,7 @@ def plot_nb_components_waterfall(plot_name="nb_components_waterfall"):
 
 def plot_tt_improvement_map(boundary=None, network=None, top_n=3,
                              plot_name="tt_improvement_map"):
-    """
-    Spatial raster-diff map: for the top_n developments by NB_s2, shows the
-    per-pixel travel-time improvement (status_quo − dev) in minutes.
-    Green = shorter travel time with the new link.  The corridor network is
-    overlaid as a grey backdrop.
 
-    Reads:  data/costs/net_benefits.csv
-            data/Network/travel_time/travel_time_raster.tif
-            data/Network/travel_time/developments/dev{id}_travel_time_raster.tif
-            data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp
-    Saves:  plot/results/{plot_name}.png
-    """
     import rasterio as _rio
 
     nb_path = "data/costs/net_benefits.csv"
@@ -1137,23 +1062,7 @@ def plot_tt_improvement_map(boundary=None, network=None, top_n=3,
 
 def plot_nb_on_network(boundary=None, network=None, access_points=None,
                        plot_name="nb_network_map"):
-    """
-    Map with development candidate **edge geometries** coloured by NB_s2
-    (medium scenario net benefit).  Line width encodes construction cost
-    so cheap high-NB links stand out.  The status-quo network is shown
-    as a grey backdrop.  Uses the same custom red–grey–blue colormap as
-    plot_cost_result() so colours are consistent across all result maps.
 
-    Unlike plot_cost_result() (which uses centroid points + interpolation),
-    this function draws the actual LineString geometry of each candidate —
-    more accurate for infrastructure that spans several hundred metres.
-
-    Reads:  data/Network/processed/development_candidates.gpkg
-            data/costs/net_benefits.gpkg
-            data/Network/processed/developments_list.csv
-            data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp
-    Saves:  plot/results/{plot_name}.png
-    """
     cands_path = "data/Network/processed/development_candidates.gpkg"
     nb_path    = "data/costs/net_benefits.gpkg"
     devs_path  = "data/Network/processed/developments_list.csv"
@@ -1316,20 +1225,7 @@ def plot_nb_on_network(boundary=None, network=None, access_points=None,
 def plot_duebendorf_zoom(df_costs, banned_area, title_bar, network=None,
                          access_points=None, plot_name="duebendorf_zoom",
                          col="NB_s2", scale_to_mio=False):
-    """
-    Stand-alone zoomed map of the Dübendorf sub-area
-    (E 2 687 000–2 697 500 / N 1 247 000–1 254 000, LV95/EPSG:2056).
-    Same colour scheme as plot_cost_result so the two maps can be read
-    side by side.  Development IDs are labelled at each line's midpoint.
 
-    scale_to_mio : if True, divide col by 1e6 before plotting (use when
-                   passing raw CHF values from net_benefits.gpkg, e.g. for
-                   component maps C, M, T_s2, R_s2, S_s2).
-
-    Reads:  data/Network/processed/development_candidates.gpkg
-            data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp
-    Saves:  plot/results/{plot_name}.png
-    """
     DUB_E_MIN, DUB_E_MAX = 2_687_000, 2_697_500
     DUB_N_MIN, DUB_N_MAX = 1_247_000, 1_254_000
 
@@ -1432,15 +1328,7 @@ def plot_duebendorf_zoom(df_costs, banned_area, title_bar, network=None,
 
 
 def plot_bcr_bar(plot_name="bcr_bar"):
-    """
-    Horizontal bar chart of Benefit-Cost Ratio (BCR) per development,
-    sorted ascending.  BCR = (T_s2 + R_s2 + S_s2) / |C + M|.
-    A vertical dashed line at BCR = 1 marks the break-even threshold.
-    Bars are green (BCR ≥ 1) or red (BCR < 1).
 
-    Reads:  data/costs/net_benefits.gpkg
-    Saves:  plot/results/{plot_name}.png
-    """
     nb_path = "data/costs/net_benefits.gpkg"
     if not os.path.exists(nb_path):
         print(f"[plot_bcr_bar] Missing: {nb_path} — skipping")
@@ -1494,22 +1382,7 @@ def plot_netzluecken_closeup(
         buffer_m=500,
         save_path="figures/netzluecken_closeup.pdf",
 ):
-    """
-    1 × 3 close-up map for each specified Netzlücke ID.
 
-    Each panel shows:
-      • OSM basemap (contextily, EPSG:3857)
-      • Surrounding network clipped to a buffer around the edge (grey)
-      • The highlighted Netzlücke edge (red, thick)
-      • Voronoi node centroids (blue dots)
-      • Title: ID · ΔT [h/day] · TTS [MCHF] · NB [MCHF]
-
-    Data read from:
-      data/Network/processed/network_full_annotated_edges.gpkg
-      data/Voronoi/voronoi_developments_euclidian_values.shp
-      data/OD/traveltime_savings_od.csv
-      data/costs/net_benefits.csv
-    """
     try:
         import contextily as ctx
         HAS_CTX = True
@@ -1636,17 +1509,7 @@ def plot_tts_area_closeups(
         col="T_s2",
         save_path="plot/results/tts_area_closeups.png",
 ):
-    """
-    1 × 3 close-up panels of travel-time savings (same visual style as
-    plot_duebendorf_zoom / plot_single_cost_result) for three sub-areas:
 
-      Panel 1 — Dübendorf cluster  (IDs 77, 78, 79, 90, 415, 676, 703, 799, 800, 908)
-      Panel 2 — Uster              (ID 566)
-      Panel 3 — Greifensee / lake  (IDs 97, 385)
-
-    Development lines are coloured by TTS [Mio. CHF] using the corridor-wide
-    diverging colourmap so all three panels share one consistent scale.
-    """
     lakes_path = r"data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
 
     # ── Load and prepare data ─────────────────────────────────────────────────

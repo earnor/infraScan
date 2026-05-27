@@ -69,7 +69,7 @@ def print_hi(name):
 
     # Construction costs [CHF/m]
     c_cycle_path_new    = 1800   # new path (Netzlücke)
-    c_cycle_path_update = 20    # upgrade (Schwachstelle)
+    c_cycle_path_update = 0    # upgrade (Schwachstelle)
 
     # Maintenance costs
     c_om_cycle_path    = 20     # operational maintenance [CHF/m/year]
@@ -207,6 +207,14 @@ def print_hi(name):
         points_corridor=points_corridor,
         corridor_polygon=innerboundary,
         save_path="data/Network/processed/network_graph.png",
+    )
+
+    # High-contrast version: Netzlücken highlighted and labelled by their ID
+    plot_corridor_netzluecken_highlighted(
+        edges_aug=edges_aug,
+        points_corridor=points_corridor,
+        corridor_polygon=innerboundary,
+        save_path="data/Network/processed/network_netzluecken_highlighted.pdf",
     )
 
 
@@ -422,15 +430,30 @@ def print_hi(name):
 
     od_scenarios, voronoi_vals = od_cycling_weighted()
 
-    plot_od_results(
-        od_scenarios=od_scenarios,
+    # Plot 1 — origin-strength map (bubble = pop, colour = employment)
+    plot_od_map(
         voronoi_vals=voronoi_vals,
         points_gdf=points_corridor,
         corridor_polygon=innerboundary,
+        edges_gdf=edges_aug,
+        save_path='data/OD/plot1_map.png',
+    )
+
+    # Plot 2 — small multiples: population & cycling trips per scenario
+    plot_od_scenario_bars(
+        od_scenarios=od_scenarios,
+        voronoi_vals=voronoi_vals,
         scenarios=['s1', 's2', 's3'],
-        edges_gdf=gpd.read_file(r"data/Network/processed/edges_with_attribute.gpkg"),
-        lakes_gdf=gpd.read_file(r"data/landuse_landcover/processed/lake_data_zh.gpkg"),
-        save_path='data/OD/od_plot.png',
+        save_path='data/OD/plot2_trips.png',
+    )
+
+    # Plot 3 — top-20 bar chart + network map side by side
+    plot_od_top20_nodes(
+        od_scenarios=od_scenarios,
+        points_gdf=points_corridor,
+        edges_gdf=edges_aug,
+        corridor_polygon=innerboundary,
+        save_path='data/OD/plot3_nodes.png',
     )
 
     runtimes["OD matrix (Voronoi-weighted)"] = time.time() - st
