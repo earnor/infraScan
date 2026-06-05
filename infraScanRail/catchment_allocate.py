@@ -74,13 +74,6 @@ CYCLE_RADIUS_M = 2500    # m - cycling search radius to rail
 # noPT sentinel
 NO_PT_ID       = -1
 
-# Access mode codes (used in allocation logic and visualisation)
-MODE_NO_PT  = 0
-MODE_WALK   = 1
-MODE_BUS    = 2
-MODE_TRAM   = 3
-MODE_CYCLE  = 4
-
 # Station search constraint (PT-Feeder method)
 MAX_CANDIDATE_STATIONS = 5
 
@@ -493,7 +486,6 @@ def _run_municipal_method(boundary, rail_stations, pop_grid=None, empl_grid=None
         make_phase_4a_plots(
             method='municipal',
             sa_boundary=None,
-            ca_boundary=boundary,
             allocation=pd.DataFrame(),    # no per-cell allocation for municipal
             rail_stations=rail_stations,
             pop_grid=pop_grid,
@@ -1175,6 +1167,11 @@ def _load_rail_stations(boundary, temporal='full_day', buffer=BUFFER_RAIL_M):
     # use it directly as id_point without any external crosswalk file.
     rail['diva_nr'] = None
     rail['id_point'] = rail['stop_id']
+
+    # The enriched rail_stops carries the nodes.gpkg schema (name column `Name`,
+    # no `stop_name`); map it so downstream name lookups don't degrade to ids.
+    if 'stop_name' not in rail.columns and 'Name' in rail.columns:
+        rail = rail.rename(columns={'Name': 'stop_name'})
 
     keep_cols = ['stop_id', 'stop_name', 'diva_nr', 'id_point', 'mode', 'geometry']
     for c in keep_cols:
@@ -2284,24 +2281,20 @@ def _compute_variant_freq_lookup() -> dict:
     """Aggregate per-variant frequency + service_period across all temporal
     subfolders (cross-period view).
 
-    Uses `_load_lines_all_periods` to read All_Day + Peak + Off_Peak files
-    with their canonical service_period filters (All_Day no filter, Peak →
-    peak_only, Off_Peak → offpeak_only). Cross-subfolder duplicates are then
-    removed on (route_id, variant_rank, direction_id) so each variant-
-    direction row contributes once. The CLI `settings.TEMPORAL` does NOT
-    scope this helper — until a concrete use case justifies per-temporal
-    variant data here, every sheet that consumes line frequencies sees the
-    full cross-period view.
+    Uses `_load_lines_all_periods` to read the full-day top-level lines file
+    (the complete union of all services). Rows are de-duplicated on
+    (route_id, variant_rank, direction_id) so each variant-direction row
+    contributes once.
 
     Per (route_id, variant_rank) aggregation:
       - freq_am / freq_pm / freq_op : mean of freq_{am,pm,op}_peak_dep_hr /
-        freq_offpeak_dep_hr across direction rows.
-      - total_dep : sum across direction rows over the ARE 06:00-20:00 window.
+        freq_offpeak_dep_hr across direction rows (retained, diagnostic only).
+      - total_dep : mean across direction rows over the ARE 06:00-20:00 window
+        (per-direction, matches _compute_stop_gueteklassen).
       - service_period : most common non-placeholder tag across the rows;
         falls back to 'unknown' only when no row carried a recognised tag.
-      - freq_per_h : per-variant period-specific dep/h:
-            peak_only            -> max(freq_am, freq_pm)
-            offpeak_only / all_day -> freq_op
+      - freq_per_h : whole-day average dep/h per direction
+        (= total_dep / (GK_WINDOW_MIN/60) = freq_per_h_window).
 
     Returns dict[(route_id_str, variant_rank_int)] -> dict of the columns
     above. Empty dict when no lines files are available.
@@ -2340,15 +2333,16 @@ def _compute_variant_freq_lookup() -> dict:
             .agg(freq_am=('freq_am_peak_dep_hr', 'mean'),
                  freq_pm=('freq_pm_peak_dep_hr', 'mean'),
                  freq_op=('freq_offpeak_dep_hr', 'mean'),
-                 total_dep=('total_dep', 'sum'),
+                 total_dep=('total_dep', 'mean'),
                  service_period=('service_period', _sp_mode))
             .reset_index())
 
-    def _per_period_freq(row):
-        if row['service_period'] == 'peak_only':
-            return max(float(row['freq_am'] or 0.0), float(row['freq_pm'] or 0.0))
-        return float(row['freq_op'] or 0.0)
-    agg['freq_per_h'] = agg.apply(_per_period_freq, axis=1)
+    # Whole-day average dep/h per direction (= freq_per_h_window). Uses the
+    # per-direction mean of total_dep over the ARE 06:00-20:00 window
+    # (GK_WINDOW_MIN), matching _compute_stop_gueteklassen so stop-level
+    # dep_per_h / wait_min stay consistent with the Güteklasse headway. The
+    # per-period freq_am/pm/op columns are retained for diagnostics only.
+    agg['freq_per_h'] = agg['total_dep'] / (GK_WINDOW_MIN / 60.0)
 
     return agg.set_index(['route_id_str', 'variant_rank_i']).to_dict('index')
 
@@ -2642,9 +2636,9 @@ def _build_pt_stops_sa_sheet(feeder_stops, feeder_segments, feeder_graph,
         sid = r['stop_id']
         lines = sorted(stop_lines_map.get(sid, set()))
         # dep_per_h = Σ freq_per_h across every (route_id, variant_rank) visiting
-        # this stop. Each variant's freq_per_h is the period-specific value
-        # produced by `_compute_variant_freq_lookup` (peak_only → max(AM, PM);
-        # offpeak_only / all_day → off-peak).
+        # this stop. Each variant's freq_per_h is the whole-day average
+        # (total_dep / (GK_WINDOW_MIN/60) = freq_per_h_window) from
+        # `_compute_variant_freq_lookup`, consistent with the ARE Güteklasse.
         dep_h = sum(float(freq_per_v.get(vk, {}).get('freq_per_h', 0.0) or 0.0)
                     for vk in stop_variants_map.get(sid, set()))
         # Implicit headway from the per-line sum; wait via the same piecewise
@@ -3036,10 +3030,22 @@ def _build_visualisation(allocation, grid, rail_stations, boundary, method_label
                         G.add_edge(clipped_catchment.loc[i, id_col],
                                    clipped_catchment.loc[j, id_col])
 
-        coloring = nx.coloring.greedy_color(G, strategy='largest_first')
-        n_colors = max(coloring.values()) + 1 if coloring else 1
-        color_map = {sid: boundary_palette[cidx % len(boundary_palette)]
-                     for sid, cidx in coloring.items()}
+        # Balanced 8-colour assignment: keep bordering catchments distinct but
+        # spread usage across 8 palette colours. Plain greedy minimisation
+        # collapsed to ~5 colours, so many non-adjacent catchments reused a
+        # colour and were ambiguous. Largest-degree first; each station takes the
+        # least-globally-used colour that no bordering catchment already holds.
+        n_target = min(8, len(boundary_palette))
+        usage = [0] * n_target
+        coloring = {}
+        for node in sorted(G.nodes(), key=lambda n: -G.degree(n)):
+            neigh = {coloring[v] for v in G.neighbors(node) if v in coloring}
+            cands = [c for c in range(n_target) if c not in neigh] or list(range(n_target))
+            best = min(cands, key=lambda c: (usage[c], c))
+            coloring[node] = best
+            usage[best] += 1
+        n_colors = len(set(coloring.values()))
+        color_map = {sid: boundary_palette[cidx] for sid, cidx in coloring.items()}
         max_deg = max(dict(G.degree()).values()) if G.degree() else 0
         print(f"    Graph colouring: {n_colors} colours for "
               f"{len(clipped_catchment)} station catchments (max adjacency {max_deg})")
@@ -3079,58 +3085,8 @@ def _build_visualisation(allocation, grid, rail_stations, boundary, method_label
         ax.set_ylabel(ylabel)
         _add_map_elements(ax)
 
-    # --- Figure: 1×2 panels ---
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(26, 11), sharey=True)
-    fig.suptitle(f'Catchment Area Allocation — {method_label}', fontsize=14)
-
-    # ---- Left panel: Access mode ----
-    legend_left = []
-    for mode, color in mode_colors.items():
-        subset = alloc[alloc['access_mode'] == mode]
-        if len(subset) > 0:
-            subset.plot(ax=ax1, color=color, edgecolor='none', alpha=0.85, zorder=2)
-            legend_left.append(
-                Patch(facecolor=color, edgecolor='none', label=mode_labels[mode]))
-    _base_setup(ax1, ylabel='N [m]')
-    legend_left.append(
-        Line2D([0], [0], color='black', linewidth=1.8, linestyle='--',
-               label='Study area boundary'))
-    legend_left.append(
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
-               markeredgecolor='black', markersize=8, label='Rail station'))
-    ax1.set_title('Access Mode', fontsize=13)
-    ax1.legend(handles=legend_left, loc='upper center',
-               bbox_to_anchor=(0.5, -0.06), bbox_transform=ax1.transAxes,
-               ncol=3, fontsize=8, framealpha=0.9, borderaxespad=0)
-
-    # ---- Right panel: Station allocation ----
-    legend_right = []
-    if color_map:
-        for sid, color in color_map.items():
-            subset = alloc[alloc['id_point'] == sid]
-            if len(subset) > 0:
-                subset.plot(ax=ax2, color=color, edgecolor='none', alpha=0.85, zorder=2)
-        legend_right.append(
-            Patch(facecolor=boundary_palette[0], edgecolor='none',
-                  label='Station catchment'))
-    no_pt_cells = alloc[alloc['id_point'] == NO_PT_ID]
-    if len(no_pt_cells) > 0:
-        no_pt_cells.plot(ax=ax2, color='#d9d9d9', edgecolor='none', alpha=0.85, zorder=2)
-    legend_right.append(
-        Patch(facecolor='#d9d9d9', edgecolor='none', label='No access'))
-    legend_right.append(
-        Line2D([0], [0], color='black', linewidth=1.8, linestyle='--',
-               label='Study area boundary'))
-    legend_right.append(
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
-               markeredgecolor='black', markersize=8, label='Rail station'))
-    _base_setup(ax2, ylabel='')
-    ax2.set_title('Station Allocation', fontsize=13)
-    ax2.legend(handles=legend_right, loc='upper center',
-               bbox_to_anchor=(0.5, -0.06), bbox_transform=ax2.transAxes,
-               ncol=3, fontsize=8, framealpha=0.9, borderaxespad=0)
-
     # --- Summary table: Modal Access | Hierarchical | Non-Hierarchical ---
+    # (computed first; it is rendered below the Access-Mode figure only)
     pop_map_d  = grid.set_index('RELI')['NUMMER'].to_dict()
     empl_map_d = empl_grid.set_index('RELI')['NUMMER'].to_dict() if empl_grid is not None else {}
 
@@ -3221,16 +3177,69 @@ def _build_visualisation(allocation, grid, rail_stations, boundary, method_label
             "Hierarchical: walk/PT primary + cycle fallback  |  "
             "Non-Hierarchical: fastest mode wins (cycle competes equally)")
 
-    fig.subplots_adjust(top=0.93, bottom=0.24, wspace=0.02)
-    fig.text(0.5, 0.02, tbl, ha='center', va='bottom',
-             fontsize=7.5, fontfamily='monospace',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.85))
+    slug = method_label.lower().replace(" ", "_")
+    boundary_line = Line2D([0], [0], color='black', linewidth=1.8, linestyle='--',
+                           label='Study area boundary')
+    station_mark  = Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
+                           markeredgecolor='black', markersize=8, label='Rail station')
 
-    out_path = os.path.join(PT_FEEDER_PLOT_DIR,
-                            f'catchment_visualisation_{method_label.lower().replace(" ", "_")}.pdf')
-    fig.savefig(out_path, bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    print(f"    Saved -> {out_path}")
+    # === Figure 1: Access Mode (+ summary table below) ======================
+    fig1, ax1 = plt.subplots(figsize=(13, 11))
+    fig1.suptitle(f'Catchment Area Allocation — {method_label}: Access Mode',
+                  fontsize=14)
+    legend_left = []
+    for mode, color in mode_colors.items():
+        subset = alloc[alloc['access_mode'] == mode]
+        if len(subset) > 0:
+            subset.plot(ax=ax1, color=color, edgecolor='none', alpha=0.85, zorder=2)
+            legend_left.append(
+                Patch(facecolor=color, edgecolor='none', label=mode_labels[mode]))
+    _base_setup(ax1, ylabel='N [m]')
+    legend_left += [boundary_line, station_mark]
+    ax1.set_title('Access Mode', fontsize=13)
+    ax1.legend(handles=legend_left, loc='upper center',
+               bbox_to_anchor=(0.5, -0.06), bbox_transform=ax1.transAxes,
+               ncol=3, fontsize=8, framealpha=0.9, borderaxespad=0)
+    fig1.subplots_adjust(top=0.93, bottom=0.24)
+    fig1.text(0.5, 0.02, tbl, ha='center', va='bottom',
+              fontsize=7.5, fontfamily='monospace',
+              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.85))
+    out_modes = os.path.join(PT_FEEDER_PLOT_DIR,
+                             f'catchment_visualisation_{slug}_modes.pdf')
+    fig1.savefig(out_modes, bbox_inches='tight', dpi=150)
+    plt.close(fig1)
+    print(f"    Saved -> {out_modes}")
+
+    # === Figure 2: Station Allocation (catchment areas) =====================
+    fig2, ax2 = plt.subplots(figsize=(13, 11))
+    fig2.suptitle(f'Catchment Area Allocation — {method_label}: Station Allocation',
+                  fontsize=14)
+    legend_right = []
+    if color_map:
+        for sid, color in color_map.items():
+            subset = alloc[alloc['id_point'] == sid]
+            if len(subset) > 0:
+                subset.plot(ax=ax2, color=color, edgecolor='none', alpha=0.85, zorder=2)
+        legend_right.append(
+            Patch(facecolor=boundary_palette[0], edgecolor='none',
+                  label='Station catchment'))
+    no_pt_cells = alloc[alloc['id_point'] == NO_PT_ID]
+    if len(no_pt_cells) > 0:
+        no_pt_cells.plot(ax=ax2, color='#d9d9d9', edgecolor='none', alpha=0.85, zorder=2)
+    legend_right.append(
+        Patch(facecolor='#d9d9d9', edgecolor='none', label='No access'))
+    legend_right += [boundary_line, station_mark]
+    _base_setup(ax2, ylabel='N [m]')
+    ax2.set_title('Station Allocation', fontsize=13)
+    ax2.legend(handles=legend_right, loc='upper center',
+               bbox_to_anchor=(0.5, -0.06), bbox_transform=ax2.transAxes,
+               ncol=3, fontsize=8, framealpha=0.9, borderaxespad=0)
+    fig2.subplots_adjust(top=0.93, bottom=0.12)
+    out_areas = os.path.join(PT_FEEDER_PLOT_DIR,
+                             f'catchment_visualisation_{slug}_areas.pdf')
+    fig2.savefig(out_areas, bbox_inches='tight', dpi=150)
+    plt.close(fig2)
+    print(f"    Saved -> {out_areas}")
 
 
 # ===============================================================================
@@ -3412,33 +3421,28 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
     ]
 
     # --- Station markers: white fill + black outline for all; green fill for
-    #     stations that have a PT-feeder catchment but no municipalities assigned
-    #     in the municipal method (n_communes == 0 in the Stations_Summary
-    #     sheet of station_catchments.xlsx). ---
+    #     stations that gain a catchment in PT-Feeder — i.e. they have a
+    #     PT-Feeder catchment but no Municipal catchment at all. ---
     prep_bnd_diff = prep(boundary)
     stations_in_bnd = rail_stations[
         rail_stations.geometry.apply(lambda p: prep_bnd_diff.contains(p))].copy()
 
-    # Load no-municipality stations from the municipal Stations_Summary sheet.
-    # All ID sets use strings to match rail_stations['id_point'] (str from stop_id).
-    summary_xlsx = os.path.join(MUNICIPAL_DATA_DIR, 'station_catchments.xlsx')
-    no_muni_ids: set = set()
-    if os.path.exists(summary_xlsx):
-        try:
-            _sum = pd.read_excel(summary_xlsx, sheet_name='Stations_Summary',
-                                  engine='openpyxl')
-            no_muni_mask = _sum['n_communes'].fillna(0).astype(int) == 0
-            no_muni_ids = set(
-                _sum.loc[no_muni_mask, 'station_number'].astype(str).values
-            )
-        except Exception as exc:
-            print(f"    WARNING: failed to read Stations_Summary from {summary_xlsx}: {exc}")
+    # A station with no Municipal catchment is ABSENT from muni_c (the breakdown
+    # has one row per assigned commune, so zero-commune stations never appear) —
+    # so the "gained" set is the catchment-id difference, not a zero-count lookup.
+    # int-normalised strings match stations_in_bnd['id_point'] (clean str ids)
+    # and absorb any float ids ("8503000.0") carried by the catchment GPKGs.
+    def _station_id_set(gdf):
+        out = set()
+        for x in gdf['id_point'].values:
+            if pd.notna(x) and str(int(x)) != str(NO_PT_ID):
+                out.add(str(int(x)))
+        return out
 
-    # A station is "PT-feeder new" if it has no municipal assignment AND exists
-    # in the PT-feeder catchment
-    pt_ids = {str(x) for x in pt_c['id_point'].values
-              if str(x) != str(NO_PT_ID)}
-    pt_new_ids = no_muni_ids & pt_ids
+    muni_ids   = _station_id_set(muni_c)
+    pt_ids     = _station_id_set(pt_c)
+    pt_new_ids = pt_ids - muni_ids
+    print(f"    Stations gaining a catchment in PT-Feeder (green): {len(pt_new_ids)}")
 
     sta_all    = stations_in_bnd
     sta_pt_new = stations_in_bnd[
@@ -3524,8 +3528,8 @@ _ACCESS_LABELS = ['0–5', '5–10', '10–15', '15–20', '20–25', '25–30',
 _ACCESS_GREY   = '#BDBDBD'
 
 
-def _plot_access_times(walk_df, cycle_df, feeder_df, alloc_pop, pop_grid,
-                       rail_stations, feeder_stops, boundary, empl_grid=None):
+def _plot_access_times(walk_df, cycle_df, feeder_df, allocation, pop_grid,
+                       boundary, empl_grid=None):
     """Produce four access-time maps (plasma_r palette, discrete 3/5-min bins).
 
     Plots
@@ -3533,7 +3537,7 @@ def _plot_access_times(walk_df, cycle_df, feeder_df, alloc_pop, pop_grid,
     1. Walk        — cells within BUFFER_RAIL_M of a rail station
     2. Cycle       — cells within CYCLE_RADIUS_M of a rail station
     3. Feeder      — cells within bus/tram buffer whose feeder stop is graph-reachable
-    4. Best choice — winner-takes-all result (alloc_pop), all in-buffer cells
+    4. Best choice — winner-takes-all result (allocation), all in-buffer cells
 
     Cells outside their respective buffer are shown in grey.
     Colour scale: plasma_r (yellow = fast, dark purple/blue = slow).
@@ -3552,14 +3556,22 @@ def _plot_access_times(walk_df, cycle_df, feeder_df, alloc_pop, pop_grid,
         lakes = gpd.read_file(paths.LAKES_SHP).to_crs(CODEBASE_CRS)
         lakes = lakes[lakes.geometry.intersects(boundary)].copy()
 
-    # Pre-build square polygon geometry for the grid (100 m × 100 m)
-    _e = pop_grid['E_KOORD'].values
-    _n = pop_grid['N_KOORD'].values
+    # Pre-build square polygon geometry (100 m × 100 m) for every inhabited cell
+    # (Pop>0 OR FTE>0) so FTE-only cells appear too; Pop/FTE attribution stays
+    # per-grid via pop_map / empl_map below.
+    grid_cells = pop_grid[['RELI', 'E_KOORD', 'N_KOORD']]
+    if empl_grid is not None:
+        grid_cells = pd.concat(
+            [grid_cells, empl_grid[['RELI', 'E_KOORD', 'N_KOORD']]],
+            ignore_index=True
+        ).drop_duplicates(subset='RELI')
+    grid_cells = grid_cells.reset_index(drop=True)
+    _e = grid_cells['E_KOORD'].values
+    _n = grid_cells['N_KOORD'].values
     squares = [box(e, n, e + CELL_SIZE_M, n + CELL_SIZE_M)
                for e, n in zip(_e, _n)]
     grid_plot = gpd.GeoDataFrame(
-        pop_grid[['RELI', 'E_KOORD', 'N_KOORD']].copy(),
-        geometry=squares, crs=CODEBASE_CRS
+        grid_cells.copy(), geometry=squares, crs=CODEBASE_CRS
     )
 
     def _class(time_sec):
@@ -3706,14 +3718,14 @@ def _plot_access_times(walk_df, cycle_df, feeder_df, alloc_pop, pop_grid,
                 feeder_df['RELI'].values,
                 feeder_df['total_time_sec'].values)
 
-    # --- 4. Best choice (winner-takes-all from alloc_pop) ---
-    # alloc_pop already has the minimum-time station per cell
-    best_mask = alloc_pop['id_point'] != NO_PT_ID
+    # --- 4. Best choice (winner-takes-all from the allocation) ---
+    # the allocation already has the minimum-time station per cell
+    best_mask = allocation['id_point'] != NO_PT_ID
     if best_mask.any():
         _render('Access Time — Best Mode (Walk / Cycle / PT)',
                 'plot_access_time_best.pdf',
-                alloc_pop.loc[best_mask, 'RELI'].values,
-                alloc_pop.loc[best_mask, 'access_time_sec'].values)
+                allocation.loc[best_mask, 'RELI'].values,
+                allocation.loc[best_mask, 'access_time_sec'].values)
 
 
 # ===============================================================================
@@ -3792,23 +3804,17 @@ def _kat_to_ring_records(stop_row, boundary_geom=None):
 # SHARED LOADERS — per-line frequency and per-segment tables across all periods
 # ===============================================================================
 
-# Each (subfolder, suffix, keep_period) tuple defines one of the three
-# service-period GeoPackages produced by services_network_builder. Loading all
-# three with these filters yields exactly one row per (route_id, direction_id,
-# variant_rank) regardless of the periods the line operates in.
-_PERIOD_SPECS = [
-    ('All_Day',  '_allday',  None),
-    ('Peak',     '_peak',    'peak_only'),
-    ('Off_Peak', '_offpeak', 'offpeak_only'),
-]
-
-
 def _load_lines_all_periods(base, name, mode_grp_map=None):
-    """Load per-line frequency table from all three temporal subfolders.
+    """Load the full-day per-line table from the top-level ``<base>/<name>.gpkg``.
+
+    The top-level file is the complete union of all services (all_day +
+    peak_only + offpeak_only), one row per (route_id, direction_id,
+    variant_rank), and is the single source of truth. The All_Day / Peak /
+    Off_Peak subfolders are diagnostic-only and no longer read here.
 
     Args:
         base: Absolute path to the network root (_FEEDER_BASE or _RAIL_BASE).
-        name: File basename without suffix or extension, e.g. 'pt_feeder_lines'.
+        name: File basename without extension, e.g. 'pt_feeder_lines'.
         mode_grp_map: Optional dict mapping layer name → mode_group code. When
             given, adds a 'mode_group' column to each layer's frame; falls
             back to 'B' for layers not in the map. None to skip the column.
@@ -3817,44 +3823,49 @@ def _load_lines_all_periods(base, name, mode_grp_map=None):
         Concatenation of all rows with all original columns retained, plus
         'mode_group' if mode_grp_map was provided.
     """
+    path = os.path.join(base, f'{name}.gpkg')
+    if not os.path.exists(path):
+        return pd.DataFrame()
     frames = []
-    for subfolder, suffix, keep_period in _PERIOD_SPECS:
-        path = os.path.join(base, subfolder, f'{name}{suffix}.gpkg')
-        for layer_name, _schema in pyogrio.list_layers(path):
-            gdf = gpd.read_file(path, layer=layer_name)
-            if keep_period is not None and 'service_period' in gdf.columns:
-                gdf = gdf[gdf['service_period'] == keep_period]
-            if mode_grp_map is not None:
-                gdf['mode_group'] = mode_grp_map.get(layer_name, 'B')
-            frames.append(gdf)
+    for layer_name, _schema in pyogrio.list_layers(path):
+        gdf = gpd.read_file(path, layer=layer_name)
+        if mode_grp_map is not None:
+            gdf['mode_group'] = mode_grp_map.get(layer_name, 'B')
+        frames.append(gdf)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def _load_segs_all_periods(base, name):
-    """Load per-segment edges from all three temporal subfolders, deduped.
+    """Load per-segment edges from the top-level ``<base>/<name>.gpkg``, deduped.
+
+    Reads the full-day top-level file (single source of truth) rather than the
+    temporal subfolders.
 
     Args:
         base: Absolute path to the network root (_FEEDER_BASE or _RAIL_BASE).
-        name: File basename without suffix or extension, e.g. 'pt_feeder_segments'.
+        name: File basename without extension, e.g. 'pt_feeder_segments'.
 
     Returns:
         DataFrame with columns ['from_stop_id', 'to_stop_id', 'route_id',
         'direction_id', 'variant_rank']. Bidirectional rows preserved so
         terminal stops appearing only in direction_id=1 are included.
     """
+    path = os.path.join(base, f'{name}.gpkg')
+    if not os.path.exists(path):
+        return pd.DataFrame(
+            columns=['from_stop_id', 'to_stop_id', 'route_id',
+                     'direction_id', 'variant_rank'])
     frames = []
-    for subfolder, suffix, _period in _PERIOD_SPECS:
-        path = os.path.join(base, subfolder, f'{name}{suffix}.gpkg')
-        for layer_name, _schema in pyogrio.list_layers(path):
-            gdf = gpd.read_file(path, layer=layer_name)
-            gdf = gdf.rename(columns={
-                'from_stop_nr': 'from_stop_id',
-                'to_stop_nr':   'to_stop_id',
-                'GTFS_ID':      'route_id',
-            })
-            frames.append(
-                gdf[['from_stop_id', 'to_stop_id',
-                     'route_id', 'direction_id', 'variant_rank']].copy())
+    for layer_name, _schema in pyogrio.list_layers(path):
+        gdf = gpd.read_file(path, layer=layer_name)
+        gdf = gdf.rename(columns={
+            'from_stop_nr': 'from_stop_id',
+            'to_stop_nr':   'to_stop_id',
+            'GTFS_ID':      'route_id',
+        })
+        frames.append(
+            gdf[['from_stop_id', 'to_stop_id',
+                 'route_id', 'direction_id', 'variant_rank']].copy())
     combined = pd.concat(frames, ignore_index=True)
     return combined.drop_duplicates(
         subset=['from_stop_id', 'to_stop_id', 'route_id', 'direction_id', 'variant_rank'])
@@ -4974,12 +4985,15 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
         breakdown=breakdown)
     if visualize:
         plot_rs = _get_plot_rail_stations(rail_stations, scope='ca')
-        _build_visualisation(alloc_pop, pop_grid, plot_rs, boundary, 'PT-Feeder',
+        # Plot every inhabited cell (Pop>0 OR FTE>0): alloc_combined adds the
+        # employment-only cells to the population allocation, and the *_all access
+        # frames keep the summary table's Pop/FTE totals consistent with them.
+        _build_visualisation(alloc_combined, pop_grid, plot_rs, boundary, 'PT-Feeder',
                              empl_grid,
-                             walk_df=walk_pop, cycle_df=cycle_pop, feeder_df=feeder_pop,
+                             walk_df=walk_all, cycle_df=cycle_all, feeder_df=feeder_all,
                              catchment_gdf=pt_catchment)
-        _plot_access_times(walk_pop, cycle_pop, feeder_pop, alloc_pop, pop_grid,
-                           plot_rs, feeder_stops, boundary, empl_grid=empl_grid)
+        _plot_access_times(walk_all, cycle_all, feeder_all, alloc_combined, pop_grid,
+                           boundary, empl_grid=empl_grid)
         # Catchment + network overlay (analogue of the Municipal plot)
         _plot_catchments_with_network(
             pt_catchment, plot_rs, boundary,
@@ -4994,7 +5008,6 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
         make_phase_4a_plots(
             method='pt_feeder',
             sa_boundary=None,    # _load_sa_boundary() called inside the orchestrator
-            ca_boundary=boundary,
             allocation=alloc_combined,
             rail_stations=rail_stations,
             pop_grid=pop_grid,
@@ -5414,7 +5427,12 @@ def _read_rail_stops_gpkg(path: str):
     else:
         return None
     if 'stop_name' not in stops.columns:
-        stops['stop_name'] = stops['stop_id']
+        # The enriched rail_stops carries the nodes.gpkg schema, where the name
+        # column is `Name`; fall back to the numeric id only if neither exists.
+        if 'Name' in stops.columns:
+            stops = stops.rename(columns={'Name': 'stop_name'})
+        else:
+            stops['stop_name'] = stops['stop_id']
     return stops
 
 
@@ -5624,8 +5642,9 @@ def _plot_sa_stations_overview_map(sa_stations, sa_boundary, shares_df,
     sa_ids = sorted(sa_row_by_id.keys())
 
     def _slices_for(sub, value_col):
-        """Return (label, share, colour) per slice, sorted desc; <3% merged into Other.
-        Communes share colours across Pop/FTE via a BFS-keyed mapping."""
+        """Return (label, share, colour) per slice: the top-3 communes by value,
+        with the remainder merged into 'Other'. Communes share colours across
+        Pop/FTE via a BFS-keyed mapping."""
         if sub.empty:
             return []
         total = float(sub[value_col].sum())
@@ -5639,57 +5658,42 @@ def _plot_sa_stations_overview_map(sa_stations, sa_boundary, shares_df,
 
         ranked = sub.sort_values(value_col, ascending=False).copy()
         ranked['share'] = ranked[value_col] / total
-        main         = ranked[ranked['share'] >= 0.03]
-        other_share  = float(ranked[ranked['share'] < 0.03]['share'].sum())
+        # Show only the top-3 communes that each hold >= 5%; everything else
+        # (smaller top-3 entries plus the long tail) collapses into 'Other'.
+        shown = ranked.head(3)
+        shown = shown[shown['share'] >= 0.05]
+        other_share = float(1.0 - shown['share'].sum())
         out = []
-        for _, r in main.iterrows():
+        for _, r in shown.iterrows():
             name = (str(r['commune_name']) if pd.notna(r.get('commune_name'))
                     else f"BFS {r['BFS_NR']}")
             out.append((name, float(r['share']), colour_for_bfs[int(r['BFS_NR'])]))
-        if other_share > 0:
+        if other_share > 1e-6:
             out.append(('Other', other_share, '#888888'))
         return out
 
-    def _closest_angle_in_arc(theta1: float, theta2: float, target: float) -> float:
-        """Angle in the counterclockwise arc [theta1, theta2] closest to `target`.
+    def _layout_pie(cx, cy, slices, title, label_side, clockwise):
+        """Compute wedge + leader geometry for one pie WITHOUT drawing.
 
-        Used to anchor the leader line on the slice's perimeter at the point
-        nearest the labelled side, so the leader never crosses the pie.
+        Returns a layout dict consumed by `_render_pie`. Each leader leaves its
+        share's centre as a radius (perpendicular to the circle, out to 1.10·r).
+        A single 100 % share anchors on the horizontal axis toward the label side
+        (9 o'clock left / 3 o'clock right) instead of the degenerate 6 o'clock
+        midpoint of a full 360° wedge. Shares facing the label column ('near') go
+        straight across; inward shares ('far') route up beside the pie and across
+        to a label at the station-text height.
         """
-        a = theta1 % 360
-        b = theta2 % 360
-        t = target % 360
-        arc_size = (theta2 - theta1) % 360
-        if arc_size == 0:
-            arc_size = 360
-        # Distance from `a` going counterclockwise to `t`
-        d_at = (t - a) % 360
-        if d_at <= arc_size:
-            return t
-        # `t` is outside the arc — return the nearer endpoint
-        d_a = min(abs(t - a), 360 - abs(t - a))
-        d_b = min(abs(t - b), 360 - abs(t - b))
-        return a if d_a < d_b else b
+        left    = (label_side == 'left')
+        lx_text = cx - label_dx if left else cx + label_dx
+        ha      = 'right' if left else 'left'
+        sgn     = -1 if left else 1
+        min_gap = pie_radius * 0.40
+        r_out   = pie_radius * 1.10
+        x_turn  = cx + sgn * pie_radius * 1.25
+        box_ly  = cy + pie_radius * 1.45
+        single  = (len(slices) == 1)
 
-    def _draw_pie(cx, cy, slices, title, label_side, clockwise):
-        """Draw one pie at (cx, cy) with leader-lined labels on `label_side`.
-
-        Two-pass label placement:
-          1. Wedges drawn + each slice's natural label y computed from the
-             closest-arc anchor (target = 180° for left, 0° for right).
-          2. Labels sorted top-to-bottom; if any pair is closer than
-             ~0.45·pie_radius the lower one is pushed down to enforce
-             the gap, so nameplates never stack on top of each other.
-        Leaders are then drawn from the slice arc to the resolved label y.
-        """
-        if not slices:
-            return
-        target = 180.0 if label_side == 'left' else 0.0
-        lx_text = cx - label_dx if label_side == 'left' else cx + label_dx
-        ha      = 'right' if label_side == 'left' else 'left'
-
-        # ── Pass 1: draw wedges, collect anchor info ──────────────────────
-        items = []   # one dict per slice: name, share, sx, sy, ly
+        wedges, recs = [], []
         start = 90.0
         for name, share, colour in slices:
             delta = share * 360.0
@@ -5699,42 +5703,114 @@ def _plot_sa_stations_overview_map(sa_stations, sa_boundary, shares_df,
             else:
                 theta1, theta2 = start, start + delta
                 start += delta
-            ax.add_patch(Wedge(
-                center=(cx, cy), r=pie_radius, theta1=theta1, theta2=theta2,
-                facecolor=colour, edgecolor='white', linewidth=0.5, zorder=9,
-            ))
-            anchor_deg = _closest_angle_in_arc(theta1, theta2, target)
-            rad = np.deg2rad(anchor_deg)
-            items.append({
-                'name':  name,
-                'share': share,
-                'sx':    cx + pie_radius * np.cos(rad),
-                'sy':    cy + pie_radius * np.sin(rad),
-                'ly':    cy + pie_radius * 1.25 * np.sin(rad),
+            wedges.append((theta1, theta2, colour))
+            if not single and share > 0.5:
+                # Dominant slice: perpendicular drop at 6 o'clock (from the share
+                # centre, straight down) then a horizontal leg to a label below.
+                recs.append({
+                    'name': name, 'share': share, 'kind': 'major',
+                    'sx': cx, 'sy': cy - pie_radius * 0.50,
+                })
+                continue
+            if single:
+                cosr, sinr = (-1.0, 0.0) if left else (1.0, 0.0)
+            else:
+                mid = np.deg2rad((theta1 + theta2) / 2.0)
+                cosr, sinr = np.cos(mid), np.sin(mid)
+            recs.append({
+                'name': name, 'share': share,
+                'sx': cx + pie_radius * 0.50 * cosr, 'sy': cy + pie_radius * 0.50 * sinr,
+                'ox': cx + r_out * cosr,             'oy': cy + r_out * sinr,
+                'kind': 'near' if ((cosr <= 0) if left else (cosr >= 0)) else 'far',
             })
 
-        # ── Pass 2: enforce minimum vertical gap between stacked labels ────
-        min_gap = pie_radius * 0.45
-        items_sorted = sorted(items, key=lambda d: -d['ly'])
-        for i in range(1, len(items_sorted)):
-            ceiling = items_sorted[i - 1]['ly'] - min_gap
-            if items_sorted[i]['ly'] > ceiling:
-                items_sorted[i]['ly'] = ceiling
+        near  = [d for d in recs if d['kind'] == 'near']
+        far   = [d for d in recs if d['kind'] == 'far']
+        major = [d for d in recs if d['kind'] == 'major']
+        for d in major:                      # label sits below the pie, beside it
+            d['ly'] = cy - pie_radius * 1.07
 
-        # ── Pass 3: draw leaders + labels at the resolved y positions ─────
-        for d in items_sorted:
-            ax.plot([d['sx'], lx_text], [d['sy'], d['ly']],
-                    color='black', linewidth=0.4, zorder=10)
+        # near: seed at the radius exit, de-collide downward. No vertical clamp —
+        # labels may rise over the station text box (approved), so the de-collided
+        # stack gets full room to spread evenly without overlapping each other.
+        near.sort(key=lambda d: -d['oy'])
+        for d in near:
+            d['ly'] = d['oy']
+        for i in range(1, len(near)):
+            ceiling = near[i - 1]['ly'] - min_gap
+            if near[i]['ly'] > ceiling:
+                near[i]['ly'] = ceiling
+        # far: stack upward from the text-box height
+        far.sort(key=lambda d: -d['oy'])
+        y_lab = box_ly
+        for d in far:
+            d['ly'] = y_lab
+            y_lab += min_gap
+
+        return {
+            'cx': cx, 'cy': cy, 'lx_text': lx_text, 'ha': ha, 'x_turn': x_turn,
+            'min_gap': min_gap, 'title': title, 'wedges': wedges, 'recs': recs,
+            'single': single,
+        }
+
+    def _place_single_label(L, other, box_bottom):
+        """For a 100 % pie, lift/drop its single label off the pie centreline to
+        clear both the paired pie's labels and the station/totals box, choosing
+        whichever side (above/below cy) has more vertical room."""
+        if not L['single'] or not L['recs']:
+            return
+        cy = L['cy']
+        title_y = cy - pie_radius * 1.25
+        other_lys = [r['ly'] for r in other['recs']]
+        ups = [box_bottom - cy] + [ly - cy for ly in other_lys if ly > cy]
+        dns = [cy - title_y]    + [cy - ly for ly in other_lys if ly < cy]
+        room_up = min(ups) if ups else pie_radius
+        room_dn = min(dns) if dns else pie_radius
+        go_up   = room_up >= room_dn
+        room    = room_up if go_up else room_dn
+        offset  = min(pie_radius * 0.55, max(0.0, room - L['min_gap']))
+        L['recs'][0]['ly'] = cy + offset if go_up else cy - offset
+
+    def _render_pie(L):
+        if not L['wedges']:
+            return
+        cx, cy = L['cx'], L['cy']
+        lx_text, x_turn, ha = L['lx_text'], L['x_turn'], L['ha']
+        for theta1, theta2, colour in L['wedges']:
+            ax.add_patch(Wedge(
+                center=(cx, cy), r=pie_radius, theta1=theta1, theta2=theta2,
+                facecolor=colour, edgecolor='none', zorder=9))
+        for d in L['recs']:
+            if d['kind'] == 'near':         # radius + horizontal/angled to label
+                ax.plot([d['sx'], d['ox']], [d['sy'], d['oy']],
+                        color='black', linewidth=0.4, zorder=10)
+                ax.plot([d['ox'], lx_text], [d['oy'], d['ly']],
+                        color='black', linewidth=0.4, zorder=10)
+            elif d['kind'] == 'major':      # perpendicular drop at 6 o'clock + horizontal
+                ax.plot([d['sx'], d['sx']], [d['sy'], d['ly']],
+                        color='black', linewidth=0.4, zorder=10)
+                ax.plot([d['sx'], lx_text], [d['ly'], d['ly']],
+                        color='black', linewidth=0.4, zorder=10)
+            else:                           # radius + perpendicular + angled + horizontal
+                y_knee = max(cy + pie_radius * 1.05, d['oy'])
+                ax.plot([d['sx'], d['ox']], [d['sy'], d['oy']],
+                        color='black', linewidth=0.4, zorder=10)
+                ax.plot([d['ox'], d['ox']], [d['oy'], y_knee],
+                        color='black', linewidth=0.4, zorder=10)
+                ax.plot([d['ox'], x_turn], [y_knee, d['ly']],
+                        color='black', linewidth=0.4, zorder=10)
+                ax.plot([x_turn, lx_text], [d['ly'], d['ly']],
+                        color='black', linewidth=0.4, zorder=10)
+        for d in L['recs']:
             ax.text(lx_text, d['ly'], f"{d['name']} ({d['share'] * 100:.1f}%)",
                     fontsize=5, ha=ha, va='center', zorder=11,
                     bbox=dict(boxstyle='square,pad=0.15',
-                              facecolor='white', edgecolor='none'))
-
+                              facecolor='white', edgecolor='black', linewidth=0.4))
         # Pie title at the bottom of the pie (Pop/FTE — sits at marker y)
-        ax.text(cx, cy - pie_radius * 1.25, title,
+        ax.text(cx, cy - pie_radius * 1.25, L['title'],
                 fontsize=5, ha='center', va='top', fontweight='bold', zorder=11,
                 bbox=dict(boxstyle='square,pad=0.15',
-                          facecolor='white', edgecolor='none'))
+                          facecolor='white', edgecolor='black', linewidth=0.4))
 
     for sid in sa_ids:
         row = sa_row_by_id[sid]
@@ -5748,11 +5824,22 @@ def _plot_sa_stations_overview_map(sa_stations, sa_boundary, shares_df,
 
         # Pies sit ABOVE the marker — Pop on the left (labels to the left),
         # FTE on the right (labels to the right). FTE is mirrored so slice
-        # geometry doesn't crowd the centre of the pair.
-        _draw_pie(x - pie_dx, y + pie_dy, pop_slices,
-                  title='Pop', label_side='left',  clockwise=True)
-        _draw_pie(x + pie_dx, y + pie_dy, fte_slices,
-                  title='FTE', label_side='right', clockwise=False)
+        # geometry doesn't crowd the centre of the pair. Lay both out first so a
+        # 100 % pie's lone label can dodge the paired pie's labels + totals box.
+        pop_L = _layout_pie(x - pie_dx, y + pie_dy, pop_slices,
+                            'Pop', label_side='left',  clockwise=True)
+        fte_L = _layout_pie(x + pie_dx, y + pie_dy, fte_slices,
+                            'FTE', label_side='right', clockwise=False)
+        box_bottom = (y + pie_dy) + pie_radius * 1.25
+        if pop_L['single'] and fte_L['single']:
+            # Both 100 %: stagger in opposite directions for a clean read.
+            pop_L['recs'][0]['ly'] = (y + pie_dy) + pie_radius * 0.55
+            fte_L['recs'][0]['ly'] = (y + pie_dy) - pie_radius * 0.55
+        else:
+            _place_single_label(pop_L, fte_L, box_bottom)
+            _place_single_label(fte_L, pop_L, box_bottom)
+        _render_pie(pop_L)
+        _render_pie(fte_L)
 
         # Station name + totals below the marker
         if not sub.empty:
@@ -5773,7 +5860,7 @@ def _plot_sa_stations_overview_map(sa_stations, sa_boundary, shares_df,
         ax.text(x, label_y, label,
                 fontsize=5, fontweight='bold', va='bottom', ha='center', zorder=11,
                 bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
-                          edgecolor='none'))
+                          edgecolor='black', linewidth=0.4))
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
@@ -6058,7 +6145,7 @@ def _compute_cell_gueteklassen(feeder_stops, rail_stops, pop_grid, empl_grid):
 
 
 def _plot_gueteklassen_stacked_bar(feeder_stops, rail_stops,
-                                     sa_boundary, ca_boundary,
+                                     sa_boundary,
                                      pop_grid, empl_grid, output_dir):
     """One PDF with four 100%-stacked bars: SA-Pop, SA-FTE, CA-Pop, CA-FTE.
 
@@ -6158,7 +6245,7 @@ def _plot_gueteklassen_stacked_bar(feeder_stops, rail_stops,
 
 # --- Orchestrator --------------------------------------------------------------
 
-def make_phase_4a_plots(method, sa_boundary, ca_boundary,
+def make_phase_4a_plots(method, sa_boundary,
                           allocation, rail_stations,
                           pop_grid, empl_grid,
                           feeder_stops=None, rail_stops=None,
@@ -6169,7 +6256,6 @@ def make_phase_4a_plots(method, sa_boundary, ca_boundary,
     Args:
         method:       'pt_feeder' or 'municipal'
         sa_boundary:  Shapely polygon (or None — see _load_sa_boundary fallback)
-        ca_boundary:  Shapely polygon
         allocation:   per-cell DataFrame (PT-Feeder method only). For Municipal
                       pass an empty DataFrame; cell-level plots are skipped.
         rail_stations: full rail station GeoDataFrame
@@ -6239,7 +6325,7 @@ def make_phase_4a_plots(method, sa_boundary, ca_boundary,
     # Plot (c): Güteklassen stacked bar — PT_Feeder only (needs classified stops)
     if is_pt_feeder and feeder_stops is not None and rail_stops is not None:
         _plot_gueteklassen_stacked_bar(feeder_stops, rail_stops,
-                                         sa_boundary, ca_boundary,
+                                         sa_boundary,
                                          pop_grid, empl_grid, plot_dir)
 
     print(f"  === Phase 4A plot suite complete ({method}) ===\n")

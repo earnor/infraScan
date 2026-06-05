@@ -3936,6 +3936,71 @@ def _write_stops_sa(src: Path, dst: Path, sa_poly) -> None:
     print(f"  Written: {dst.name}")
 
 
+# Canonical nodes.gpkg attribute order (see infrabuild_filter_network.process_bav).
+_NODES_SCHEMA = ["Node_ID", "Number", "Name", "Code", "E", "N",
+                 "Node_Class", "Transport_Mode", "Track_Count",
+                 "Platform_Count", "Parent_Node"]
+
+
+def _enrich_stops_with_nodes(src: Path, dst: Path, nodes_path: Path) -> None:
+    """Rewrite a multi-layer rail-stops GPKG so every layer carries the exact
+    nodes.gpkg column set, joining each stop to its infrastructure node on the
+    numeric station id (rail_stops 'Number' == nodes 'Number').
+
+    Matched stops adopt the node's attributes, coordinates and geometry. Stops
+    with no matching node keep their GTFS geometry and stop_name (-> 'Name') with
+    the infra-only columns left null. No stop is dropped.
+    """
+    import pyogrio as _pyogrio
+    if not src.exists():
+        print(f"  WARNING: {src.name} not found — cannot enrich with nodes.gpkg")
+        return
+    if not nodes_path.exists():
+        print(f"  WARNING: nodes.gpkg missing at {nodes_path} — copying stops unchanged")
+        _copy_multilayer_gpkg(src, dst)
+        return
+
+    nodes = gpd.read_file(nodes_path)
+    nodes["_num"] = pd.to_numeric(nodes["Number"], errors="coerce")
+    nodes = nodes.dropna(subset=["_num"]).drop_duplicates("_num")
+    nodes["_num"] = nodes["_num"].astype("int64")
+    nodes = nodes.set_index("_num")
+    attr_cols = [c for c in _NODES_SCHEMA if c != "Number"]
+
+    if dst.exists():
+        dst.unlink()
+
+    n_match = n_miss = 0
+    for layer_name, _ in _pyogrio.list_layers(str(src)):
+        stops = gpd.read_file(src, layer=layer_name)
+        recs, geoms = [], []
+        for s in stops.itertuples(index=False):
+            num = pd.to_numeric(getattr(s, "Number", None), errors="coerce")
+            rec = {c: None for c in _NODES_SCHEMA}
+            if pd.notna(num) and int(num) in nodes.index:
+                node = nodes.loc[int(num)]
+                rec["Number"] = int(num)
+                for c in attr_cols:
+                    rec[c] = node[c]
+                geoms.append(node["geometry"])
+                n_match += 1
+            else:
+                rec["Number"] = int(num) if pd.notna(num) else None
+                rec["Name"] = getattr(s, "stop_name", None)
+                geom = s.geometry
+                rec["E"] = geom.x if geom is not None else None
+                rec["N"] = geom.y if geom is not None else None
+                geoms.append(geom)
+                n_miss += 1
+            recs.append(rec)
+        out = gpd.GeoDataFrame(recs, geometry=geoms, crs=stops.crs)
+        out = out[_NODES_SCHEMA + ["geometry"]]
+        out.to_file(dst, driver="GPKG", layer=layer_name)
+
+    print(f"  Written: {dst.name} (nodes.gpkg schema; {n_match} stops matched to "
+          f"nodes, {n_miss} unmatched → GTFS fallback)")
+
+
 def _write_stops_filtered(src: Path, dst: Path, keep_numbers: set) -> None:
     """Write multi-layer stops GPKG filtered to a set of Number values."""
     import pyogrio as _pyogrio
@@ -4298,7 +4363,7 @@ def _write_rail_outputs(
       rail_segments.gpkg       — all projected segments, multi-layer by route type
       rail_segments_sa.gpkg    — both endpoints within SA, multi-layer
       rail_lines.gpkg          — one row per (GTFS_ID, direction_id, variant_rank)
-      rail_stops.gpkg          — copied from Unprojected (unchanged by projection)
+      rail_stops.gpkg          — Unprojected stops enriched to the nodes.gpkg schema
       rail_stops_sa.gpkg       — stops within SA boundary
       rail_segments.qgz, rail_lines.qgz
       All_Day/, Peak/, Off_Peak/ subfolders with the above set at each time slice
@@ -4322,11 +4387,11 @@ def _write_rail_outputs(
     _write_multilayer_gpkg(sa_gdf, out_dir / "rail_segments_sa.gpkg", drop_all, rename_map)
     print(f"  Written: rail_segments_sa.gpkg ({len(sa_gdf)} edges)")
 
-    _copy_multilayer_gpkg(
+    _enrich_stops_with_nodes(
         src=config.rail_input.parent / "rail_stops.gpkg",
         dst=out_dir / "rail_stops.gpkg",
+        nodes_path=config.infra_dir / "nodes.gpkg",
     )
-    print("  Written: rail_stops.gpkg")
     _write_stops_sa(
         src=out_dir / "rail_stops.gpkg",
         dst=out_dir / "rail_stops_sa.gpkg",

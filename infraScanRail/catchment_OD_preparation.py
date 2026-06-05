@@ -25,9 +25,12 @@ from pathlib import Path
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 from matplotlib.patches import Wedge
+from matplotlib.path import Path as _MplPath
 import numpy as np
 import pandas as pd
+from pyogrio import list_layers
 
 import paths
 import settings
@@ -53,7 +56,9 @@ OD_COMPARISON_PLOT_DIR = catchment_base.OD_COMPARISON_PLOT_DIR
 
 def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
                             infra_version: str = '', method: str = '',
-                            attribution_mode: str = '') -> None:
+                            attribution_mode: str = '',
+                            both_attributions: bool = False,
+                            make_plots: bool = True) -> None:
     """Generate station-pair OD matrices for the selected method(s) × three windows.
 
     Args:
@@ -68,12 +73,22 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
                      settings.CATCHMENT_METHOD). main_new passes the active method.
         attribution_mode: 'specific' | 'blended' | '' (empty ->
                      settings.OD_ATTRIBUTION_MODE). PT-Feeder only.
+        both_attributions: When True (standalone runs only), PT-Feeder runs BOTH
+                     attribution modes so each per-window workbook carries a
+                     'Specific' and a 'Blended' sheet. When False (the main_new
+                     pipeline default) only `attribution_mode` is run, producing a
+                     single-sheet workbook.
+        make_plots:  When True (default; standalone), render the SA-stations OD
+                     pie map, the corridor Sankeys and the method-comparison
+                     diagnostics. main_new passes settings.PLOT_STATION_OD so the
+                     plots honour the Phase-4B visualisation toggle. Excel/CSV
+                     data outputs are always written regardless.
 
     Writes (under paths.MAIN):
-        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_matrix_stations_{peak,off_peak,full_day}.csv
-        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_matrix_stations.xlsx  (full station×station matrix, one sheet per window)
-        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_top5.xlsx
-        data/Traffic_Flow/OD/<svc_network>/Gateway/{gateway_zone_assignment.json,gateway_out_of_catchment.csv,gateway_splits.csv}
+        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_matrix_stations_{peak,off_peak,full_day}.xlsx  (a sheet per attribution mode)
+        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_matrix_stations.xlsx  (chosen-attribution station×station matrix, one sheet per window)
+        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_station_top_relations.xlsx
+        data/Traffic_Flow/OD/<svc_network>/Gateway/{gateway_zone_assignment.json,gateway_out_of_catchment.csv,gateway_splits.xlsx}
     """
     global OD_COMPARISON_PLOT_DIR
 
@@ -93,6 +108,10 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
     boundary      = catchment_base._load_catchment_boundary()
     rail_stations = catchment_allocate._load_rail_stations(boundary, 'all', buffer=0)
     name_lookup   = _build_station_name_lookup(rail_stations)
+
+    # Resolve the infra version once — used for the authoritative SA station set
+    # (rail_stops_sa.gpkg) and for gateway routing.
+    infra_version = _resolve_infra_version(svc_version, infra_version)
 
     scale_factors, agg_fallback = _compute_commune_scale_factors()
 
@@ -127,34 +146,58 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
     gw_ids     = gateways['gateway_station_ids']
 
     # --- Branch dispatch (only the selected method(s)) ---
+    # `attr_mode` selects the attribution feeding the combined matrix, top-relations,
+    # pie map and comparison plots. With both_attributions=True (standalone) PT-Feeder
+    # additionally runs the other mode so each per-window workbook carries a
+    # 'Specific' and a 'Blended' sheet; from main_new only `attr_mode` is run.
+    chosen_label = 'Blended' if attr_mode == 'blended' else 'Specific'
     pt_long = muni_long = None
+    branch_attr_longs = {}   # branch -> {sheet_label -> long_df}
     if 'pt_feeder' in methods:
-        pt_long, pt_orig_weights = _run_pt_feeder_branch(branch_od, gw_ids, attr_mode)
+        if both_attributions:
+            pt_specific, ow_specific = _run_pt_feeder_branch(branch_od, gw_ids, 'specific')
+            pt_blended,  ow_blended  = _run_pt_feeder_branch(branch_od, gw_ids, 'blended')
+            branch_attr_longs['pt_feeder'] = {'Specific': pt_specific, 'Blended': pt_blended}
+            if attr_mode == 'blended':
+                pt_long, pt_orig_weights = pt_blended, ow_blended
+            else:
+                pt_long, pt_orig_weights = pt_specific, ow_specific
+        else:
+            pt_long, pt_orig_weights = _run_pt_feeder_branch(branch_od, gw_ids, attr_mode)
+            branch_attr_longs['pt_feeder'] = {chosen_label: pt_long}
         _diagnose_conservation(branch_od, pt_long, pt_orig_weights, 'PT-Feeder')
     if 'municipal' in methods:
         muni_long = _run_municipal_branch(branch_od, gw_ids)
+        branch_attr_longs['municipal'] = {'Municipal': muni_long}
         _diagnose_conservation(branch_od, muni_long, None, 'Municipal')
 
-    # --- Emit CSVs per (method, window) into the versioned OD tree ---
+    # Fill any name_lookup gaps from the allocation breakdown (peak-only stations
+    # absent from the all-day rail-stops load), then verify full coverage.
+    for _m in methods:
+        _extend_name_lookup_from_breakdown(name_lookup, _m)
+    _check_name_coverage(pt_long,   name_lookup, 'PT-Feeder')
+    _check_name_coverage(muni_long, name_lookup, 'Municipal')
+
+    # --- Emit per-window workbooks (a sheet per attribution mode) ---
     windows = [(cp.TAU_PEAK_SHARE,     'peak'),
                (cp.TAU_OFFPEAK_SHARE,  'off_peak'),
                (cp.TAU_FULL_DAY_SHARE, 'full_day')]
-    branch_longs = {'pt_feeder': pt_long, 'municipal': muni_long}
-    print("\n  Writing CSVs ...")
+    branch_longs = {'pt_feeder': pt_long, 'municipal': muni_long}  # chosen attribution
+    print("\n  Writing per-window OD workbooks ...")
     for branch in methods:
-        long_df = branch_longs[branch]
-        if long_df is None:
+        attr_longs = branch_attr_longs.get(branch)
+        if not attr_longs:
             continue
         for tau, suffix in windows:
-            out_path = paths.get_station_od_csv(svc_version, branch, suffix)
+            out_path = paths.get_station_od_window_xlsx(svc_version, branch, suffix)
             if use_cache and Path(out_path).exists():
                 print(f"    cached: {out_path}")
             else:
-                _apply_window_scaling(long_df, tau, name_lookup, out_path,
-                                      label=f'{branch} {suffix}')
+                _write_window_xlsx(attr_longs, tau, name_lookup, out_path,
+                                   label=f'{branch} {suffix}')
 
     # --- Top-5 origins/destinations Excel export + per-method OD pie map ---
-    sa_stations_gdf = _load_sa_stations(rail_stations)
+    sa_stations_gdf = _load_sa_stations(rail_stations, svc_version, infra_version)
     sa_ids = set(pd.to_numeric(sa_stations_gdf['id_point'], errors='coerce')
                  .dropna().astype(int).tolist())
     for branch in methods:
@@ -162,14 +205,21 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
         if long_df is not None:
             _export_od_matrix_excel(long_df, windows, name_lookup,
                                     svc_version, branch)
-            _export_top5_excel(long_df, sa_ids, name_lookup, branch, svc_version)
-            _plot_sa_stations_od_map(long_df, sa_stations_gdf, name_lookup,
-                                     branch, svc_version)
+            _export_top_relations_excel(long_df, sa_ids, name_lookup, branch,
+                                        svc_version, windows)
+            if make_plots:
+                _plot_sa_stations_od_map(long_df, sa_stations_gdf, name_lookup,
+                                         branch, svc_version, attr_mode)
+                build_corridor_sankeys(long_df, name_lookup, svc_version, branch,
+                                       attr_mode)
 
-    # --- Diagnostic plots (comparison; only when both methods are present) ---
+    # --- Method comparison + diagnostic plots (only when both methods present) ---
     if pt_long is not None and muni_long is not None:
-        _plot_od_diagnostics(pt_long, muni_long, rail_stations, boundary,
-                              name_lookup)
+        _export_method_comparison_excel(pt_long, muni_long, sa_ids,
+                                        name_lookup, svc_version)
+        if make_plots:
+            _plot_od_diagnostics(pt_long, muni_long, rail_stations, boundary,
+                                  name_lookup)
 
     print("\n=== W3 OD matrices done ===")
 
@@ -188,11 +238,6 @@ def _resolve_methods(method: str) -> list:
         return ['pt_feeder', 'municipal']
     cm = settings.CATCHMENT_METHOD.strip().lower().replace('-', '_')
     return ['pt_feeder'] if cm == 'pt_feeder' else ['municipal']
-
-
-# Backwards-compat alias — DEPRECATED. New callers should use
-# prepare_all_od_matrices, which produces six matrices instead of one.
-prepare_od_pt_feeder_a = prepare_all_od_matrices
 
 
 # ===============================================================================
@@ -420,17 +465,36 @@ def _build_boundary_station_index(boundary_ids: list, infra_version: str) -> dic
 def _normalise_assignment(raw: dict) -> dict:
     """Normalise a loaded zone-assignment dict to dict[int code -> list[int]].
 
-    Accepts both the legacy single-station format ({code: id}) and the
-    multi-station format ({code: [id, ...]}).
+    Accepts the legacy single-station ({code: id}) and multi-station
+    ({code: [id, ...]}) formats, plus the readable format where each station is a
+    {"id": int, "name": str} object ({code: [{"id": .., "name": ..}, ...]}).
     """
+    def _sid(x):
+        return int(x['id']) if isinstance(x, dict) else int(x)
     out = {}
     for k, v in raw.items():
         code = int(k)
         if isinstance(v, (list, tuple)):
-            out[code] = [int(x) for x in v]
+            out[code] = [_sid(x) for x in v]
         else:
-            out[code] = [int(v)]
+            out[code] = [_sid(v)]
     return out
+
+
+def _save_zone_assignment(mapping: dict, bs_index: dict, json_path: str) -> None:
+    """Write the zone→gateway assignment in the readable format:
+    {code: [{"id": station_number, "name": station_name}, ...]}.
+
+    Carries both the station number and name for readability; round-trips through
+    _normalise_assignment (which tolerates this and the legacy id-only formats).
+    """
+    def _entry(sid):
+        name = bs_index.get(int(sid), (str(int(sid)), None))[0]
+        return {'id': int(sid), 'name': name}
+    payload = {str(k): [_entry(s) for s in v] for k, v in mapping.items()}
+    os.makedirs(os.path.dirname(json_path), exist_ok=True)
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def _assign_external_zones(zone_codes, boundary_ids, bs_index, zone_names,
@@ -438,44 +502,44 @@ def _assign_external_zones(zone_codes, boundary_ids, bs_index, zone_names,
     """Assign each external GVM zone (code > 9999) to one or more gateway stations.
 
     Multiple stations per zone are allowed; the zone's demand is later split
-    across them by service volume. Persisted to json_path as {code: [ids]}. On
-    re-run the saved assignment is offered for reuse (interactive) or loaded
-    silently (automated). Mirrors the municipal station-assignment override.
+    across them by service volume. Persisted to json_path in the readable format
+    {code: [{"id": station_number, "name": station_name}, ...]} (legacy id-only
+    files are auto-upgraded on load). A complete saved assignment is loaded
+    silently (interactive or not); an incomplete one prompts for the missing zones
+    (interactive) or raises (automated). Delete the json to force a full rebuild.
 
     Returns dict[int zone_code -> list[int gateway_station_id]] (skipped absent).
     """
     zone_codes = sorted(int(z) for z in zone_codes)
     saved = None
+    legacy_format = False
     if os.path.exists(json_path):
         with open(json_path, encoding='utf-8') as f:
-            saved = _normalise_assignment(json.load(f))
+            raw = json.load(f)
+        saved = _normalise_assignment(raw)
+        legacy_format = bool(raw) and not all(
+            isinstance(v, list) and all(isinstance(e, dict) for e in v)
+            for v in raw.values())
 
     if saved is not None:
         complete = all(z in saved for z in zone_codes)
-        if not _INTERACTIVE_MODE:
-            if not complete:
-                missing = [z for z in zone_codes if z not in saved]
-                raise FileNotFoundError(
-                    f"Gateway zone assignment at {json_path} is missing zones "
-                    f"{missing}. Run catchment_OD_preparation standalone to "
-                    f"complete the assignment.")
+        if complete:
+            # Upgrade a legacy id-only file to the readable name+number format
+            # in place (no re-prompting), then use it silently. Delete the json
+            # to force a full rebuild.
+            if legacy_format:
+                _save_zone_assignment(saved, bs_index, json_path)
+                print(f"  Upgraded gateway zone assignment to readable format")
             print(f"  Loaded gateway zone assignment ({len(saved)} zones)")
             return {z: saved[z] for z in zone_codes}
-        print(f"  Existing gateway zone assignment found: {json_path}")
-        print("  1) Use existing")
-        print("  2) Recreate")
-        while True:
-            choice = input("  Select [1]: ").strip() or '1'
-            if choice == '1':
-                if complete:
-                    return {z: saved[z] for z in zone_codes}
-                print("    Existing assignment incomplete; prompting for "
-                      "missing zones only.")
-                break
-            if choice == '2':
-                saved = None
-                break
-            print("    Enter 1 or 2.")
+        if not _INTERACTIVE_MODE:
+            missing = [z for z in zone_codes if z not in saved]
+            raise FileNotFoundError(
+                f"Gateway zone assignment at {json_path} is missing zones "
+                f"{missing}. Run catchment_OD_preparation standalone to "
+                f"complete the assignment.")
+        print(f"  Existing gateway zone assignment incomplete — prompting for "
+              f"missing zones only.")
 
     if not _INTERACTIVE_MODE:
         raise FileNotFoundError(
@@ -517,10 +581,7 @@ def _assign_external_zones(zone_codes, boundary_ids, bs_index, zone_names,
             print(f"      Invalid — enter one or more of 1–{len(ordered_ids)} "
                   f"(comma-separated) or 's'.")
 
-    os.makedirs(os.path.dirname(json_path), exist_ok=True)
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump({str(k): [int(s) for s in v] for k, v in mapping.items()},
-                  f, indent=2)
+    _save_zone_assignment(mapping, bs_index, json_path)
     print(f"  Saved gateway zone assignment → {json_path}")
     return mapping
 
@@ -581,38 +642,50 @@ def _gateway_segments_path(svc_network: str, infra_version: str) -> str:
                         infra_version, 'rail_segments.gpkg')
 
 
-def _window_freq_series(df: pd.DataFrame, window: str) -> pd.Series:
-    """Per-segment frequency for the chosen temporal window (dep/hr).
+def _load_line_freq_per_h_window(svc_network: str, infra_version: str) -> dict:
+    """Whole-day per-variant freq_per_h_window from the full-day rail_lines.gpkg.
 
-    full_day / all_day -> am + pm + offpeak ; peak -> am + pm ; offpeak -> offpeak.
+    freq_per_h_window = total_dep / (GK_WINDOW_MIN/60). Keyed as strings on
+    (route_id, direction_id, variant_rank) to match the segment GTFS_ID /
+    direction_id / variant_rank columns used at the gateways.
     """
-    for c in ('freq_am_peak_dep_hr', 'freq_pm_peak_dep_hr', 'freq_offpeak_dep_hr'):
-        if c not in df.columns:
-            df[c] = 0.0
-    am = pd.to_numeric(df['freq_am_peak_dep_hr'],  errors='coerce').fillna(0.0)
-    pm = pd.to_numeric(df['freq_pm_peak_dep_hr'],  errors='coerce').fillna(0.0)
-    op = pd.to_numeric(df['freq_offpeak_dep_hr'],  errors='coerce').fillna(0.0)
-    w = (window or 'full_day').lower()
-    if w == 'peak':
-        return am + pm
-    if w in ('offpeak', 'off_peak'):
-        return op
-    return am + pm + op
+    lines_path = os.path.join(paths.MAIN, paths.RAIL_LINES_DIR, svc_network,
+                              infra_version, 'rail_lines.gpkg')
+    if not os.path.exists(lines_path):
+        return {}
+    frames = []
+    for lyr in list_layers(lines_path)[:, 0].tolist():
+        g = gpd.read_file(lines_path, layer=lyr)
+        if 'geometry' in g.columns:
+            g = pd.DataFrame(g.drop(columns='geometry'))
+        frames.append(g)
+    if not frames:
+        return {}
+    df = pd.concat(frames, ignore_index=True)
+    df['total_dep'] = pd.to_numeric(df.get('total_dep'), errors='coerce')
+    df = df.dropna(subset=['total_dep'])
+    fpw = df['total_dep'] / (catchment_allocate.GK_WINDOW_MIN / 60.0)
+    return {
+        (str(rid), str(did), str(vr)): float(f)
+        for rid, did, vr, f in zip(
+            df['route_id'], df['direction_id'], df['variant_rank'], fpw)
+    }
 
 
 def _freq_by_route_at_gateways(seg_path: str, layer: str, gateway_ids,
-                               window: str) -> dict:
-    """Summed window frequency of services crossing the canton boundary at each
-    gateway station, for one route_type layer.
+                               freq_lookup: dict) -> dict:
+    """Summed whole-day frequency (freq_per_h_window) of services crossing the
+    canton boundary at each gateway station, for one route_type layer.
 
     Matching uses boundary_entry_node / boundary_exit_node — the node where a
     service enters/leaves the catchment — NOT the scheduled stop columns:
     long-distance / inter-regional trains traverse boundary stations without
     stopping, so they never appear as from/to stops. boundary_entry/exit_node is
     set consistently across all route types, giving a comparable cross-border
-    supply measure. Each service variant is counted once per direction.
+    supply measure. Each service variant is counted once per direction; its
+    frequency is the whole-day freq_per_h_window joined from the lines table on
+    (GTFS_ID, direction_id, variant_rank).
     """
-    from pyogrio import list_layers
     try:
         available = list_layers(seg_path)[:, 0].tolist()
     except Exception:
@@ -625,12 +698,16 @@ def _freq_by_route_at_gateways(seg_path: str, layer: str, gateway_ids,
         seg = pd.DataFrame(seg.drop(columns='geometry'))
     for c in ('boundary_entry_node', 'boundary_exit_node'):
         seg[c] = pd.to_numeric(seg.get(c), errors='coerce')
-    seg['freq'] = _window_freq_series(seg, window)
+    seg['freq'] = [
+        freq_lookup.get((str(r), str(d), str(v)), 0.0)
+        for r, d, v in zip(seg.get('GTFS_ID'), seg.get('direction_id'),
+                           seg.get('variant_rank'))
+    ]
 
     want = {int(g) for g in gateway_ids}
     touch = seg[seg['boundary_entry_node'].isin(want)
                 | seg['boundary_exit_node'].isin(want)]
-    keys = [k for k in ('Service', 'direction_id', 'variant_rank')
+    keys = [k for k in ('GTFS_ID', 'direction_id', 'variant_rank')
             if k in touch.columns]
     out = {}
     for gid in want:
@@ -643,15 +720,18 @@ def _freq_by_route_at_gateways(seg_path: str, layer: str, gateway_ids,
     return out
 
 
-def _compute_gateway_splits(gateway_ids, svc_network, infra_version, window,
-                            bs_index, csv_path) -> pd.DataFrame:
+def _compute_gateway_splits(gateway_ids, svc_network, infra_version,
+                            bs_index) -> pd.DataFrame:
     """Local (S-Bahn + RE) vs long-distance (LD + IR) service-supply split per
-    gateway, written to csv_path.
+    gateway.
 
     local_share = f(sbahn + regional) / (f(sbahn + regional) + f(long_distance +
-    inter_regional)). Gateways with no crossing service in the window default to
-    local_share=1.0. The split is metadata for downstream routing — the gateway
-    carries full demand in the OD matrix itself.
+    inter_regional)), where f is the whole-day freq_per_h_window summed over the
+    variants crossing the boundary at the gateway. Gateways with no crossing
+    service default to local_share=1.0. The split is metadata for downstream
+    routing — the gateway carries full demand in the OD matrix itself. Returned
+    for the caller to write as the 'Gateway_Split' sheet of the gateway routing
+    workbook.
     """
     gateway_ids = sorted({int(g) for g in gateway_ids})
     if not gateway_ids:
@@ -660,16 +740,17 @@ def _compute_gateway_splits(gateway_ids, svc_network, infra_version, window,
     if not os.path.exists(seg_path):
         print(f"    Gateway split: rail_segments.gpkg missing at {seg_path}")
         return pd.DataFrame()
+    freq_lookup = _load_line_freq_per_h_window(svc_network, infra_version)
 
     local = {}
     for lyr in _LOCAL_LAYERS:
         for gid, f in _freq_by_route_at_gateways(
-                seg_path, lyr, gateway_ids, window).items():
+                seg_path, lyr, gateway_ids, freq_lookup).items():
             local[gid] = local.get(gid, 0.0) + f
     ldirt = {}
     for lyr in _LDIRT_LAYERS:
         for gid, f in _freq_by_route_at_gateways(
-                seg_path, lyr, gateway_ids, window).items():
+                seg_path, lyr, gateway_ids, freq_lookup).items():
             ldirt[gid] = ldirt.get(gid, 0.0) + f
 
     rows = []
@@ -681,8 +762,8 @@ def _compute_gateway_splits(gateway_ids, svc_network, infra_version, window,
         else:
             ls = 1.0
             gid_name = bs_index.get(gid, (str(gid), None))[0]
-            print(f"    Gateway {gid_name} ({gid}): no crossing service in window "
-                  f"'{window}' — defaulting local share=1.0")
+            print(f"    Gateway {gid_name} ({gid}): no crossing service "
+                  f"— defaulting local share=1.0")
         rows.append({
             'gateway_station_id': gid,
             'station_name': bs_index.get(gid, (str(gid), None))[0],
@@ -690,11 +771,71 @@ def _compute_gateway_splits(gateway_ids, svc_network, infra_version, window,
             'local_share': round(ls, 4), 'longdist_share': round(1.0 - ls, 4),
         })
     df = pd.DataFrame(rows)
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    df.to_csv(csv_path, index=False, encoding='utf-8-sig')
-    print(f"    Gateway service-supply splits ({len(df)} gateways, "
-          f"window='{window}') → {csv_path}")
+    print(f"    Gateway service-supply splits computed ({len(df)} gateways, "
+          f"whole-day freq_per_h_window)")
     return df
+
+
+def _build_region_gateways_table(gw_weights: dict, zone_names: dict,
+                                 bs_index: dict) -> pd.DataFrame:
+    """Wide region→gateway share table for the workbook's 'Region_Gateways' sheet.
+
+    One row per routed region (gw_weights key): the region label followed by
+    `Gateway i` / `Share gateway i` columns for each assigned gateway, ordered by
+    descending share. Single-gateway regions list one gateway at 100 %. Region
+    labelled by external-zone name where known, else 'BFS <code>' for out-of-
+    catchment communes (code ≤ 9999) or the bare zone code. Multi-gateway regions
+    are listed first.
+    """
+    if not gw_weights:
+        return pd.DataFrame()
+
+    def _region_label(code):
+        if code in zone_names:
+            return zone_names[code]
+        return f"BFS {code}" if code <= 9999 else str(code)
+
+    def _gw_name(sid):
+        return bs_index.get(int(sid), (str(int(sid)), None))[0]
+
+    rows, max_gw = [], 0
+    for code, pairs in gw_weights.items():
+        ordered = sorted(pairs, key=lambda sv: -sv[1])
+        row = {'Region': _region_label(int(code))}
+        for i, (sid, share) in enumerate(ordered, 1):
+            row[f'Gateway {i}']       = _gw_name(sid)
+            row[f'Share gateway {i}'] = round(float(share), 4)
+        rows.append((int(code), len(ordered), row))
+        max_gw = max(max_gw, len(ordered))
+
+    rows.sort(key=lambda t: (-t[1], t[0]))   # multi-gateway first, then by code
+    cols = ['Region']
+    for i in range(1, max_gw + 1):
+        cols += [f'Gateway {i}', f'Share gateway {i}']
+    return pd.DataFrame([r for _, _, r in rows]).reindex(columns=cols)
+
+
+def _write_gateway_splits_xlsx(splits: pd.DataFrame, gw_weights: dict,
+                               zone_names: dict, bs_index: dict,
+                               out_path: str) -> None:
+    """Write the gateway routing workbook (replaces the old gateway_splits.csv).
+
+    Sheet 'Gateway_Split'   — per-gateway local vs long-distance service split.
+    Sheet 'Region_Gateways' — every routed region with its gateway station(s) and
+        demand shares (see _build_region_gateways_table).
+    """
+    region_tbl = _build_region_gateways_table(gw_weights, zone_names, bs_index)
+    has_splits = splits is not None and not splits.empty
+    if not has_splits and region_tbl.empty:
+        return
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+        (splits if has_splits else pd.DataFrame()).to_excel(
+            writer, sheet_name='Gateway_Split', index=False)
+        region_tbl.to_excel(writer, sheet_name='Region_Gateways', index=False)
+    print(f"    Gateway routing workbook "
+          f"({len(splits) if has_splits else 0} gateways, "
+          f"{len(region_tbl)} regions) → {out_path}")
 
 
 def _build_gateway_weights(assignment: dict, volumes: dict) -> dict:
@@ -774,7 +915,7 @@ def _prepare_gateways(external_od, commune_gdf, bfs_col, in_bnd_bfs,
     gateway_dir = paths.get_gateway_dir(svc_network)
     json_path   = os.path.join(gateway_dir, 'gateway_zone_assignment.json')
     csv_path    = os.path.join(gateway_dir, 'gateway_out_of_catchment.csv')
-    splits_path = os.path.join(gateway_dir, 'gateway_splits.csv')
+    splits_xlsx = os.path.join(gateway_dir, 'gateway_splits.xlsx')
 
     zone_map = (_assign_external_zones(zone_codes, boundary_ids, bs_index,
                                        zone_names, json_path)
@@ -791,13 +932,15 @@ def _prepare_gateways(external_od, commune_gdf, bfs_col, in_bnd_bfs,
 
     used_gateways = {s for stations in assignment.values() for s in stations}
     splits = _compute_gateway_splits(used_gateways, svc_network, infra,
-                                     settings.TEMPORAL, bs_index, splits_path)
+                                     bs_index)
 
     volumes = {}
     if not splits.empty:
         volumes = {int(r.gateway_station_id): float(r.local_freq) + float(r.longdist_freq)
                    for r in splits.itertuples(index=False)}
     gw_weights = _build_gateway_weights(assignment, volumes)
+
+    _write_gateway_splits_xlsx(splits, gw_weights, zone_names, bs_index, splits_xlsx)
 
     multi = sum(1 for v in gw_weights.values() if len(v) > 1)
     print(f"  Gateways ready: {len(zone_map)} external zones "
@@ -836,6 +979,58 @@ def _build_station_name_lookup(rail_stations) -> dict:
     return lookup
 
 
+def _extend_name_lookup_from_breakdown(name_lookup: dict, method: str) -> int:
+    """Fill missing station ids in `name_lookup` with (station_number ->
+    station_name) pairs from station_commune_breakdown.csv.
+
+    The all-day rail-stops load behind `name_lookup` omits peak-only stations
+    (e.g. the Effretikon–Wetzikon corridor), which would otherwise render as bare
+    numeric ids. The breakdown carries every attributed station with its name, so
+    it is the authoritative gap-filler. Only absent ids are added (existing,
+    collision-disambiguated names are left untouched). Returns the count added.
+    """
+    data_dir = (catchment_base.PT_FEEDER_DATA_DIR if method == 'pt_feeder'
+                else catchment_base.MUNICIPAL_DATA_DIR)
+    path = os.path.join(paths.MAIN, data_dir, 'station_commune_breakdown.csv')
+    if not os.path.exists(path):
+        return 0
+    df = pd.read_csv(path, encoding='utf-8-sig')
+    if 'station_number' not in df.columns or 'station_name' not in df.columns:
+        return 0
+    added = 0
+    for num, nm in zip(df['station_number'], df['station_name']):
+        n = pd.to_numeric(num, errors='coerce')
+        if pd.isna(n):
+            continue
+        key  = str(int(n))
+        name = str(nm).strip()
+        if key not in name_lookup and name and name.lower() != 'nan':
+            name_lookup[key] = name
+            added += 1
+    if added:
+        print(f"  Name lookup extended with {added} station name(s) from the "
+              f"{method} breakdown (peak-only / out-of-all-day stations).")
+    return added
+
+
+def _check_name_coverage(long_df: pd.DataFrame, name_lookup: dict,
+                         label: str) -> None:
+    """Warn if any station id in `long_df` has no entry in `name_lookup` (which
+    would surface as a bare number in the matrices/plots)."""
+    if long_df is None or long_df.empty:
+        return
+    ids = pd.to_numeric(
+        pd.concat([long_df['origin_station_id'], long_df['dest_station_id']]),
+        errors='coerce').dropna().astype(int).unique()
+    missing = sorted(int(i) for i in ids if str(int(i)) not in name_lookup)
+    if missing:
+        print(f"  WARNING [{label}]: {len(missing)} station id(s) have no name and "
+              f"will render as bare numbers: {missing[:15]}"
+              f"{' ...' if len(missing) > 15 else ''}")
+    else:
+        print(f"  Name coverage [{label}]: all {len(ids)} station ids resolve to names.")
+
+
 def _build_window_matrix(long_df: pd.DataFrame, tau_window: float,
                          name_lookup: dict) -> pd.DataFrame:
     """Scale a long-format station-pair OD by tau and pivot to a wide, name-keyed
@@ -866,23 +1061,31 @@ def _build_window_matrix(long_df: pd.DataFrame, tau_window: float,
     return matrix
 
 
-def _apply_window_scaling(long_df: pd.DataFrame, tau_window: float,
-                          name_lookup: dict, output_path: str,
-                          label: str = '') -> None:
-    """Build the window station×station matrix and write it to CSV at
-    `output_path` (absolute).
+def _write_window_xlsx(attr_longs: dict, tau_window: float, name_lookup: dict,
+                       output_path: str, label: str = '') -> None:
+    """Write one per-window station×station OD workbook with a sheet per attribution
+    mode (PT-Feeder: 'Specific' + 'Blended'; Municipal: 'Municipal').
+
+    Args:
+        attr_longs: dict[sheet_label -> long-format OD DataFrame].
     """
-    matrix = _build_window_matrix(long_df, tau_window, name_lookup)
-    if matrix is None:
+    matrices = {}
+    for sheet, long_df in attr_longs.items():
+        matrix = _build_window_matrix(long_df, tau_window, name_lookup)
+        if matrix is not None:
+            matrices[sheet] = matrix
+    if not matrices:
         print(f"    ({label}): no data — skipping {output_path}")
         return
 
     out_full = Path(output_path)
     out_full.parent.mkdir(parents=True, exist_ok=True)
-    matrix.to_csv(out_full, encoding='utf-8-sig')
+    with pd.ExcelWriter(out_full, engine='openpyxl') as writer:
+        for sheet, matrix in matrices.items():
+            matrix.to_excel(writer, sheet_name=sheet)   # labels are ≤31 chars
+    sizes = '; '.join(f"{s}: {m.values.sum():,.0f}" for s, m in matrices.items())
     print(f"    Saved → {out_full}")
-    print(f"      {label}: {matrix.shape[0]}×{matrix.shape[1]} stations, "
-          f"total trips = {matrix.values.sum():,.1f}  (τ={tau_window})")
+    print(f"      {label}: {', '.join(matrices)}  ({sizes}; τ={tau_window})")
 
 
 def _export_od_matrix_excel(long_df: pd.DataFrame, windows: list,
@@ -1275,18 +1478,39 @@ def _reaggregate_to_stations(
 # TOP-5 EXCEL EXPORT (study-area stations)
 # ===============================================================================
 
-def _load_sa_stations(rail_stations) -> gpd.GeoDataFrame:
-    """Return SA rail stations using the same method catchment_allocate uses for
-    the station_catchments breakdown.
+def _load_sa_stations(rail_stations, svc_version: str = '',
+                      infra_version: str = '') -> gpd.GeoDataFrame:
+    """Return the authoritative study-area rail-station set.
 
-    Filters the already-loaded `rail_stations` by the study-area boundary via
-    catchment_allocate._filter_stations_to_sa — identical to the SA filter
-    behind the Communes_by_station sheet, so the top-5 Excel and OD pie map
-    cover exactly that station set.
+    Sourced from rail_stops_sa.gpkg (per svc/infra version), which is filtered from
+    the FULL rail_stops layer and therefore includes peak-only stations (e.g. the
+    Effretikon–Wetzikon corridor) that the all-day rail-stops load behind
+    `rail_stations` omits. Falls back to the legacy SA-boundary filter on
+    `rail_stations` when the file is absent.
 
     Returns:
-        GeoDataFrame[id_point, stop_name, geometry] for SA-scoped stations.
+        GeoDataFrame[id_point (int), stop_name, geometry] for SA-scoped stations.
     """
+    sa_path = (paths.get_rail_stops_sa(svc_version, infra_version)
+               if (svc_version and infra_version) else '')
+    if sa_path and os.path.exists(sa_path):
+        from pyogrio import list_layers
+        frames = [gpd.read_file(sa_path, layer=lyr)
+                  for lyr in list_layers(sa_path)[:, 0]]
+        sa = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True)).to_crs(_CODEBASE_CRS)
+        # Tolerate both the nodes schema ('Name') and the legacy GTFS schema.
+        name_col = ('stop_name' if 'stop_name' in sa.columns
+                    else ('Name' if 'Name' in sa.columns else None))
+        sa['id_point'] = pd.to_numeric(sa['Number'], errors='coerce')
+        sa = sa.dropna(subset=['id_point'])
+        sa['id_point']  = sa['id_point'].astype(int)
+        sa['stop_name'] = (sa[name_col].astype(str).str.strip()
+                           if name_col else sa['id_point'].astype(str))
+        out = sa[['id_point', 'stop_name', 'geometry']].reset_index(drop=True)
+        print(f"  Study-area stations (rail_stops_sa): {len(out)}")
+        return out
+
+    print("  rail_stops_sa.gpkg unavailable — falling back to SA-boundary filter.")
     sa_boundary = catchment_allocate._load_sa_boundary()
     sa_gdf      = catchment_allocate._filter_stations_to_sa(rail_stations, sa_boundary)
     if sa_gdf is None or sa_gdf.empty:
@@ -1296,9 +1520,9 @@ def _load_sa_stations(rail_stations) -> gpd.GeoDataFrame:
     return sa_gdf
 
 
-def _top5_table(long_df: pd.DataFrame, sa_ids: set, name_lookup: dict,
-                group_col: str, partner_col: str, partner_label: str,
-                top_n: int = 5) -> pd.DataFrame:
+def _top_relations_table(long_df: pd.DataFrame, sa_ids: set, name_lookup: dict,
+                         group_col: str, partner_col: str, partner_label: str,
+                         top_n: int = 10) -> pd.DataFrame:
     """Build a wide top-N table for SA stations on the given grouping side.
 
     group_col   = 'origin_station_id' (top destinations) or 'dest_station_id'
@@ -1321,26 +1545,87 @@ def _top5_table(long_df: pd.DataFrame, sa_ids: set, name_lookup: dict,
     return pd.DataFrame(rows)
 
 
-def _export_top5_excel(long_df, sa_ids, name_lookup, method, svc_network,
-                       top_n: int = 5) -> None:
+def _export_top_relations_excel(long_df, sa_ids, name_lookup, method, svc_network,
+                                windows, top_n: int = 10) -> None:
     """Write 'Top_Destinations' and 'Top_Origins' sheets (SA stations only) to a
-    standalone od_top5.xlsx in the versioned per-method OD directory.
+    standalone od_station_top_relations.xlsx in the versioned per-method OD directory.
+
+    Each sheet stacks one top-N table per time window — full-day first, then peak,
+    then off-peak — separated by a blank row and a window header. τ is a uniform
+    scalar, so the partner ranking is identical across windows; only the trip
+    magnitudes scale.
     """
     if long_df is None or long_df.empty or not sa_ids:
-        print(f"    Top-5 export ({method}): no data — skipped")
+        print(f"    Top-relations export ({method}): no data — skipped")
         return
 
-    dest_tbl = _top5_table(long_df, sa_ids, name_lookup,
-                           'origin_station_id', 'dest_station_id', 'dest', top_n)
-    orig_tbl = _top5_table(long_df, sa_ids, name_lookup,
-                           'dest_station_id', 'origin_station_id', 'origin', top_n)
+    tau_by_suffix = {suffix: tau for tau, suffix in windows}
+    ordered = [('Full day', tau_by_suffix.get('full_day', 1.0)),
+               ('Peak',     tau_by_suffix.get('peak',     1.0)),
+               ('Off-peak', tau_by_suffix.get('off_peak', 1.0))]
+    sides = [('Top_Destinations', 'origin_station_id', 'dest_station_id', 'dest'),
+             ('Top_Origins',      'dest_station_id',   'origin_station_id', 'origin')]
 
-    out_path = paths.get_od_top5_xlsx(svc_network, method)
+    out_path = paths.get_od_top_relations_xlsx(svc_network, method)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
-        dest_tbl.to_excel(writer, sheet_name='Top_Destinations', index=False)
-        orig_tbl.to_excel(writer, sheet_name='Top_Origins', index=False)
-    print(f"    Top-5 origins/destinations → {out_path}")
+        for sheet, group_col, partner_col, partner_label in sides:
+            start = 0
+            for win_label, tau in ordered:
+                scaled = long_df.copy()
+                scaled['trips'] = scaled['trips'] * tau
+                tbl = _top_relations_table(scaled, sa_ids, name_lookup,
+                                           group_col, partner_col, partner_label,
+                                           top_n)
+                tbl.to_excel(writer, sheet_name=sheet, startrow=start + 1,
+                             index=False)
+                writer.sheets[sheet].cell(row=start + 1, column=1,
+                                          value=f'{win_label} (τ={tau:g})')
+                start += len(tbl) + 3
+    print(f"    Top origins/destinations (full-day + peak + off-peak) → {out_path}")
+
+
+def _export_method_comparison_excel(pt_long: pd.DataFrame, muni_long: pd.DataFrame,
+                                    sa_ids: set, name_lookup: dict,
+                                    svc_network: str) -> None:
+    """Per-SA-station OD-flow comparison between PT-Feeder and Municipal (τ=1).
+
+    For each study-area station: outgoing (sum as origin) and incoming (sum as
+    destination) trips under each method, their differences, and the percentage
+    change in total throughput Municipal → PT-Feeder. Written to a single-sheet
+    od_method_comparison.xlsx. Only meaningful when both methods are present.
+    """
+    if pt_long is None or muni_long is None or not sa_ids:
+        print("    Method comparison: needs both methods — skipped")
+        return
+
+    def _flows(long_df):
+        return (long_df.groupby('origin_station_id')['trips'].sum(),
+                long_df.groupby('dest_station_id')['trips'].sum())
+
+    pt_out, pt_in = _flows(pt_long)
+    mu_out, mu_in = _flows(muni_long)
+
+    rows = []
+    for sid in sorted(sa_ids):
+        po, pi = float(pt_out.get(sid, 0.0)), float(pt_in.get(sid, 0.0))
+        mo, mi = float(mu_out.get(sid, 0.0)), float(mu_in.get(sid, 0.0))
+        base   = mo + mi
+        rows.append({
+            'station':    name_lookup.get(str(sid), str(sid)),
+            'muni_out':   round(mo, 1), 'pt_out': round(po, 1),
+            'muni_in':    round(mi, 1), 'pt_in':  round(pi, 1),
+            'delta_out':  round(po - mo, 1), 'delta_in': round(pi - mi, 1),
+            'pct_delta':  (round(100.0 * ((po + pi) - base) / base, 1)
+                           if base > 0 else None),
+        })
+    df = pd.DataFrame(rows).sort_values('station').reset_index(drop=True)
+
+    out_path = paths.get_od_method_comparison_xlsx(svc_network)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Method_Comparison', index=False)
+    print(f"    Method comparison ({len(df)} SA stations) → {out_path}")
 
 
 # ===============================================================================
@@ -1510,22 +1795,29 @@ def _plot_sa_stations_od_map(long_df: pd.DataFrame,
                               sa_stations: gpd.GeoDataFrame,
                               name_lookup: dict,
                               method: str,
-                              svc_version: str) -> None:
+                              svc_version: str,
+                              attribution_mode: str = '') -> None:
     """OD pie-chart map for SA stations — mirrors _plot_sa_stations_overview_map.
 
-    For each SA station two pies are drawn above the marker:
-      Left  ('Dest'): top-3 stations this station sends trips to   (as origin).
-      Right ('Orig'): top-3 stations that send trips to this station (as dest).
-    Slice labels show partner station name + share %. Colours are keyed
-    deterministically by partner station id. Slices below the visible threshold
-    are merged into 'Other'.
+    Each station's top-3 OD partners are shown as pie wedges with one compact
+    callout box per pie (single leader) listing 'partner (share %)'. Colours are
+    keyed deterministically by partner station id; sub-threshold partners merge
+    into 'Other'.
+
+    When the station OD is symmetric (Municipal, or PT-Feeder 'blended') Dest and
+    Orig are identical, so a single pie is drawn per station with its callout
+    fanned outward (away from the map centre). PT-Feeder 'specific' is directional,
+    so two pies are drawn — Dest (left, box left) and Orig (right, box right).
 
     Output: plots/Traffic_Flow/OD/<svc_version>/<Method>/od_sa_stations_od_map.pdf
     """
     if long_df is None or long_df.empty or sa_stations.empty:
         print(f"    OD pie map ({method}): no data — skipped")
         return
-    print(f"  Building SA-stations OD pie map ({method}) ...")
+    symmetric = (method == 'municipal'
+                 or (attribution_mode or '').strip().lower() == 'blended')
+    print(f"  Building SA-stations OD pie map ({method}; "
+          f"{'1 pie' if symmetric else '2 pies'}) ...")
 
     sa_boundary = catchment_allocate._load_sa_boundary()
 
@@ -1543,24 +1835,61 @@ def _plot_sa_stations_od_map(long_df: pd.DataFrame,
     fig, ax = plt.subplots(figsize=(14, 12))
     ax.set_facecolor('#f5f5f5')
 
-    # ── Background: SA area (white fill), lakes, SA boundary outline ─────────
+    # ── Background: rail + surroundings (ghost outside SA, solid inside) ──────
+    #     Mirrors catchment_allocate._plot_sa_stations_overview_map so the OD map
+    #     carries the same infrastructure context (no white SA mask — the
+    #     surrounding catchment area stays visible at reduced opacity).
+    from shapely.geometry import box as _box
+    extent_box = _box(xmin, ymin, xmax, ymax)
+
+    try:
+        muni = gpd.read_file(paths.MUNICIPAL_BOUNDARIES_GPKG).to_crs(
+            catchment_base.CODEBASE_CRS)
+        if 'objektart' in muni.columns:
+            muni = muni[muni['objektart'] == 'Gemeindegebiet']
+        muni_full = muni[muni.geometry.intersects(extent_box)].copy()
+        muni_full.boundary.plot(ax=ax, color='#B0B0B0', linewidth=0.3,
+                                linestyle='--', alpha=0.35, zorder=1)
+        if sa_boundary is not None and not muni_full.empty:
+            muni_in = gpd.clip(muni_full, sa_boundary)
+            if not muni_in.empty:
+                muni_in.boundary.plot(ax=ax, color='#808080', linewidth=0.45,
+                                      linestyle='--', alpha=0.9, zorder=2)
+    except Exception as exc:
+        print(f"    WARNING: failed to load municipal boundaries: {exc}")
+
+    try:
+        lakes_full = catchment_allocate._load_lakes_for_extent(extent_box, scope='ca')
+        if not lakes_full.empty:
+            lakes_full.plot(ax=ax, facecolor='#D6E9F2', edgecolor='none',
+                            alpha=0.4, zorder=3)
+            if sa_boundary is not None:
+                lakes_in = gpd.clip(lakes_full, sa_boundary)
+                if not lakes_in.empty:
+                    lakes_in.plot(ax=ax, facecolor='#A8D8EA', edgecolor='none',
+                                  alpha=1.0, zorder=4)
+    except Exception as exc:
+        print(f"    WARNING: failed to load lakes: {exc}")
+
+    try:
+        rail_full = catchment_allocate._load_rail_lines_for_plot(
+            extent_box, temporal='all')
+        if not rail_full.empty:
+            rail_full.plot(ax=ax, color='#FF7F00', linewidth=0.8,
+                           alpha=0.35, zorder=5)
+            if sa_boundary is not None:
+                rail_in = gpd.clip(rail_full, sa_boundary)
+                if not rail_in.empty:
+                    rail_in.plot(ax=ax, color='#FF7F00', linewidth=1.2,
+                                 alpha=1.0, zorder=6)
+    except Exception as exc:
+        print(f"    WARNING: failed to load rail lines: {exc}")
+
     if sa_boundary is not None:
         sa_gdf = gpd.GeoDataFrame(geometry=[sa_boundary],
                                   crs=catchment_base.CODEBASE_CRS)
-        sa_gdf.plot(ax=ax, color='white', edgecolor='none', zorder=1)
         sa_gdf.boundary.plot(ax=ax, color='black', linewidth=1.3,
                              linestyle='--', zorder=7)
-    if os.path.exists(paths.LAKES_SHP):
-        try:
-            from shapely.geometry import box as _box
-            lakes = gpd.read_file(paths.LAKES_SHP).to_crs(catchment_base.CODEBASE_CRS)
-            ext   = _box(xmin, ymin, xmax, ymax)
-            lakes = lakes[lakes.geometry.intersects(ext)]
-            if not lakes.empty:
-                lakes.plot(ax=ax, facecolor='#A8D8EA', edgecolor='none',
-                           alpha=0.8, zorder=3)
-        except Exception as _exc:
-            print(f"    WARNING: could not load lakes: {_exc}")
 
     # ── Station markers ──────────────────────────────────────────────────────
     ax.scatter(sa_stations.geometry.x, sa_stations.geometry.y,
@@ -1585,9 +1914,12 @@ def _plot_sa_stations_od_map(long_df: pd.DataFrame,
         if total <= 0:
             return []
         top   = sub.nlargest(top_n, 'trips')
-        other = total - float(top['trips'].sum())
+        # Show only the top-N partners that each hold >= 5%; everything else
+        # (smaller top-N entries plus the long tail) collapses into 'Other'.
+        shown = top[top['trips'] / total >= 0.05]
+        other = total - float(shown['trips'].sum())
         slices = []
-        for _, r in top.iterrows():
+        for _, r in shown.iterrows():
             pid = int(r[partner_col])
             slices.append((_nm(pid), float(r['trips']) / total,
                            colour_map.get(pid, '#888888')))
@@ -1595,110 +1927,163 @@ def _plot_sa_stations_od_map(long_df: pd.DataFrame,
             slices.append(('Other', other / total, '#888888'))
         return slices
 
-    # ── Pie geometry constants (match _plot_sa_stations_overview_map) ────────
+    # ── Pie + callout geometry ───────────────────────────────────────────────
+    #     One compact callout box per pie (single leader) listing every slice,
+    #     placed with collision avoidance (see below).
     pie_radius = min(sa_w, sa_h) * 0.022
-    pie_dx     = pie_radius * 1.35
-    pie_dy     = pie_radius * 1.25
-    label_dx   = pie_radius * 1.9
+    pie_dx     = pie_radius * 1.45   # half-separation of the Dest/Orig pair (specific)
+    pie_dy     = pie_radius * 1.30   # vertical lift of pie centre above the marker
+    label_dx   = pie_radius * 1.55   # pie centre → callout box anchor
+    centre_x   = 0.5 * (xmin + xmax)
 
     sa_row_by_id = {int(r['id_point']): r for _, r in sa_stations.iterrows()}
 
-    def _closest_angle_in_arc(theta1: float, theta2: float, target: float) -> float:
-        a = theta1 % 360
-        b = theta2 % 360
-        t = target % 360
-        arc_size = (theta2 - theta1) % 360
-        if arc_size == 0:
-            arc_size = 360
-        d_at = (t - a) % 360
-        if d_at <= arc_size:
-            return t
-        d_a = min(abs(t - a), 360 - abs(t - a))
-        d_b = min(abs(t - b), 360 - abs(t - b))
-        return a if d_a < d_b else b
-
-    def _draw_pie(cx, cy, slices, title, label_side, clockwise):
-        if not slices:
-            return
-        target  = 180.0 if label_side == 'left' else 0.0
-        lx_text = cx - label_dx if label_side == 'left' else cx + label_dx
-        ha      = 'right' if label_side == 'left' else 'left'
-
-        items = []
-        start = 90.0
-        for name, share, colour in slices:
-            delta = share * 360.0
-            if clockwise:
-                theta1, theta2 = start - delta, start
-                start -= delta
-            else:
-                theta1, theta2 = start, start + delta
-                start += delta
-            ax.add_patch(Wedge(
-                center=(cx, cy), r=pie_radius, theta1=theta1, theta2=theta2,
-                facecolor=colour, edgecolor='white', linewidth=0.5, zorder=9,
-            ))
-            anchor_deg = _closest_angle_in_arc(theta1, theta2, target)
-            rad = np.deg2rad(anchor_deg)
-            items.append({
-                'name':  name,
-                'share': share,
-                'sx':    cx + pie_radius * np.cos(rad),
-                'sy':    cy + pie_radius * np.sin(rad),
-                'ly':    cy + pie_radius * 1.25 * np.sin(rad),
-            })
-
-        min_gap     = pie_radius * 0.45
-        items_sorted = sorted(items, key=lambda d: -d['ly'])
-        for i in range(1, len(items_sorted)):
-            ceiling = items_sorted[i - 1]['ly'] - min_gap
-            if items_sorted[i]['ly'] > ceiling:
-                items_sorted[i]['ly'] = ceiling
-
-        for d in items_sorted:
-            ax.plot([d['sx'], lx_text], [d['sy'], d['ly']],
-                    color='black', linewidth=0.4, zorder=10)
-            ax.text(lx_text, d['ly'], f"{d['name']} ({d['share'] * 100:.1f}%)",
-                    fontsize=5, ha=ha, va='center', zorder=11,
-                    bbox=dict(boxstyle='square,pad=0.15',
-                              facecolor='white', edgecolor='none'))
-
-        ax.text(cx, cy - pie_radius * 1.25, title,
-                fontsize=5, ha='center', va='top', fontweight='bold', zorder=11,
-                bbox=dict(boxstyle='square,pad=0.15',
-                          facecolor='white', edgecolor='none'))
-
-    # ── Per-station rendering ────────────────────────────────────────────────
-    for sid, row in sa_row_by_id.items():
-        x, y = row.geometry.x, row.geometry.y
-
-        dest_slices = _top_slices(sid, 'origin_station_id', 'dest_station_id')
-        orig_slices = _top_slices(sid, 'dest_station_id',   'origin_station_id')
-
-        _draw_pie(x - pie_dx, y + pie_dy, dest_slices,
-                  title='Dest', label_side='left',  clockwise=True)
-        _draw_pie(x + pie_dx, y + pie_dy, orig_slices,
-                  title='Orig', label_side='right', clockwise=False)
-
-        total_out = float(long_df[long_df['origin_station_id'] == sid]['trips'].sum())
-        total_in  = float(long_df[long_df['dest_station_id']   == sid]['trips'].sum())
-        stn_name  = name_lookup.get(str(sid), row.get('stop_name', str(sid)))
-        label     = f"{stn_name}\nOut {total_out:,.0f} · In {total_in:,.0f}"
-        label_y   = (y + pie_dy + pie_radius * 1.25
-                     if (dest_slices or orig_slices) else y + pie_radius * 0.4)
-        ax.text(x, label_y, label,
-                fontsize=5, fontweight='bold', va='bottom', ha='center', zorder=11,
-                bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
-                          edgecolor='none'))
-
+    # Axes limits must be final before text extents are measured for de-collision.
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.set_aspect('equal')
+
+    _CALLOUT_BBOX = dict(boxstyle='square,pad=0.3', facecolor='white',
+                         edgecolor='black', linewidth=0.4)
+    _TOTALS_BBOX  = dict(boxstyle='round,pad=0.15', facecolor='white',
+                         edgecolor='black', linewidth=0.4)
+    _TITLE_BBOX   = dict(boxstyle='square,pad=0.15', facecolor='white',
+                         edgecolor='black', linewidth=0.4)
+
+    def _draw_pie(cx, cy, slices):
+        """Draw the wedges of one pie (clockwise from 12 o'clock); no labels."""
+        start = 90.0
+        for _name, share, colour in slices:
+            delta = share * 360.0
+            ax.add_patch(Wedge(center=(cx, cy), r=pie_radius,
+                               theta1=start - delta, theta2=start,
+                               facecolor=colour, edgecolor='white',
+                               linewidth=0.3, zorder=9))
+            start -= delta
+
+    # --- Collision-aware label placement -------------------------------------
+    # Each text box is placed at the first candidate position whose rendered
+    # extent clears every previously placed box and pie; callouts try their
+    # preferred side then the other, each at increasing vertical nudges, and the
+    # leader is drawn from the rim to the chosen anchor. If extent measurement is
+    # unavailable the preferred slot is used directly (no regression).
+    try:
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.transforms import Bbox
+        renderer = FigureCanvasAgg(fig).get_renderer()
+    except Exception:
+        renderer = None
+    placed = []
+
+    def _clash(bb, pad=4.0):
+        for o in placed:
+            if (bb.x0 < o.x1 + pad and bb.x1 > o.x0 - pad and
+                    bb.y0 < o.y1 + pad and bb.y1 > o.y0 - pad):
+                return True
+        return False
+
+    def _pie_obstacle(cx, cy):
+        if renderer is None:
+            return
+        (x0, y0) = ax.transData.transform((cx - pie_radius, cy - pie_radius))
+        (x1, y1) = ax.transData.transform((cx + pie_radius, cy + pie_radius))
+        placed.append(Bbox([[min(x0, x1), min(y0, y1)],
+                            [max(x0, x1), max(y0, y1)]]))
+
+    def _try_text(tx, ty, text, ha, va, bbox_kw, bold):
+        """Add the text; return it if it clears all obstacles, else remove it."""
+        t = ax.text(tx, ty, text, fontsize=5, ha=ha, va=va, zorder=11,
+                    fontweight=('bold' if bold else 'normal'), bbox=bbox_kw)
+        if renderer is None:
+            return t                       # cannot measure → accept first slot
+        if not _clash(t.get_window_extent(renderer)):
+            placed.append(t.get_window_extent(renderer))
+            return t
+        t.remove()
+        return None
+
+    def _place_callout(cx, cy, slices, pref_side):
+        if not slices:
+            return
+        text   = '\n'.join(f"{nm} ({sh * 100:.1f}%)" for nm, sh, _c in slices)
+        sides  = [pref_side, 'right' if pref_side == 'left' else 'left']
+        nudges = [0.0, 1.9 * pie_radius, -1.9 * pie_radius,
+                  3.8 * pie_radius, -3.8 * pie_radius]
+        for s, dy in [(s, dy) for s in sides for dy in nudges]:
+            left = (s == 'left')
+            bx   = cx - label_dx if left else cx + label_dx
+            ha   = 'right' if left else 'left'
+            if _try_text(bx, cy + dy, text, ha, 'center', _CALLOUT_BBOX, False):
+                rim = cx - pie_radius if left else cx + pie_radius
+                ax.plot([rim, bx], [cy, cy + dy], color='black',
+                        linewidth=0.4, zorder=10)
+                return
+        # fallback: preferred side, no nudge (drawn even if it clashes)
+        left = (pref_side == 'left')
+        bx   = cx - label_dx if left else cx + label_dx
+        ha   = 'right' if left else 'left'
+        ax.text(bx, cy, text, fontsize=5, ha=ha, va='center', zorder=11,
+                bbox=_CALLOUT_BBOX)
+        rim = cx - pie_radius if left else cx + pie_radius
+        ax.plot([rim, bx], [cy, cy], color='black', linewidth=0.4, zorder=10)
+
+    def _place_totals(cx, cy, stn_name, total_out, total_in):
+        text = f"{stn_name}\nOut {total_out:,.0f} · In {total_in:,.0f}"
+        for dy in (pie_radius * 1.30, pie_radius * 2.60,
+                   -pie_radius * 1.45, pie_radius * 3.90):
+            va = 'bottom' if dy >= 0 else 'top'
+            if _try_text(cx, cy + dy, text, 'center', va, _TOTALS_BBOX, True):
+                return
+        ax.text(cx, cy + pie_radius * 1.30, text, fontsize=5, fontweight='bold',
+                va='bottom', ha='center', zorder=11, bbox=_TOTALS_BBOX)
+
+    def _place_pie_title(cx, cy, txt):
+        t = ax.text(cx, cy - pie_radius * 1.25, txt, fontsize=5, ha='center',
+                    va='top', fontweight='bold', zorder=11, bbox=_TITLE_BBOX)
+        if renderer is not None:
+            placed.append(t.get_window_extent(renderer))
+
+    # ── Per-station rendering (two passes) ───────────────────────────────────
+    # Pass 1 draws every pie so callouts can avoid all of them; pass 2 places the
+    # text boxes busiest-station-first so the largest callouts win the prime slots.
+    stations = []
+    for sid, row in sa_row_by_id.items():
+        x, y = row.geometry.x, row.geometry.y
+        dest_slices = _top_slices(sid, 'origin_station_id', 'dest_station_id')
+        orig_slices = _top_slices(sid, 'dest_station_id',   'origin_station_id')
+        total_out = float(long_df[long_df['origin_station_id'] == sid]['trips'].sum())
+        total_in  = float(long_df[long_df['dest_station_id']   == sid]['trips'].sum())
+        stn_name  = name_lookup.get(str(sid), row.get('stop_name', str(sid)))
+        cy = y + pie_dy
+        if symmetric:
+            _draw_pie(x, cy, dest_slices)
+            _pie_obstacle(x, cy)
+        else:
+            _draw_pie(x - pie_dx, cy, dest_slices)
+            _draw_pie(x + pie_dx, cy, orig_slices)
+            _pie_obstacle(x - pie_dx, cy)
+            _pie_obstacle(x + pie_dx, cy)
+        stations.append((x, y, cy, dest_slices, orig_slices,
+                         total_out, total_in, stn_name))
+
+    stations.sort(key=lambda s: -(s[5] + s[6]))
+    for x, y, cy, dest_slices, orig_slices, total_out, total_in, stn_name in stations:
+        if symmetric:
+            _place_totals(x, cy, stn_name, total_out, total_in)
+            _place_callout(x, cy, dest_slices, 'left' if x < centre_x else 'right')
+        else:
+            _place_pie_title(x - pie_dx, cy, 'Dest')
+            _place_pie_title(x + pie_dx, cy, 'Orig')
+            _place_totals(x, cy, stn_name, total_out, total_in)
+            _place_callout(x - pie_dx, cy, dest_slices, 'left')
+            _place_callout(x + pie_dx, cy, orig_slices, 'right')
+
     ax.set_xlabel('E [m]')
     ax.set_ylabel('N [m]')
     method_label = 'PT-Feeder' if method == 'pt_feeder' else 'Municipal'
-    ax.set_title(f'SA stations — top-3 OD partners ({method_label}): '
-                 f'Dest (left pie) / Orig (right pie)')
+    subtitle = ('in = out (symmetric)' if symmetric
+                else 'Dest (left pie) / Orig (right pie)')
+    ax.set_title(f'SA stations — top-3 OD partners ({method_label}): {subtitle}')
     catchment_base._add_map_elements(ax)
 
     out_dir  = paths.get_od_method_plot_dir(svc_version, method)
@@ -1736,6 +2121,270 @@ def _plot_od_diagnostics(pt_long, muni_long, rail_stations, boundary,
     _plot_bar_attracted(summary, top_n=20)
     _plot_spatial_attracted(summary, boundary)
     _plot_diff_map(summary, boundary, top_n_label=5)
+
+
+# ===============================================================================
+# CORRIDOR SANKEY DIAGRAMS
+# ===============================================================================
+# Per corridor and direction the named partner-node set is the union of each
+# corridor station's top-N partners (SANKEY_TOP_N_NAMED); every corridor station's
+# flow to a named partner is drawn explicitly (even if it is that station's 5th/6th
+# choice), and only flow to non-named partners collapses into a single 'Other' node.
+# Static PDF via matplotlib (always); interactive HTML via plotly when importable.
+
+# Study-area corridor membership (id_point), in geographic order.
+SANKEY_CORRIDORS = {
+    'Corridor_A_Uster_Oberland': [8503128, 8503127, 8503126, 8503125,
+                                  8503124, 8503123, 8503130],
+    'Corridor_B_Effretikon_Wetzikon': [8503305, 8503303, 8503302, 8503301,
+                                       8503300, 8503123],
+}
+SANKEY_TOP_N_NAMED = 4   # named partners per station (4 named + 'Other' -> "top-5")
+
+
+def build_corridor_sankeys(long_df: pd.DataFrame, name_lookup: dict,
+                           svc_network: str, method: str,
+                           attribution_mode: str = '') -> None:
+    """Render corridor Sankeys (PDF + optional HTML) from the all-day (tau=1)
+    long-format OD, written directly in the per-method plot dir.
+
+    Origins and destinations are identical whenever the station OD is symmetric —
+    Municipal, or PT-Feeder 'blended' (both apply a single symmetric attribution
+    weight to a symmetric communal OD) — so only the Destination Sankey is drawn
+    for those. PT-Feeder 'specific' (origin=Pop, dest=FTE) is directional, so both
+    Origin and Destination Sankeys are drawn.
+    """
+    if long_df is None or long_df.empty:
+        print("    Corridor Sankeys: no OD data — skipped")
+        return
+    symmetric  = (method == 'municipal'
+                  or (attribution_mode or '').strip().lower() == 'blended')
+    directions = ('dest',) if symmetric else ('dest', 'orig')
+    out_dir = paths.get_od_method_plot_dir(svc_network, method)
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"  Building corridor Sankeys ({method}; "
+          f"{'dest only' if symmetric else 'dest + orig'}) ...")
+    for cname, ids in SANKEY_CORRIDORS.items():
+        for direction in directions:
+            _build_corridor_sankey(long_df, ids, direction, name_lookup,
+                                   cname, method, out_dir)
+
+
+def _sk_nm(name_lookup: dict, sid) -> str:
+    return name_lookup.get(str(int(sid)), str(int(sid)))
+
+
+def _corridor_partner_flows(long_df: pd.DataFrame, station_ids, direction) -> dict:
+    """dict[corridor_station_id -> dict[partner_id -> trips]].
+
+    'dest': corridor station is the ORIGIN, partner the destination.
+    'orig': corridor station is the DESTINATION, partner the origin. Self pairs dropped.
+    """
+    sset = set(int(s) for s in station_ids)
+    s_col, p_col = (('origin_station_id', 'dest_station_id') if direction == 'dest'
+                    else ('dest_station_id', 'origin_station_id'))
+    sub = long_df[long_df[s_col].isin(sset)]
+    flows = {}
+    for r in sub.itertuples(index=False):
+        S = int(getattr(r, s_col)); P = int(getattr(r, p_col))
+        if P == S:
+            continue
+        flows.setdefault(S, {})
+        flows[S][P] = flows[S].get(P, 0.0) + float(r.trips)
+    return flows
+
+
+def _sankey_named_set(flows: dict, top_n: int = SANKEY_TOP_N_NAMED) -> list:
+    """Union of each station's top-`top_n` partners, ordered by total flow desc."""
+    seen, totals = set(), {}
+    for pv in flows.values():
+        for P, v in pv.items():
+            totals[P] = totals.get(P, 0.0) + v
+    for pv in flows.values():
+        for P, _v in sorted(pv.items(), key=lambda kv: -kv[1])[:top_n]:
+            seen.add(P)
+    return sorted(seen, key=lambda P: -totals.get(P, 0.0))
+
+
+def _build_corridor_sankey(long_df, station_ids, direction, name_lookup, cname,
+                           method, out_dir) -> None:
+    flows = _corridor_partner_flows(long_df, station_ids, direction)
+    if not flows:
+        print(f"    {cname} {direction}: no flow — skipped")
+        return
+    named = _sankey_named_set(flows)
+    named_index = {P: i for i, P in enumerate(named)}
+    other_idx = len(named)
+
+    corridor_labels = [_sk_nm(name_lookup, s) for s in station_ids]
+    partner_labels  = [_sk_nm(name_lookup, p) for p in named] + ['Other']
+
+    links = []
+    for si, S in enumerate(station_ids):
+        pv = flows.get(int(S), {})
+        per_named, other = {}, 0.0
+        for P, val in pv.items():
+            if P in named_index:
+                pi = named_index[P]
+                per_named[pi] = per_named.get(pi, 0.0) + val
+            else:
+                other += val
+        for pi, val in per_named.items():
+            if val > 0:
+                links.append((si, pi, val) if direction == 'dest' else (pi, si, val))
+        if other > 1e-9:
+            links.append((si, other_idx, other) if direction == 'dest'
+                         else (other_idx, si, other))
+
+    if direction == 'dest':
+        left_labels, right_labels = corridor_labels, partner_labels
+    else:
+        left_labels, right_labels = partner_labels, corridor_labels
+
+    method_label = 'PT-Feeder' if method == 'pt_feeder' else 'Municipal'
+    pretty = cname.replace('_', ' ')
+    kind   = 'Destinations' if direction == 'dest' else 'Origins'
+    title  = f"{pretty} — top {kind} ({method_label}, all-day)"
+
+    out_pdf  = os.path.join(out_dir, f"sankey_{cname}_{direction}.pdf")
+    out_html = os.path.join(out_dir, f"sankey_{cname}_{direction}.html")
+    _draw_sankey_mpl(left_labels, right_labels, links, title, out_pdf)
+    _write_sankey_html(left_labels, right_labels, links, title, out_html)
+
+
+def _sankey_ribbon(ax, x0, x1, sy0, sy1, ty0, ty1, color) -> None:
+    """Filled S-curve band from a source segment [sy0,sy1] to a target [ty0,ty1]."""
+    xm = (x0 + x1) / 2.0
+    verts = [(x0, sy1), (xm, sy1), (xm, ty1), (x1, ty1),
+             (x1, ty0), (xm, ty0), (xm, sy0), (x0, sy0), (x0, sy1)]
+    codes = [_MplPath.MOVETO, _MplPath.CURVE4, _MplPath.CURVE4, _MplPath.CURVE4,
+             _MplPath.LINETO,  _MplPath.CURVE4, _MplPath.CURVE4, _MplPath.CURVE4,
+             _MplPath.CLOSEPOLY]
+    ax.add_patch(mpatches.PathPatch(_MplPath(verts, codes), facecolor=color,
+                                    edgecolor='none', alpha=0.45, zorder=2))
+
+
+def _sankey_stack(tots, gap, scale):
+    """Vertically-centred stacked spans [(y0, y1), ...] for one Sankey column."""
+    side_h = sum(t * scale for t in tots) + max(len(tots) - 1, 0) * gap
+    y = 0.5 + side_h / 2.0
+    spans = []
+    for t in tots:
+        h = t * scale
+        spans.append((y - h, y))
+        y -= h + gap
+    return spans
+
+
+def _draw_sankey_multi_mpl(columns, links, title, out_pdf) -> None:
+    """Draw an N-column static Sankey (PDF).
+
+    Args:
+        columns: ordered list of label-lists, one per column (left -> right).
+        links:   list of (col_idx, src_local, dst_local, value) — a flow from node
+                 src_local in column col_idx to node dst_local in column col_idx+1.
+        title, out_pdf: figure title and output path.
+
+    Node heights take max(inflow, outflow); for conserving middle columns the two
+    coincide. The 2-column callers go through _draw_sankey_mpl (a thin wrapper).
+    """
+    ncols = len(columns)
+    sizes = [len(c) for c in columns]
+    in_tot  = [[0.0] * n for n in sizes]
+    out_tot = [[0.0] * n for n in sizes]
+    for (c, s, d, v) in links:
+        out_tot[c][s] += v
+        in_tot[c + 1][d] += v
+    node_tot = [[max(in_tot[c][i], out_tot[c][i]) for i in range(sizes[c])]
+                for c in range(ncols)]
+    total = max((sum(col) for col in node_tot if col), default=0.0)
+    if total <= 0:
+        print(f"    Sankey: no flow — skipped {os.path.basename(out_pdf)}")
+        return
+
+    gap = 0.02
+    scale = (1.0 - (max(sizes) - 1) * gap) / total
+    spans = [_sankey_stack(node_tot[c], gap, scale) for c in range(ncols)]
+    xs = [0.10] if ncols == 1 else list(np.linspace(0.10, 0.90, ncols))
+    nw = 0.02
+    palette = plt.colormaps['tab20'].resampled(20)
+
+    fig, ax = plt.subplots(figsize=(13, 8))
+    col_colors = []
+    for c in range(ncols):
+        cols = (['#555555'] * sizes[c] if c == ncols - 1
+                else [palette((i + 3 * c) % 20) for i in range(sizes[c])])
+        col_colors.append(cols)
+        for i, (y0, y1) in enumerate(spans[c]):
+            ax.add_patch(mpatches.Rectangle((xs[c] - nw / 2, y0), nw, y1 - y0,
+                                            facecolor=cols[i], edgecolor='white',
+                                            linewidth=0.5, zorder=3))
+            if c == 0:
+                ax.text(xs[c] - nw / 2 - 0.012, (y0 + y1) / 2, columns[c][i],
+                        ha='right', va='center', fontsize=7)
+            elif c == ncols - 1:
+                ax.text(xs[c] + nw / 2 + 0.012, (y0 + y1) / 2, columns[c][i],
+                        ha='left', va='center', fontsize=7)
+            else:
+                ax.text(xs[c], y1 + 0.004, columns[c][i], ha='center', va='bottom',
+                        fontsize=7)
+
+    right_cur = [[y1 for (_y0, y1) in spans[c]] for c in range(ncols)]
+    left_cur  = [[y1 for (_y0, y1) in spans[c]] for c in range(ncols)]
+    for (c, s, d, v) in sorted(links, key=lambda t: (t[0], t[1], t[2])):
+        h = v * scale
+        sy_hi = right_cur[c][s]; sy_lo = sy_hi - h; right_cur[c][s] = sy_lo
+        ty_hi = left_cur[c + 1][d]; ty_lo = ty_hi - h; left_cur[c + 1][d] = ty_lo
+        _sankey_ribbon(ax, xs[c] + nw / 2, xs[c + 1] - nw / 2,
+                       sy_lo, sy_hi, ty_lo, ty_hi, col_colors[c][s])
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis('off')
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    fig.savefig(out_pdf, bbox_inches='tight')
+    plt.close(fig)
+    print(f"    Sankey → {out_pdf}")
+
+
+def _write_sankey_multi_html(columns, links, title, out_html) -> None:
+    """Write an interactive N-column Plotly Sankey; skips silently if plotly absent.
+
+    columns/links use the same convention as _draw_sankey_multi_mpl.
+    """
+    try:
+        import plotly.graph_objects as go
+    except Exception as exc:
+        print(f"    (plotly unavailable — interactive Sankey skipped: {exc})")
+        return
+    offs, labels, tot = [], [], 0
+    for col in columns:
+        offs.append(tot)
+        labels += list(col)
+        tot += len(col)
+    src = [offs[c] + s for (c, s, d, v) in links]
+    tgt = [offs[c + 1] + d for (c, s, d, v) in links]
+    val = [v for (c, s, d, v) in links]
+    fig = go.Figure(go.Sankey(
+        node=dict(label=labels, pad=15, thickness=16,
+                  line=dict(color='white', width=0.5)),
+        link=dict(source=src, target=tgt, value=val),
+    ))
+    fig.update_layout(title_text=title, font_size=11)
+    fig.write_html(out_html)
+    print(f"    Sankey (interactive) → {out_html}")
+
+
+def _draw_sankey_mpl(left_labels, right_labels, links, title, out_pdf) -> None:
+    """2-column static Sankey (thin wrapper over _draw_sankey_multi_mpl)."""
+    _draw_sankey_multi_mpl([left_labels, right_labels],
+                           [(0, li, ri, v) for (li, ri, v) in links], title, out_pdf)
+
+
+def _write_sankey_html(left_labels, right_labels, links, title, out_html) -> None:
+    """2-column interactive Sankey (thin wrapper over _write_sankey_multi_html)."""
+    _write_sankey_multi_html([left_labels, right_labels],
+                             [(0, li, ri, v) for (li, ri, v) in links], title, out_html)
 
 
 # ===============================================================================
@@ -1795,6 +2444,21 @@ if __name__ == '__main__':
         _a = input(f"Select attribution [{_default}]: ").strip() or _default
         _attr = 'specific' if _a == '1' else 'blended'
 
+    # Plot generation — standalone asks; default follows settings.PLOT_STATION_OD.
+    # (In the main pipeline the toggle decides without prompting.)
+    _default_plot = bool(getattr(settings, 'PLOT_STATION_OD', True))
+    _default_str  = 'y' if _default_plot else 'n'
+    print("\nPlots (SA stations OD pie map + corridor Sankeys):")
+    print(f"  Y/N — default '{_default_str}' from settings.PLOT_STATION_OD")
+    while True:
+        _p = input(f"Generate plots? [{_default_str}]: ").strip().lower() or _default_str
+        if _p in ('y', 'n', 'yes', 'no'):
+            _make_plots = _p.startswith('y')
+            break
+        print("  Invalid — enter y or n.")
+
     prepare_all_od_matrices(use_cache=settings.use_cache_stationsOD,
                             svc_version=_svc, method=_method,
-                            attribution_mode=_attr)
+                            attribution_mode=_attr,
+                            both_attributions=True,
+                            make_plots=_make_plots)

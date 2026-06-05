@@ -5,13 +5,12 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
 ================================================================================
   Infrastructure   : Build_New  -->  build as 'AS_2026_ZH'
   Raw version      : Raw_ZH
-  Services         : AK_2026_S18
+  Services         : Build_New  [needs projection]
   GTFS version     : GTFS_SVC2026_ZH
   Canton           : ZH
   Catchment method : PT_Feeder  (OD: feeder_weighted)
-  Travel cost      : absolute  (transfer: explicit)
+  Travel cost      : calibrated  (transfer: explicit)
   Capacity mode    : Dynamic
-  OD type          : canton_ZH  (base year 2035)
   Population base  : 2035
   Scenarios        : 100 x [2018-2100]
 --------------------------------------------------------------------------------
@@ -41,9 +40,9 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
   Total employment  :      914,349 (2023) →    1,021,643 (2035)
 
 --- Enhancement Stats: AS_2026_ZH_enhanced ---
-  Total segments         : 691
-  TT_Stopping filled     : 664 (96.1%)
-  speed_source = gtfs    : 691
+  Total segments         : 687
+  TT_Stopping filled     : 660 (96.1%)
+  speed_source = gtfs    : 687
   speed_source = formula : 0
   speed_source = estimate: 0
   speed_source = design  : 0
@@ -52,18 +51,18 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
 ================================================================================
   CALIBRATION INPUTS (Phase 4A)
 ================================================================================
-  Travel cost method     : absolute
+  Travel cost method     : calibrated
   Transfer cost model    : explicit
 --------------------------------------------------------------------------------
   Generalised-cost weights (cost_parameters.py)
-    W_IVT      = 1.0 (overridden)
-    W_WAIT     = 1.0 (overridden)
-    W_WALK     = 1.0 (overridden)
-    W_BIKE     = 1.0 (overridden)
-    W_TRANSFER = 1.0 (overridden)
+    W_IVT      = 1.000
+    W_WAIT     = 1.500
+    W_WALK     = 2.000
+    W_BIKE     = 1.500
+    W_TRANSFER = 2.000
 --------------------------------------------------------------------------------
   Transfer-penalty parameters
-    Active transfer penalty : 7.10 min  (raw 7.1 min (no comfort weighting))
+    Active transfer penalty : 12.10 min  (12.1 min eq. IVT (Axhausen 2014))
     PI_TRANSFER_MIN         : 12.10 min  (comfort-weighted, 'fixed_value' model)
     TRANSFER_WALK_MIN       : 4.00 min  ('explicit' model only)
     average_train_change_time : 7.10 min  (Axhausen 2014 raw)
@@ -86,16 +85,42 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
     BUFFER_BUS_M  = 500 m
 ================================================================================
 
+
+================================================================================
+  STATION OD MATRIX (Phase 4B)
+================================================================================
+  Method               : pt_feeder
+  Attribution mode     : specific
+  Service version      : AK_2026_S18_network
+  Population base year  : 2035
+  Temporal window      : full_day
+  OD output dir        : data/Traffic_Flow/OD/AK_2026_S18_network/
+================================================================================
+
+
+================================================================================
+  NETWORK ASSIGNMENT (Phase 4C)
+================================================================================
+  OD method            : pt_feeder
+  Assignment method    : logit
+  Service version      : AK_2026_S18_network
+  Cost model           : calibrated / explicit
+  Logit (K/maxT/theta) : 5 / 3 / 0.2
+  Output dir           : data/Traffic_Flow/Assignment/AK_2026_S18_network/
+================================================================================
+
 PHASE RUNTIMES
 ================================================================================
 
-Phase 1: Initialisation..................................... 0m 0s (0.77s)
-Phase 2: Data Preparation................................... 0m 53s (53.02s)
-Phase 3A: Infrastructure Network Build...................... 0m 20s (20.82s)
-Phase 3B: Services Network Build............................ 1m 24s (84.46s)
-Phase 3C: Capacity Analysis................................. 0m 4s (4.98s)
-Phase 4A: Catchment Allocation.............................. 2m 44s (164.82s)
+Phase 1: Initialisation..................................... 0m 0s (0.84s)
+Phase 2: Data Preparation................................... 0m 53s (53.82s)
+Phase 3A: Infrastructure Network Build...................... 0m 25s (25.85s)
+Phase 3B: Services Network Build............................ 7m 24s (444.07s)
+Phase 3C: Capacity Analysis................................. 0m 5s (5.03s)
+Phase 4A: Catchment Allocation.............................. 2m 41s (161.23s)
+Phase 4B: Station OD Matrix................................. 0m 33s (33.99s)
+Phase 4C: Passenger Routing................................. 11m 47s (707.61s)
 
 ================================================================================
-TOTAL TIME.................................................. 5m 28s (328.87s)
+TOTAL TIME.................................................. 23m 52s (1432.43s)
 ================================================================================

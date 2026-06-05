@@ -17,6 +17,7 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 
+import cost_parameters as cp
 import paths
 import settings
 from catchment_base import (
@@ -109,7 +110,7 @@ def _resolve_catchment_area():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 1 -Initialisation
+# Phase 1 - Initialisation
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def phase_1_initialisation(runtimes: dict) -> tuple:
@@ -259,7 +260,6 @@ def phase_1_initialisation(runtimes: dict) -> tuple:
         f"  Travel cost      : {settings.TRAVEL_COST_METHOD}  "
         f"(transfer: {settings.TRANSFER_COST_MODEL})",
         f"  Capacity mode    : {settings.CAPACITY_MODE}",
-        f"  OD type          : {settings.OD_TYPE}  (base year {settings.POPULATION_BASE_YEAR})",
         f"  Population base  : {settings.POPULATION_BASE_YEAR}",
         f"  Scenarios        : {settings.amount_of_scenarios} x "
         f"[{settings.start_year_scenario}-{settings.end_year_scenario}]",
@@ -284,7 +284,7 @@ def phase_1_initialisation(runtimes: dict) -> tuple:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Phase 2 -Data Preparation
+# Phase 2 - Data Preparation
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def phase_2_data_preparation(
@@ -1168,7 +1168,7 @@ def phase_4b_station_od_matrix(runtimes: dict) -> None:
     Runs catchment_OD_preparation.prepare_all_od_matrices() for the active
     settings.CATCHMENT_METHOD. Communal OD is scaled forward to
     POPULATION_BASE_YEAR (per-commune geometric mean), out-of-catchment demand is
-    routed to gateway (boundary) stations, and a top-5 origins/destinations Excel
+    routed to gateway (boundary) stations, and a top-10 origins/destinations Excel
     is exported for study-area stations.
 
     Gateway assignment behaves like the municipal station assignment: if a saved
@@ -1201,7 +1201,7 @@ def phase_4b_station_od_matrix(runtimes: dict) -> None:
     print(f"  Population base year  : {settings.POPULATION_BASE_YEAR}\n")
 
     # ── Step 4B.2: Skip-if-cached check ──────────────────────────────────────
-    expected = [paths.get_station_od_csv(svc_network, method, w)
+    expected = [paths.get_station_od_window_xlsx(svc_network, method, w)
                 for w in ('peak', 'off_peak', 'full_day')]
 
     if settings.use_cache_stationsOD:
@@ -1228,10 +1228,101 @@ def phase_4b_station_od_matrix(runtimes: dict) -> None:
         infra_version=PIPELINE_CONFIG.infra_version,
         method=method,
         attribution_mode=settings.OD_ATTRIBUTION_MODE,
+        make_plots=settings.PLOT_STATION_OD,
     )
 
     _write_station_od_to_report(method, svc_network)
     runtimes["Phase 4B: Station OD Matrix"] = time.time() - st
+
+
+def phase_4c_network_assignment(runtimes: dict) -> None:
+    """Phase 4C — Passenger Routing.
+
+    Assigns the Phase-4B station OD onto rail services via
+    catchment_OD_rail_network.passenger_routing(), honouring
+    settings.ROUTING_ASSIGNMENT_METHOD and the active cost model.
+    """
+    print("\n" + "=" * 80)
+    print("PHASE 4C: PASSENGER ROUTING")
+    print("=" * 80 + "\n")
+    st = time.time()
+
+    method = get_routing_od_method()   # 'pt_feeder' | 'municipal'
+    svc_version = PIPELINE_CONFIG.svc_version
+    if svc_version is None:
+        svc_version = settings.SVC_VERSION
+        if svc_version == 'Build_New':
+            svc_version = settings.SVC_BUILD_NEW_NAME
+    svc_network = f'{svc_version}_network'
+
+    assignment_method = settings.ROUTING_ASSIGNMENT_METHOD
+    if assignment_method == 'both':
+        print("  WARNING: ROUTING_ASSIGNMENT_METHOD='both' is standalone-only — "
+              "using 'logit' for the pipeline run.")
+        assignment_method = 'logit'
+    method_dirs = [assignment_method]
+
+    print(f"  OD method            : {method}")
+    print(f"  Assignment method    : {assignment_method}")
+    print(f"  Service version      : {svc_version}  -> '{svc_network}'")
+    print(f"  Cost model           : {settings.TRAVEL_COST_METHOD} / "
+          f"{settings.TRANSFER_COST_MODEL}\n")
+
+    expected = [
+        os.path.join(paths.get_assignment_method_dir(svc_network, md),
+                     'path_assignment.xlsx')
+        for md in method_dirs
+    ]
+    if settings.use_cache_railRouting:
+        missing = [f for f in expected if not os.path.exists(f)]
+        if not missing:
+            print(f"  use_cache_railRouting = True and all {len(expected)} expected "
+                  f"outputs present — skipping Phase 4C.")
+            runtimes["Phase 4C: Passenger Routing"] = time.time() - st
+            return
+        print(f"  use_cache_railRouting = True but {len(missing)} output(s) missing "
+              f"— running routing.")
+    else:
+        print("  use_cache_railRouting = False — running routing.")
+
+    print("\n--- Step 4C.1: Run Passenger Routing ---\n")
+    import catchment_OD_rail_network as _pr
+    _pr.passenger_routing(
+        svc_version=svc_network,
+        use_cache=settings.use_cache_railRouting,
+        od_method=method,
+        assignment_method=assignment_method,
+        make_plots=settings.PLOT_ASSIGNMENT)
+
+    _write_assignment_to_report(method, svc_network, assignment_method)
+    runtimes["Phase 4C: Passenger Routing"] = time.time() - st
+
+
+def _write_assignment_to_report(method: str, svc_network: str,
+                                assignment_method: str) -> None:
+    """Append a 'NETWORK ASSIGNMENT (Phase 4C)' block to report_new.txt."""
+    lines = [
+        "=" * 80,
+        "  NETWORK ASSIGNMENT (Phase 4C)",
+        "=" * 80,
+        f"  OD method            : {method}",
+        f"  Assignment method    : {assignment_method}",
+        f"  Service version      : {svc_network}",
+        f"  Cost model           : {settings.TRAVEL_COST_METHOD} / "
+        f"{settings.TRANSFER_COST_MODEL}",
+        f"  Logit (K/maxT/theta) : {settings.ROUTING_K_PATHS} / "
+        f"{settings.ROUTING_MAX_TRANSFERS} / {cp.LOGIT_ROUTE_THETA}",
+        f"  Output dir           : data/Traffic_Flow/Assignment/{svc_network}/",
+        "=" * 80,
+    ]
+    for line in lines:
+        print(line)
+    rt_file = os.path.join(paths.MAIN, 'report_new.txt')
+    with open(rt_file, 'a', encoding='utf-8') as f:
+        f.write("\n")
+        for line in lines:
+            f.write(line + "\n")
+        f.write("\n")
 
 
 def _write_station_od_to_report(method: str, svc_network: str) -> None:
@@ -1374,6 +1465,7 @@ def infrascanrail_new():
     phase_3c_capacity(sa_boundary, ca_boundary, runtimes)
     phase_4a_catchment_allocation(sa_boundary, ca_boundary, runtimes)
     phase_4b_station_od_matrix(runtimes)
+    phase_4c_network_assignment(runtimes)
 
     _save_runtimes(runtimes, 'report_new.txt')
 

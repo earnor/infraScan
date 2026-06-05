@@ -14,7 +14,10 @@ DEVELOPMENT_DIRECTORY = r"data\Network\processed\developments"
 
 RAIL_NODES_PATH = r"data\Network\Rail_Node.csv"
 RAIL_POINTS_PATH = r"data\Network\processed\points.gpkg"
-OD_KT_ZH_PATH = r'data/Traffic_Flow/OD/Original/KTZH_00001982_00003903.xlsx'
+OD_KT_ZH_PATH = r'data/Spatial_Data/Transit_Network/Cantonal_OD_Demand/KTZH_00001982_00003903.xlsx'
+# SBB official station-users statistics (2013-2025): daily passenger totals and the
+# hourly load distribution per major station (sheet 'Tag_Jour_Giorno_Day').
+SBB_STATION_USERS_XLSX = r'data/Spatial_Data/Transit_Network/SBB_Station_Flows/b01x-sbb-cff-ffs-bhfbenutzer-usagersgares-utentistazione-stationusers_2013-2025.xlsx'
 OD_STATIONS_KT_ZH_PATH      = r'data/Traffic_Flow/OD/Rail/ktzh/od_matrix_stations_ktzh_20.csv'
 OD_STATIONS_KT_ZH_2040_PATH = r'data/Traffic_Flow/OD/Rail/ktzh/od_matrix_stations_ktzh_2040.csv'
 
@@ -25,6 +28,8 @@ OD_STATIONS_KT_ZH_2040_PATH = r'data/Traffic_Flow/OD/Rail/ktzh/od_matrix_station
 # data/Traffic_Flow/OD/ and data/Traffic_Flow/OD/Rail/ are retained as-is.
 TRAFFIC_FLOW_OD_DIR       = r'data/Traffic_Flow/OD'
 TRAFFIC_FLOW_OD_PLOTS_DIR = os.path.join('plots', 'Traffic_Flow', 'OD')
+TRAFFIC_FLOW_ASSIGNMENT_DIR = r'data/Traffic_Flow/Assignment'
+TRAFFIC_FLOW_ASSIGNMENT_PLOTS_DIR = os.path.join('plots', 'Traffic_Flow', 'Assignment')
 _OD_METHOD_DIRS = {'pt_feeder': 'PT_Feeder', 'municipal': 'Municipal'}
 
 COMMUNE_TO_STATION_PATH = r"data\Network\processed\Communes_to_railway_stations_ZH.xlsx"
@@ -144,6 +149,20 @@ def get_projected_services_path(svc_version: str, infra_version: str) -> str:
     """Return absolute path to projected rail edges for a svc/infra version pair."""
     return os.path.join(MAIN, RAIL_LINES_DIR, svc_version + '_network', infra_version, 'rail_segments.gpkg')
 
+def get_rail_stops_sa(svc_network: str, infra_version: str) -> str:
+    """Return absolute path to the study-area rail-stops GPKG for a svc/infra pair
+    (data/Network/Rail_Lines/<svc_network>/<infra_version>/rail_stops_sa.gpkg).
+
+    This is the authoritative study-area station set: it is filtered from the full
+    rail_stops layer, so it includes peak-only stations that the all-day rail-stops
+    load omits.
+
+    Args:
+        svc_network:   service version folder name WITH the '_network' suffix.
+        infra_version: infrastructure version subfolder, e.g. 'AS_2026_ZH_enhanced'.
+    """
+    return os.path.join(MAIN, RAIL_LINES_DIR, svc_network, infra_version, 'rail_stops_sa.gpkg')
+
 def get_od_version_dir(svc_network: str) -> str:
     """Return absolute path to the versioned OD output dir for a svc version.
 
@@ -160,20 +179,29 @@ def get_station_od_dir(svc_network: str, method: str) -> str:
                         _OD_METHOD_DIRS.get(method, method))
 
 
-def get_station_od_csv(svc_network: str, method: str, window: str) -> str:
-    """Return absolute path to a station-pair OD matrix CSV for a (method, window).
+def get_station_od_window_xlsx(svc_network: str, method: str, window: str) -> str:
+    """Return absolute path to a per-window station-pair OD workbook for a
+    (method, window). For PT-Feeder the workbook carries a 'Specific' and a
+    'Blended' sheet; for Municipal a single 'Municipal' sheet.
 
     Args:
         method: 'pt_feeder' | 'municipal'.
         window: 'peak' | 'off_peak' | 'full_day'.
     """
     return os.path.join(get_station_od_dir(svc_network, method),
-                        f'od_matrix_stations_{window}.csv')
+                        f'od_matrix_stations_{window}.xlsx')
 
 
-def get_od_top5_xlsx(svc_network: str, method: str) -> str:
-    """Return absolute path to the per-method top-5 origins/destinations workbook."""
-    return os.path.join(get_station_od_dir(svc_network, method), 'od_top5.xlsx')
+def get_od_top_relations_xlsx(svc_network: str, method: str) -> str:
+    """Return absolute path to the per-method top origins/destinations workbook."""
+    return os.path.join(get_station_od_dir(svc_network, method),
+                        'od_station_top_relations.xlsx')
+
+
+def get_od_method_comparison_xlsx(svc_network: str) -> str:
+    """Return absolute path to the cross-method (PT-Feeder vs Municipal) OD-flow
+    comparison workbook for the study-area stations (version-level, not per-method)."""
+    return os.path.join(get_od_version_dir(svc_network), 'od_method_comparison.xlsx')
 
 
 def get_station_od_matrix_xlsx(svc_network: str, method: str) -> str:
@@ -193,6 +221,12 @@ def get_od_method_plot_dir(svc_network: str, method: str) -> str:
                         _OD_METHOD_DIRS.get(method, method))
 
 
+def get_od_sankey_dir(svc_network: str, method: str) -> str:
+    """Return absolute path to the per-method corridor-Sankey plot dir
+    (plots/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/Sankey/)."""
+    return os.path.join(get_od_method_plot_dir(svc_network, method), 'Sankey')
+
+
 def get_gateway_dir(svc_network: str) -> str:
     """Return absolute path to the gateway-assignment dir
     (data/Traffic_Flow/OD/<svc_network>/Gateway/)."""
@@ -203,6 +237,52 @@ def get_od_routing_dir(svc_network: str) -> str:
     """Return absolute path to the W4b rail-routing output dir
     (data/Traffic_Flow/OD/<svc_network>/Routing/)."""
     return os.path.join(get_od_version_dir(svc_network), 'Routing')
+
+
+def get_assignment_dir(svc_network: str) -> str:
+    """Return absolute path to the Phase-4C assignment output dir
+    (data/Traffic_Flow/Assignment/<svc_network>/).
+
+    Args:
+        svc_network: service version folder name WITH the '_network' suffix.
+    """
+    return os.path.join(MAIN, TRAFFIC_FLOW_ASSIGNMENT_DIR, svc_network)
+
+
+def get_assignment_method_dir(svc_network: str, method: str) -> str:
+    """Return absolute path to the per-method assignment dir
+    (data/Traffic_Flow/Assignment/<svc_network>/<shortest_path|logit>/).
+
+    Args:
+        svc_network: service version folder name WITH the '_network' suffix.
+        method:      'shortest_path' | 'logit'.
+    """
+    return os.path.join(get_assignment_dir(svc_network), method)
+
+
+def get_assignment_report_xlsx(svc_network: str, method: str, name: str) -> str:
+    """Per-method assignment report workbook
+    (data/Traffic_Flow/Assignment/<svc_network>/<method>/<name>.xlsx).
+
+    Args:
+        svc_network: service version folder name WITH the '_network' suffix.
+        method:      'shortest_path' | 'logit'.
+        name:        workbook stem (no extension), e.g. 'matrix_all_stations'.
+    """
+    return os.path.join(get_assignment_method_dir(svc_network, method),
+                        f'{name}.xlsx')
+
+
+def get_assignment_plot_dir(svc_network: str, method: str) -> str:
+    """Per-method assignment plot dir
+    (plots/Traffic_Flow/Assignment/<svc_network>/<method>/). Mirrors
+    get_assignment_method_dir on the plots side so the repo tree is symmetric.
+
+    Args:
+        svc_network: service version folder name WITH the '_network' suffix.
+        method:      'shortest_path' | 'logit'.
+    """
+    return os.path.join(MAIN, TRAFFIC_FLOW_ASSIGNMENT_PLOTS_DIR, svc_network, method)
 
 
 def get_boundary_stations_json(svc_network: str, infra_version: str) -> str:
