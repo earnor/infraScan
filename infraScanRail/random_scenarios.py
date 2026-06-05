@@ -1,5 +1,7 @@
 import pandas as pd
 import paths
+import settings
+import catchment_base
 import matplotlib.pyplot as plt
 from matplotlib.ticker import EngFormatter
 from tqdm import tqdm
@@ -728,6 +730,54 @@ def load_scenarios_from_cache(cache_dir):
         print(f"Loaded {len(scenarios)} scenarios from {cache_dir}")
     return scenarios
 
+def _build_communes_population_df(year: int) -> pd.DataFrame:
+    """Build the communes_population DataFrame for a given year.
+
+    Uses the commune->bezirk skeleton from POPULATION_PER_COMMUNE_ZH_2018
+    (bezirk names match the scenario keys in get_bezirk_population_scenarios)
+    and replaces the anzahl column with actual year-specific populations from
+    catchment_base.load_commune_pop(year).
+
+    Returns:
+        DataFrame with columns: gemeinde_bfs_nr, gemeinde, bezirk_code,
+        bezirk, anzahl.
+    """
+    skeleton = pd.read_csv(
+        paths.POPULATION_PER_COMMUNE_ZH_2018,
+        usecols=['gemeinde_bfs_nr', 'gemeinde', 'bezirk_code', 'bezirk']
+    )
+    pop_series = catchment_base.load_commune_pop(year)
+    pop_df = pop_series.rename('anzahl').reset_index()
+    pop_df.columns = ['gemeinde_bfs_nr', 'anzahl']
+    pop_df['gemeinde_bfs_nr'] = pd.to_numeric(
+        pop_df['gemeinde_bfs_nr'], errors='coerce'
+    ).astype('Int64')
+    skeleton['gemeinde_bfs_nr'] = pd.to_numeric(
+        skeleton['gemeinde_bfs_nr'], errors='coerce'
+    ).astype('Int64')
+    result = skeleton.merge(pop_df, on='gemeinde_bfs_nr', how='left')
+    result['anzahl'] = result['anzahl'].fillna(0.0)
+    return result
+
+
+def _get_od_base_matrix(start_year: int) -> pd.DataFrame:
+    """Return the station-level OD base matrix for start_year.
+
+    For start_year >= 2040 and when a 2040 station-level OD file exists at
+    paths.OD_STATIONS_KT_ZH_2040_PATH, the 2040 matrix is returned.
+    Falls back to the 2018 matrix for all other cases (the 2040 file is
+    derived from commune-level 2040 OD via the catchment allocation pipeline
+    and is not yet produced automatically).
+    """
+    if start_year >= 2040 and os.path.exists(paths.OD_STATIONS_KT_ZH_2040_PATH):
+        print(f"  OD base: using 2040 station matrix ({paths.OD_STATIONS_KT_ZH_2040_PATH})")
+        return pd.read_csv(paths.OD_STATIONS_KT_ZH_2040_PATH)
+    if start_year >= 2040:
+        print(f"  OD base: 2040 matrix not found at {paths.OD_STATIONS_KT_ZH_2040_PATH},"
+              f" falling back to 2018 matrix.")
+    return pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH)
+
+
 def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, use_cache=False, do_plot=False):
     """
     Retrieve or generate random OD growth scenarios.
@@ -749,9 +799,9 @@ def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, u
 
     # Generate new scenarios
     scenarios = generate_od_growth_scenarios(
-        pd.read_csv(paths.OD_STATIONS_KT_ZH_PATH),
+        _get_od_base_matrix(start_year),
         pd.read_excel(paths.COMMUNE_TO_STATION_PATH),
-        pd.read_csv(paths.POPULATION_PER_COMMUNE_ZH_2018),
+        _build_communes_population_df(settings.POPULATION_BASE_YEAR),
         start_year=start_year,
         end_year=end_year,
         num_of_scenarios=num_of_scenarios,

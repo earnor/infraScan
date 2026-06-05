@@ -7,5 +7,9 @@
 /infraScanRail/plots/
 infraScanRail/__pycache__
 infraScanRail/_unused_files
+infraScanRail/_helper_files
 /infraScanRail/markdowns
-.claude/settings.local.json
+/infraScanRail/report
+/.claude
+/.vscode
+docs/

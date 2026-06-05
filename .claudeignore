@@ -1,0 +1,15 @@
+# Claude Code ignore file — controls automatic file discovery (Glob, Grep, file picker).
+# Explicitly provided file paths can always be read directly regardless of these rules.
+
+# Python build artifacts
+infraScanRail/__pycache__/
+infraScanRail/_unused_files/
+
+# Unrelated module — we work in infraScanRail only.
+# To research infraScanRoad for reference or ideas, provide file paths explicitly
+# (e.g. "look at C:\Users\ETH\Documents\GitHub\infraScan\infraScanRoad\some_file.py")
+# or comment out the line below for the session.
+infraScanRoad/
+
+# Node / JS tooling (not used in this project but guard against accidental installs)
+node_modules/

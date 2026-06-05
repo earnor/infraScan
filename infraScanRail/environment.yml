@@ -293,6 +293,7 @@ dependencies:
       - iniconfig==2.0.0
       - libpysal==4.7.0
       - markupsafe==2.1.2
+      - matplotlib-map-utils==3.1.2
       - matplotlib-scalebar==0.8.1
       - mercantile==1.2.1
       - momepy==0.7.0

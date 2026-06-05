@@ -1638,7 +1638,7 @@ def create_catchement_plot_time():
     s_bahn_path = "data/Network/processed/split_s_bahn_lines.gpkg"
     lakes_path = "data/landuse_landcover/landcover/lake/WB_STEHGEWAESSER_F.shp"
     points_path = "data/Network/processed/points.gpkg"
-    boundary_path = "data/_basic_data/innerboundary.shp"
+    boundary_path = paths.STUDY_AREA_BOUNDARY_GPKG
     output_path = "plots/Catchement_Time.png"
 
     # Load the boundary shapefile
@@ -1793,7 +1793,7 @@ def plot_developments_expand_by_one_station():
     s_bahn_lines_path = "data/Network/processed/split_s_bahn_lines.gpkg"
     developments_path = "data/costs/total_costs_with_geometry.gpkg"
     endnodes_path = "data/Network/processed/endnodes.gpkg"
-    boundary_path = "data/_basic_data/outerboundary.shp"
+    boundary_path = paths.STUDY_AREA_BUFFER_GPKG
     output_path = "plots/developments.png"
 
     # Load data

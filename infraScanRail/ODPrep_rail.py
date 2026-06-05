@@ -102,36 +102,61 @@ def ODPrep_rail():
 
 
 def GetCommunePopulation(y0):  # We find population of each commune.
-    rawpop = pd.read_excel('data/_basic_data/KTZH_00000127_00001245.xlsx', sheet_name='Gemeinden', header=None)
-    rawpop.columns = rawpop.iloc[5]
-    rawpop = rawpop.drop([0, 1, 2, 3, 4, 5, 6])
-    pop = pd.DataFrame(data=rawpop, columns=['BFS-NR  ', 'TOTAL_' + str(y0) + '  ']).sort_values(by='BFS-NR  ')
-    popvec = np.array(pop['TOTAL_' + str(y0) + '  '])
+    rawpop = pd.read_excel(paths.POPULATION_CANTON_ZH_XLSX, sheet_name='Gemeinden', header=5)
+    rawpop.columns = [str(c).strip() for c in rawpop.columns]
+    rawpop = rawpop[pd.to_numeric(rawpop['BFS-NR'], errors='coerce').notna()]
+    pop = pd.DataFrame(data=rawpop, columns=['BFS-NR', 'TOTAL_' + str(y0)]).sort_values(by='BFS-NR')
+    popvec = np.array(pd.to_numeric(pop['TOTAL_' + str(y0)], errors='coerce').fillna(0))
     return popvec
 
 def GetCommuneEmployment(y0):  # we find employment in each commune.
-    rawjob = pd.read_excel('data/_basic_data/KANTON_ZUERICH_596.xlsx')
-    rawjob = rawjob.loc[(rawjob['INDIKATOR_JAHR'] == y0) & (rawjob['BFS_NR'] > 0) & (rawjob['BFS_NR'] != 291)]
-
-    # rawjob=rawjob.loc[(rawjob['INDIKATOR_JAHR']==y0)&(rawjob['BFS_NR']>0)&(rawjob['BFS_NR']!=291)]
-    job = pd.DataFrame(data=rawjob, columns=['BFS_NR', 'INDIKATOR_VALUE']).sort_values(by='BFS_NR')
-    jobvec = np.array(job['INDIKATOR_VALUE'])
+    rawjob = pd.read_csv(paths.EMPLOYMENT_CANTON_ZH_CSV)
+    mask = (
+        (rawjob['year'] == int(y0)) &
+        (rawjob['areatype_name'] == 'Gemeinde') &
+        (~rawjob['unit'].str.contains('Prozent', na=False)) &
+        (rawjob['area_code'] > 0) &
+        (rawjob['area_code'] != 291)
+    )
+    job = rawjob[mask].groupby('area_code')['value'].sum().reset_index()
+    job.columns = ['BFS_NR', 'total_fte']
+    job = job.sort_values('BFS_NR')
+    jobvec = np.array(job['total_fte'])
     return jobvec
 
 def GetCommuneShapes(raster_path):  # todo this might be unnecessary if you already have these shapes.
-    communalraw = gpd.read_file(r"data/_basic_data/Gemeindegrenzen/UP_GEMEINDEN_F.shp")
-    communalraw = communalraw.loc[(communalraw['ART_TEXT'] == 'Gemeinde')]
-    communedf = gpd.GeoDataFrame(data=communalraw, geometry=communalraw['geometry'], columns=['BFS', 'GEMEINDENA'],
-                                 crs="epsg:2056").sort_values(by='BFS')
+    communalraw = gpd.read_file(paths.MUNICIPAL_BOUNDARIES_GPKG).to_crs('EPSG:2056')
+    if 'objektart' in communalraw.columns:
+        communalraw = communalraw[communalraw['objektart'] == 'Gemeindegebiet'].copy()
 
-    # Read the reference TIFF file
+    bfs_col = next((c for c in ['BFS_NR', 'bfs_nr', 'BFS_NUMMER', 'GMDNR', 'gmdnr']
+                    if c in communalraw.columns), None)
+    if bfs_col is None:
+        raise ValueError(f"BFS column not found in {paths.MUNICIPAL_BOUNDARIES_GPKG}")
+    name_col = next((c for c in ['NAME', 'GEMEINDENAME', 'name', 'GMDNAME']
+                     if c in communalraw.columns), None)
+
+    communalraw = communalraw.rename(columns={bfs_col: 'BFS'})
+    communalraw['BFS'] = pd.to_numeric(communalraw['BFS'], errors='coerce').astype('Int64')
+    communalraw = communalraw.dropna(subset=['BFS'])
+    communalraw['BFS'] = communalraw['BFS'].astype(int)
+    if name_col:
+        communalraw = communalraw.rename(columns={name_col: 'GEMEINDENA'})
+    else:
+        communalraw['GEMEINDENA'] = communalraw['BFS'].astype(str)
+
+    communedf = gpd.GeoDataFrame(
+        data=communalraw, geometry=communalraw['geometry'], columns=['BFS', 'GEMEINDENA'],
+        crs='EPSG:2056'
+    ).sort_values(by='BFS')
+
+    import os as _os
+    _os.makedirs(_os.path.dirname(paths.COMMUNE_RASTER_TIF), exist_ok=True)
     with rasterio.open(raster_path) as src:
         profile = src.profile
         profile.update(count=1)
-        crs = src.crs
 
-    # Rasterize
-    with rasterio.open('data/_basic_data/Gemeindegrenzen/gemeinde_zh.tif', 'w', **profile) as dst:
+    with rasterio.open(paths.COMMUNE_RASTER_TIF, 'w', **profile) as dst:
         rasterized_image = rasterize(
             [(shape, value) for shape, value in zip(communedf.geometry, communedf['BFS'])],
             out_shape=(src.height, src.width),
@@ -142,9 +167,7 @@ def GetCommuneShapes(raster_path):  # todo this might be unnecessary if you alre
         )
         dst.write(rasterized_image, 1)
 
-    # Convert the rasterized image to a numpy array
     commune_raster = np.array(rasterized_image)
-
     return commune_raster, communedf
 
 
@@ -152,7 +175,7 @@ def GetDemandPerCommune(tau=0.013, mode='miv'):
     # now we extract an od matrix for private motrised vehicle traffic from year 2019
     # we then modify the OD matrix to fit our needs of expressing peak hour highway travel demand
     y0 = 2019
-    rawod = pd.read_excel('data/_basic_data/KTZH_00001982_00003903.xlsx')
+    rawod = pd.read_excel(paths.OD_KT_ZH_PATH)
     communalOD = rawod.loc[
         (rawod['jahr'] == 2018) & (rawod['kategorie'] == 'Verkehrsaufkommen') & (rawod['verkehrsmittel'] == mode)]
     # communalOD = data.drop(['jahr','quelle_name','quelle_gebietart','ziel_name','ziel_gebietart',"kategorie","verkehrsmittel","einheit","gebietsstand_jahr","zeit_dimension"],axis=1)

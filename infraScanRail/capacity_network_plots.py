@@ -40,6 +40,13 @@ except ImportError:  # pragma: no cover - optional geospatial support
     make_valid = None  # type: ignore
     LineString = None  # type: ignore
 
+try:
+    from matplotlib_map_utils.core.north_arrow import north_arrow as _north_arrow_fn
+    _HAS_NORTH_ARROW = True
+except ImportError:
+    _north_arrow_fn = None
+    _HAS_NORTH_ARROW = False
+
 if TYPE_CHECKING:
     from geopandas import GeoDataFrame
 else:
@@ -56,6 +63,16 @@ SERVICE_MIN_GAP = 60.0  # Minimum gap (in units) between adjacent service freque
 SERVICE_RECT_MARGIN = 40.0
 STATION_BASE_HALF_SIZE = 60.0
 STATION_PER_SERVICE_INCREMENT = 14.0
+
+# Colour palette for catchment-area (infrabuild-style) plots.
+_CA_TRACK_COLOURS: Dict[int, str] = {1: "#e41a1c", 2: "#377eb8", 3: "#4daf4a", 4: "#984ea3"}
+_CA_TRACK_DEFAULT = "#ff7f00"
+_CA_NODE_COLOURS: Dict[str, str] = {
+    "station":           "#e41a1c",
+    "abandoned_station": "#888888",
+    "junction":          "#377eb8",
+}
+_CA_NODE_DEFAULT = "#aaaaaa"
 
 
 def _safe_make_valid(geometry):
@@ -247,21 +264,52 @@ class _MultiTrackLegendHandler(HandlerBase):
         return artists
 
 
-CAPACITY_DIR = Path(paths.MAIN) / "data" / "Network" / "capacity"
-DEFAULT_OUTPUT_DIR = Path(paths.MAIN) / "plots" / "network"
-DEFAULT_OUTPUT = DEFAULT_OUTPUT_DIR / f"{settings.rail_network}_network_infrastructure.png"
-DEFAULT_CAPACITY_OUTPUT = DEFAULT_OUTPUT_DIR / f"{settings.rail_network}_network_capacity.png"
-DEFAULT_SPEED_OUTPUT = DEFAULT_OUTPUT_DIR / f"{settings.rail_network}_network_speed.png"
-DEFAULT_SERVICE_OUTPUT = DEFAULT_OUTPUT_DIR / f"{settings.rail_network}_network_service.png"
-DEFAULT_SECTIONS_WORKBOOK = CAPACITY_DIR / f"capacity_{settings.rail_network}_network_sections.xlsx"
+_SCALE_BAR_NICE_KM = [1, 2, 5, 10, 20, 50, 100, 200, 500]
 
 
-def _derive_capacity_output(base_output: Path, explicit: bool) -> Path:
-    """Derive the capacity plot output path from the base path."""
-    if not explicit:
-        return DEFAULT_CAPACITY_OUTPUT
-    suffix = base_output.suffix or ".png"
-    return base_output.with_name(f"{base_output.stem}_capacity{suffix}")
+def _add_north_arrow(ax, location: str = "upper left", scale: float = 0.5) -> None:
+    if not _HAS_NORTH_ARROW:
+        return
+    try:
+        _north_arrow_fn(ax, location=location, scale=scale, rotation={"degrees": 0})
+    except Exception:
+        pass
+
+
+def _add_scale_bar(ax, location: Tuple[float, float] = (0.97, 0.020)) -> None:
+    """Adaptive scale bar anchored at axes-fraction coordinates."""
+    xlim = ax.get_xlim()
+    map_w = xlim[1] - xlim[0]
+    if map_w <= 0:
+        return
+    target_km = (map_w / 4.0) / 1000.0
+    total_km = min(_SCALE_BAR_NICE_KM, key=lambda v: abs(v - target_km))
+    n_cells = 4 if total_km >= 4 else 2
+    cell_m = (total_km * 1000.0) / n_cells
+    cell_frac = cell_m / map_w
+    x0 = location[0] - n_cells * cell_frac
+    y0 = location[1]
+    bar_h = 0.012
+    for i in range(n_cells):
+        color = "black" if i % 2 == 0 else "white"
+        rect = Rectangle(
+            (x0 + i * cell_frac, y0), cell_frac, bar_h,
+            facecolor=color, edgecolor="black", linewidth=0.6,
+            transform=ax.transAxes, zorder=7,
+        )
+        ax.add_patch(rect)
+    for i in range(n_cells + 1):
+        val_km = (i * cell_m) / 1000.0
+        label = f"{val_km:.0f} km" if val_km == int(val_km) else f"{val_km:.1f} km"
+        ax.text(
+            x0 + i * cell_frac, y0 + bar_h * 1.6,
+            label, ha="center", va="bottom", fontsize=7,
+            transform=ax.transAxes, zorder=7,
+        )
+
+
+CAPACITY_DIR = Path(paths.MAIN) / "data" / "Network" / "Capacity"
+DEFAULT_OUTPUT_DIR = Path(paths.MAIN) / "plots" / "Network" / "Capacity"
 
 
 def _derive_plot_output_path(
@@ -301,33 +349,16 @@ def _derive_plot_output_path(
         network_tag = getattr(settings, "rail_network", "current")
 
     safe_network_tag = re.sub(r"[^\w-]+", "_", str(network_tag)).strip("_") or "current"
-    filename = f"{safe_network_tag}_network_{plot_type}.png"
-
-    # Auto-detect category from network_label (mirrors data structure)
-    if output_dir is None and network_label is not None:
-        dev_match = re.search(r'_dev_(\d+)', network_label)
-        is_enhanced = "_enhanced" in network_label
-
-        if dev_match:
-            # Development network: plots/network/Developments/{dev_id}/
-            dev_id = dev_match.group(1)
-            output_dir = DEFAULT_OUTPUT_DIR / "Developments" / dev_id
-        elif is_enhanced:
-            # Enhanced network: plots/network/Enhanced/{network_label}/
-            output_dir = DEFAULT_OUTPUT_DIR / "Enhanced" / safe_network_tag
-        else:
-            # Baseline network: plots/network/Baseline/{network_label}/
-            output_dir = DEFAULT_OUTPUT_DIR / "Baseline" / safe_network_tag
+    filename = f"{safe_network_tag}_{plot_type}.pdf"
 
     if output_dir is not None:
-        # Use detected/provided directory
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir / filename
     else:
-        # Fallback: Baseline with current network
-        network_subdir = DEFAULT_OUTPUT_DIR / "Baseline" / safe_network_tag
-        network_subdir.mkdir(parents=True, exist_ok=True)
-        return network_subdir / filename
+        # Fallback: DEFAULT_OUTPUT_DIR / safe_network_tag
+        fallback = DEFAULT_OUTPUT_DIR / safe_network_tag
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback / filename
 
 
 def _calculate_figure_size(stations: Dict[int, Station]) -> Tuple[float, float]:
@@ -393,6 +424,8 @@ class Station:
     stopping_services: frozenset[str] = field(default_factory=frozenset)
     passing_services: frozenset[str] = field(default_factory=frozenset)
     stopping_tphpd: float = math.nan
+    is_junction: bool = False
+    node_class: str = "station"
 
 
 @dataclass(frozen=True)
@@ -433,6 +466,7 @@ class SectionSummary:
     utilization: float
     stopping_tphpd: float
     passing_tphpd: float
+    intermediate_stations: Tuple[Station, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -519,8 +553,11 @@ def _load_workbook(
     if not workbook.exists():
         raise FileNotFoundError(f"Workbook not found: {workbook}")
 
-    stations = pd.read_excel(workbook, sheet_name="Stations")
-    segments = pd.read_excel(workbook, sheet_name="Segments")
+    xl = pd.ExcelFile(workbook)
+    stn_sheet = "Stations" if "Stations" in xl.sheet_names else "Stations_Peak"
+    seg_sheet = "Segments" if "Segments" in xl.sheet_names else "Segments_Peak"
+    stations = pd.read_excel(workbook, sheet_name=stn_sheet)
+    segments = pd.read_excel(workbook, sheet_name=seg_sheet)
     return stations, segments
 
 
@@ -535,24 +572,47 @@ def _parse_station_services(cell) -> Set[str]:
     return set(tokens)
 
 
+def _filter_stations_by_class(
+    stations: Dict[int, Station],
+    allowed_node_classes: Optional[Set[str]],
+) -> Dict[int, Station]:
+    """Return stations filtered to allowed Node_Class values; None means no filter."""
+    if allowed_node_classes is None:
+        return stations
+    allowed_lower = {c.lower() for c in allowed_node_classes}
+    return {nid: s for nid, s in stations.items() if s.node_class.lower() in allowed_lower}
+
+
 def _to_stations(stations_df: pd.DataFrame) -> Dict[int, Station]:
     """Convert the stations dataframe into Station records indexed by NR."""
     parsed: Dict[int, Station] = {}
     for row in stations_df.itertuples(index=False):
         try:
-            node_id = int(getattr(row, "NR"))
-            x = float(getattr(row, "E_LV95"))
-            y = float(getattr(row, "N_LV95"))
+            _nr = getattr(row, "NR", None) or getattr(row, "Number", None)
+            node_id = int(_nr)
+            _e = getattr(row, "E_LV95", None) or getattr(row, "E", None)
+            _n = getattr(row, "N_LV95", None) or getattr(row, "N", None)
+            x = float(_e)
+            y = float(_n)
         except (TypeError, ValueError):
             continue
 
-        code = str(getattr(row, "CODE", "") or "").strip()
-        name = str(getattr(row, "NAME", "") or "").strip()
-        tracks = _coerce_number(getattr(row, "tracks", math.nan))
-        platforms = _coerce_number(getattr(row, "platforms", math.nan))
+        code = str(getattr(row, "CODE", None) or getattr(row, "Code", "") or "").strip()
+        name = str(getattr(row, "NAME", None) or getattr(row, "Name", "") or "").strip()
+        tracks = _coerce_number(
+            getattr(row, "tracks", None) or getattr(row, "Track_Count", math.nan)
+        )
+        platforms = _coerce_number(
+            getattr(row, "platforms", None) or getattr(row, "Platform_Count", math.nan)
+        )
         stopping_services = frozenset(_parse_station_services(getattr(row, "stopping_services", "")))
         passing_services = frozenset(_parse_station_services(getattr(row, "passing_services", "")))
-        stopping_tphpd = _coerce_number(getattr(row, "stopping_tphpd", math.nan))
+        stopping_tphpd = _coerce_number(
+            getattr(row, "stopping_tphpd", None)
+            or getattr(row, "stopping_tphpd_peak", math.nan)
+        )
+        node_class = str(getattr(row, "Node_Class", "") or "").strip()
+        is_junction = (node_class.lower() == "junction")
         parsed[node_id] = Station(
             node_id=node_id,
             code=code or name or str(node_id),
@@ -564,6 +624,8 @@ def _to_stations(stations_df: pd.DataFrame) -> Dict[int, Station]:
             stopping_services=stopping_services,
             passing_services=passing_services,
             stopping_tphpd=stopping_tphpd,
+            is_junction=is_junction,
+            node_class=node_class or "station",
         )
     return parsed
 
@@ -582,15 +644,31 @@ def _to_segments(segments_df: pd.DataFrame, valid_nodes: Iterable[int]) -> List[
         if from_node not in node_set or to_node not in node_set:
             continue
 
-        tracks = _coerce_number(getattr(row, "tracks", math.nan))
-        speed = _coerce_number(getattr(row, "speed", math.nan))
-        total_tphpd = _coerce_number(getattr(row, "total_tphpd", math.nan))
-        selected_capacity = _coerce_number(getattr(row, "Capacity", math.nan))
+        tracks = _coerce_number(
+            getattr(row, "tracks", None) or getattr(row, "Num_Tracks", math.nan)
+        )
+        speed = _coerce_number(
+            getattr(row, "speed", None) or getattr(row, "Average_Speed", math.nan)
+        )
+        total_tphpd = _coerce_number(
+            getattr(row, "total_tphpd", None) or getattr(row, "total_tphpd_peak", math.nan)
+        )
+        selected_capacity = _coerce_number(
+            getattr(row, "Capacity", None) or getattr(row, "Capacity_peak", math.nan)
+        )
         base_capacity = _coerce_number(getattr(row, "capacity_base_tphpd", math.nan))
-        utilization = _coerce_number(getattr(row, "Utilization", math.nan))
-        length_m = _coerce_number(getattr(row, "length_m", math.nan))
-        travel_time_stopping = _coerce_number(getattr(row, "travel_time_stopping", math.nan))
-        travel_time_passing = _coerce_number(getattr(row, "travel_time_passing", math.nan))
+        utilization = _coerce_number(
+            getattr(row, "Utilization", None) or getattr(row, "Utilization_peak", math.nan)
+        )
+        length_m = _coerce_number(
+            getattr(row, "length_m", None) or getattr(row, "Length", math.nan)
+        )
+        travel_time_stopping = _coerce_number(
+            getattr(row, "travel_time_stopping", None) or getattr(row, "TT_Stopping", math.nan)
+        )
+        travel_time_passing = _coerce_number(
+            getattr(row, "travel_time_passing", None) or getattr(row, "TT_Passing", math.nan)
+        )
         services_tphpd_cell = str(getattr(row, "services_tphpd", "") or "")
         records.append(
             Segment(
@@ -627,7 +705,42 @@ def _segment_key(from_node: int, to_node: int) -> Tuple[int, int]:
     return tuple(sorted((from_node, to_node)))
 
 
-_SERVICE_WARNING_EMITTED: Set[str] = set()
+_ASYMMETRIC_SERVICES: Set[str] = set()
+
+
+def _polyline_midpoint(xs: Sequence[float], ys: Sequence[float]) -> Tuple[float, float]:
+    """Return the point at half the cumulative arc length along the polyline.
+
+    Used to anchor section labels to the visual centre of the line that runs
+    through intermediate stations, rather than the straight-line midpoint
+    between endpoints (which can be far off the actual route).
+    """
+    if not xs or not ys:
+        return (0.0, 0.0)
+    if len(xs) == 1:
+        return (xs[0], ys[0])
+    seg_lens = [
+        math.hypot(xs[i + 1] - xs[i], ys[i + 1] - ys[i]) for i in range(len(xs) - 1)
+    ]
+    total = sum(seg_lens)
+    if total <= 0.0:
+        return (xs[0], ys[0])
+    target = total / 2.0
+    cum = 0.0
+    for i, seg_len in enumerate(seg_lens):
+        if cum + seg_len >= target:
+            t = (target - cum) / seg_len if seg_len > 0 else 0.0
+            return (xs[i] + t * (xs[i + 1] - xs[i]), ys[i] + t * (ys[i + 1] - ys[i]))
+        cum += seg_len
+    return (xs[-1], ys[-1])
+
+
+def _flush_directional_asymmetry_summary() -> None:
+    """Emit one summary line listing services with asymmetric directional frequency."""
+    if _ASYMMETRIC_SERVICES:
+        services = ", ".join(sorted(_ASYMMETRIC_SERVICES))
+        print(f"Note: Directional frequency asymmetry detected for services: {services} (using max per segment).")
+        _ASYMMETRIC_SERVICES.clear()
 
 
 def _merge_bounds(
@@ -683,13 +796,7 @@ def _parse_service_frequencies(cell: str, segment_label: str) -> Dict[str, float
             continue
         max_freq = max(freq_values)
         if any(abs(value - max_freq) > 1e-6 for value in freq_values):
-            warning_key = f"{segment_label}:{service}"
-            if warning_key not in _SERVICE_WARNING_EMITTED:
-                print(
-                    f"Warning: Directional frequency not homogenous for service '{service}' on segment {segment_label}; "
-                    f"using max value {max_freq}."
-                )
-                _SERVICE_WARNING_EMITTED.add(warning_key)
+            _ASYMMETRIC_SERVICES.add(service)
         result[service] = max_freq
     return result
 
@@ -784,9 +891,7 @@ def _compute_station_shapes(
         axis_u = (math.cos(orientation), math.sin(orientation))
         axis_v = (-axis_u[1], axis_u[0])
 
-        service_total = len(station.stopping_services | station.passing_services)
-        size_multiplier = max(1, service_total)
-        along_half = STATION_BASE_HALF_SIZE + STATION_PER_SERVICE_INCREMENT * (size_multiplier - 1)
+        along_half = STATION_BASE_HALF_SIZE
 
         max_services = max_service_counts.get(node_id, 1)
         max_freq = max_frequencies.get(node_id, 1)
@@ -815,45 +920,33 @@ def _compute_station_shapes(
     return station_shapes
 
 
-def _project_point_to_station_boundary(
-    point: Tuple[float, float],
-    reference: Tuple[float, float],
+def _project_offset_to_segment_boundary(
+    offset_point: Tuple[float, float],
     station: Station,
-    shape: StationShape,
+    segment_dir_unit: Tuple[float, float],
+    boundary_distance: float = STATION_BASE_HALF_SIZE,
 ) -> Tuple[float, float]:
-    """Project a point onto the station polygon boundary along the segment direction."""
-    if shape.along_half <= 0.0:
-        return point
+    """Project a service offset endpoint onto a virtual boundary perpendicular to
+    the segment direction at boundary_distance from the station centre.
 
-    center_x, center_y = station.x, station.y
-    px, py = point
-    rx, ry = reference
+    Preserves the lateral spread (perpendicular to that specific segment) exactly,
+    avoiding the collapse caused by polygon clamping when the station's averaged
+    orientation differs from the individual segment direction.
+    """
+    ux, uy = segment_dir_unit
+    length = math.hypot(ux, uy)
+    if length <= 1e-9:
+        return offset_point
+    ux /= length
+    uy /= length
+    nx, ny = -uy, ux
 
-    rel_px = px - center_x
-    rel_py = py - center_y
-    rel_rx = rx - center_x
-    rel_ry = ry - center_y
+    rel_x = offset_point[0] - station.x
+    rel_y = offset_point[1] - station.y
+    normal_component = rel_x * nx + rel_y * ny
 
-    point_u = rel_px * shape.axis_u[0] + rel_py * shape.axis_u[1]
-    point_v = rel_px * shape.axis_v[0] + rel_py * shape.axis_v[1]
-    ref_u = rel_rx * shape.axis_u[0] + rel_ry * shape.axis_u[1]
-    ref_v = rel_rx * shape.axis_v[0] + rel_ry * shape.axis_v[1]
-
-    target_sign = 1.0 if ref_u >= 0.0 else -1.0
-    target_u = target_sign * shape.along_half
-
-    delta_u = ref_u - point_u
-    delta_v = ref_v - point_v
-    if math.isclose(delta_u, 0.0, abs_tol=1e-9):
-        new_v = max(-shape.across_half, min(shape.across_half, point_v))
-    else:
-        t = (target_u - point_u) / delta_u
-        t = max(0.0, min(1.0, t))
-        new_v = point_v + t * delta_v
-        new_v = max(-shape.across_half, min(shape.across_half, new_v))
-
-    new_x = center_x + shape.axis_u[0] * target_u + shape.axis_v[0] * new_v
-    new_y = center_y + shape.axis_u[1] * target_u + shape.axis_v[1] * new_v
+    new_x = station.x + boundary_distance * ux + normal_component * nx
+    new_y = station.y + boundary_distance * uy + normal_component * ny
     return (new_x, new_y)
 
 
@@ -867,7 +960,7 @@ def _service_station_table(station: Station) -> Optional[str]:
     if not station.stopping_services:
         return None
     services = ", ".join(sorted(station.stopping_services))
-    total_text = _format_track(station.stopping_tphpd)
+    total_text = _format_freq(station.stopping_tphpd)
     return f"Stops: {services}\nTotal: {total_text} tphpd"
 
 
@@ -967,8 +1060,10 @@ def _load_capacity_sections(
     if not workbook.exists():
         raise FileNotFoundError(f"Sections workbook not found: {workbook}")
 
+    xl = pd.ExcelFile(workbook)
+    stn_sheet = "Stations" if "Stations" in xl.sheet_names else "Stations_Peak"
     sections_df = pd.read_excel(workbook, sheet_name="Sections")
-    stations_df = pd.read_excel(workbook, sheet_name="Stations")
+    stations_df = pd.read_excel(workbook, sheet_name=stn_sheet)
 
     station_records = _to_stations(stations_df)
     name_lookup = _build_name_lookup(station_records)
@@ -992,11 +1087,37 @@ def _load_capacity_sections(
             section_id = len(sections) + 1
 
         track_count = _coerce_number(getattr(row, "track_count", math.nan))
-        total_tphpd = _coerce_number(getattr(row, "total_tphpd", math.nan))
-        capacity_tphpd = _coerce_number(getattr(row, "Capacity", math.nan))
-        utilization = _coerce_number(getattr(row, "Utilization", math.nan))
-        stopping_tphpd = _coerce_number(getattr(row, "stopping_tphpd", math.nan))
-        passing_tphpd = _coerce_number(getattr(row, "passing_tphpd", math.nan))
+        total_tphpd = _coerce_number(
+            getattr(row, "total_tphpd_peak", None) or getattr(row, "total_tphpd", math.nan)
+        )
+        capacity_tphpd = _coerce_number(
+            getattr(row, "Capacity_peak", None) or getattr(row, "Capacity", math.nan)
+        )
+        utilization = _coerce_number(
+            getattr(row, "Utilization_peak", None) or getattr(row, "Utilization", math.nan)
+        )
+        stopping_tphpd = _coerce_number(
+            getattr(row, "stopping_tphpd_peak", None) or getattr(row, "stopping_tphpd", math.nan)
+        )
+        passing_tphpd = _coerce_number(
+            getattr(row, "passing_tphpd_peak", None) or getattr(row, "passing_tphpd", math.nan)
+        )
+
+        # Intermediate stations along the section (between start and end), used
+        # to route the line through real station geometry and to render faded
+        # markers for stops that do not act as section boundaries.
+        node_seq_raw = str(getattr(row, "node_sequence", "") or "")
+        intermediate: List[Station] = []
+        if node_seq_raw:
+            tokens = [tok.strip() for tok in node_seq_raw.split("->") if tok.strip()]
+            try:
+                path_ids = [int(tok) for tok in tokens]
+            except ValueError:
+                path_ids = []
+            for nid in path_ids[1:-1]:
+                station = station_records.get(nid)
+                if station is not None:
+                    intermediate.append(station)
 
         sections.append(
             SectionSummary(
@@ -1009,6 +1130,7 @@ def _load_capacity_sections(
                 utilization=utilization,
                 stopping_tphpd=stopping_tphpd,
                 passing_tphpd=passing_tphpd,
+                intermediate_stations=tuple(intermediate),
             )
         )
 
@@ -1106,6 +1228,8 @@ def _station_colour(station_tracks: float, connected_tracks: List[float]) -> str
     if station_tracks > connected_equivalent + 1e-6:
         return "#4caf50"  # Green - surplus capacity.
     if math.isclose(station_tracks, connected_equivalent, rel_tol=1e-6, abs_tol=1e-6):
+        if math.isclose(station_tracks, 1.0, abs_tol=1e-6):
+            return "#d73027"  # Red - single track, no crossing possible even when matched.
         return "#ffffff"  # White - matched capacity.
     return "#d73027"  # Red - constrained.
 
@@ -1150,6 +1274,13 @@ def _format_percentage(ratio: float) -> str:
     if math.isnan(ratio):
         return "n/a"
     return f"{ratio * 100:.1f}%"
+
+
+def _format_freq(value: float) -> str:
+    """Format a service frequency value as a floored integer; '0' when missing."""
+    if math.isnan(value):
+        return "0"
+    return str(int(math.floor(value)))
 
 
 def _segment_utilization(segment: Segment) -> float:
@@ -1258,52 +1389,173 @@ def _find_label_position(
     return base_x + fallback_dx, base_y + fallback_dy
 
 
-def _load_map_overlays() -> Tuple[Optional["GeoDataFrame"], Dict[Tuple[int, int], List[Tuple[float, float]]]]:
+def _find_section_geometry(
+    start_id: int,
+    end_id: int,
+    segment_geometries: Dict[Tuple[int, int], List[Tuple[float, float]]],
+    max_depth: int = 40,
+) -> Optional[List[Tuple[float, float]]]:
+    """BFS through the segment graph to stitch a polyline from start to end node.
+
+    Returns None when no path is found or the segment_geometries dict is empty.
+    """
+    if not segment_geometries or start_id == end_id:
+        return None
+
+    adj: Dict[int, List[int]] = defaultdict(list)
+    for a, b in segment_geometries:
+        adj[a].append(b)
+        adj[b].append(a)
+
+    if start_id not in adj or end_id not in adj:
+        return None
+
+    from collections import deque
+    queue: deque = deque([(start_id, [start_id])])
+    visited: Set[int] = {start_id}
+
+    while queue:
+        node, path = queue.popleft()
+        if len(path) > max_depth:
+            continue
+        for neighbor in adj[node]:
+            if neighbor == end_id:
+                full_path = path + [end_id]
+                coords: List[Tuple[float, float]] = []
+                for i in range(len(full_path) - 1):
+                    a, b = full_path[i], full_path[i + 1]
+                    key = _segment_key(a, b)
+                    seg = segment_geometries.get(key, [])
+                    if not seg:
+                        return None
+                    seg_coords = list(seg) if a <= b else list(reversed(seg))
+                    coords.extend(seg_coords[1:] if coords else seg_coords)
+                return coords if len(coords) >= 2 else None
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, path + [neighbor]))
+    return None
+
+
+def _load_boundary(boundary_path: str) -> Optional["GeoDataFrame"]:
+    """Load any boundary polygon from a path relative to paths.MAIN."""
+    if gpd is None:
+        return None
+    try:
+        full_path = Path(paths.MAIN) / boundary_path
+        if not full_path.exists():
+            return None
+        boundary = gpd.read_file(str(full_path))
+        return boundary.to_crs(epsg=2056) if boundary.crs is not None else boundary.set_crs(epsg=2056)
+    except Exception:
+        return None
+
+
+def _load_map_overlays(
+    infra_version: Optional[str] = None,
+    lakes_path: Optional[str] = None,
+) -> Tuple[Optional["GeoDataFrame"], Dict[Tuple[int, int], List[Tuple[float, float]]]]:
     """Load optional GIS overlays used to enrich the network map.
 
-    Currently only loads lakes for background water features. Network segment geometries
-    are drawn directly from station coordinates (straight lines between nodes).
+    Loads pre-clipped lakes for background water features when *lakes_path* is
+    provided (e.g. paths.LAKES_SA_GPKG or paths.LAKES_CA_GPKG). When
+    *infra_version* is provided, also loads actual BAV LineString geometry from
+    infrabuild segments.gpkg so segments are drawn as true curves rather than
+    straight lines.
+
+    Args:
+        infra_version: Named infra version (e.g. 'AS_2026_ZH_enhanced'). When
+            None, segment_geometries is empty and segments fall back to straight
+            lines between station coordinate pairs.
+        lakes_path: Relative path (from paths.MAIN) to a pre-clipped lakes
+            GeoPackage (e.g. paths.LAKES_SA_GPKG). When None, no water layer
+            is drawn.
 
     Returns:
-        Tuple of (lakes GeoDataFrame or None, empty segment_geometries dict)
+        Tuple of (lakes GeoDataFrame or None, segment_geometries dict)
     """
     if gpd is None or make_valid is None:
         return None, {}
 
-    base_dir = Path(paths.MAIN)
-    lakes_path = base_dir / "data" / "landuse_landcover" / "landcover" / "lake" / "WB_STEHGEWAESSER_F.shp"
-    boundary_path = base_dir / "data" / "_basic_data" / "outerboundary.shp"
-
-    # Load lakes for background water features
+    # Load pre-clipped lakes when a path is provided
     lakes = None
-    if lakes_path.exists() and boundary_path.exists():
-        try:
-            lakes = gpd.read_file(lakes_path)
-            boundary = gpd.read_file(boundary_path)
-
-            # Validate and reproject layers
-            for layer in (lakes, boundary):
-                if "geometry" in layer:
-                    layer["geometry"] = layer["geometry"].apply(_safe_make_valid)
-                try:
-                    if layer.crs and str(layer.crs).lower() not in {"epsg:2056", "epsg:2056.0"}:
-                        layer.to_crs(epsg=2056, inplace=True)
-                except Exception:
-                    # If CRS conversion fails, continue with available data.
-                    pass
-
-            # Clip lakes to boundary
+    if lakes_path:
+        _lakes_file = Path(paths.MAIN) / lakes_path
+        if _lakes_file.exists():
             try:
-                lakes = gpd.clip(lakes, boundary)
+                lakes = gpd.read_file(str(_lakes_file))
+                if lakes.crs is None:
+                    lakes = lakes.set_crs(epsg=2056)
+                else:
+                    lakes = lakes.to_crs(epsg=2056)
+                if "geometry" in lakes.columns:
+                    lakes["geometry"] = lakes["geometry"].apply(_safe_make_valid)
             except Exception:
-                pass
-        except Exception:
-            # If lake loading fails, continue without lakes
-            lakes = None
+                lakes = None
 
-    # Network segments are drawn as straight lines between station coordinates
-    # No external geometry file needed
     segment_geometries: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+
+    # Load actual BAV segment geometry when an infra version is available
+    if infra_version and gpd is not None:
+        try:
+            import pandas as _pd
+            from infrabuild_network_builder import load_version as _load_v
+            _nodes_gdf, _segs_gdf = _load_v(infra_version)
+
+            # Train-mode filter mirrors capacity_calculator.load_infra_data so the
+            # BFS graph uses the same Numbers as the workbook. Without this, a
+            # tram-mode duplicate of a shared station name (e.g. "Zürich HB")
+            # would overwrite the train Number in the lookup and BFS would fail
+            # to find routes between the workbook's train-side endpoints.
+            if "Transport_Mode" in _segs_gdf.columns:
+                _segs_gdf = _segs_gdf[
+                    _segs_gdf["Transport_Mode"].astype(str).str.contains("train", case=False, na=False)
+                ].copy()
+            if "Transport_Mode" in _nodes_gdf.columns:
+                _train_names_in_segs: Set[str] = set()
+                if not _segs_gdf.empty:
+                    _train_names_in_segs = (
+                        set(_segs_gdf["From_Name"].dropna().astype(str))
+                        | set(_segs_gdf["To_Name"].dropna().astype(str))
+                    )
+                _mode = _nodes_gdf["Transport_Mode"]
+                _explicit = _mode.astype(str).str.contains("train", case=False, na=False)
+                _unknown = _mode.isna() | (_mode.astype(str).str.strip() == "")
+                _adjacent = pd.Series(False, index=_nodes_gdf.index)
+                if "Name" in _nodes_gdf.columns and _train_names_in_segs:
+                    _adjacent = _unknown & _nodes_gdf["Name"].astype(str).isin(_train_names_in_segs)
+                _nodes_gdf = _nodes_gdf[_explicit | _adjacent].copy()
+
+            # Build station name → Number lookup
+            _name_to_nr: Dict[str, int] = {}
+            for _, _nr in _nodes_gdf.iterrows():
+                _num = _nr.get("Number")
+                _nm  = _nr.get("Name", "")
+                if _pd.notna(_num) and _nm:
+                    _name_to_nr[str(_nm)] = int(float(_num))
+
+            for _, _seg in _segs_gdf.iterrows():
+                _fn = _name_to_nr.get(str(_seg.get("From_Name", "") or ""))
+                _tn = _name_to_nr.get(str(_seg.get("To_Name",   "") or ""))
+                if not _fn or not _tn:
+                    continue
+                _geom = _seg.geometry
+                if _geom is None or _geom.is_empty:
+                    continue
+                try:
+                    if _geom.geom_type == "MultiLineString":
+                        _coords = list(_geom.geoms[0].coords)
+                    else:
+                        _coords = list(_geom.coords)
+                    if _coords:
+                        _key = tuple(sorted((_fn, _tn)))
+                        segment_geometries[_key] = _coords
+                except Exception:
+                    continue
+            print(f"  _load_map_overlays: {len(segment_geometries)} segment geometries "
+                  f"loaded from '{infra_version}'")
+        except Exception as _e:
+            print(f"  [WARN] Could not load segment geometry from '{infra_version}': {_e}")
 
     return lakes, segment_geometries
 
@@ -1314,8 +1566,9 @@ def _draw_station_annotations(
     segments: List[Segment],
     station_shapes: Optional[Dict[int, StationShape]] = None,
     marker_style: str = "square",
-    marker_size_mode: str = "auto",
     include_tables: bool = True,
+    include_labels: bool = True,
+    marker_scale: float = 1.0,
     colour_mode: str = "status",
     uniform_colour: str = "#222222",
     table_text_func: Optional[Callable[[Station], Optional[str]]] = None,
@@ -1342,9 +1595,30 @@ def _draw_station_annotations(
         centroid_x = 0.0
         centroid_y = 0.0
 
+    _JUNCTION_RADIUS = STATION_BASE_HALF_SIZE / 4.0 * marker_scale
+
     for node_id, station in stations.items():
+        # Junctions: small dark-grey dot, no label, no table
+        if station.is_junction:
+            junc = Circle(
+                (station.x, station.y),
+                radius=_JUNCTION_RADIUS,
+                facecolor="#555555",
+                edgecolor="#333333",
+                linewidth=0.5,
+                zorder=3,
+            )
+            ax.add_patch(junc)
+            extent_min_x = min(extent_min_x, station.x - _JUNCTION_RADIUS)
+            extent_max_x = max(extent_max_x, station.x + _JUNCTION_RADIUS)
+            extent_min_y = min(extent_min_y, station.y - _JUNCTION_RADIUS)
+            extent_max_y = max(extent_max_y, station.y + _JUNCTION_RADIUS)
+            continue
+
         if colour_mode == "status":
             colour = _station_colour(station.tracks, connectivity.get(node_id, []))
+        elif colour_mode == "node_class":
+            colour = _CA_NODE_COLOURS.get(station.node_class.lower(), _CA_NODE_DEFAULT)
         else:
             colour = uniform_colour
         used_station_colours.add(colour)
@@ -1401,12 +1675,7 @@ def _draw_station_annotations(
             extent_min_y = min(extent_min_y, min(poly_y))
             extent_max_y = max(extent_max_y, max(poly_y))
         else:
-            service_total = len(station.stopping_services | station.passing_services)
-            size_multiplier = max(1, service_total)
-            if marker_size_mode == "fixed":
-                half_size = STATION_BASE_HALF_SIZE + STATION_PER_SERVICE_INCREMENT
-            else:
-                half_size = STATION_BASE_HALF_SIZE + STATION_PER_SERVICE_INCREMENT * (size_multiplier - 1)
+            half_size = STATION_BASE_HALF_SIZE * marker_scale
             if marker_style == "circle":
                 marker = Circle(
                     (station.x, station.y),
@@ -1436,6 +1705,9 @@ def _draw_station_annotations(
                 extent_max_x = max(extent_max_x, station.x + half_size)
                 extent_min_y = min(extent_min_y, station.y - half_size)
                 extent_max_y = max(extent_max_y, station.y + half_size)
+
+        if not include_labels:
+            continue
 
         code_text = station.code or station.name or str(node_id)
         code_width, code_height = _estimate_text_extent(code_text, char_width=48.0, line_height=120.0)
@@ -1469,19 +1741,13 @@ def _draw_station_annotations(
             ha="left",
             va="bottom",
             color="#111111",
+            bbox=dict(boxstyle="round,pad=0.15", facecolor="white", edgecolor="none", alpha=0.85),
             zorder=4,
         )
 
-        code_bounds_index = len(annotation_boxes)
-        annotation_boxes.append(_bounds_from_anchor(code_x, code_y, code_width, code_height, "left_bottom"))
-
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
-        inv = ax.transData.inverted()
-        code_canvas = code_artist.get_window_extent(renderer=renderer)
-        code_min_x, code_min_y = inv.transform((code_canvas.x0, code_canvas.y0))
-        code_max_x, code_max_y = inv.transform((code_canvas.x1, code_canvas.y1))
-        annotation_boxes[code_bounds_index] = (code_min_x, code_max_x, code_min_y, code_max_y)
+        code_bounds = _bounds_from_anchor(code_x, code_y, code_width, code_height, "left_bottom")
+        annotation_boxes.append(code_bounds)
+        code_min_x, code_max_x, code_min_y, code_max_y = code_bounds
 
         extent_min_x = min(extent_min_x, code_min_x)
         extent_max_x = max(extent_max_x, code_max_x)
@@ -1496,33 +1762,23 @@ def _draw_station_annotations(
 
             if table_text:
                 table_width, table_height = _estimate_text_extent(table_text, char_width=52.0, line_height=120.0)
-                table_base_x = code_x + code_width
-                table_base_y = code_y + code_height / 2.0
-                table_primary = 260.0
-                table_lateral = 180.0
-                dynamic_table_candidates = [
-                    (perp_dir[0] * table_primary, perp_dir[1] * table_primary),
-                    (
-                        perp_dir[0] * table_primary + along_dir[0] * table_lateral,
-                        perp_dir[1] * table_primary + along_dir[1] * table_lateral,
-                    ),
-                    (
-                        perp_dir[0] * table_primary - along_dir[0] * table_lateral,
-                        perp_dir[1] * table_primary - along_dir[1] * table_lateral,
-                    ),
-                    (perp_dir[0] * (table_primary + 80.0), perp_dir[1] * (table_primary + 80.0)),
-                    (-perp_dir[0] * (table_primary + 60.0), -perp_dir[1] * (table_primary + 60.0)),
-                    (along_dir[0] * (table_primary + 40.0), along_dir[1] * (table_primary + 40.0)),
+                # Primary position: right of the station name with a clear gap
+                _TABLE_GAP = 700.0
+                table_base_x = code_x + code_width + _TABLE_GAP
+                table_base_y = code_y + code_height / 4.0
+                table_candidates = [
+                    (0.0, 0.0),                          # right of name — preferred
+                    (0.0, code_height),                  # above
+                    (0.0, -code_height),                 # below
+                    (0.0, code_height * 1.5),
+                    (0.0, -code_height * 1.5),
+                    (table_width * 0.5, 0.0),
+                    (table_width * 0.5, code_height),
+                    (table_width * 0.5, -code_height),
+                    (-table_width - 400.0, 0.0),         # left of name (fallback)
+                    (0.0, code_height * 2.0),
+                    (0.0, -code_height * 2.0),
                 ]
-                fallback_table_candidates = [
-                    (120.0, 0.0),
-                    (160.0, 160.0),
-                    (160.0, -160.0),
-                    (200.0, 240.0),
-                    (200.0, -240.0),
-                    (240.0, 0.0),
-                ]
-                table_candidates = dynamic_table_candidates + fallback_table_candidates
                 table_x, table_y = _find_label_position(
                     annotation_boxes,
                     table_base_x,
@@ -1545,17 +1801,9 @@ def _draw_station_annotations(
                     zorder=4,
                 )
 
-                table_bounds_index = len(annotation_boxes)
-                annotation_boxes.append(
-                    _bounds_from_anchor(table_x, table_y, table_width, table_height, "left_center")
-                )
-
-                fig.canvas.draw()
-                table_canvas = table_artist.get_window_extent(renderer=renderer)
-                table_min_x, table_min_y = inv.transform((table_canvas.x0, table_canvas.y0))
-                table_max_x, table_max_y = inv.transform((table_canvas.x1, table_canvas.y1))
-
-                annotation_boxes[table_bounds_index] = (table_min_x, table_max_x, table_min_y, table_max_y)
+                table_bounds = _bounds_from_anchor(table_x, table_y, table_width, table_height, "left_center")
+                annotation_boxes.append(table_bounds)
+                table_min_x, table_max_x, table_min_y, table_max_y = table_bounds
 
                 extent_min_x = min(extent_min_x, table_min_x)
                 extent_max_x = max(extent_max_x, table_max_x)
@@ -1572,24 +1820,41 @@ def _draw_segments(
     stations: Dict[int, Station],
     segments: List[Segment],
     segment_geometries: Optional[Dict[Tuple[int, int], List[Tuple[float, float]]]] = None,
-) -> Tuple[Set[str], bool]:
-    """Render the network segments with styling and return used track categories and divider usage."""
+    colour_by_track: bool = False,
+    max_tracks: Optional[int] = None,
+    track_spacing: float = 60.0,
+) -> Tuple[Set[str], bool, Set[int]]:
+    """Render network segments and return (track_categories, separators_used, track_counts_used).
+
+    When colour_by_track is True segments are coloured by track count using
+    _CA_TRACK_COLOURS, matching the infrabuild infrastructure visual style.
+    max_tracks caps the number of parallel lines drawn (e.g. 4 means 5-track segments
+    display as 4-track). track_spacing sets the lateral offset between parallel lines in
+    LV95 metres.
+    """
     track_categories: Set[str] = set()
+    track_counts_used: Set[int] = set()
     separators_used = False
     for segment in segments:
         start = stations[segment.from_node]
         end = stations[segment.to_node]
-        line_width = _line_width(segment.tracks)
         track_count = int(round(segment.tracks)) if not math.isnan(segment.tracks) else 0
+        display_tracks = min(track_count, max_tracks) if (max_tracks is not None and track_count > 0) else track_count
+        line_width = _line_width(display_tracks)
         track_categories.add(_segment_track_category(segment.tracks))
+        track_counts_used.add(track_count)
+
+        seg_colour = _CA_TRACK_COLOURS.get(track_count, _CA_TRACK_DEFAULT) if colour_by_track else "black"
 
         key = _segment_key(segment.from_node, segment.to_node)
         if segment_geometries and key in segment_geometries:
-            coords = segment_geometries[key]
-            xs, ys = zip(*coords)
+            coords = list(segment_geometries[key])
+        elif segment_geometries:
+            stitched = _find_section_geometry(segment.from_node, segment.to_node, segment_geometries)
+            coords = stitched if stitched else [(start.x, start.y), (end.x, end.y)]
         else:
-            xs, ys = (start.x, end.x), (start.y, end.y)
-            coords = list(zip(xs, ys))
+            coords = [(start.x, start.y), (end.x, end.y)]
+        xs, ys = zip(*coords)
 
         # Check for fractional tracks (passing sidings)
         is_fractional = (segment.tracks % 1 == 0.5) if not math.isnan(segment.tracks) else False
@@ -1603,7 +1868,7 @@ def _draw_segments(
                 ax.plot(
                     xs,
                     ys,
-                    color="black",
+                    color=seg_colour,
                     linewidth=_line_width(1),
                     zorder=2,
                 )
@@ -1631,7 +1896,7 @@ def _draw_segments(
                     ax.plot(
                         mx,
                         my,
-                        color="black",
+                        color=seg_colour,
                         linewidth=double_line_width,
                         zorder=2.1,
                     )
@@ -1648,12 +1913,11 @@ def _draw_segments(
                     separators_used = True
             else:
                 # 2.5, 3.5, 4.5+ tracks: Use new parallel line approach
-                TRACK_OFFSET_SPACING = 60.0  # meters in LV95 coordinates
                 individual_line_width = line_width / (base_tracks * 1.3)
 
                 # Step 1: Draw base tracks (full length)
                 for track_idx in range(base_tracks):
-                    offset_distance = (track_idx - (base_tracks - 1) / 2.0) * TRACK_OFFSET_SPACING
+                    offset_distance = (track_idx - (base_tracks - 1) / 2.0) * track_spacing
                     offset_coords = _offset_polyline_uniform(coords, offset_distance)
 
                     if offset_coords:
@@ -1661,7 +1925,7 @@ def _draw_segments(
                         ax.plot(
                             lx,
                             ly,
-                            color="black",
+                            color=seg_colour,
                             linewidth=individual_line_width,
                             solid_capstyle="round",
                             zorder=2,
@@ -1682,28 +1946,28 @@ def _draw_segments(
                     middle_coords = list(middle_section.coords)
 
                     # Top edge extra track (skip one full spacing to avoid overlap)
-                    top_offset = ((base_tracks / 2.0) + 0.5) * TRACK_OFFSET_SPACING
+                    top_offset = ((base_tracks / 2.0) + 0.5) * track_spacing
                     top_coords = _offset_polyline_uniform(middle_coords, top_offset)
                     if top_coords:
                         tx, ty = zip(*top_coords)
                         ax.plot(
                             tx,
                             ty,
-                            color="black",
+                            color=seg_colour,
                             linewidth=individual_line_width,
                             solid_capstyle="round",
                             zorder=2,
                         )
 
                     # Bottom edge extra track (skip one full spacing to avoid overlap)
-                    bottom_offset = -((base_tracks / 2.0) + 0.5) * TRACK_OFFSET_SPACING
+                    bottom_offset = -((base_tracks / 2.0) + 0.5) * track_spacing
                     bottom_coords = _offset_polyline_uniform(middle_coords, bottom_offset)
                     if bottom_coords:
                         bx, by = zip(*bottom_coords)
                         ax.plot(
                             bx,
                             by,
-                            color="black",
+                            color=seg_colour,
                             linewidth=individual_line_width,
                             solid_capstyle="round",
                             zorder=2,
@@ -1715,20 +1979,18 @@ def _draw_segments(
                 ax.plot(
                     xs,
                     ys,
-                    color="black",
+                    color=seg_colour,
                     linewidth=line_width,
                     zorder=2,
                 )
             else:
                 # Multiple tracks: draw N separate parallel lines with fixed spacing in data coordinates
-                TRACK_OFFSET_SPACING = 60.0  # meters in LV95 coordinates
-
                 # Individual line width for visual appearance (thinner than total for visual separation)
-                individual_line_width = line_width / (track_count * 1.3)
+                individual_line_width = line_width / (display_tracks * 1.3)
 
-                for track_idx in range(track_count):
-                    # Calculate offset in data coordinates (meters)
-                    offset_distance = (track_idx - (track_count - 1) / 2.0) * TRACK_OFFSET_SPACING
+                for track_idx in range(display_tracks):
+                    # Calculate offset in data coordinates (metres)
+                    offset_distance = (track_idx - (display_tracks - 1) / 2.0) * track_spacing
 
                     # Use _offset_polyline_uniform (same as service plot)
                     offset_coords = _offset_polyline_uniform(coords, offset_distance)
@@ -1738,13 +2000,13 @@ def _draw_segments(
                         ax.plot(
                             lx,
                             ly,
-                            color="black",
+                            color=seg_colour,
                             linewidth=individual_line_width,
                             solid_capstyle="round",
                             zorder=2,
                         )
 
-    return track_categories, separators_used
+    return track_categories, separators_used, track_counts_used
 
 
 def _add_network_legends(
@@ -1752,8 +2014,62 @@ def _add_network_legends(
     station_colours: Set[str],
     segment_categories: Set[str],
     separators_present: bool,
+    is_catchment: bool = False,
+    track_counts_used: Optional[Set[int]] = None,
 ) -> None:
-    """Add station and segment legends to the plot."""
+    """Add station and segment legends to the plot.
+
+    When is_catchment is True renders the infrabuild-style legend: segments
+    coloured by track count, nodes coloured by class.
+    """
+    if is_catchment:
+        _ca_node_labels = {
+            _CA_NODE_COLOURS["station"]:           "Station",
+            _CA_NODE_COLOURS["junction"]:          "Junction",
+            _CA_NODE_COLOURS["abandoned_station"]: "Abandoned station",
+            _CA_NODE_DEFAULT:                      "Other node",
+        }
+        node_handles = [
+            Patch(facecolor=colour, edgecolor="black", linewidth=0.6, label=label)
+            for colour, label in _ca_node_labels.items()
+            if colour in station_colours
+        ]
+        node_legend = None
+        if node_handles:
+            node_legend = ax.legend(
+                handles=node_handles,
+                title="Node Class",
+                loc="upper right",
+                frameon=True,
+                fontsize=8,
+                title_fontsize=9,
+            )
+            node_legend.get_frame().set_facecolor("#f7f7f7")
+            ax.add_artist(node_legend)
+
+        _ca_track_labels: Dict[int, str] = {1: "Single track", 2: "Double track", 3: "3 tracks", 4: "4 tracks"}
+        counts = sorted(track_counts_used or set())
+        track_handles = []
+        for n in counts:
+            if n <= 0:
+                continue
+            colour = _CA_TRACK_COLOURS.get(n, _CA_TRACK_DEFAULT)
+            label = _ca_track_labels.get(n, f"{n} tracks")
+            track_handles.append(Line2D([0], [0], color=colour, linewidth=_line_width(n), label=label))
+        if track_handles:
+            track_legend = ax.legend(
+                handles=track_handles,
+                title="Track Count",
+                loc="lower left",
+                frameon=True,
+                fontsize=8,
+                title_fontsize=9,
+            )
+            track_legend.get_frame().set_facecolor("#f7f7f7")
+            if node_legend is not None:
+                ax.add_artist(track_legend)
+        return
+
     station_definitions = {
         "#4caf50": "Crossing & overtaking possible",
         "#ffffff": "Crossing possible",
@@ -1772,7 +2088,7 @@ def _add_network_legends(
         station_legend = ax.legend(
             handles=station_handles,
             title="Station Status",
-            loc="upper left",
+            loc="upper right",
             frameon=True,
             fontsize=8,
             title_fontsize=9,
@@ -1794,12 +2110,10 @@ def _add_network_legends(
         if key not in segment_categories:
             continue
         if key == "double":
-            # Use parallel line rendering for double track
-            handle_obj = _DoubleTrackLegendHandle(width, 0)  # divider_width not used anymore
+            handle_obj = _DoubleTrackLegendHandle(width, 0)
             handler_map[_DoubleTrackLegendHandle] = _DoubleTrackLegendHandler()
         elif key == "multi":
-            # Use parallel line rendering for 3+ tracks
-            handle_obj = _MultiTrackLegendHandle(width, 3)  # Show 3 lines as example
+            handle_obj = _MultiTrackLegendHandle(width, 3)
             handler_map[_MultiTrackLegendHandle] = _MultiTrackLegendHandler()
         else:
             handle_obj = Line2D([0], [0], color="black", linewidth=width)
@@ -1823,7 +2137,9 @@ def _add_network_legends(
 
 
 def _draw_capacity_map(
-    ax, sections: List[SectionSummary]
+    ax,
+    sections: List[SectionSummary],
+    include_annotations: bool = True,
 ) -> Tuple[Optional[Tuple[float, float, float, float]], Set[str]]:
     """Render a capacity utilization view of the network sections."""
     cmap = plt.get_cmap("RdYlGn_r")
@@ -1838,17 +2154,28 @@ def _draw_capacity_map(
     extent_min_y = math.inf
     extent_max_y = -math.inf
 
-    scatter_points: Dict[int, Tuple[float, float]] = {}
-    fig = ax.figure
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
+    # Separate regular, junction, and intermediate scatter points for different
+    # marker sizes. Intermediate stations are stops that fall inside a section
+    # (not at its endpoints) — they get a faded marker.
+    regular_points: Dict[int, Tuple[float, float]] = {}
+    junction_points: Dict[int, Tuple[float, float]] = {}
+    intermediate_points: Dict[int, Tuple[float, float]] = {}
     track_categories: Set[str] = set()
 
     for section in sections:
         start = section.start
         end = section.end
-        scatter_points[start.node_id] = (start.x, start.y)
-        scatter_points[end.node_id] = (end.x, end.y)
+
+        # Route scatter points to regular or junction buckets.
+        for station in (start, end):
+            target = junction_points if station.is_junction else regular_points
+            target[station.node_id] = (station.x, station.y)
+        # Intermediate junctions still drive the polyline geometry, but are
+        # not rendered as markers — only real stations get a faded dot.
+        for station in section.intermediate_stations:
+            if station.is_junction:
+                continue
+            intermediate_points[station.node_id] = (station.x, station.y)
 
         util_value = section.utilization
         track_categories.add(_segment_track_category(section.track_count))
@@ -1863,20 +2190,29 @@ def _draw_capacity_map(
 
         # Cap line width at 2-track maximum for capacity plot
         capped_track_count = min(section.track_count, 2.0) if not math.isnan(section.track_count) else section.track_count
+
+        # Route the section polyline through intermediate stations when present
+        # to approximate the real track geometry. Label anchor follows the
+        # polyline midpoint (by arc length) so utilisation/info boxes stay
+        # near the centre of the rendered line, not the straight start↔end line.
+        path_stations = [start, *section.intermediate_stations, end]
+        xs = [s.x for s in path_stations]
+        ys = [s.y for s in path_stations]
+        mid_x, mid_y = _polyline_midpoint(xs, ys)
+
         ax.plot(
-            [start.x, end.x],
-            [start.y, end.y],
+            xs,
+            ys,
             color=colour,
             linewidth=_line_width(capped_track_count),
             solid_capstyle="round",
             zorder=zorder,
         )
 
-        if math.isnan(util_value):
+        # Skip text annotations when either endpoint is a junction or annotations are suppressed.
+        has_junction_endpoint = start.is_junction or end.is_junction
+        if math.isnan(util_value) or not include_annotations or has_junction_endpoint:
             continue
-
-        mid_x = (start.x + end.x) / 2.0
-        mid_y = (start.y + end.y) / 2.0
 
         percent_text = _format_percentage(util_value)
         percent_width, percent_height = _estimate_text_extent(percent_text, char_width=50.0, line_height=120.0)
@@ -1901,7 +2237,7 @@ def _draw_capacity_map(
             anchor="center",
         )
 
-        percent_artist = ax.text(
+        ax.text(
             percent_x,
             percent_y,
             percent_text,
@@ -1913,38 +2249,39 @@ def _draw_capacity_map(
             zorder=4,
         )
 
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
-
-        percent_bbox = percent_artist.get_window_extent(renderer=renderer)
-        inv = ax.transData.inverted()
-        p_min_x, p_min_y = inv.transform((percent_bbox.x0, percent_bbox.y0))
-        p_max_x, p_max_y = inv.transform((percent_bbox.x1, percent_bbox.y1))
-        annotation_boxes.append((p_min_x, p_max_x, p_min_y, p_max_y))
+        p_bounds = _bounds_from_anchor(percent_x, percent_y, percent_width, percent_height, "center")
+        annotation_boxes.append(p_bounds)
+        p_min_x, p_max_x, p_min_y, p_max_y = p_bounds
 
         extent_min_x = min(extent_min_x, p_min_x)
         extent_max_x = max(extent_max_x, p_max_x)
         extent_min_y = min(extent_min_y, p_min_y)
         extent_max_y = max(extent_max_y, p_max_y)
 
+        # Round fractional (.5) values down to the nearest integer for display.
+        def _fmt_int(v: float) -> str:
+            return _format_track(math.floor(v) if not math.isnan(v) else v)
+
         detail_text = (
-            f"Total: {_format_track(section.total_tphpd)} / {_format_track(section.capacity_tphpd)} tphpd\n"
-            f"Local: {_format_track(section.stopping_tphpd)}\n"
-            f"Express: {_format_track(section.passing_tphpd)}"
+            f"Total: {_fmt_int(section.total_tphpd)} / {_fmt_int(section.capacity_tphpd)} tphpd\n"
+            f"Local: {_fmt_int(section.stopping_tphpd)}\n"
+            f"Express: {_fmt_int(section.passing_tphpd)}"
         )
         detail_width, detail_height = _estimate_text_extent(detail_text, char_width=55.0, line_height=120.0)
+        # Increased gap between % badge and detail table.
+        _DETAIL_GAP = 600.0
         detail_base_x = p_max_x
         detail_base_y = (p_min_y + p_max_y) / 2.0
         detail_candidates = [
-            (180.0, 0.0),
-            (180.0, 200.0),
-            (180.0, -200.0),
-            (360.0, 0.0),
-            (360.0, 200.0),
-            (360.0, -200.0),
-            (-180.0, 0.0),
-            (-180.0, 200.0),
-            (-180.0, -200.0),
+            (_DETAIL_GAP, 0.0),
+            (_DETAIL_GAP, 200.0),
+            (_DETAIL_GAP, -200.0),
+            (_DETAIL_GAP * 2, 0.0),
+            (_DETAIL_GAP * 2, 200.0),
+            (_DETAIL_GAP * 2, -200.0),
+            (-_DETAIL_GAP, 0.0),
+            (-_DETAIL_GAP, 200.0),
+            (-_DETAIL_GAP, -200.0),
         ]
         detail_x, detail_y = _find_label_position(
             annotation_boxes,
@@ -1956,7 +2293,7 @@ def _draw_capacity_map(
             anchor="left_center",
         )
 
-        detail_artist = ax.text(
+        ax.text(
             detail_x,
             detail_y,
             detail_text,
@@ -1968,33 +2305,31 @@ def _draw_capacity_map(
             zorder=4,
         )
 
-        fig.canvas.draw()
-        detail_bbox = detail_artist.get_window_extent(renderer=renderer)
-        d_min_x, d_min_y = inv.transform((detail_bbox.x0, detail_bbox.y0))
-        d_max_x, d_max_y = inv.transform((detail_bbox.x1, detail_bbox.y1))
-        annotation_boxes.append((d_min_x, d_max_x, d_min_y, d_max_y))
+        d_bounds = _bounds_from_anchor(detail_x, detail_y, detail_width, detail_height, "left_center")
+        annotation_boxes.append(d_bounds)
+        d_min_x, d_max_x, d_min_y, d_max_y = d_bounds
 
         extent_min_x = min(extent_min_x, d_min_x)
         extent_max_x = max(extent_max_x, d_max_x)
         extent_min_y = min(extent_min_y, d_min_y)
         extent_max_y = max(extent_max_y, d_max_y)
 
-        connector_start_x = p_max_x
-        connector_start_y = (p_min_y + p_max_y) / 2.0
-        connector_end_x = d_min_x
-        connector_end_y = (d_min_y + d_max_y) / 2.0
+    # Intermediate-only stations are those that never act as a section endpoint;
+    # render them faded so users can see which stops a section passes through
+    # without offering passing opportunities.
+    for nid in list(intermediate_points.keys()):
+        if nid in regular_points or nid in junction_points:
+            del intermediate_points[nid]
+    if intermediate_points:
+        ixs, iys = zip(*intermediate_points.values())
+        ax.scatter(ixs, iys, s=45, c="#bbbbbb", edgecolors="white", linewidths=0.4, alpha=0.6, zorder=4)
 
-    if scatter_points:
-        xs, ys = zip(*scatter_points.values())
-        ax.scatter(
-            xs,
-            ys,
-            s=45,
-            c="#222222",
-            edgecolors="white",
-            linewidths=0.4,
-            zorder=5,
-        )
+    if regular_points:
+        rxs, rys = zip(*regular_points.values())
+        ax.scatter(rxs, rys, s=45, c="#222222", edgecolors="white", linewidths=0.4, zorder=5)
+    if junction_points:
+        jxs, jys = zip(*junction_points.values())
+        ax.scatter(jxs, jys, s=20, c="#444444", edgecolors="white", linewidths=0.3, zorder=5)
 
     sm = ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
@@ -2033,20 +2368,19 @@ def _draw_speed_profile(
     extent_min_y = math.inf
     extent_max_y = -math.inf
 
-    fig = ax.figure
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-
     for segment in segments:
         start = stations[segment.from_node]
         end = stations[segment.to_node]
 
         key = _segment_key(segment.from_node, segment.to_node)
         if segment_geometries and key in segment_geometries:
-            coords = segment_geometries[key]
-            xs, ys = zip(*coords)
+            coords = list(segment_geometries[key])
+        elif segment_geometries:
+            stitched = _find_section_geometry(segment.from_node, segment.to_node, segment_geometries)
+            coords = stitched if stitched else [(start.x, start.y), (end.x, end.y)]
         else:
-            xs, ys = (start.x, end.x), (start.y, end.y)
+            coords = [(start.x, start.y), (end.x, end.y)]
+        xs, ys = zip(*coords)
 
         speed_value = segment.speed
         if math.isnan(speed_value) or speed_value <= 0.0:
@@ -2106,12 +2440,9 @@ def _draw_speed_profile(
             zorder=4,
         )
 
-        fig.canvas.draw()
-        speed_bbox = speed_artist.get_window_extent(renderer=renderer)
-        inv = ax.transData.inverted()
-        s_min_x, s_min_y = inv.transform((speed_bbox.x0, speed_bbox.y0))
-        s_max_x, s_max_y = inv.transform((speed_bbox.x1, speed_bbox.y1))
-        annotation_boxes.append((s_min_x, s_max_x, s_min_y, s_max_y))
+        s_bounds = _bounds_from_anchor(speed_x, speed_y, speed_width, speed_height, "center")
+        annotation_boxes.append(s_bounds)
+        s_min_x, s_max_x, s_min_y, s_max_y = s_bounds
 
         extent_min_x = min(extent_min_x, s_min_x)
         extent_max_x = max(extent_max_x, s_max_x)
@@ -2159,11 +2490,9 @@ def _draw_speed_profile(
             zorder=4,
         )
 
-        fig.canvas.draw()
-        detail_bbox = detail_artist.get_window_extent(renderer=renderer)
-        d_min_x, d_min_y = inv.transform((detail_bbox.x0, detail_bbox.y0))
-        d_max_x, d_max_y = inv.transform((detail_bbox.x1, detail_bbox.y1))
-        annotation_boxes.append((d_min_x, d_max_x, d_min_y, d_max_y))
+        d_bounds = _bounds_from_anchor(detail_x, detail_y, detail_width, detail_height, "left_center")
+        annotation_boxes.append(d_bounds)
+        d_min_x, d_max_x, d_min_y, d_max_y = d_bounds
 
         extent_min_x = min(extent_min_x, d_min_x)
         extent_max_x = max(extent_max_x, d_max_x)
@@ -2186,6 +2515,7 @@ def _draw_service_map(
     segments: List[Segment],
     segment_geometries: Optional[Dict[Tuple[int, int], List[Tuple[float, float]]]] = None,
     station_shapes: Optional[Dict[int, StationShape]] = None,
+    include_service_labels: bool = True,
 ) -> Optional[Tuple[float, float, float, float]]:
     """Render service frequencies with coloured lines and service labels."""
     annotation_boxes: List[Tuple[float, float, float, float]] = []
@@ -2193,10 +2523,6 @@ def _draw_service_map(
     extent_max_x = -math.inf
     extent_min_y = math.inf
     extent_max_y = -math.inf
-
-    fig = ax.figure
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
 
     service_order: Dict[str, int] = {}
     service_station_links: Dict[Tuple[str, int], List[Tuple[Tuple[float, float], str, float]]] = defaultdict(list)
@@ -2216,13 +2542,16 @@ def _draw_service_map(
         key = _segment_key(segment.from_node, segment.to_node)
         if segment_geometries and key in segment_geometries:
             base_coords = list(segment_geometries[key])
+            canonical_from, _ = key
+            if segment.from_node != canonical_from:
+                coords = list(reversed(base_coords))
+            else:
+                coords = list(base_coords)
+        elif segment_geometries:
+            stitched = _find_section_geometry(segment.from_node, segment.to_node, segment_geometries)
+            coords = stitched if stitched else [(start.x, start.y), (end.x, end.y)]
         else:
-            base_coords = [(start.x, start.y), (end.x, end.y)]
-        canonical_from, _ = key
-        if segment.from_node != canonical_from:
-            coords = list(reversed(base_coords))
-        else:
-            coords = list(base_coords)
+            coords = [(start.x, start.y), (end.x, end.y)]
 
         services_sorted = sorted(
             service_map.items(),
@@ -2234,7 +2563,6 @@ def _draw_service_map(
         adaptive_offset_spacing = _find_optimal_spacing(service_map)
 
         start_shape = station_shapes.get(segment.from_node) if station_shapes else None
-        end_shape = station_shapes.get(segment.to_node) if station_shapes else None
 
         base_sign = 1.0
         if coords:
@@ -2275,13 +2603,17 @@ def _draw_service_map(
 
             offset_coords = _offset_polyline_uniform(coords, offset_distance)
 
-            if station_shapes and len(offset_coords) >= 2:
-                if start_shape:
-                    offset_coords[0] = _project_point_to_station_boundary(offset_coords[0], offset_coords[1], start, start_shape)
-                if end_shape:
-                    offset_coords[-1] = _project_point_to_station_boundary(
-                        offset_coords[-1], offset_coords[-2], end, end_shape
-                    )
+            if len(offset_coords) >= 2:
+                start_dir = (
+                    offset_coords[1][0] - offset_coords[0][0],
+                    offset_coords[1][1] - offset_coords[0][1],
+                )
+                end_dir = (
+                    offset_coords[-2][0] - offset_coords[-1][0],
+                    offset_coords[-2][1] - offset_coords[-1][1],
+                )
+                offset_coords[0] = _project_offset_to_segment_boundary(offset_coords[0], start, start_dir)
+                offset_coords[-1] = _project_offset_to_segment_boundary(offset_coords[-1], end, end_dir)
 
             start_offset = offset_coords[0]
             end_offset = offset_coords[-1]
@@ -2302,16 +2634,17 @@ def _draw_service_map(
                 # Apply frequency offset to the service's base offset coordinates
                 freq_coords = _offset_polyline_uniform(offset_coords, freq_offset)
 
-                # Project to station boundaries if needed
-                if station_shapes and len(freq_coords) >= 2:
-                    if start_shape:
-                        freq_coords[0] = _project_point_to_station_boundary(
-                            freq_coords[0], freq_coords[1], start, start_shape
-                        )
-                    if end_shape:
-                        freq_coords[-1] = _project_point_to_station_boundary(
-                            freq_coords[-1], freq_coords[-2], end, end_shape
-                        )
+                if len(freq_coords) >= 2:
+                    freq_start_dir = (
+                        freq_coords[1][0] - freq_coords[0][0],
+                        freq_coords[1][1] - freq_coords[0][1],
+                    )
+                    freq_end_dir = (
+                        freq_coords[-2][0] - freq_coords[-1][0],
+                        freq_coords[-2][1] - freq_coords[-1][1],
+                    )
+                    freq_coords[0] = _project_offset_to_segment_boundary(freq_coords[0], start, freq_start_dir)
+                    freq_coords[-1] = _project_offset_to_segment_boundary(freq_coords[-1], end, freq_end_dir)
 
                 # Update extent tracking
                 xs_all = [pt[0] for pt in freq_coords]
@@ -2396,27 +2729,45 @@ def _draw_service_map(
         key for key, touches in service_station_links.items() if len(touches) <= 1
     }
 
-    for candidate in label_candidates:
-        service_name = candidate["service"]
-        start_node = candidate["start_node"]
-        end_node = candidate["end_node"]
-        if (service_name, start_node) not in endpoint_stations and (service_name, end_node) not in endpoint_stations:
-            continue
+    if not include_service_labels:
+        labels_to_draw: List[Dict[str, Any]] = []
+    else:
+        labels_to_draw = []
+        labelled_services: Set[str] = set()
+        # First pass: keep current behaviour — tag at endpoint segments.
+        for candidate in label_candidates:
+            service_name = candidate["service"]
+            if (service_name, candidate["start_node"]) in endpoint_stations or (
+                service_name, candidate["end_node"]
+            ) in endpoint_stations:
+                labels_to_draw.append(candidate)
+                labelled_services.add(service_name)
+        # Second pass: services that only run through interior segments get
+        # one tag placed on the first interior segment we encountered.
+        for candidate in label_candidates:
+            service_name = candidate["service"]
+            if service_name in labelled_services:
+                continue
+            labels_to_draw.append(candidate)
+            labelled_services.add(service_name)
 
+    for candidate in labels_to_draw:
+        service_name = candidate["service"]
         service_text = service_name
         service_width, service_height = _estimate_text_extent(
             service_text, char_width=50.0, line_height=120.0
         )
         service_candidates = [
-            (0.0, 0.0),
-            (200.0, 0.0),
-            (-200.0, 0.0),
-            (0.0, 200.0),
-            (0.0, -200.0),
-            (200.0, 200.0),
-            (200.0, -200.0),
-            (-200.0, 200.0),
-            (-200.0, -200.0),
+            (0.0, 350.0),
+            (0.0, -350.0),
+            (350.0, 0.0),
+            (-350.0, 0.0),
+            (350.0, 350.0),
+            (350.0, -350.0),
+            (-350.0, 350.0),
+            (-350.0, -350.0),
+            (0.0, 600.0),
+            (0.0, -600.0),
         ]
         label_x, label_y = _find_label_position(
             annotation_boxes,
@@ -2440,12 +2791,9 @@ def _draw_service_map(
             zorder=4,
         )
 
-        fig.canvas.draw()
-        label_bbox = label_artist.get_window_extent(renderer=renderer)
-        inv = ax.transData.inverted()
-        l_min_x, l_min_y = inv.transform((label_bbox.x0, label_bbox.y0))
-        l_max_x, l_max_y = inv.transform((label_bbox.x1, label_bbox.y1))
-        annotation_boxes.append((l_min_x, l_max_x, l_min_y, l_max_y))
+        l_bounds = _bounds_from_anchor(label_x, label_y, service_width, service_height, "center")
+        annotation_boxes.append(l_bounds)
+        l_min_x, l_max_x, l_min_y, l_max_y = l_bounds
 
         extent_min_x = min(extent_min_x, l_min_x)
         extent_max_x = max(extent_max_x, l_max_x)
@@ -2517,7 +2865,7 @@ def _configure_axes(
     ax.set_xlim(min_x - padding_x, max_x + padding_x)
     ax.set_ylim(min_y - padding_y, max_y + padding_y)
 
-    ax.set_aspect("equal", adjustable="datalim")
+    ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("Easting (LV95)")
     ax.set_ylabel("Northing (LV95)")
     ax.grid(False)
@@ -2540,6 +2888,13 @@ def network_current_map(
     return_figure: bool = False,
     network_label: str = None,
     output_dir: Path = None,
+    infra_version: Optional[str] = None,
+    lakes_path: Optional[str] = None,
+    include_labels: bool = True,
+    allowed_node_classes: Optional[Set[str]] = None,
+    is_catchment: bool = False,
+    marker_scale: float = 1.5,
+    boundary_path: Optional[str] = None,
 ) -> Union[Path, Tuple[Path, Figure]]:
     """Render the current network infrastructure map.
 
@@ -2554,6 +2909,8 @@ def network_current_map(
         return_figure: If True, return both path and figure.
         network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
         output_dir: Optional custom output directory.
+        is_catchment: When True renders with infrabuild-style colours (segments by
+            track count, nodes by class) suited to wide-area catchment maps.
 
     Returns:
         Path to saved image, or (Path, Figure) if return_figure=True.
@@ -2565,7 +2922,7 @@ def network_current_map(
                 network_label=network_label,
                 output_dir=output_dir
             )
-        stations = _to_stations(stations_df)
+        stations = _filter_stations_by_class(_to_stations(stations_df), allowed_node_classes)
         segments_list = _to_segments(segments_df, stations.keys())
 
     if not stations:
@@ -2573,9 +2930,8 @@ def network_current_map(
     if not segments_list:
         raise ValueError("No segments were found linking the stations.")
 
-    water_layer, segment_geometries = _load_map_overlays()
+    water_layer, segment_geometries = _load_map_overlays(infra_version, lakes_path=lakes_path)
 
-    # Calculate dynamic figure size based on station bounding box
     figsize = _calculate_figure_size(stations)
     fig, ax = plt.subplots(figsize=figsize)
     if water_layer is not None and not getattr(water_layer, "empty", True):
@@ -2584,23 +2940,53 @@ def network_current_map(
         except Exception:
             pass
 
-    segment_categories, separators_used = _draw_segments(
-        ax, stations, segments_list, segment_geometries=segment_geometries
+    # Ghost pass: infra segments whose endpoints are not both in the workbook (CA only)
+    if is_catchment and segment_geometries:
+        workbook_node_set = set(stations.keys())
+        for (a, b), coords in segment_geometries.items():
+            if a in workbook_node_set and b in workbook_node_set:
+                continue
+            xs, ys = zip(*coords)
+            ax.plot(xs, ys, color="#555555", linewidth=1.2, alpha=0.40, zorder=1.5,
+                    solid_capstyle="round")
+
+    seg_kwargs: Dict = {"segment_geometries": segment_geometries}
+    if is_catchment:
+        seg_kwargs["max_tracks"] = 4
+        seg_kwargs["track_spacing"] = 140.0
+    segment_categories, separators_used, _ = _draw_segments(
+        ax, stations, segments_list, **seg_kwargs,
     )
     annotation_bounds, station_colours = _draw_station_annotations(
         ax,
         stations,
         segments_list,
         marker_style="circle",
-        marker_size_mode="fixed",
+        include_labels=include_labels,
+        include_tables=(not is_catchment),
+        marker_scale=marker_scale,
+        colour_mode="status",
     )
 
-    # Format title with network information
     plot_title = _format_plot_title("Rail Network Infrastructure", network_label)
     _configure_axes(ax, stations, title=plot_title, annotation_bounds=annotation_bounds)
-    _add_network_legends(ax, station_colours, segment_categories, separators_used)
 
-    # Use new path derivation logic with network subdirectories
+    if boundary_path:
+        _boundary_gdf = _load_boundary(boundary_path)
+        if _boundary_gdf is not None and not getattr(_boundary_gdf, "empty", True):
+            try:
+                _boundary_gdf.boundary.plot(
+                    ax=ax, color="#333333", linewidth=1.0, linestyle="--", alpha=0.6, zorder=5
+                )
+            except Exception:
+                pass
+
+    _add_network_legends(
+        ax, station_colours, segment_categories, separators_used,
+    )
+    _add_north_arrow(ax)
+    _add_scale_bar(ax)
+
     base_output = _derive_plot_output_path(
         plot_type="infrastructure",
         network_label=network_label,
@@ -2609,8 +2995,6 @@ def network_current_map(
     )
     base_output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(base_output, dpi=300, bbox_inches="tight")
-    pdf_output = base_output.with_suffix(".pdf")
-    fig.savefig(pdf_output, dpi=300, bbox_inches="tight")
 
     if show:
         plt.show()
@@ -2630,6 +3014,14 @@ def plot_capacity_network(
     show: bool = False,
     network_label: str = None,
     output_dir: Path = None,
+    infra_version: Optional[str] = None,
+    lakes_path: Optional[str] = None,
+    include_labels: bool = True,
+    marker_scale: float = 1.0,
+    allowed_node_classes: Optional[Set[str]] = None,
+    is_catchment: bool = False,
+    network_marker_scale: float = 1.5,
+    boundary_path: Optional[str] = None,
 ) -> Tuple[Path, Path]:
     """Plot the capacity prep workbook and return the saved image paths (network, capacity).
 
@@ -2641,6 +3033,7 @@ def plot_capacity_network(
         show: If True, display the plots.
         network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
         output_dir: Optional custom output directory.
+        infra_version: Optional infra version for real segment geometry.
 
     Returns:
         Tuple of (network_output_path, capacity_output_path).
@@ -2650,7 +3043,7 @@ def plot_capacity_network(
         network_label=network_label,
         output_dir=output_dir
     )
-    stations = _to_stations(stations_df)
+    stations = _filter_stations_by_class(_to_stations(stations_df), allowed_node_classes)
     segments = _to_segments(segments_df, stations.keys())
     sections = _load_capacity_sections(
         workbook_path=Path(sections_workbook_path) if sections_workbook_path else None,
@@ -2686,6 +3079,13 @@ def plot_capacity_network(
             return_figure=True,
             network_label=network_label,
             output_dir=output_dir,
+            infra_version=infra_version,
+            lakes_path=lakes_path,
+            include_labels=include_labels,
+            allowed_node_classes=allowed_node_classes,
+            is_catchment=is_catchment,
+            marker_scale=network_marker_scale,
+            boundary_path=boundary_path,
         )
 
         if isinstance(base_result, tuple):
@@ -2712,14 +3112,29 @@ def plot_capacity_network(
     # Calculate dynamic figure size based on section station bounding box
     figsize = _calculate_figure_size(section_stations)
     capacity_fig, capacity_ax = plt.subplots(figsize=figsize)
-    capacity_annotation_bounds, _ = _draw_capacity_map(capacity_ax, sections)
+
+    # Draw lakes on capacity figure; also load segment geometries for BFS routing
+    _cap_water, _ = _load_map_overlays(infra_version=infra_version, lakes_path=lakes_path)
+    if _cap_water is not None and not getattr(_cap_water, "empty", True):
+        try:
+            _cap_water.plot(ax=capacity_ax, color="#b7d4f0", edgecolor="#6ea3d5", linewidth=0.5, zorder=1)
+        except Exception:
+            pass
+
+    capacity_annotation_bounds, _ = _draw_capacity_map(
+        capacity_ax,
+        sections,
+        include_annotations=include_labels,
+    )
     station_annotation_bounds, _ = _draw_station_annotations(
         capacity_ax,
         section_stations,
         annotation_segments,
         marker_style="circle",
-        marker_size_mode="fixed",
+
         include_tables=False,
+        include_labels=include_labels,
+        marker_scale=marker_scale,
         colour_mode="uniform",
         uniform_colour="#000000",
     )
@@ -2733,9 +3148,10 @@ def plot_capacity_network(
         title=capacity_title,
         annotation_bounds=combined_bounds,
     )
+    _add_north_arrow(capacity_ax)
+    _add_scale_bar(capacity_ax)
+
     capacity_fig.savefig(capacity_output, dpi=300, bbox_inches="tight")
-    capacity_pdf_output = capacity_output.with_suffix(".pdf")
-    capacity_fig.savefig(capacity_pdf_output, dpi=300, bbox_inches="tight")
 
     if show:
         plt.show()
@@ -2744,6 +3160,7 @@ def plot_capacity_network(
             plt.close(base_fig)
         plt.close(capacity_fig)
 
+    _flush_directional_asymmetry_summary()
     return base_output, capacity_output
 
 
@@ -2796,7 +3213,7 @@ def plot_speed_profile_network(
         stations,
         segments,
         marker_style="circle",
-        marker_size_mode="fixed",
+
         include_tables=False,
         colour_mode="uniform",
         uniform_colour="#ffffff",
@@ -2816,8 +3233,6 @@ def plot_speed_profile_network(
     )
     speed_output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(speed_output, dpi=300, bbox_inches="tight")
-    speed_pdf_output = speed_output.with_suffix(".pdf")
-    fig.savefig(speed_pdf_output, dpi=300, bbox_inches="tight")
 
     if show:
         plt.show()
@@ -2833,6 +3248,9 @@ def plot_service_network(
     show: bool = False,
     network_label: str = None,
     output_dir: Path = None,
+    lakes_path: Optional[str] = None,
+    include_labels: bool = True,
+    allowed_node_classes: Optional[Set[str]] = None,
 ) -> Path:
     """Plot network services with frequency-based styling and return the saved image path.
 
@@ -2851,7 +3269,7 @@ def plot_service_network(
         network_label=network_label,
         output_dir=output_dir
     )
-    stations = _to_stations(stations_df)
+    stations = _filter_stations_by_class(_to_stations(stations_df), allowed_node_classes)
     segments = _to_segments(segments_df, stations.keys())
 
     if not stations:
@@ -2863,7 +3281,7 @@ def plot_service_network(
     if not segments_with_services:
         raise ValueError("No service frequency data was found in the segments sheet.")
 
-    water_layer, segment_geometries = _load_map_overlays()
+    water_layer, segment_geometries = _load_map_overlays(lakes_path=lakes_path)
 
     station_shapes = _compute_station_shapes(stations, segments_with_services)
 
@@ -2882,13 +3300,18 @@ def plot_service_network(
         segments_with_services,
         segment_geometries,
         station_shapes=station_shapes,
+        include_service_labels=include_labels,
     )
+    stations_no_junctions = {
+        node_id: station for node_id, station in stations.items() if not station.is_junction
+    }
     station_annotation_bounds, _ = _draw_station_annotations(
         ax,
-        stations,
+        stations_no_junctions,
         segments_with_services,
         station_shapes=station_shapes,
-        include_tables=True,
+        include_tables=include_labels,
+        include_labels=include_labels,
         colour_mode="uniform",
         uniform_colour="#ffffff",
         table_text_func=_service_station_table,
@@ -2898,12 +3321,14 @@ def plot_service_network(
     # Format title with network information
     service_title = _format_plot_title("Service Frequencies", network_label)
     _configure_axes(ax, stations, title=service_title, annotation_bounds=combined_bounds)
+    _add_north_arrow(ax)
+    _add_scale_bar(ax)
 
     legend_handles = [
         Line2D([0], [0], color=SERVICE_COLOUR_STOP, linewidth=2.0, label="Stopping"),
         Line2D([0], [0], color=SERVICE_COLOUR_PASS, linewidth=2.0, label="Passing"),
     ]
-    ax.legend(handles=legend_handles, title="Service type", loc="upper left", frameon=True, fontsize=8, title_fontsize=9)
+    ax.legend(handles=legend_handles, title="Service type", loc="upper right", frameon=True, fontsize=8, title_fontsize=9)
 
     # Use new path derivation logic with network subdirectories
     service_output = _derive_plot_output_path(
@@ -2914,14 +3339,13 @@ def plot_service_network(
     )
     service_output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(service_output, dpi=300, bbox_inches="tight")
-    service_pdf_output = service_output.with_suffix(".pdf")
-    fig.savefig(service_pdf_output, dpi=300, bbox_inches="tight")
 
     if show:
         plt.show()
     else:
         plt.close(fig)
 
+    _flush_directional_asymmetry_summary()
     return service_output
 
 

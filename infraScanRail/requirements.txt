@@ -37,7 +37,6 @@ Fiona==1.8.22
 flake8==7.2.0
 folium==0.14.0
 fonttools==4.39.3
-geo_northarrow @ git+https://github.com/pmdscully/geo_northarrow.git@963bdd271707a3bcaa47b2d83d92b88ae0b10950
 geographiclib==2.0
 geopandas==0.12.2
 geopy==2.4.1
@@ -65,6 +64,7 @@ lxml==4.9.2
 mapclassify==2.5.0
 MarkupSafe==2.1.2
 matplotlib==3.6.3
+matplotlib-map-utils==3.1.2
 matplotlib-scalebar==0.8.1
 mccabe==0.7.0
 mercantile==1.2.1

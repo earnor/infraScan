@@ -1,12 +1,9 @@
-"""Capacity calculator for the processed baseline rail network.
+"""Capacity calculator for the rail network.
 
-This module prepares two worksheets:
-* Stations: node metadata and aggregated stopping / passing service frequencies.
-* Segments: bidirectional rail link statistics with combined frequencies.
-
-The script assumes that the baseline (status-quo) network has already been
-processed and stored in ``data/Network/processed``. Run this module after the
-main infrastructure generation pipeline to ensure the inputs exist.
+Reads infrastructure from infrabuild outputs (nodes.gpkg, segments.gpkg) and
+projected service data (rail_segments.gpkg) produced by services_service_projection.
+Builds peak and off-peak station/segment frequency tables, runs the sectioning
+graph-walk, and computes capacity and utilization per section.
 """
 
 from __future__ import annotations
@@ -27,9 +24,7 @@ import settings
 # Paths and constants
 # ---------------------------------------------------------------------------
 
-DATA_ROOT = Path(paths.MAIN) / "data" / "Network"
-PROCESSED_ROOT = DATA_ROOT / "processed"
-CAPACITY_ROOT = DATA_ROOT / "capacity"
+CAPACITY_ROOT = Path(paths.MAIN) / "data" / "Network" / "Capacity"
 
 def capacity_output_path(network_label: str = None, output_dir: Path = None) -> Path:
     """Return the capacity workbook path for the active rail network.
@@ -80,11 +75,6 @@ def capacity_output_path(network_label: str = None, output_dir: Path = None) -> 
 
         network_subdir.mkdir(parents=True, exist_ok=True)
         return network_subdir / filename
-
-EDGES_IN_CORRIDOR_PATH = PROCESSED_ROOT / "edges_in_corridor.gpkg"
-EDGES_ON_BORDER_PATH = PROCESSED_ROOT / "edges_on_corridor_border.gpkg"
-MASTER_POINTS_PATH = PROCESSED_ROOT / "points.gpkg"
-CORRIDOR_POINTS_PATH = PROCESSED_ROOT / "points_corridor.gpkg"
 
 DECIMAL_COMMA = ","
 
@@ -168,16 +158,13 @@ def extract_via_nodes(value: str) -> List[int]:
 
 
 def _format_frequency_value(value: float) -> str:
-    """Format frequency values without trailing zeroes."""
+    """Format frequency values as floored integers (no fractional tphpd allowed)."""
     if value is None:
         return ""
     numeric = float(value)
     if math.isnan(numeric):
         return ""
-    rounded = round(numeric)
-    if math.isclose(numeric, rounded, abs_tol=1e-6):
-        return str(int(rounded))
-    return f"{numeric:.3f}".rstrip("0").rstrip(".")
+    return str(int(math.floor(numeric)))
 
 
 def _format_service_frequency_map(frequencies: Dict[str, float]) -> str:
@@ -248,634 +235,658 @@ def _parse_service_direction_frequency_string(cell: str) -> Dict[Tuple[str, str]
     return result
 
 
-def extract_stations_from_edges(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Derive station points from edge endpoints when no separate points file exists.
+# ---------------------------------------------------------------------------
+# New infrabuild / projected-services loaders (replace legacy processed/ loaders)
+# ---------------------------------------------------------------------------
 
-    Used for development networks where only edges are available.
-    Returns a GeoDataFrame with columns: ID_point, NAME, CODE, XKOORD, YKOORD, geometry.
-    Extracts station names and codes from edge attributes.
+def load_infra_data(infra_version: str) -> tuple:
+    """Load nodes and segments from infrabuild outputs.
+
+    Args:
+        infra_version: Named infra version (e.g. 'AS_2026_ZH_enhanced').
+
+    Returns:
+        (nodes_df, segments_df, name_to_number, number_to_name)
+        nodes_df columns: NR (int), Name, Code, Node_Class, Track_Count,
+            Platform_Count, E_LV95, N_LV95
+        segments_df columns: from_node (int), to_node (int), from_name, to_name,
+            Num_Tracks, Length, TT_Stopping, TT_Passing, Average_Speed, geometry
     """
-    from shapely.geometry import Point
+    from infrabuild_network_builder import load_version
 
-    # # DEBUG: Print available columns in edges
-    # print(f"\n[DEBUG] Edges columns available: {list(edges_gdf.columns)}")
+    nodes_gdf, segments_gdf = load_version(infra_version)
 
-    # Collect unique endpoints with their names and codes
-    node_data: Dict[int, Dict[str, any]] = {}
+    # Retain only rail (train) nodes and segments — excludes tram, funicular, etc.
+    # Nodes with no Transport_Mode that are referenced by at least one train segment are
+    # treated as train nodes (e.g. junction nodes like Winterthur Nord whose mode is unset).
+    if "Transport_Mode" in segments_gdf.columns:
+        train_seg_mask = segments_gdf["Transport_Mode"].str.contains("train", case=False, na=False)
+        segments_gdf = segments_gdf[train_seg_mask].copy()
 
-    # Try different possible column name variations
-    name_columns = ["FromStation", "FromName", "From_Station", "From_Name", "from_station", "from_name"]
-    code_columns = ["FromCode", "From_Code", "from_code", "FromStationCode", "from_station_code"]
+    if "Transport_Mode" in nodes_gdf.columns:
+        explicit_train = nodes_gdf["Transport_Mode"].str.contains("train", case=False, na=False)
+        unknown_mode = nodes_gdf["Transport_Mode"].isna() | (
+            nodes_gdf["Transport_Mode"].astype(str).str.strip() == ""
+        )
+        adjacent_train = pd.Series(False, index=nodes_gdf.index)
+        if "Name" in nodes_gdf.columns and not segments_gdf.empty:
+            _train_names = (
+                set(segments_gdf["From_Name"].dropna().astype(str))
+                | set(segments_gdf["To_Name"].dropna().astype(str))
+            )
+            adjacent_train = unknown_mode & nodes_gdf["Name"].astype(str).isin(_train_names)
+        train_node_mask = explicit_train | adjacent_train
+        n_before = len(nodes_gdf)
+        nodes_gdf = nodes_gdf[train_node_mask].copy()
+        print(f"  load_infra_data: Transport_Mode filter kept {len(nodes_gdf)}/{n_before} nodes "
+              f"({int(explicit_train.sum())} explicit train, "
+              f"{int(adjacent_train.sum())} rescued via adjacent segments)")
 
-    # # DEBUG: Check which name/code columns exist
-    # existing_name_cols = [col for col in name_columns if col in edges_gdf.columns]
-    # existing_code_cols = [col for col in code_columns if col in edges_gdf.columns]
-    # print(f"[DEBUG] Found name columns: {existing_name_cols}")
-    # print(f"[DEBUG] Found code columns: {existing_code_cols}")
+    # Build name ↔ number lookups
+    name_to_number: Dict[str, int] = {}
+    number_to_name: Dict[int, str] = {}
+    for _, row in nodes_gdf.iterrows():
+        nr = row.get("Number")
+        name = row.get("Name", "")
+        if pd.notna(nr) and name:
+            nr_int = int(float(nr))
+            name_to_number[str(name)] = nr_int
+            number_to_name[nr_int] = str(name)
 
-    for _, row in edges_gdf.iterrows():
-        from_node = parse_int(row.get("FromNode", 0))
-        to_node = parse_int(row.get("ToNode", 0))
+    # Normalise nodes DataFrame
+    nodes_df = pd.DataFrame({
+        "NR":             nodes_gdf["Number"].apply(lambda v: int(float(v)) if pd.notna(v) else pd.NA),
+        "Name":           nodes_gdf["Name"].astype(str),
+        "Code":           nodes_gdf["Code"].astype(str) if "Code" in nodes_gdf.columns else "",
+        "Node_Class":     nodes_gdf["Node_Class"].astype(str) if "Node_Class" in nodes_gdf.columns else "station",
+        "Track_Count":    pd.to_numeric(nodes_gdf.get("Track_Count"), errors="coerce"),
+        "Platform_Count": pd.to_numeric(nodes_gdf.get("Platform_Count"), errors="coerce"),
+        "E_LV95":         pd.to_numeric(nodes_gdf["E"], errors="coerce"),
+        "N_LV95":         pd.to_numeric(nodes_gdf["N"], errors="coerce"),
+    })
+    nodes_df = nodes_df.dropna(subset=["NR"]).reset_index(drop=True)
+    nodes_df["NR"] = nodes_df["NR"].astype(int)
 
-        # Extract FromNode data
-        if from_node and from_node not in node_data and hasattr(row.geometry, 'coords'):
-            coords = list(row.geometry.coords)
-            if coords:
-                # Try to find name in various column names
-                from_name = None
-                for col in name_columns:
-                    if col in row.index and row.get(col):
-                        from_name = row.get(col)
-                        break
-                if not from_name:
-                    from_name = f"Node_{from_node}"
-
-                # Try to find code in various column names
-                from_code = None
-                for col in code_columns:
-                    if col in row.index and row.get(col):
-                        from_code = row.get(col)
-                        break
-                if not from_code:
-                    from_code = str(from_node)
-
-                node_data[from_node] = {
-                    "coords": coords[0],
-                    "name": from_name,
-                    "code": from_code
-                }
-
-        # Extract ToNode data
-        if to_node and to_node not in node_data and hasattr(row.geometry, 'coords'):
-            coords = list(row.geometry.coords)
-            if coords:
-                # Try to find name (replace "From" with "To" in column names)
-                to_name = None
-                to_name_columns = [col.replace("From", "To") for col in name_columns]
-                for col in to_name_columns:
-                    if col in row.index and row.get(col):
-                        to_name = row.get(col)
-                        break
-                if not to_name:
-                    to_name = f"Node_{to_node}"
-
-                # Try to find code
-                to_code = None
-                to_code_columns = [col.replace("From", "To") for col in code_columns]
-                for col in to_code_columns:
-                    if col in row.index and row.get(col):
-                        to_code = row.get(col)
-                        break
-                if not to_code:
-                    to_code = str(to_node)
-
-                node_data[to_node] = {
-                    "coords": coords[-1],
-                    "name": to_name,
-                    "code": to_code
-                }
-
-    # Build points GeoDataFrame
-    records = []
-    sample_count = 0
-    for node_id, data in node_data.items():
-        x, y = data["coords"]
-        # Convert from LV95 to offset coordinates
-        x_offset = x - LV95_E_OFFSET
-        y_offset = y - LV95_N_OFFSET
-
-        # # DEBUG: Print first 3 stations to verify extraction
-        # if sample_count < 3:
-        #     print(f"[DEBUG] Station {node_id}: name='{data['name']}', code='{data['code']}'")
-        #     sample_count += 1
-
-        records.append({
-            "ID_point": node_id,
-            "NAME": str(data["name"]) if data["name"] else f"Node_{node_id}",
-            "CODE": str(data["code"]) if data["code"] else str(node_id),
-            "XKOORD": x_offset,
-            "YKOORD": y_offset,
-            "geometry": Point(x, y),
+    # Normalise segments DataFrame: resolve integer node IDs from Name lookup
+    seg_rows = []
+    for _, row in segments_gdf.iterrows():
+        from_name = str(row.get("From_Name", "") or "")
+        to_name   = str(row.get("To_Name", "") or "")
+        from_node = name_to_number.get(from_name)
+        to_node   = name_to_number.get(to_name)
+        if from_node is None or to_node is None:
+            continue
+        seg_rows.append({
+            "from_node":    from_node,
+            "to_node":      to_node,
+            "from_name":    from_name,
+            "to_name":      to_name,
+            "Num_Tracks":   parse_float(row.get("Num_Tracks") or row.get("Track_Count")),
+            "Length":       parse_float(row.get("Length")),
+            "TT_Stopping":  parse_float(row.get("TT_Stopping")),
+            "TT_Passing":   parse_float(row.get("TT_Passing")),
+            "Average_Speed": parse_float(row.get("Average_Speed") or row.get("Predominant_Speed")),
+            "geometry":     row.geometry,
         })
+    segments_df = pd.DataFrame(seg_rows)
+    if segments_df.empty:
+        segments_df = pd.DataFrame(columns=[
+            "from_node", "to_node", "from_name", "to_name",
+            "Num_Tracks", "Length", "TT_Stopping", "TT_Passing", "Average_Speed", "geometry",
+        ])
 
-    points_gdf = gpd.GeoDataFrame(records, crs=edges_gdf.crs)
-    # print(f"[DEBUG] Extracted {len(points_gdf)} unique stations from edges\n")
-    return points_gdf
+    print(f"  load_infra_data: {len(nodes_df)} nodes, {len(segments_df)} segments "
+          f"from '{infra_version}'")
+    return nodes_df, segments_df, name_to_number, number_to_name
 
 
-def load_service_links(edges_path: Path = None) -> pd.DataFrame:
-    """Load service link records from the processed corridor edges GeoPackage.
+def load_projected_services(svc_version: str, infra_version: str) -> pd.DataFrame:
+    """Load projected service links expanded to per-BAV-segment contributions.
 
-    Args:
-        edges_path: Optional custom path to edges file. If None, uses default baseline path(s).
-                   Both standard and extended baseline modes use edges_in_corridor.gpkg.
-
-    Returns:
-        DataFrame with service link records.
-    """
-    # BASELINE MODE: Load from default path(s)
-    if edges_path is None:
-        # Check if extended mode based on settings
-        is_extended = str(getattr(settings, "rail_network", "")).endswith("_extended")
-
-        # Load main corridor edges (used for both standard and extended modes)
-        if not EDGES_IN_CORRIDOR_PATH.exists():
-            raise FileNotFoundError(
-                f"Processed corridor edges not found at {EDGES_IN_CORRIDOR_PATH}."
-            )
-
-        gdf = gpd.read_file(EDGES_IN_CORRIDOR_PATH)
-
-        if is_extended:
-            print(f"[INFO] Baseline extended mode: loaded {len(gdf)} edges from edges_in_corridor.gpkg")
-        else:
-            print(f"[INFO] Baseline standard mode: loaded {len(gdf)} edges from edges_in_corridor.gpkg")
-
-        # print(f"[INFO] Total edges for baseline: {len(gdf)}")
-
-    # DEVELOPMENT MODE: Load from custom path
-    else:
-        if not edges_path.exists():
-            raise FileNotFoundError(
-                f"Development edges not found at {edges_path}."
-            )
-
-        gdf = gpd.read_file(edges_path)
-        print(f"[INFO] Loaded {len(gdf)} edges from {edges_path.name}")
-
-    geometry_columns = [col for col in ("geom", "geometry") if col in gdf.columns]
-    df = pd.DataFrame(gdf.drop(columns=geometry_columns, errors="ignore"))
-
-    df["FromNode"] = df["FromNode"].apply(parse_int)
-    df["ToNode"] = df["ToNode"].apply(parse_int)
-    df["Frequency"] = df["Frequency"].apply(parse_float)
-    df["TravelTime"] = df["TravelTime"].apply(parse_float)
-    df["ViaNodes"] = df["Via"].apply(extract_via_nodes)
-    df["Service"] = df["Service"].astype(str)
-    df["Direction"] = df["Direction"].astype(str)
-    df["FromEndFlag"] = df["FromEnd"].apply(parse_bool_flag)
-    df["ToEndFlag"] = df["ToEnd"].apply(parse_bool_flag)
-    return df
-
-def apply_enrichment(
-    stations_df: pd.DataFrame,
-    segments_df: pd.DataFrame,
-    baseline_prep: Path,
-    edges_gdf: gpd.GeoDataFrame,
-    new_station_ids: Set[int] = None,
-    enhanced_prep: Path = None
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Apply enrichment from baseline prep workbook to development network data.
-
-    Selectively inherits infrastructure from enhanced baseline for stations/segments
-    where services differ from baseline. Uses baseline for unchanged infrastructure.
+    Reads all route-type layers from the projected rail_segments.gpkg, then
+    expands each GTFS link (from_stop → to_stop via path_nodes) into one row
+    per consecutive BAV-segment pair.
 
     Args:
-        stations_df: Raw station metrics (tracks/platforms = NA, services populated)
-        segments_df: Raw segment metrics (tracks/speed/length = NA, services populated)
-        baseline_prep: Path to manually enriched baseline workbook
-        edges_gdf: Original edges GeoDataFrame for geometry lookups
-        new_station_ids: Set of station IDs that are NEW (not in points.gpkg)
-        enhanced_prep: Optional path to enhanced baseline workbook for selective enrichment
+        svc_version:   Service version name (e.g. 'AK_2026').
+        infra_version: Infra version used for projection (e.g. 'AS_2026_ZH_enhanced').
 
     Returns:
-        Enriched (stations_df, segments_df) with infrastructure attributes filled where possible.
+        DataFrame with one row per service × direction × BAV-segment:
+          service, direction_id, from_stop_nr (int), to_stop_nr (int),
+          from_stop_name, to_stop_name,
+          seg_from_node (int), seg_to_node (int),
+          freq_am_peak (float), freq_pm_peak (float),
+          freq_peak (float), freq_offpeak (float),
+          is_origin (bool), is_destination (bool)
     """
-    if new_station_ids is None:
-        new_station_ids = set()
+    import fiona
 
-    if not baseline_prep.exists():
-        raise FileNotFoundError(f"Baseline prep workbook not found: {baseline_prep}")
-
-    # Load baseline enrichment data
-    baseline_stations = pd.read_excel(baseline_prep, sheet_name="Stations")
-    baseline_segments = pd.read_excel(baseline_prep, sheet_name="Segments")
-
-    # Load enhanced baseline if provided
-    enhanced_stations = None
-    enhanced_segments = None
-    if enhanced_prep is not None and enhanced_prep.exists():
-        enhanced_stations = pd.read_excel(enhanced_prep, sheet_name="Stations")
-        enhanced_segments = pd.read_excel(enhanced_prep, sheet_name="Segments")
-        print(f"[INFO] Enhanced baseline loaded for selective enrichment based on capacity demand increases")
-
-    # Create lookup maps for baseline data (including TPHPD for comparison)
-    station_lookup = {}
-    for _, row in baseline_stations.iterrows():
-        node_id = int(row["NR"])
-        station_lookup[node_id] = {
-            "tracks": row.get("tracks"),
-            "platforms": row.get("platforms"),
-            "stopping_tphpd": row.get("stopping_tphpd", 0.0),
-            "passing_tphpd": row.get("passing_tphpd", 0.0)
-        }
-
-    segment_lookup = {}
-    for _, row in baseline_segments.iterrows():
-        from_node = int(row["from_node"])
-        to_node = int(row["to_node"])
-        pair = tuple(sorted((from_node, to_node)))
-        segment_lookup[pair] = {
-            "tracks": row.get("tracks"),
-            "speed": row.get("speed"),
-            "length_m": row.get("length_m"),
-            "travel_time_passing": row.get("travel_time_passing"),
-            "total_tphpd": row.get("total_tphpd", 0.0)
-        }
-
-    # Create enhanced lookup maps if available
-    enhanced_station_lookup = {}
-    enhanced_segment_lookup = {}
-
-    if enhanced_stations is not None:
-        for _, row in enhanced_stations.iterrows():
-            node_id = int(row["NR"])
-            enhanced_station_lookup[node_id] = {
-                "tracks": row.get("tracks"),
-                "platforms": row.get("platforms")
-            }
-
-    if enhanced_segments is not None:
-        for _, row in enhanced_segments.iterrows():
-            from_node = int(row["from_node"])
-            to_node = int(row["to_node"])
-            pair = tuple(sorted((from_node, to_node)))
-            enhanced_segment_lookup[pair] = {
-                "tracks": row.get("tracks"),
-                "speed": row.get("speed"),
-                "length_m": row.get("length_m"),
-                "travel_time_passing": row.get("travel_time_passing")
-            }
-
-    # Create geometry lookup for segments (need to calculate length)
-    geometry_lookup = {}
-    for _, row in edges_gdf.iterrows():
-        from_node = parse_int(row.get("FromNode", 0))
-        to_node = parse_int(row.get("ToNode", 0))
-        if from_node and to_node:
-            pair = tuple(sorted((from_node, to_node)))
-            if hasattr(row.geometry, 'length'):
-                geometry_lookup[pair] = row.geometry.length
-
-    # Enrich stations
-    enriched_stations = stations_df.copy()
-    new_station_count = 0
-    enhanced_station_count = 0
-
-    for idx, row in enriched_stations.iterrows():
-        node_id = int(row["NR"])
-        if node_id in station_lookup:
-            # Existing station - compare total TPHPD to determine if capacity increased
-            baseline_data = station_lookup[node_id]
-
-            # Calculate total TPHPD for development
-            dev_stopping_tphpd = row.get("stopping_tphpd", 0.0)
-            dev_passing_tphpd = row.get("passing_tphpd", 0.0)
-            dev_total_tphpd = dev_stopping_tphpd + dev_passing_tphpd
-
-            # Get baseline total TPHPD
-            baseline_stopping_tphpd = baseline_data.get("stopping_tphpd", 0.0)
-            baseline_passing_tphpd = baseline_data.get("passing_tphpd", 0.0)
-            baseline_total_tphpd = baseline_stopping_tphpd + baseline_passing_tphpd
-
-            # Determine if capacity increased (Q3: equal/less uses baseline)
-            capacity_increased = dev_total_tphpd > baseline_total_tphpd
-
-            if capacity_increased and node_id in enhanced_station_lookup:
-                # Capacity increased - use enhanced baseline infrastructure
-                enhanced_data = enhanced_station_lookup[node_id]
-                enriched_stations.at[idx, "tracks"] = enhanced_data["tracks"]
-                enriched_stations.at[idx, "platforms"] = enhanced_data["platforms"]
-                enhanced_station_count += 1
-            elif capacity_increased and node_id not in enhanced_station_lookup:
-                # Capacity increased but no enhanced baseline - apply default values
-                enriched_stations.at[idx, "tracks"] = 2
-                enriched_stations.at[idx, "platforms"] = 2
-                new_station_count += 1
-            else:
-                # Capacity same/decreased - use regular baseline
-                enriched_stations.at[idx, "tracks"] = baseline_data["tracks"]
-                enriched_stations.at[idx, "platforms"] = baseline_data["platforms"]
-        elif node_id in new_station_ids:
-            # NEW station: apply default values
-            enriched_stations.at[idx, "tracks"] = 2
-            enriched_stations.at[idx, "platforms"] = 2
-            new_station_count += 1
-        else:
-            # Not in baseline prep - treat as NEW, apply default values
-            enriched_stations.at[idx, "tracks"] = 2
-            enriched_stations.at[idx, "platforms"] = 2
-            new_station_count += 1
-
-    if enhanced_station_count > 0:
-        print(f"[INFO] {enhanced_station_count} stations with increased capacity demand - using enhanced baseline infrastructure")
-    if new_station_count > 0:
-        print(f"[INFO] {new_station_count} NEW stations or stations requiring capacity increase without enhanced baseline - using default values (tracks=2, platforms=2)")
-
-    # Enrich segments
-    enriched_segments = segments_df.copy()
-    new_segment_count = 0
-    enhanced_segment_count = 0
-
-    for idx, row in enriched_segments.iterrows():
-        from_node = int(row["from_node"])
-        to_node = int(row["to_node"])
-        pair = tuple(sorted((from_node, to_node)))
-
-        # Check if segment has any new endpoints
-        has_new_endpoint = (from_node in new_station_ids) or (to_node in new_station_ids)
-
-        if pair in segment_lookup and not has_new_endpoint:
-            # Existing segment with no new endpoints - compare total TPHPD
-            baseline_data = segment_lookup[pair]
-
-            # Get development total TPHPD
-            dev_total_tphpd = row.get("total_tphpd", 0.0)
-
-            # Get baseline total TPHPD
-            baseline_total_tphpd = baseline_data.get("total_tphpd", 0.0)
-
-            # Determine if capacity increased (Q3: equal/less uses baseline)
-            capacity_increased = dev_total_tphpd > baseline_total_tphpd
-
-            if capacity_increased and pair in enhanced_segment_lookup:
-                # Capacity increased - use enhanced baseline infrastructure
-                enhanced_data = enhanced_segment_lookup[pair]
-                enriched_segments.at[idx, "tracks"] = enhanced_data["tracks"]
-                enriched_segments.at[idx, "speed"] = enhanced_data["speed"]
-                enriched_segments.at[idx, "length_m"] = enhanced_data["length_m"]
-                enriched_segments.at[idx, "travel_time_passing"] = enhanced_data["travel_time_passing"]
-                enhanced_segment_count += 1
-            elif capacity_increased and pair not in enhanced_segment_lookup:
-                # Capacity increased but no enhanced baseline - apply default values
-                enriched_segments.at[idx, "tracks"] = 1
-                enriched_segments.at[idx, "speed"] = 80
-                # Keep length_m as is (already set from baseline or geometry)
-                # Calculate travel_time_passing from travel_time_stopping
-                tt_stopping = row.get("travel_time_stopping")
-                if pd.notna(tt_stopping):
-                    enriched_segments.at[idx, "travel_time_passing"] = max(0, tt_stopping - 2)
-                else:
-                    enriched_segments.at[idx, "travel_time_passing"] = pd.NA
-                new_segment_count += 1
-            else:
-                # Capacity same/decreased - use regular baseline
-                enriched_segments.at[idx, "tracks"] = baseline_data["tracks"]
-                enriched_segments.at[idx, "speed"] = baseline_data["speed"]
-                enriched_segments.at[idx, "length_m"] = baseline_data["length_m"]
-                enriched_segments.at[idx, "travel_time_passing"] = baseline_data["travel_time_passing"]
-        else:
-            # NEW segment or segment with new endpoint: apply default values
-            enriched_segments.at[idx, "tracks"] = 1
-            enriched_segments.at[idx, "speed"] = 80
-            new_segment_count += 1
-
-            # Calculate length from geometry
-            if pair in geometry_lookup:
-                enriched_segments.at[idx, "length_m"] = geometry_lookup[pair]
-            else:
-                # Fallback: try reverse pair
-                reverse_pair = (pair[1], pair[0])
-                if reverse_pair in geometry_lookup:
-                    enriched_segments.at[idx, "length_m"] = geometry_lookup[reverse_pair]
-                else:
-                    enriched_segments.at[idx, "length_m"] = pd.NA
-
-            # Calculate travel_time_passing from travel_time_stopping
-            tt_stopping = row.get("travel_time_stopping")
-            if pd.notna(tt_stopping):
-                enriched_segments.at[idx, "travel_time_passing"] = max(0, tt_stopping - 2)
-            else:
-                enriched_segments.at[idx, "travel_time_passing"] = pd.NA
-
-    if enhanced_segment_count > 0:
-        print(f"[INFO] {enhanced_segment_count} segments with increased capacity demand - using enhanced baseline infrastructure")
-    if new_segment_count > 0:
-        print(f"[INFO] {new_segment_count} NEW segments or segments requiring capacity increase without enhanced baseline - using default values (tracks=1, speed=80 km/h, travel_time_passing=tt_stopping-2)")
-
-    return enriched_stations, enriched_segments
-
-
-def load_corridor_nodes_from_master(
-    edges_gdf: gpd.GeoDataFrame,
-    master_points_path: Path = None,
-    baseline_prep_path: Path = None,
-    is_development: bool = False,
-) -> Tuple[gpd.GeoDataFrame, Set[int]]:
-    """Load stations from points file, filtered to nodes present in edges and baseline.
-
-    This function is used for BOTH baseline and development workflows.
-    For baseline standard: Uses points_corridor.gpkg (stations within corridor boundary).
-    For baseline extended: Uses points.gpkg (all stations in edges, no corridor filtering).
-    For development: Uses points.gpkg, filters to baseline prep NR column + flags new stations.
-
-    Args:
-        edges_gdf: Edges GeoDataFrame containing FromNode and ToNode columns.
-        master_points_path: Path to points file. If None, auto-detects based on mode:
-                           - Baseline standard: points_corridor.gpkg
-                           - Baseline extended: points.gpkg
-                           - Development: points.gpkg
-        baseline_prep_path: Path to baseline prep workbook (required for development workflow).
-        is_development: If True, applies development filtering logic.
-
-    Returns:
-        Tuple of:
-        - GeoDataFrame with station points (columns: ID_point, NAME, CODE, XKOORD, YKOORD, geometry).
-        - Set of new station IDs (empty for baseline, contains IDs not in points.gpkg for development)
-
-    Raises:
-        FileNotFoundError: If points file doesn't exist.
-        ValueError: If baseline edge references corridor node not found in points_corridor.gpkg.
-    """
-    if master_points_path is None:
-        # Check if extended mode based on settings
-        is_extended = str(getattr(settings, "rail_network", "")).endswith("_extended")
-
-        if is_development:
-            # DEVELOPMENT: Use full master points
-            master_points_path = MASTER_POINTS_PATH
-        elif is_extended:
-            # BASELINE EXTENDED: Use full master points (no corridor filtering)
-            master_points_path = MASTER_POINTS_PATH
-        else:
-            # BASELINE STANDARD: Use corridor points only
-            master_points_path = CORRIDOR_POINTS_PATH
-
-    if not master_points_path.exists():
+    gpkg_path = paths.get_projected_services_path(svc_version, infra_version)
+    if not Path(gpkg_path).exists():
         raise FileNotFoundError(
-            f"Points file not found at {master_points_path}. "
-            f"Please ensure the file exists."
+            f"Projected services not found: {gpkg_path}\n"
+            f"Run services_service_projection.py for '{svc_version}' on '{infra_version}' first."
         )
 
-    # Extract unique node IDs from edges (FromNode, ToNode, Via)
-    node_ids = set()
-    for _, row in edges_gdf.iterrows():
-        from_node = parse_int(row.get("FromNode", 0))
-        to_node = parse_int(row.get("ToNode", 0))
+    # Read all route-type layers and concatenate
+    layers = fiona.listlayers(gpkg_path)
+    gdfs = []
+    for layer in layers:
+        try:
+            gdf = gpd.read_file(gpkg_path, layer=layer)
+            if not gdf.empty:
+                gdf["_layer"] = layer
+                gdfs.append(gdf)
+        except Exception:
+            continue
 
-        # Parse Via column directly here (edges_gdf doesn't have ViaNodes yet)
-        via_value = row.get("Via", "")
-        via_nodes = extract_via_nodes(via_value)
+    if not gdfs:
+        raise ValueError(f"No data found in projected services file: {gpkg_path}")
 
-        if from_node:
-            node_ids.add(from_node)
-        if to_node:
-            node_ids.add(to_node)
+    raw = pd.concat(gdfs, ignore_index=True)
+    print(f"  load_projected_services: {len(raw)} service links from '{svc_version}'"
+          f" projected on '{infra_version}' ({len(layers)} layers)")
 
-        # Add Via nodes
-        if via_nodes:
-            for via_node in via_nodes:
-                if via_node and via_node != -99:
-                    node_ids.add(via_node)
+    # _freq_am_peak / _freq_pm_peak feed temporal-aware aggregation that avoids
+    # double-counting when AM and PM peaks reverse direction; _freq_peak stays
+    # as max(AM, PM) for the per-service display columns (services_tph(pd)).
+    am   = pd.to_numeric(raw["freq_am_peak_dep_hr"],  errors="coerce").fillna(0.0)
+    pm   = pd.to_numeric(raw["freq_pm_peak_dep_hr"],  errors="coerce").fillna(0.0)
+    offp = pd.to_numeric(raw["freq_offpeak_dep_hr"],  errors="coerce").fillna(0.0)
+    raw["_freq_am_peak"] = am
+    raw["_freq_pm_peak"] = pm
+    raw["_freq_peak"]    = am.combine(pm, max)
+    raw["_freq_offpeak"] = offp
 
-    # print(f"[INFO] Extracted {len(node_ids)} unique node IDs from edges (FromNode, ToNode, Via)")
+    # Drop rows where service never runs
+    raw = raw[(raw["_freq_peak"] > 0) | (raw["_freq_offpeak"] > 0)].reset_index(drop=True)
 
-    # Load points file
-    master_points = gpd.read_file(master_points_path)
+    # Expand each service link into per-BAV-segment rows using path_nodes
+    expanded_rows = []
+    for _, row in raw.iterrows():
+        # Parse path_nodes (semicolon-separated BAV Number integers)
+        raw_path = str(row.get("path_nodes") or "")
+        node_strs = [s.strip() for s in raw_path.split(";") if s.strip()]
+        try:
+            path = [int(float(s)) for s in node_strs]
+        except (ValueError, TypeError):
+            path = []
 
-    # Check if extended mode based on settings
-    is_extended = str(getattr(settings, "rail_network", "")).endswith("_extended")
+        # Fallback to from/to stop node IDs
+        if len(path) < 2:
+            nid_from = row.get("node_id_from")
+            nid_to   = row.get("node_id_to")
+            try:
+                path = [int(float(nid_from)), int(float(nid_to))]
+            except (TypeError, ValueError):
+                continue
 
-    # Determine points file name for logging
-    if is_development:
-        points_file_name = "points.gpkg"
-    elif is_extended:
-        points_file_name = "points.gpkg"
-    else:
-        points_file_name = "points_corridor.gpkg"
+        n_pairs = len(path) - 1
+        svc       = str(row.get("Service") or row.get("GTFS_ID") or "")
+        direction = str(row.get("direction_id") or "")
+        try:
+            from_stop_nr = int(float(row.get("from_stop_nr") or row.get("node_id_from") or 0))
+            to_stop_nr   = int(float(row.get("to_stop_nr")   or row.get("node_id_to")   or 0))
+        except (TypeError, ValueError):
+            from_stop_nr = to_stop_nr = 0
 
-    # print(f"[INFO] Loaded {len(master_points)} stations from {points_file_name}")
+        from_stop_name = str(row.get("from_stop_name") or "")
+        to_stop_name   = str(row.get("to_stop_name")   or "")
+        freq_am_peak   = float(row["_freq_am_peak"])
+        freq_pm_peak   = float(row["_freq_pm_peak"])
+        freq_peak      = float(row["_freq_peak"])
+        freq_offpeak   = float(row["_freq_offpeak"])
 
-    # Ensure ID_point is integer for matching
-    master_points["ID_point"] = master_points["ID_point"].apply(parse_int)
-    points_station_ids = set(master_points["ID_point"])
+        for i in range(n_pairs):
+            expanded_rows.append({
+                "service":        svc,
+                "direction_id":   direction,
+                "from_stop_nr":   from_stop_nr,
+                "to_stop_nr":     to_stop_nr,
+                "from_stop_name": from_stop_name,
+                "to_stop_name":   to_stop_name,
+                "seg_from_node":  path[i],
+                "seg_to_node":    path[i + 1],
+                "freq_am_peak":   freq_am_peak,
+                "freq_pm_peak":   freq_pm_peak,
+                "freq_peak":      freq_peak,
+                "freq_offpeak":   freq_offpeak,
+                "is_origin":      (i == 0),
+                "is_destination": (i == n_pairs - 1),
+            })
 
-    # Classify stations: existing (in points.gpkg) vs new (not in points.gpkg)
-    new_station_ids = node_ids - points_station_ids
-    existing_station_ids = node_ids & points_station_ids
-
-    if new_station_ids:
-        print(f"[INFO] Found {len(new_station_ids)} NEW stations not in points.gpkg: {sorted(new_station_ids)}")
-
-    # DEVELOPMENT WORKFLOW: Filter to baseline prep NR column
-    if is_development:
-        if baseline_prep_path is None:
-            raise ValueError("baseline_prep_path is required for development workflow")
-
-        if not baseline_prep_path.exists():
-            raise FileNotFoundError(f"Baseline prep workbook not found: {baseline_prep_path}")
-
-        # Load baseline prep stations
-        baseline_prep_stations = pd.read_excel(baseline_prep_path, sheet_name="Stations")
-        baseline_station_ids = set(baseline_prep_stations["NR"].apply(parse_int))
-
-        print(f"[INFO] Loaded {len(baseline_station_ids)} stations from baseline prep workbook")
-
-        # Filter: Keep only stations that are EITHER in baseline prep OR are new
-        # This filters the development to relevant stations based on baseline scope
-        relevant_existing_stations = existing_station_ids & baseline_station_ids
-        stations_to_keep = relevant_existing_stations | new_station_ids
-
-        # Report filtering results
-        filtered_out = existing_station_ids - baseline_station_ids
-        if filtered_out:
-            print(f"[INFO] Filtered out {len(filtered_out)} stations not in baseline prep scope")
-
-        print(f"[INFO] Keeping {len(relevant_existing_stations)} baseline + {len(new_station_ids)} new = {len(stations_to_keep)} total stations")
-
-    elif is_extended:
-        # BASELINE EXTENDED WORKFLOW: Keep ALL stations from edges (no corridor filtering)
-        # This captures all stations including those outside corridor boundary
-        # Via nodes are included if they appear in edges
-        stations_to_keep = existing_station_ids  # All nodes that exist in points.gpkg
-        new_station_ids = set()  # No new stations in baseline
-
-        # Report stations not found in points.gpkg (should extract from edges if any)
-        outside_points = node_ids - existing_station_ids
-        if outside_points:
-            print(f"[INFO] {len(outside_points)} edge nodes not found in points.gpkg (will extract from edges)")
-
-        print(f"[INFO] Keeping {len(stations_to_keep)} stations from edges (no corridor filtering)")
-
-    else:
-        # BASELINE STANDARD WORKFLOW: Keep only corridor stations (intersection of edge nodes and corridor points)
-        # This filters out stations outside the corridor (e.g., endpoints of through-services)
-        # but still captures services passing through corridor stations via the Via list
-        stations_to_keep = existing_station_ids  # Only nodes that exist in points_corridor.gpkg
-        new_station_ids = set()  # No new stations in baseline
-
-        # Report stations filtered out (appear in edges but not in corridor)
-        outside_corridor = node_ids - existing_station_ids
-        if outside_corridor:
-            print(f"[INFO] {len(outside_corridor)} edge nodes are outside corridor boundary (filtered out)")
-            print(f"       These are typically endpoints of through-services")
-
-        print(f"[INFO] Keeping {len(stations_to_keep)} stations within corridor boundary")
-
-    # Filter master points to stations we're keeping
-    points_gdf = master_points[master_points["ID_point"].isin(stations_to_keep)].copy()
-
-    # For extended mode, also need to extract stations not found in points.gpkg
-    if is_extended and not is_development:
-        outside_points = node_ids - existing_station_ids
-        if outside_points:
-            new_station_ids = outside_points
-
-    # For NEW stations (not in points.gpkg), we need to extract from edges
-    if new_station_ids:
-        print(f"[INFO] Extracting {len(new_station_ids)} new stations from edge geometry...")
-        new_stations_gdf = extract_stations_from_edges(edges_gdf)
-        new_stations_gdf = new_stations_gdf[new_stations_gdf["ID_point"].isin(new_station_ids)].copy()
-
-        # Flag new stations with [NEW] suffix in NAME (only for development mode)
-        if is_development:
-            for idx, row in new_stations_gdf.iterrows():
-                original_name = row["NAME"]
-                new_stations_gdf.at[idx, "NAME"] = f"{original_name} [NEW]"
-
-        # Combine with points from master
-        points_gdf = gpd.GeoDataFrame(
-            pd.concat([points_gdf, new_stations_gdf], ignore_index=True),
-            crs=points_gdf.crs
-        )
-
-    print(f"[INFO] Final station count: {len(points_gdf)} stations")
-
-    # Convert offset coordinates to LV95
-    points_gdf["E_LV95"] = points_gdf["XKOORD"] + LV95_E_OFFSET
-    points_gdf["N_LV95"] = points_gdf["YKOORD"] + LV95_N_OFFSET
-
-    # Remove duplicates based on ID_point (shouldn't happen but be safe)
-    initial_count = len(points_gdf)
-    points_gdf = points_gdf.drop_duplicates(subset=["ID_point"])
-    if len(points_gdf) < initial_count:
-        print(f"[WARNING] Removed {initial_count - len(points_gdf)} duplicate stations")
-
-    # Return with required columns
-    return points_gdf[["ID_point", "NAME", "CODE", "XKOORD", "YKOORD", "geometry"]].copy(), new_station_ids
+    result = pd.DataFrame(expanded_rows)
+    if result.empty:
+        result = pd.DataFrame(columns=[
+            "service", "direction_id", "from_stop_nr", "to_stop_nr",
+            "from_stop_name", "to_stop_name", "seg_from_node", "seg_to_node",
+            "freq_am_peak", "freq_pm_peak", "freq_peak", "freq_offpeak",
+            "is_origin", "is_destination",
+        ])
+    print(f"  load_projected_services: expanded to {len(result)} per-segment rows")
+    return result
 
 
-def load_corridor_nodes(edges_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Extract station points from edges (used for DEVELOPMENT workflow).
+# ---------------------------------------------------------------------------
+# Spatially filtered loaders — Study Area and Catchment Area variants
+# ---------------------------------------------------------------------------
 
-    This function derives station points from edge geometry endpoints.
-    For BASELINE workflow, use load_corridor_nodes_from_master() instead.
+def _extract_sa_node_set(infra_version: str) -> Set[int]:
+    """Return all BAV node Numbers whose point geometry falls within the SA boundary.
+
+    Spatially filters nodes.gpkg against study_area_boundary.gpkg (EPSG:2056).
 
     Args:
-        edges_gdf: Edges GeoDataFrame to extract stations from.
+        infra_version: Infra version name (e.g. 'AS_2026_ZH_enhanced').
 
     Returns:
-        GeoDataFrame with station points.
+        Set of integer BAV node Numbers within the study area.
     """
-    if edges_gdf is None or len(edges_gdf) == 0:
-        raise ValueError("edges_gdf must be provided and non-empty")
+    from infrabuild_network_builder import load_version
 
-    # Extract stations from edges
-    points_gdf = extract_stations_from_edges(edges_gdf)
-    print(f"[INFO] Extracted {len(points_gdf)} stations from development edges")
+    sa_boundary_path = Path(paths.MAIN) / paths.STUDY_AREA_BOUNDARY_GPKG
+    if not sa_boundary_path.exists():
+        raise FileNotFoundError(f"SA boundary not found: {sa_boundary_path}")
 
-    return points_gdf
+    sa_boundary = gpd.read_file(str(sa_boundary_path)).to_crs(epsg=2056)
+    sa_polygon  = sa_boundary.unary_union
 
+    nodes_gdf, _ = load_version(infra_version)
+    if nodes_gdf.crs is None:
+        nodes_gdf = nodes_gdf.set_crs(epsg=2056)
+    else:
+        nodes_gdf = nodes_gdf.to_crs(epsg=2056)
+
+    within_mask = nodes_gdf.geometry.within(sa_polygon)
+    sa_nodes: Set[int] = set()
+    for _, row in nodes_gdf[within_mask].iterrows():
+        nr = row.get("Number")
+        if pd.notna(nr):
+            sa_nodes.add(int(float(nr)))
+
+    print(f"  _extract_sa_node_set: {len(sa_nodes)} SA nodes for '{infra_version}'")
+    return sa_nodes
+
+
+def _get_ca_node_set(infra_version: str) -> Set[int]:
+    """Return all BAV node Numbers whose point geometry falls within the CA boundary.
+
+    Spatially filters nodes.gpkg against catchment_area_boundary.gpkg (EPSG:2056).
+
+    Args:
+        infra_version: Infra version name (e.g. 'AS_2026_ZH_enhanced').
+
+    Returns:
+        Set of integer BAV node Numbers within the catchment area.
+    """
+    from infrabuild_network_builder import load_version
+
+    ca_boundary_path = Path(paths.MAIN) / paths.CA_BOUNDARY_PATH
+    if not ca_boundary_path.exists():
+        raise FileNotFoundError(f"CA boundary not found: {ca_boundary_path}")
+
+    ca_boundary = gpd.read_file(str(ca_boundary_path)).to_crs(epsg=2056)
+    ca_polygon = ca_boundary.unary_union
+
+    nodes_gdf, _ = load_version(infra_version)
+    if nodes_gdf.crs is None:
+        nodes_gdf = nodes_gdf.set_crs(epsg=2056)
+    else:
+        nodes_gdf = nodes_gdf.to_crs(epsg=2056)
+
+    within_mask = nodes_gdf.geometry.within(ca_polygon)
+    ca_nodes: Set[int] = set()
+    for _, row in nodes_gdf[within_mask].iterrows():
+        nr = row.get("Number")
+        if pd.notna(nr):
+            ca_nodes.add(int(float(nr)))
+
+    print(f"  _get_ca_node_set: {len(ca_nodes)} CA nodes for '{infra_version}'")
+    return ca_nodes
+
+
+def load_infra_data_filtered(infra_version: str, node_set: Set[int]) -> tuple:
+    """Load nodes and segments from infrabuild outputs, filtered to a node set.
+
+    Shared by the Study Area and Catchment Area workflows. Only segments where
+    both endpoints are in node_set are returned.
+
+    Args:
+        infra_version: Named infra version (e.g. 'AS_2026_ZH_enhanced').
+        node_set:      Set of integer BAV node Numbers to retain.
+
+    Returns:
+        Same (nodes_df, segments_df, name_to_number, number_to_name) tuple as
+        load_infra_data(), but filtered to node_set.
+    """
+    nodes_df, segments_df, name_to_number, number_to_name = load_infra_data(infra_version)
+
+    nodes_df = nodes_df[nodes_df["NR"].isin(node_set)].reset_index(drop=True)
+
+    seg_mask = (
+        segments_df["from_node"].isin(node_set) &
+        segments_df["to_node"].isin(node_set)
+    )
+    segments_df = segments_df[seg_mask].reset_index(drop=True)
+
+    # Rebuild name lookups restricted to filtered nodes
+    name_to_number = {name: nr for name, nr in name_to_number.items() if nr in node_set}
+    number_to_name = {nr: name for nr, name in number_to_name.items() if nr in node_set}
+
+    print(f"  load_infra_data_filtered: {len(nodes_df)} nodes, {len(segments_df)} segments "
+          f"({len(node_set)} node filter applied)")
+    return nodes_df, segments_df, name_to_number, number_to_name
+
+
+def load_projected_services_sa(
+    svc_version: str,
+    infra_version: str,
+    sa_node_set: Set[int],
+) -> pd.DataFrame:
+    """Load SA-clipped projected service links from the full rail_segments.gpkg.
+
+    Loads all service rows, then clips each row's path_nodes to the contiguous
+    sub-sequence of SA nodes (strips leading/trailing non-SA nodes). Services
+    that pass through the SA but have an origin or destination outside it are
+    included for the segments they actually traverse within the SA.
+
+    is_origin / is_destination are set True only when the clipped endpoint
+    coincides with the service's true origin / destination — i.e. when no
+    nodes were stripped from that end.
+
+    Args:
+        svc_version:   Service version name (e.g. 'AK_2026').
+        infra_version: Infra version name (e.g. 'AS_2026_ZH_enhanced').
+        sa_node_set:   Set of BAV node Numbers within the study area.
+
+    Returns:
+        DataFrame with the same schema as load_projected_services().
+    """
+    import fiona
+
+    gpkg_path = Path(paths.get_projected_services_path(svc_version, infra_version))
+    if not gpkg_path.exists():
+        raise FileNotFoundError(
+            f"Projected services not found: {gpkg_path}\n"
+            f"Run services_service_projection.py for '{svc_version}' on '{infra_version}' first."
+        )
+
+    layers = fiona.listlayers(str(gpkg_path))
+    gdfs = []
+    for layer in layers:
+        try:
+            gdf = gpd.read_file(str(gpkg_path), layer=layer)
+            if not gdf.empty:
+                gdf["_layer"] = layer
+                gdfs.append(gdf)
+        except Exception:
+            continue
+
+    if not gdfs:
+        raise ValueError(f"No data found in projected services file: {gpkg_path}")
+
+    raw = pd.concat(gdfs, ignore_index=True)
+    print(f"  load_projected_services_sa: {len(raw)} total service links from '{svc_version}' "
+          f"({len(layers)} layers)")
+
+    am   = pd.to_numeric(raw["freq_am_peak_dep_hr"], errors="coerce").fillna(0.0)
+    pm   = pd.to_numeric(raw["freq_pm_peak_dep_hr"], errors="coerce").fillna(0.0)
+    offp = pd.to_numeric(raw["freq_offpeak_dep_hr"], errors="coerce").fillna(0.0)
+    raw["_freq_am_peak"] = am
+    raw["_freq_pm_peak"] = pm
+    raw["_freq_peak"]    = am.combine(pm, max)
+    raw["_freq_offpeak"] = offp
+    raw = raw[(raw["_freq_peak"] > 0) | (raw["_freq_offpeak"] > 0)].reset_index(drop=True)
+
+    expanded_rows = []
+    n_clipped = 0
+    for _, row in raw.iterrows():
+        raw_path = str(row.get("path_nodes") or "")
+        node_strs = [s.strip() for s in raw_path.split(";") if s.strip()]
+        try:
+            path = [int(float(s)) for s in node_strs]
+        except (ValueError, TypeError):
+            path = []
+
+        if len(path) < 2:
+            nid_from = row.get("node_id_from")
+            nid_to   = row.get("node_id_to")
+            try:
+                path = [int(float(nid_from)), int(float(nid_to))]
+            except (TypeError, ValueError):
+                continue
+
+        # Clip path to contiguous SA sub-sequence (strip leading/trailing non-SA nodes)
+        start_idx = next((i for i, n in enumerate(path) if n in sa_node_set), None)
+        if start_idx is None:
+            continue  # no SA nodes at all
+        end_idx = len(path) - 1 - next(
+            (i for i, n in enumerate(reversed(path)) if n in sa_node_set), 0
+        )
+        clipped = path[start_idx : end_idx + 1]
+        if len(clipped) < 2:
+            continue  # single SA node — no segment to contribute
+
+        if start_idx > 0 or end_idx < len(path) - 1:
+            n_clipped += 1
+
+        n_pairs = len(clipped) - 1
+        svc       = str(row.get("Service") or row.get("GTFS_ID") or "")
+        direction = str(row.get("direction_id") or "")
+        try:
+            from_stop_nr = int(float(row.get("from_stop_nr") or row.get("node_id_from") or 0))
+            to_stop_nr   = int(float(row.get("to_stop_nr")   or row.get("node_id_to")   or 0))
+        except (TypeError, ValueError):
+            from_stop_nr = to_stop_nr = 0
+
+        from_stop_name  = str(row.get("from_stop_name") or "")
+        to_stop_name    = str(row.get("to_stop_name")   or "")
+        freq_am_peak    = float(row["_freq_am_peak"])
+        freq_pm_peak    = float(row["_freq_pm_peak"])
+        freq_peak       = float(row["_freq_peak"])
+        freq_offpeak    = float(row["_freq_offpeak"])
+        true_origin     = (start_idx == 0)
+        true_destination = (end_idx == len(path) - 1)
+
+        for i in range(n_pairs):
+            expanded_rows.append({
+                "service":        svc,
+                "direction_id":   direction,
+                "from_stop_nr":   from_stop_nr,
+                "to_stop_nr":     to_stop_nr,
+                "from_stop_name": from_stop_name,
+                "to_stop_name":   to_stop_name,
+                "seg_from_node":  clipped[i],
+                "seg_to_node":    clipped[i + 1],
+                "freq_am_peak":   freq_am_peak,
+                "freq_pm_peak":   freq_pm_peak,
+                "freq_peak":      freq_peak,
+                "freq_offpeak":   freq_offpeak,
+                "is_origin":      (i == 0 and true_origin),
+                "is_destination": (i == n_pairs - 1 and true_destination),
+            })
+
+    result = pd.DataFrame(expanded_rows)
+    if result.empty:
+        result = pd.DataFrame(columns=[
+            "service", "direction_id", "from_stop_nr", "to_stop_nr",
+            "from_stop_name", "to_stop_name", "seg_from_node", "seg_to_node",
+            "freq_am_peak", "freq_pm_peak", "freq_peak", "freq_offpeak",
+            "is_origin", "is_destination",
+        ])
+    print(f"  load_projected_services_sa: {n_clipped} rows path-clipped, "
+          f"expanded to {len(result)} per-segment rows")
+    return result
+
+
+def load_projected_services_filtered(
+    svc_version: str,
+    infra_version: str,
+    node_set: Set[int],
+) -> pd.DataFrame:
+    """Load projected services filtered to segments within a node set.
+
+    Reads the full rail_segments.gpkg, expands path_nodes, then retains only
+    rows where both seg_from_node and seg_to_node are in node_set.
+
+    Args:
+        svc_version:   Service version name.
+        infra_version: Infra version name.
+        node_set:      Set of integer BAV node Numbers to retain.
+
+    Returns:
+        DataFrame with the same schema as load_projected_services(), filtered.
+    """
+    result = load_projected_services(svc_version, infra_version)
+    mask = (
+        result["seg_from_node"].isin(node_set) &
+        result["seg_to_node"].isin(node_set)
+    )
+    filtered = result[mask].reset_index(drop=True)
+    print(f"  load_projected_services_filtered: {len(filtered)} rows after node-set filter "
+          f"({len(result)} total)")
+    return filtered
+
+
+# ---------------------------------------------------------------------------
+# Scope-aware capacity table builders
+# ---------------------------------------------------------------------------
+
+def build_capacity_tables_sa(
+    infra_version: str,
+    svc_version: str,
+    network_label: str,
+    output_dir: Optional[Path] = None,
+) -> tuple:
+    """Build capacity tables for the Study Area scope.
+
+    Uses SA-filtered infra (nodes from path_nodes in rail_segments_sa.gpkg)
+    and SA-filtered services (rail_segments_sa.gpkg).
+
+    Returns:
+        (stations_peak, segments_peak, stations_offpeak, segments_offpeak,
+         junction_numbers, sa_node_set)
+    """
+    print("  [SA] Extracting study area node set from infra geometry ...")
+    sa_node_set = _extract_sa_node_set(infra_version)
+
+    print("  [SA] Loading filtered infrastructure ...")
+    nodes_df, segments_df, _n2nr, _nr2n = load_infra_data_filtered(infra_version, sa_node_set)
+
+    print("  [SA] Loading SA-clipped projected services ...")
+    service_links_df = load_projected_services_sa(svc_version, infra_version, sa_node_set)
+
+    junction_numbers: Set[int] = set(
+        nodes_df.loc[nodes_df["Node_Class"] == "junction", "NR"].astype(int)
+    )
+    print(f"  [SA] Junction nodes: {len(junction_numbers)}")
+
+    results = {}
+    for period in ("peak", "offpeak"):
+        print(f"  [SA] Building {period} tables ...")
+        sl = build_stop_lookup(service_links_df, period)
+        st = aggregate_station_metrics(nodes_df, service_links_df, junction_numbers, period)
+        sg = aggregate_segment_metrics(segments_df, service_links_df, sl, junction_numbers, period)
+        results[period] = (st, sg)
+
+    stations_peak,    segments_peak    = results["peak"]
+    stations_offpeak, segments_offpeak = results["offpeak"]
+
+    safe_label = re.sub(r"[^\w-]+", "_", network_label).strip("_") or "capacity_sa"
+    out_dir = output_dir if output_dir is not None else CAPACITY_ROOT / infra_version / svc_version
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"capacity_{safe_label}.xlsx"
+    with pd.ExcelWriter(out_path, engine=EXCEL_ENGINE) as writer:
+        stations_peak.to_excel(writer,    sheet_name="Stations_Peak",    index=False)
+        segments_peak.to_excel(writer,    sheet_name="Segments_Peak",    index=False)
+        stations_offpeak.to_excel(writer, sheet_name="Stations_Offpeak", index=False)
+        segments_offpeak.to_excel(writer, sheet_name="Segments_Offpeak", index=False)
+    print(f"  [SA] Capacity workbook -> {out_path}")
+
+    return stations_peak, segments_peak, stations_offpeak, segments_offpeak, junction_numbers, sa_node_set
+
+
+def build_capacity_tables_ca(
+    infra_version: str,
+    svc_version: str,
+    network_label: str,
+    output_dir: Optional[Path] = None,
+) -> tuple:
+    """Build capacity tables for the Catchment Area scope.
+
+    Uses CA-filtered infra (nodes within catchment_area_boundary.gpkg) and
+    CA-filtered services (full rail_segments.gpkg, clipped to CA nodes).
+
+    Returns:
+        (stations_peak, segments_peak, stations_offpeak, segments_offpeak,
+         junction_numbers, ca_node_set, sa_node_set)
+    """
+    print("  [CA] Extracting catchment area node set from boundary ...")
+    ca_node_set = _get_ca_node_set(infra_version)
+
+    print("  [CA] Extracting study area node set from infra geometry ...")
+    sa_node_set = _extract_sa_node_set(infra_version)
+
+    print("  [CA] Loading filtered infrastructure ...")
+    nodes_df, segments_df, _n2nr, _nr2n = load_infra_data_filtered(infra_version, ca_node_set)
+
+    print("  [CA] Loading filtered projected services ...")
+    service_links_df = load_projected_services_filtered(svc_version, infra_version, ca_node_set)
+
+    junction_numbers: Set[int] = set(
+        nodes_df.loc[nodes_df["Node_Class"] == "junction", "NR"].astype(int)
+    )
+    print(f"  [CA] Junction nodes: {len(junction_numbers)}")
+
+    results = {}
+    for period in ("peak", "offpeak"):
+        print(f"  [CA] Building {period} tables ...")
+        sl = build_stop_lookup(service_links_df, period)
+        st = aggregate_station_metrics(nodes_df, service_links_df, junction_numbers, period)
+        sg = aggregate_segment_metrics(segments_df, service_links_df, sl, junction_numbers, period)
+        results[period] = (st, sg)
+
+    stations_peak,    segments_peak    = results["peak"]
+    stations_offpeak, segments_offpeak = results["offpeak"]
+
+    safe_label = re.sub(r"[^\w-]+", "_", network_label).strip("_") or "capacity_ca"
+    out_dir = output_dir if output_dir is not None else CAPACITY_ROOT / infra_version / svc_version
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"capacity_{safe_label}.xlsx"
+    with pd.ExcelWriter(out_path, engine=EXCEL_ENGINE) as writer:
+        stations_peak.to_excel(writer,    sheet_name="Stations_Peak",    index=False)
+        segments_peak.to_excel(writer,    sheet_name="Segments_Peak",    index=False)
+        stations_offpeak.to_excel(writer, sheet_name="Stations_Offpeak", index=False)
+        segments_offpeak.to_excel(writer, sheet_name="Segments_Offpeak", index=False)
+    print(f"  [CA] Capacity workbook -> {out_path}")
+
+    return (stations_peak, segments_peak, stations_offpeak, segments_offpeak,
+            junction_numbers, ca_node_set, sa_node_set)
+
+
+# ---------------------------------------------------------------------------
+# Retired loaders (replaced by load_infra_data / load_projected_services)
+# ---------------------------------------------------------------------------
+
+def extract_stations_from_edges(*args, **kwargs):
+    raise RuntimeError("extract_stations_from_edges() is retired. Use load_infra_data() instead.")
+
+
+def load_service_links(*args, **kwargs):
+    raise RuntimeError("load_service_links() is retired. Use load_projected_services() instead.")
+
+
+def apply_enrichment(*args, **kwargs):
+    raise RuntimeError("apply_enrichment() is retired. Infrastructure data comes from load_infra_data() instead.")
+
+
+def load_corridor_nodes_from_master(*args, **kwargs):
+    raise RuntimeError("load_corridor_nodes_from_master() is retired. Use load_infra_data() instead.")
+
+
+def load_corridor_nodes(*args, **kwargs):
+    raise RuntimeError("load_corridor_nodes() is retired. Use load_infra_data() instead.")
 
 def build_stop_records(
     service_links: pd.DataFrame,
@@ -940,391 +951,416 @@ def build_segment_contributions(
 # Aggregation logic
 # ---------------------------------------------------------------------------
 
+def _binding_metrics_from_grouped(
+    am_stop: Dict[str, float],
+    am_pass: Dict[str, float],
+    pm_stop: Dict[str, float],
+    pm_pass: Dict[str, float],
+    has_pm: bool,
+) -> Tuple[float, float, float, float, float, float]:
+    """Derive temporal-aware binding metrics from per-direction frequency sums.
+
+    Each *_stop / *_pass argument maps direction_id → summed frequency at one
+    segment or node within one peak window. For off-peak only AM is supplied
+    (has_pm=False); the PM dicts should be empty.
+
+    Returns (in order):
+        stopping_tph    bidirectional binding throughput for stopping trains
+                        — max(am_stop_total, pm_stop_total).
+        passing_tph     same, for passing trains.
+        total_tph       bidirectional binding throughput counting stop+pass
+                        jointly — max over peak windows of (stop+pass) summed
+                        across directions.
+        stopping_tphpd  binding per-direction load on stopping infrastructure
+                        — max over (peak window × direction).
+        passing_tphpd   same, for passing.
+        total_tphpd     binding per-direction load on shared infrastructure
+                        — max over (peak window × direction) of (stop+pass)
+                        at that bucket.
+
+    Symmetric inputs reproduce the pre-Level-2 numbers exactly; asymmetric
+    inputs replace the old `/2` halving with the binding peak × direction.
+    """
+    am_stop_total = sum(am_stop.values())
+    am_pass_total = sum(am_pass.values())
+    pm_stop_total = sum(pm_stop.values()) if has_pm else 0.0
+    pm_pass_total = sum(pm_pass.values()) if has_pm else 0.0
+
+    if has_pm:
+        stop_tph  = max(am_stop_total, pm_stop_total)
+        pass_tph  = max(am_pass_total, pm_pass_total)
+        total_tph = max(am_stop_total + am_pass_total, pm_stop_total + pm_pass_total)
+    else:
+        stop_tph  = am_stop_total
+        pass_tph  = am_pass_total
+        total_tph = am_stop_total + am_pass_total
+
+    directions = set(am_stop) | set(am_pass) | set(pm_stop) | set(pm_pass)
+    stop_dir_values: List[float] = []
+    pass_dir_values: List[float] = []
+    combined_dir_values: List[float] = []
+    for d in directions:
+        am_s = am_stop.get(d, 0.0)
+        am_p = am_pass.get(d, 0.0)
+        stop_dir_values.append(am_s)
+        pass_dir_values.append(am_p)
+        combined_dir_values.append(am_s + am_p)
+        if has_pm:
+            pm_s = pm_stop.get(d, 0.0)
+            pm_p = pm_pass.get(d, 0.0)
+            stop_dir_values.append(pm_s)
+            pass_dir_values.append(pm_p)
+            combined_dir_values.append(pm_s + pm_p)
+
+    stop_tphpd  = max(stop_dir_values) if stop_dir_values else 0.0
+    pass_tphpd  = max(pass_dir_values) if pass_dir_values else 0.0
+    total_tphpd = max(combined_dir_values) if combined_dir_values else 0.0
+
+    return stop_tph, pass_tph, total_tph, stop_tphpd, pass_tphpd, total_tphpd
+
+
 def aggregate_station_metrics(
-    rail_nodes: pd.DataFrame,
-    stop_records: pd.DataFrame,
-    service_links: pd.DataFrame,
-    corridor_node_ids: set[int],
-    stop_lookup: set[Tuple[str, str, int]],
+    nodes_df: pd.DataFrame,
+    service_links_df: pd.DataFrame,
+    junction_numbers: set,
+    period: str,
 ) -> pd.DataFrame:
-    """Compute station-level capacity inputs."""
+    """Compute station-level capacity inputs for the given service period.
 
-    # Sum per-direction frequencies for services that stop at the node. Each
-    # record in ``stop_records`` represents an actual station stop.
-    stopping_per_node = (
-        stop_records.groupby("Node")["Frequency"].sum().rename("stopping_tph").fillna(0.0)
-    )  # Total trains per hour (both directions) that stop at each corridor node.
-    stop_services: Dict[int, set[str]] = defaultdict(set)
-    for service, direction, node_id in stop_lookup:
-        if node_id in corridor_node_ids:
-            stop_services[node_id].add(service)
-    stop_services_map = {node: ", ".join(sorted(services)) for node, services in stop_services.items()}
+    Args:
+        nodes_df: Output of load_infra_data() nodes table.
+        service_links_df: Output of load_projected_services().
+        junction_numbers: Set of BAV node Numbers classified as junctions.
+        period: 'peak' or 'offpeak'.
 
-    # Count services that pass through the node according to the Via list.
-    passing_counter: Dict[int, float] = defaultdict(float)
-    passing_services: Dict[int, set[str]] = defaultdict(set)
-    for _, row in service_links.iterrows():
-        frequency = row["Frequency"]
-        if not frequency:
-            continue
-        service_name = row["Service"]
-        for node_id in row["ViaNodes"]:
-            if node_id in corridor_node_ids:
-                passing_counter[node_id] += frequency  # Aggregate trains per hour that only pass through the node.
-                passing_services[node_id].add(service_name)
-    passing_per_node = pd.Series(passing_counter, name="passing_tph")
-    passing_services_map = {
-        node: ", ".join(sorted(services))
-        for node, services in passing_services.items()
-    }
+    Returns:
+        DataFrame with NR, Name, Code, Node_Class, E_LV95, N_LV95,
+        Track_Count, Platform_Count, stopping_tph/tphpd, passing_tph/tphpd,
+        stopping_services, passing_services.
 
-    # Merge stopping / passing totals back onto the node attributes.
-    merged = rail_nodes.merge(
-        stopping_per_node,
-        how="left",
-        left_on="NR",
-        right_index=True,
-    ).merge(
-        passing_per_node,
-        how="left",
-        left_on="NR",
-        right_index=True,
-    )
+    Notes:
+        For 'peak' the AM and PM windows are aggregated independently before
+        being collapsed: tph reports the binding window's bidirectional total
+        and tphpd reports the binding direction in the binding window. This
+        avoids double-counting commuter services that reverse direction
+        between AM and PM. Off-peak is collapsed across its single window.
+    """
+    if period == "peak":
+        am_col = "freq_am_peak"
+        pm_col = "freq_pm_peak"
+        has_pm = True
+        active = service_links_df[
+            (service_links_df[am_col] > 0) | (service_links_df[pm_col] > 0)
+        ].copy()
+    else:
+        am_col = "freq_offpeak"
+        pm_col = None
+        has_pm = False
+        active = service_links_df[service_links_df[am_col] > 0].copy()
 
-    merged["stopping_tph"] = merged["stopping_tph"].fillna(0.0)
-    merged["passing_tph"] = merged["passing_tph"].fillna(0.0)
-    merged["stopping_tphpd"] = merged["stopping_tph"] / 2.0
-    merged["passing_tphpd"] = merged["passing_tph"] / 2.0
-    merged["stopping_services"] = merged["NR"].map(stop_services_map).fillna("")
-    merged["passing_services"] = merged["NR"].map(passing_services_map).fillna("")
-    merged["tracks"] = pd.NA  # Placeholder to be filled manually.
-    merged["platforms"] = pd.NA  # Placeholder to be filled manually.
+    junction_set: Set[int] = set(int(j) for j in junction_numbers)
 
-    output_columns = [
-        "NR",
-        "NAME",
-        "CODE",
-        "E_LV95",
-        "N_LV95",
-        "stopping_tph",
-        "passing_tph",
-        "stopping_tphpd",
-        "passing_tphpd",
-        "stopping_services",
-        "passing_services",
-        "tracks",
-        "platforms",
+    stop_from_mask = active["is_origin"] & ~active["seg_from_node"].isin(junction_set)
+    stop_to_mask   = active["is_destination"] & ~active["seg_to_node"].isin(junction_set)
+    pass_from_mask = ~stop_from_mask
+    pass_to_mask   = ~stop_to_mask
+
+    def _node_contributions(mask_from, mask_to, col: str) -> Dict[int, Dict[str, float]]:
+        sub_from = active.loc[mask_from, ["seg_from_node", "direction_id", col]].rename(
+            columns={"seg_from_node": "node"}
+        )
+        sub_to = active.loc[mask_to, ["seg_to_node", "direction_id", col]].rename(
+            columns={"seg_to_node": "node"}
+        )
+        combined = pd.concat([sub_from, sub_to], ignore_index=True)
+        if combined.empty:
+            return {}
+        combined["node"] = combined["node"].astype(int)
+        combined["direction_id"] = combined["direction_id"].astype(str)
+        grouped = combined.groupby(["node", "direction_id"])[col].sum()
+        result: Dict[int, Dict[str, float]] = defaultdict(dict)
+        for (node, direction), val in grouped.items():
+            result[int(node)][str(direction)] = float(val)
+        return result
+
+    am_stop_by_node = _node_contributions(stop_from_mask, stop_to_mask, am_col)
+    am_pass_by_node = _node_contributions(pass_from_mask, pass_to_mask, am_col)
+    if has_pm:
+        pm_stop_by_node = _node_contributions(stop_from_mask, stop_to_mask, pm_col)
+        pm_pass_by_node = _node_contributions(pass_from_mask, pass_to_mask, pm_col)
+    else:
+        pm_stop_by_node = {}
+        pm_pass_by_node = {}
+
+    # Service-name maps per node (display, unchanged behaviour).
+    stop_svc_map: Dict[int, set] = defaultdict(set)
+    for _, row in active[stop_from_mask].iterrows():
+        stop_svc_map[int(row["seg_from_node"])].add(str(row["service"]))
+    for _, row in active[stop_to_mask].iterrows():
+        stop_svc_map[int(row["seg_to_node"])].add(str(row["service"]))
+
+    pass_svc_map: Dict[int, set] = defaultdict(set)
+    for _, row in active[pass_from_mask].iterrows():
+        pass_svc_map[int(row["seg_from_node"])].add(str(row["service"]))
+    for _, row in active[pass_to_mask].iterrows():
+        pass_svc_map[int(row["seg_to_node"])].add(str(row["service"]))
+
+    def _node_metrics(node_nr: int) -> Tuple[float, float, float, float]:
+        stop_tph, pass_tph, _t_tph, stop_tphpd, pass_tphpd, _t_tphpd = (
+            _binding_metrics_from_grouped(
+                am_stop_by_node.get(node_nr, {}),
+                am_pass_by_node.get(node_nr, {}),
+                pm_stop_by_node.get(node_nr, {}),
+                pm_pass_by_node.get(node_nr, {}),
+                has_pm,
+            )
+        )
+        return stop_tph, pass_tph, stop_tphpd, pass_tphpd
+
+    result = nodes_df.copy()
+    metrics = {int(nr): _node_metrics(int(nr)) for nr in result["NR"]}
+    result["stopping_tph"]   = result["NR"].map(lambda n: metrics[int(n)][0]).fillna(0.0)
+    result["passing_tph"]    = result["NR"].map(lambda n: metrics[int(n)][1]).fillna(0.0)
+    result["stopping_tphpd"] = result["NR"].map(lambda n: metrics[int(n)][2]).fillna(0.0)
+    result["passing_tphpd"]  = result["NR"].map(lambda n: metrics[int(n)][3]).fillna(0.0)
+
+    result["stopping_services"] = result["NR"].map(
+        {k: ", ".join(sorted(v)) for k, v in stop_svc_map.items()}
+    ).fillna("")
+    result["passing_services"]  = result["NR"].map(
+        {k: ", ".join(sorted(v)) for k, v in pass_svc_map.items()}
+    ).fillna("")
+
+    out_cols = [
+        "NR", "Name", "Code", "Node_Class", "E_LV95", "N_LV95",
+        "Track_Count", "Platform_Count",
+        "stopping_tph", "stopping_tphpd", "passing_tph", "passing_tphpd",
+        "stopping_services", "passing_services",
     ]
-    return merged[output_columns].sort_values("NR").reset_index(drop=True)
+    available = [c for c in out_cols if c in result.columns]
+    return result[available].sort_values("NR").reset_index(drop=True)
 
 
-def build_stop_lookup(stop_records: pd.DataFrame) -> set[Tuple[str, str, int]]:
-    """Create a lookup set of (service, direction, node) tuples where the service stops."""
-    return {
-        (row["Service"], row["Direction"], int(row["Node"]))
-        for _, row in stop_records.iterrows()
-    }
+def build_stop_lookup(service_links_df: pd.DataFrame, period: str) -> set:
+    """Return (service, direction_id, node_id) tuples where a service stops.
+
+    A node is a stop if it is the origin (is_origin=True) or destination
+    (is_destination=True) of a link with non-zero frequency in the given period.
+
+    Args:
+        service_links_df: Output of load_projected_services().
+        period: 'peak' uses freq_peak; 'offpeak' uses freq_offpeak.
+    """
+    freq_col = "freq_peak" if period == "peak" else "freq_offpeak"
+    active = service_links_df[service_links_df[freq_col] > 0]
+    stops: set = set()
+    for _, row in active[active["is_origin"]].iterrows():
+        stops.add((str(row["service"]), str(row["direction_id"]), int(row["seg_from_node"])))
+    for _, row in active[active["is_destination"]].iterrows():
+        stops.add((str(row["service"]), str(row["direction_id"]), int(row["seg_to_node"])))
+    return stops
 
 
 def aggregate_segment_metrics(
-    service_links: pd.DataFrame,
-    stop_lookup: set[Tuple[str, str, int]],
-    corridor_node_ids: set[int],
+    segments_df: pd.DataFrame,
+    service_links_df: pd.DataFrame,
+    stop_lookup: set,
+    junction_numbers: set,
+    period: str,
 ) -> pd.DataFrame:
-    """Compute segment-level statistics directly from processed service links."""
-    segment_contribs = build_segment_contributions(service_links, stop_lookup, corridor_node_ids)
-
-    pair_meta: Dict[Tuple[int, int], Dict[str, object]] = {}
-    for _, row in service_links.iterrows():
-        frequency = row["Frequency"]
-        if frequency <= 0:
-            continue
-        service = row["Service"]
-        direction = row["Direction"]
-        via_nodes: List[int] = row["ViaNodes"]
-        path_nodes: List[int] = [row["FromNode"], *via_nodes, row["ToNode"]]
-        segment_count = len(path_nodes) - 1
-
-        for start, end in zip(path_nodes, path_nodes[1:]):
-            if start not in corridor_node_ids or end not in corridor_node_ids:
-                continue
-            pair = tuple(sorted((start, end)))
-            meta = pair_meta.setdefault(
-                pair,
-                {
-                    "stop_tts": [],
-                    "pass_tts": [],
-                    "service_totals": defaultdict(float),
-                    "service_direction_totals": defaultdict(float),
-                },
-            )
-            if "service_totals" not in meta:
-                meta["service_totals"] = defaultdict(float)
-            if "service_direction_totals" not in meta:
-                meta["service_direction_totals"] = defaultdict(float)
-            service_totals: defaultdict[str, float] = meta["service_totals"]  # type: ignore[assignment]
-            direction_totals: defaultdict[Tuple[str, str], float] = meta["service_direction_totals"]  # type: ignore[assignment]
-            service_totals[service] += frequency
-            direction_key = str(direction).strip()
-            direction_totals[(service, direction_key)] += frequency
-            stop_from = (service, direction, start) in stop_lookup
-            stop_to = (service, direction, end) in stop_lookup
-            if pd.notna(row["TravelTime"]) and segment_count == 1:
-                if stop_from and stop_to:
-                    meta["stop_tts"].append(row["TravelTime"])
-                else:
-                    meta["pass_tts"].append(row["TravelTime"])
-
-    records: List[Dict[str, object]] = []
-    for from_node, to_node in sorted(segment_contribs.keys()):
-        meta = pair_meta.get(
-            (from_node, to_node),
-            {
-                "stop_tts": [],
-                "pass_tts": [],
-                "service_totals": {},
-                "service_direction_totals": {},
-            },
-        )
-        contrib = segment_contribs.get((from_node, to_node), {"stop_freq": 0.0, "pass_freq": 0.0})
-
-        stop_tts = meta.get("stop_tts", [])
-        pass_tts = meta.get("pass_tts", [])
-        service_totals_map = dict(meta.get("service_totals", {}))
-        service_direction_totals_map = dict(meta.get("service_direction_totals", {}))
-        services_tph = _format_service_frequency_map(service_totals_map)
-        services_tphpd = _format_service_direction_frequency_map(service_direction_totals_map)
-
-        travel_time_stopping = max(stop_tts) if stop_tts else pd.NA
-        travel_time_passing = max(pass_tts) if pass_tts else pd.NA
-        stopping_tph = contrib.get("stop_freq", 0.0)
-        passing_tph = contrib.get("pass_freq", 0.0)
-        total_tph = stopping_tph + passing_tph
-        stopping_tphpd = stopping_tph / 2.0
-        passing_tphpd = passing_tph / 2.0
-        total_tphpd = stopping_tphpd + passing_tphpd
-        records.append(
-            {
-                "from_node": from_node,
-                "to_node": to_node,
-                "length_m": pd.NA,
-                "tracks": pd.NA,
-                "speed": pd.NA,
-                "travel_time_stopping": travel_time_stopping,
-                "travel_time_passing": travel_time_passing,
-                "stopping_tph": stopping_tph,
-                "passing_tph": passing_tph,
-                "total_tph": total_tph,
-                "stopping_tphpd": stopping_tphpd,
-                "passing_tphpd": passing_tphpd,
-                "total_tphpd": total_tphpd,
-                "services_tph": services_tph,
-                "services_tphpd": services_tphpd,
-            }
-        )
-
-    segments_df = pd.DataFrame(records)
-    return segments_df.sort_values(["from_node", "to_node"]).reset_index(drop=True)
-
-
-def _derive_baseline_prep_path() -> Path:
-    """Auto-detect baseline prep workbook path from settings.
-
-    Returns:
-        Path to the baseline prep workbook.
-
-    Raises:
-        FileNotFoundError: If baseline prep workbook doesn't exist.
-    """
-    network_tag = getattr(settings, "rail_network", "current")
-    safe_network_tag = re.sub(r"[^\w-]+", "_", str(network_tag)).strip("_") or "current"
-
-    # Try new structure first: Baseline subdirectory
-    prep_path = CAPACITY_ROOT / "Baseline" / safe_network_tag / f"capacity_{safe_network_tag}_network_prep.xlsx"
-
-    if prep_path.exists():
-        return prep_path
-
-    # Fallback 1: Old structure with subdirectory (for backwards compatibility)
-    prep_path_old_subdir = CAPACITY_ROOT / safe_network_tag / f"capacity_{safe_network_tag}_network_prep.xlsx"
-    if prep_path_old_subdir.exists():
-        return prep_path_old_subdir
-
-    # Fallback 2: Old structure without subdirectory
-    prep_path_old_flat = CAPACITY_ROOT / f"capacity_{safe_network_tag}_network_prep.xlsx"
-    if prep_path_old_flat.exists():
-        return prep_path_old_flat
-
-    raise FileNotFoundError(
-        f"Baseline prep workbook not found. Tried:\n"
-        f"  - {prep_path}\n"
-        f"  - {prep_path_old_subdir}\n"
-        f"  - {prep_path_old_flat}\n\n"
-        f"Please run the baseline workflow and manually enrich the workbook first."
-    )
-
-
-def build_capacity_tables(
-    edges_path: Path = None,
-    network_label: str = None,
-    enrichment_source: Path = None,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Return the station and segment capacity tables for the active network.
+    """Compute segment-level capacity inputs for the given service period.
 
     Args:
-        edges_path: Optional custom path to edges file.
-                   - If None: BASELINE workflow (uses edges_in_corridor.gpkg + master points)
-                   - If provided: DEVELOPMENT workflow (uses custom edges + edge-derived stations)
-        network_label: Optional custom network label for output naming.
-        enrichment_source: Optional path to baseline prep workbook for auto-enrichment.
-                          - If None: generates empty workbook for manual enrichment (baseline workflow)
-                          - If provided: inherits baseline data and applies defaults (development workflow)
+        segments_df: Output of load_infra_data() segments table.
+        service_links_df: Output of load_projected_services().
+        stop_lookup: Output of build_stop_lookup() for the given period.
+        junction_numbers: Set of BAV node Numbers classified as junctions.
+        period: 'peak' or 'offpeak'.
 
     Returns:
-        Tuple of (stations_df, segments_df) with capacity metrics.
+        DataFrame with infra attributes merged with service frequencies.
+
+    Notes:
+        For 'peak' the AM and PM windows are aggregated independently before
+        being collapsed. tph reports the binding window's bidirectional total
+        and tphpd reports the binding direction in the binding window (max
+        over peak window × direction). total_* considers stop+pass jointly
+        within each (window, direction) bucket so segments are not
+        double-counted when stopping and passing services peak in different
+        windows.
     """
-    is_baseline = edges_path is None
-
-    # print(f"\n{'='*80}")
-    # print(f"[INFO] build_capacity_tables - {'BASELINE' if is_baseline else 'DEVELOPMENT'} workflow")
-    # print(f"  - edges_path: {edges_path if edges_path else 'Default (baseline)'}")
-    # print(f"  - network_label: {network_label}")
-    # print(f"  - enrichment_source: {enrichment_source}")
-    # print(f"{'='*80}\n")
-
-    # Load service links (handles baseline extended mode internally)
-    service_links_full = load_service_links(edges_path=edges_path)
-
-    # Get edges GeoDataFrame for later use (needed for enrichment geometry lookups)
-    if is_baseline:
-        # For baseline (both standard and extended), load edges from edges_in_corridor.gpkg
-        edges_gdf = gpd.read_file(EDGES_IN_CORRIDOR_PATH)
+    if period == "peak":
+        am_col = "freq_am_peak"
+        pm_col = "freq_pm_peak"
+        peak_col = "freq_peak"
+        has_pm = True
+        active = service_links_df[
+            (service_links_df[am_col] > 0) | (service_links_df[pm_col] > 0)
+        ].copy()
     else:
-        # For development, load from custom path
-        edges_gdf = gpd.read_file(edges_path)
+        am_col = "freq_offpeak"
+        pm_col = None
+        peak_col = "freq_offpeak"
+        has_pm = False
+        active = service_links_df[service_links_df[am_col] > 0].copy()
 
-    # Extract stations based on workflow
-    new_station_ids = set()  # Track new stations for enrichment
+    def _is_stopping(row) -> bool:
+        # Junction endpoints are transparent infrastructure — only station
+        # endpoints can disqualify a service from "stopping". A service counts
+        # as stopping on the segment if it has a real stop at every station
+        # endpoint; junctions are treated as if they weren't there. This means
+        # services are only classified as passing/express when they actually
+        # pass a station without stopping (not merely when they route through
+        # a junction).
+        fn = int(row["seg_from_node"])
+        tn = int(row["seg_to_node"])
+        svc = str(row["service"])
+        did = str(row["direction_id"])
+        fn_ok = fn in junction_numbers or (svc, did, fn) in stop_lookup
+        tn_ok = tn in junction_numbers or (svc, did, tn) in stop_lookup
+        return fn_ok and tn_ok
 
-    if is_baseline:
-        # BASELINE: Load stations from master points file
-        corridor_points, new_station_ids = load_corridor_nodes_from_master(
-            edges_gdf,
-            is_development=False
-        )
-    else:
-        # DEVELOPMENT: Load and filter stations
-        # Auto-detect baseline prep path
-        baseline_prep_path = _derive_baseline_prep_path()
-
-        corridor_points, new_station_ids = load_corridor_nodes_from_master(
-            edges_gdf,
-            baseline_prep_path=baseline_prep_path,
-            is_development=True
-        )
-
-    corridor_nodes = set(corridor_points["ID_point"].astype(int))
-
-    # Filter service links to those related to corridor nodes
-    def _link_has_corridor_relation(row: pd.Series) -> bool:
-        return (
-            row["FromNode"] in corridor_nodes
-            or row["ToNode"] in corridor_nodes
-            or any(node in corridor_nodes for node in row["ViaNodes"])
-        )
-
-    service_links = (
-        service_links_full[service_links_full.apply(_link_has_corridor_relation, axis=1)]
-        .reset_index(drop=True)
+    active["_stopping"] = active.apply(_is_stopping, axis=1)
+    active["_key"] = active.apply(
+        lambda r: tuple(sorted((int(r["seg_from_node"]), int(r["seg_to_node"])))), axis=1
     )
+    active["_direction"] = active["direction_id"].astype(str)
 
-    stop_records = build_stop_records(service_links, corridor_nodes)
-    stop_lookup = build_stop_lookup(stop_records)
+    def _segment_contributions(is_stop: bool, col: str) -> Dict[tuple, Dict[str, float]]:
+        subset = active[active["_stopping"] == is_stop]
+        if subset.empty:
+            return {}
+        grouped = subset.groupby(["_key", "_direction"])[col].sum()
+        result: Dict[tuple, Dict[str, float]] = defaultdict(dict)
+        for (key, direction), val in grouped.items():
+            result[key][str(direction)] = float(val)
+        return result
 
-    # Prepare corridor table with proper coordinate handling
-    corridor_table = corridor_points.drop(columns=[corridor_points.geometry.name], errors="ignore").copy()
-    corridor_table.rename(columns={"ID_point": "NR"}, inplace=True)
-    corridor_table["NR"] = corridor_table["NR"].apply(parse_int)
-    corridor_table["NAME"] = corridor_table["NAME"].astype(str)
-    if "CODE" in corridor_table.columns:
-        corridor_table["CODE"] = corridor_table["CODE"].astype(str)
+    am_stop_by_seg = _segment_contributions(True, am_col)
+    am_pass_by_seg = _segment_contributions(False, am_col)
+    if has_pm:
+        pm_stop_by_seg = _segment_contributions(True, pm_col)
+        pm_pass_by_seg = _segment_contributions(False, pm_col)
     else:
-        corridor_table["CODE"] = ""
-    corridor_table["XKOORD"] = corridor_table["XKOORD"].apply(parse_float)
-    corridor_table["YKOORD"] = corridor_table["YKOORD"].apply(parse_float)
+        pm_stop_by_seg = {}
+        pm_pass_by_seg = {}
 
-    # E_LV95/N_LV95 already added by load_corridor_nodes_from_master for baseline
-    # For development, need to add them
-    if "E_LV95" not in corridor_table.columns:
-        corridor_table["E_LV95"] = corridor_table["XKOORD"] + LV95_E_OFFSET
-    if "N_LV95" not in corridor_table.columns:
-        corridor_table["N_LV95"] = corridor_table["YKOORD"] + LV95_N_OFFSET
+    # Per-service display maps preserve current behaviour using max-of-AM/PM
+    # per row (collapsed into _freq_peak / _freq_offpeak).
+    svc_totals:     Dict[tuple, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    svc_dir_totals: Dict[tuple, Dict[tuple, float]] = defaultdict(lambda: defaultdict(float))
+    stop_svc_seg:   Dict[tuple, set] = defaultdict(set)
+    pass_svc_seg:   Dict[tuple, set] = defaultdict(set)
 
-    station_metrics = aggregate_station_metrics(
-        corridor_table,
-        stop_records,
-        service_links,
-        corridor_nodes,
-        stop_lookup,
-    )
+    for _, row in active.iterrows():
+        key = row["_key"]
+        svc = str(row["service"])
+        did = str(row["direction_id"])
+        freq = float(row[peak_col])
+        svc_totals[key][svc] += freq
+        svc_dir_totals[key][(svc, did)] += freq
+        if row["_stopping"]:
+            stop_svc_seg[key].add(svc)
+        else:
+            pass_svc_seg[key].add(svc)
 
-    node_name_lookup = dict(zip(corridor_table["NR"], corridor_table["NAME"]))
+    records = []
+    for _, seg in segments_df.iterrows():
+        fn  = int(seg["from_node"])
+        tn  = int(seg["to_node"])
+        key = tuple(sorted((fn, tn)))
 
-    segment_metrics = aggregate_segment_metrics(service_links, stop_lookup, corridor_nodes)
-    segment_metrics["from_station"] = segment_metrics["from_node"].map(node_name_lookup)
-    segment_metrics["to_station"] = segment_metrics["to_node"].map(node_name_lookup)
-
-    output_columns = [
-        "from_node",
-        "from_station",
-        "to_node",
-        "to_station",
-        "length_m",
-        "speed",
-        "tracks",
-        "travel_time_stopping",
-        "travel_time_passing",
-        "stopping_tph",
-        "passing_tph",
-        "total_tph",
-        "stopping_tphpd",
-        "passing_tphpd",
-        "total_tphpd",
-        "services_tph",
-        "services_tphpd",
-    ]
-    segment_metrics = segment_metrics[output_columns]
-
-    # Apply enrichment if source provided (development workflow)
-    if enrichment_source is not None or not is_baseline:
-        # Determine enrichment source
-        baseline_enrichment = enrichment_source if enrichment_source is not None else _derive_baseline_prep_path()
-
-        # Auto-detect enhanced baseline path based on settings.rail_network
-        enhanced_enrichment = None
-        try:
-            from settings import rail_network
-            enhanced_network_name = f"{rail_network}_enhanced"
-            enhanced_enrichment = CAPACITY_ROOT / "Enhanced" / enhanced_network_name / f"capacity_{rail_network}_enhanced_network_prep.xlsx"
-
-            if not enhanced_enrichment.exists():
-                enhanced_enrichment = None
-                print(f"[INFO] Enhanced baseline not found, using baseline only for enrichment")
-        except Exception as e:
-            print(f"[INFO] Could not auto-detect enhanced baseline: {e}")
-            enhanced_enrichment = None
-
-        # Apply enrichment with selective enhanced baseline
-        station_metrics, segment_metrics = apply_enrichment(
-            station_metrics,
-            segment_metrics,
-            baseline_enrichment,
-            edges_gdf,
-            new_station_ids,
-            enhanced_enrichment  # Pass enhanced baseline for selective enrichment
+        stop_tph, pass_tph, total_tph, stop_tphpd, pass_tphpd, total_tphpd = (
+            _binding_metrics_from_grouped(
+                am_stop_by_seg.get(key, {}),
+                am_pass_by_seg.get(key, {}),
+                pm_stop_by_seg.get(key, {}),
+                pm_pass_by_seg.get(key, {}),
+                has_pm,
+            )
         )
 
-    return station_metrics, segment_metrics
+        records.append({
+            "from_node":        fn,
+            "to_node":          tn,
+            "from_name":        seg.get("from_name", ""),
+            "to_name":          seg.get("to_name", ""),
+            "Num_Tracks":       seg.get("Num_Tracks"),
+            "Length":           seg.get("Length"),
+            "TT_Stopping":      seg.get("TT_Stopping"),
+            "TT_Passing":       seg.get("TT_Passing"),
+            "Average_Speed":    seg.get("Average_Speed"),
+            "stopping_tph":     stop_tph,
+            "passing_tph":      pass_tph,
+            "total_tph":        total_tph,
+            "stopping_tphpd":   stop_tphpd,
+            "passing_tphpd":    pass_tphpd,
+            "total_tphpd":      total_tphpd,
+            "services_tph":     _format_service_frequency_map(dict(svc_totals.get(key, {}))),
+            "services_tphpd":   _format_service_direction_frequency_map(dict(svc_dir_totals.get(key, {}))),
+            "stopping_services": ", ".join(sorted(stop_svc_seg.get(key, set()))),
+            "passing_services":  ", ".join(sorted(pass_svc_seg.get(key, set()))),
+        })
+
+    result = pd.DataFrame(records)
+    return result.sort_values(["from_node", "to_node"]).reset_index(drop=True)
+
+
+def _derive_baseline_prep_path(*args, **kwargs):
+    raise RuntimeError("_derive_baseline_prep_path() is retired. Use load_infra_data() instead.")
+
+def build_capacity_tables(
+    infra_version: str,
+    svc_version: str,
+    network_label: str,
+    output_dir: Optional[Path] = None,
+) -> tuple:
+    """Build station and segment capacity tables for peak and off-peak periods.
+
+    Args:
+        infra_version: Named infra version (e.g. 'AS_2026_ZH_enhanced').
+        svc_version:   Service version (e.g. 'AK_2026').
+        network_label: Label for the output workbook filename.
+        output_dir:    Directory to write the capacity workbook. When None, defaults
+                       to CAPACITY_ROOT / 'Baseline' / safe_label.
+
+    Returns:
+        (stations_peak, segments_peak, stations_offpeak, segments_offpeak, junction_numbers)
+    """
+    print("  Loading infrastructure data ...")
+    nodes_df, segments_df, _n2nr, _nr2n = load_infra_data(infra_version)
+
+    print("  Loading projected services ...")
+    service_links_df = load_projected_services(svc_version, infra_version)
+
+    junction_numbers: set = set(
+        nodes_df.loc[nodes_df["Node_Class"] == "junction", "NR"].astype(int)
+    )
+    print(f"  Junction nodes: {len(junction_numbers)}")
+
+    results = {}
+    for period in ("peak", "offpeak"):
+        print(f"  Building {period} tables ...")
+        sl = build_stop_lookup(service_links_df, period)
+        st = aggregate_station_metrics(nodes_df, service_links_df, junction_numbers, period)
+        sg = aggregate_segment_metrics(segments_df, service_links_df, sl, junction_numbers, period)
+        results[period] = (st, sg)
+
+    stations_peak,    segments_peak    = results["peak"]
+    stations_offpeak, segments_offpeak = results["offpeak"]
+
+    safe_label = re.sub(r"[^\w-]+", "_", network_label).strip("_") or "capacity"
+    out_dir = output_dir if output_dir is not None else CAPACITY_ROOT / "Baseline" / safe_label
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"capacity_{safe_label}.xlsx"
+    with pd.ExcelWriter(out_path, engine=EXCEL_ENGINE) as writer:
+        stations_peak.to_excel(writer,    sheet_name="Stations_Peak",    index=False)
+        segments_peak.to_excel(writer,    sheet_name="Segments_Peak",    index=False)
+        stations_offpeak.to_excel(writer, sheet_name="Stations_Offpeak", index=False)
+        segments_offpeak.to_excel(writer, sheet_name="Segments_Offpeak", index=False)
+    print(f"  Capacity workbook -> {out_path}")
+
+    return stations_peak, segments_peak, stations_offpeak, segments_offpeak, junction_numbers
 
 
 def _derive_prep_path(output_path: Path) -> Path:
@@ -1389,8 +1425,57 @@ def _post_export_capacity_processing(output_path: Path) -> None:
     print(f"Sections workbook written to {sections_path}.")
 
 
-def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFrame) -> pd.DataFrame:
-    """Assemble continuous sections that share the same track count."""
+def _build_sections_dataframe(
+    stations_df: pd.DataFrame,
+    segments_df: pd.DataFrame,
+    junction_numbers: Optional[set] = None,
+    segments_offpeak_df: Optional[pd.DataFrame] = None,
+    compute_capacity: bool = True,
+    sa_node_set: Optional[Set[int]] = None,
+    grouping_strategy: str = "manual",
+) -> pd.DataFrame:
+    """Assemble continuous sections that share the same track count.
+
+    Args:
+        stations_df: Station table from aggregate_station_metrics().
+        segments_df: Segment table from aggregate_segment_metrics() (peak period).
+        junction_numbers: Set of BAV node Numbers classified as junctions.
+            Degree>=3 junctions always act as boundaries via the degree condition.
+            Degree-2 junctions are transparent when both adjacent segments share
+            the same Num_Tracks (handled automatically by track-group separation).
+        segments_offpeak_df: Optional off-peak segment table. When provided the
+            returned DataFrame carries paired _peak / _offpeak columns.
+            Capacity_offpeak = Capacity_peak (infrastructure does not change);
+            only Utilization_offpeak differs.
+        compute_capacity: When False, skips all UIC formula calls for every
+            section. Use for pure Set_Value mode to avoid wasted computation.
+        sa_node_set: When provided, UIC formulas run only for sections whose
+            entire node sequence is within this set; all other sections skip
+            the formula (Set_Value is applied by the caller). Overrides
+            compute_capacity for per-section decisions.
+    """
+    _junctions: set = junction_numbers if junction_numbers is not None else set()
+
+    # ── Column aliases: accept both new infrabuild names and old names ────
+    stations_df = stations_df.copy()
+    segments_df = segments_df.copy()
+
+    if 'tracks' not in stations_df.columns and 'Track_Count' in stations_df.columns:
+        stations_df['tracks'] = stations_df['Track_Count']
+    if 'NAME' not in stations_df.columns and 'Name' in stations_df.columns:
+        stations_df['NAME'] = stations_df['Name']
+
+    _seg_aliases = [
+        ('Num_Tracks',    'tracks'),
+        ('Length',        'length_m'),
+        ('TT_Passing',    'travel_time_passing'),
+        ('TT_Stopping',   'travel_time_stopping'),
+        ('Average_Speed', 'speed'),
+    ]
+    for _new_col, _old_col in _seg_aliases:
+        if _old_col not in segments_df.columns and _new_col in segments_df.columns:
+            segments_df[_old_col] = segments_df[_new_col]
+
     required_station_cols = {"NR", "tracks"}
     required_segment_cols = {"from_node", "to_node", "tracks"}
     service_columns = {
@@ -1589,6 +1674,12 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
         visited_edges: set[frozenset] = set()
 
         def node_valid(node_id: int) -> bool:
+            # Junctions transparent to track-count check:
+            # degree>=3 already forces boundary via len(adjacency)!=2;
+            # degree-2 junctions only split when Num_Tracks differs across them,
+            # handled automatically by track-group separation.
+            if node_id in _junctions:
+                return True
             track_value = node_tracks.get(node_id)
             return track_value == track
 
@@ -1629,6 +1720,10 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
                         node_pass_services,
                     )
                     for refined_nodes, refined_edges in refined_sections:
+                        _sec_compute_cap = (
+                            all(n in sa_node_set for n in refined_nodes)
+                            if sa_node_set is not None else compute_capacity
+                        )
                         sections.append(
                             _summarise_section(
                                 section_counter,
@@ -1638,6 +1733,8 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
                                 node_names,
                                 node_stop_services,
                                 node_pass_services,
+                                compute_capacity=_sec_compute_cap,
+                                grouping_strategy=grouping_strategy,
                             )
                         )
                         section_counter += 1
@@ -1667,6 +1764,10 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
                     node_pass_services,
                 )
                 for refined_nodes, refined_edges in refined_sections:
+                    _sec_compute_cap = (
+                        all(n in sa_node_set for n in refined_nodes)
+                        if sa_node_set is not None else compute_capacity
+                    )
                     sections.append(
                         _summarise_section(
                             section_counter,
@@ -1676,12 +1777,94 @@ def _build_sections_dataframe(stations_df: pd.DataFrame, segments_df: pd.DataFra
                             node_names,
                             node_stop_services,
                             node_pass_services,
+                            compute_capacity=_sec_compute_cap,
+                            grouping_strategy=grouping_strategy,
                         )
                     )
                     section_counter += 1
                 visited_edges.update(path_edge_keys)
 
-    return pd.DataFrame(sections)
+    if not sections:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(sections)
+
+    # ── Rename single-period columns to _peak variants ────────────────────────
+    _peak_rename = {
+        "total_tph":      "total_tph_peak",
+        "stopping_tph":   "stopping_tph_peak",
+        "passing_tph":    "passing_tph_peak",
+        "total_tphpd":    "total_tphpd_peak",
+        "stopping_tphpd": "stopping_tphpd_peak",
+        "passing_tphpd":  "passing_tphpd_peak",
+        "Capacity":       "Capacity_peak",
+        "Utilization":    "Utilization_peak",
+    }
+    df.rename(columns={k: v for k, v in _peak_rename.items() if k in df.columns}, inplace=True)
+
+    # ── Add offpeak columns when offpeak segment data is supplied ─────────────
+    if segments_offpeak_df is not None and not segments_offpeak_df.empty:
+        _op = segments_offpeak_df.copy()
+        for _nc, _oc in _seg_aliases:
+            if _oc not in _op.columns and _nc in _op.columns:
+                _op[_oc] = _op[_nc]
+
+        _op_lookup: Dict[tuple, Dict] = {}
+        for _, _r in _op.iterrows():
+            _k = tuple(sorted((int(_r["from_node"]), int(_r["to_node"]))))
+            _op_lookup[_k] = {
+                "total_tphpd":    float(_r.get("total_tphpd",    0.0) or 0.0),
+                "stopping_tphpd": float(_r.get("stopping_tphpd", 0.0) or 0.0),
+                "passing_tphpd":  float(_r.get("passing_tphpd",  0.0) or 0.0),
+            }
+
+        def _offpeak_for_section(seg_seq: str) -> Dict:
+            vals: Dict[str, list] = {"total": [], "stop": [], "pass_": []}
+            for seg_str in str(seg_seq).split("|"):
+                parts = [p.strip() for p in seg_str.split("-") if p.strip()]
+                if len(parts) == 2:
+                    try:
+                        k = tuple(sorted((int(parts[0]), int(parts[1]))))
+                        d = _op_lookup.get(k, {})
+                        vals["total"].append(d.get("total_tphpd",    0.0))
+                        vals["stop"].append( d.get("stopping_tphpd", 0.0))
+                        vals["pass_"].append(d.get("passing_tphpd",  0.0))
+                    except ValueError:
+                        pass
+            return {
+                "total_tphpd_offpeak":    max(vals["total"],  default=0.0),
+                "stopping_tphpd_offpeak": max(vals["stop"],   default=0.0),
+                "passing_tphpd_offpeak":  max(vals["pass_"],  default=0.0),
+            }
+
+        _op_rows = df["segment_sequence"].map(_offpeak_for_section)
+        _op_frame = pd.DataFrame(list(_op_rows))
+        df["total_tphpd_offpeak"]    = _op_frame["total_tphpd_offpeak"].values
+        df["stopping_tphpd_offpeak"] = _op_frame["stopping_tphpd_offpeak"].values
+        df["passing_tphpd_offpeak"]  = _op_frame["passing_tphpd_offpeak"].values
+        # Capacity is infrastructure-limited — same for both periods
+        df["Capacity_offpeak"]    = df.get("Capacity_peak", float("nan"))
+        df["Utilization_offpeak"] = df.apply(
+            lambda r: (
+                r["total_tphpd_offpeak"] / r["Capacity_offpeak"]
+                if pd.notna(r.get("Capacity_offpeak")) and r.get("Capacity_offpeak", 0) > 0
+                else float("nan")
+            ),
+            axis=1,
+        )
+    else:
+        # No offpeak data: mirror peak as offpeak so callers always get both columns
+        for _src, _dst in [
+            ("total_tphpd_peak",    "total_tphpd_offpeak"),
+            ("stopping_tphpd_peak", "stopping_tphpd_offpeak"),
+            ("passing_tphpd_peak",  "passing_tphpd_offpeak"),
+            ("Capacity_peak",       "Capacity_offpeak"),
+            ("Utilization_peak",    "Utilization_offpeak"),
+        ]:
+            if _src in df.columns:
+                df[_dst] = df[_src]
+
+    return df
 
 
 def _traverse_path(
@@ -2239,7 +2422,10 @@ def _calculate_multi_track_capacity(
 
     remaining_tracks = formula_track - 4
 
-    if remaining_tracks == 1:
+    if remaining_tracks <= 0:
+        additional = 0.0
+
+    elif remaining_tracks == 1:
         # +1 passing track
         additional = _calculate_single_passing_track_capacity(
             total_passing_time, headway
@@ -2283,8 +2469,20 @@ def _summarise_section(
     node_names: Dict[int, str],
     node_stop_services: Dict[int, set[str]],
     node_pass_services: Dict[int, set[str]],
+    compute_capacity: bool = True,
+    grouping_strategy: str = "manual",
 ) -> Dict[str, object]:
-    """Combine edge metrics into a section summary."""
+    """Combine edge metrics into a section summary.
+
+    Args:
+        compute_capacity: When False, skips all UIC capacity formula calls and
+            returns NaN for Capacity and Utilization. Use for Set_Value mode to
+            avoid unnecessary computation.
+        grouping_strategy: How to resolve ambiguous 2-track groupings when
+            multiple options exist: 'manual' prompts interactively,
+            'conservative' picks the lowest capacity option, 'baseline' picks
+            the middle option, 'optimal' picks the highest capacity option.
+    """
     start_node = path_nodes[0]
     end_node = path_nodes[-1]
     start_name = node_names.get(start_node, f"Node_{start_node}")
@@ -2397,6 +2595,7 @@ def _summarise_section(
     n_stop = len(stopping_services)
     n_pass = len(passing_services_list)
     all_services = sorted(set(stopping_services) | set(passing_services_list))
+    service_count = len(all_services)
 
     stopping_tph_value = (
         stopping_tph_values[0] if len(stopping_tph_values) == 1 else float("nan")
@@ -2451,6 +2650,7 @@ def _summarise_section(
             return float("nan")
         return demand / capacity_value
 
+    # Default NaN capacity columns — always present in return dict regardless of compute_capacity.
     capacity_columns = {
         "capacity_single_track_tphpd": float("nan"),
         "capacity_uniform_pattern_tphpd": float("nan"),
@@ -2466,156 +2666,179 @@ def _summarise_section(
         "utilization_base": float("nan"),
         "utilization_good": float("nan"),
     }
-
-    headway = DEFAULT_HEADWAY_MIN
-    travel_time_penalty = max(0.0, float(total_stopping_time) - float(total_passing_time) - headway)
-    service_count = len(all_services)
-    strategy_metrics: List[Tuple[str, float, float]] = []
-
-    # print(f"  Capacity calculation inputs:")
-    # print(f"    Total length: {total_length}m")
-    # print(f"    Stopping time: {total_stopping_time}min")
-    # print(f"    Passing time: {total_passing_time}min")
-    # print(f"    Headway: {headway}min")
-    # print(f"    Service count: {service_count}")
-    # print(f"    All services: {all_services}")
-    # print(f"    Stopping services: {stopping_services}")
-    # print(f"    Passing services: {passing_services_list}")
-
-    # Fractional track support: .5 increments halve section travel times
-    is_fractional = (track % 1 == 0.5)  # True for 1.5, 2.5, 3.5, 4.5, 5.5, etc.
-    base_track = math.floor(track)  # 1.5→1, 2.5→2, 3.5→3, 4.5→4, etc.
-
-    if is_fractional:
-        # Halve travel times to simulate section_length_m / 2
-        total_stopping_time = total_stopping_time / 2.0
-        total_passing_time = total_passing_time / 2.0
-        travel_time_penalty = max(0.0, total_stopping_time - total_passing_time - headway)
-        formula_track = base_track
-        # print(f"    Fractional track ({track}): Using formula_track={formula_track}, times halved")
-    else:
-        formula_track = int(track)
-        # print(f"    Track formula: formula_track={formula_track} (is_fractional={is_fractional})")
-
-    if formula_track == 1:
-        single_capacity = float("nan")
-        if total_stopping_time > 0:
-            raw_capacity = _floor_capacity(60.0 / float(total_stopping_time))
-            single_capacity = raw_capacity / 2.0 if not math.isnan(raw_capacity) else float("nan")
-        capacity_columns["capacity_single_track_tphpd"] = single_capacity
-        demand_single_track = (
-            total_tphpd if not math.isnan(total_tphpd) else (total_tph / 2.0 if not math.isnan(total_tph) else float("nan"))
-        )
-        capacity_columns["utilization_single_track"] = _utilization(single_capacity, demand_single_track)
-    elif formula_track == 2:
-        if not stopping_services or not passing_services_list:
-            uniform_capacity = _floor_capacity(60.0 / headway)
-            capacity_columns["capacity_uniform_pattern_tphpd"] = uniform_capacity
-            capacity_columns["utilization_uniform_pattern"] = _utilization(
-                uniform_capacity, total_tphpd
-            )
-        elif service_count > 0:
-            strategy_definitions: List[str] = []
-            if service_count >= 6:
-                strategy_definitions = ["bad", "base", "good"]
-            elif service_count >= 4:
-                strategy_definitions = ["bad", "good"]
-            elif service_count >= 2:
-                strategy_definitions = ["bad"]
-            for strategy_key in strategy_definitions:
-                pattern_changes = _strategy_pattern_changes(strategy_key, n_stop, n_pass)
-                feasible_changes = min(pattern_changes, max(service_count - 1, 0))
-                denominator = headway + (feasible_changes / service_count) * travel_time_penalty
-                capacity_value = _floor_capacity(60.0 / denominator) if denominator > 0 else float("nan")
-                capacity_columns[f"capacity_{strategy_key}_tphpd"] = capacity_value
-                capacity_columns[f"pattern_changes_{strategy_key}"] = float(feasible_changes)
-                capacity_columns[f"utilization_{strategy_key}"] = _utilization(
-                    capacity_value, total_tphpd
-                )
-                strategy_metrics.append(
-                    (
-                        strategy_key,
-                        capacity_columns[f"capacity_{strategy_key}_tphpd"],
-                        capacity_columns[f"utilization_{strategy_key}"],
-                    )
-                )
-    selected_capacity = float("nan")
+    selected_capacity    = float("nan")
     selected_utilization = float("nan")
 
-    # Helper variables for 3+ track calculations
-    has_stopping = bool(stopping_services)
-    has_passing = bool(passing_services_list)
+    if compute_capacity:
+        headway = DEFAULT_HEADWAY_MIN
+        travel_time_penalty = max(0.0, float(total_stopping_time) - float(total_passing_time) - headway)
+        strategy_metrics: List[Tuple[str, float, float]] = []
 
-    if formula_track == 1:
-        selected_capacity = capacity_columns["capacity_single_track_tphpd"]
-        selected_utilization = capacity_columns["utilization_single_track"]
-    elif formula_track == 2:
-        if not stopping_services or not passing_services_list:
-            selected_capacity = capacity_columns["capacity_uniform_pattern_tphpd"]
-            selected_utilization = capacity_columns["utilization_uniform_pattern"]
-        elif strategy_metrics:
-            if len(strategy_metrics) == 1:
-                _, cap_value, util_value = strategy_metrics[0]
-                selected_capacity = cap_value
-                selected_utilization = util_value
-            else:
-                print(
-                    f"\nSection {section_id} ({start_node}->{end_node}) offers multiple capacity groupings."
+        # print(f"  Capacity calculation inputs:")
+        # print(f"    Total length: {total_length}m")
+        # print(f"    Stopping time: {total_stopping_time}min")
+        # print(f"    Passing time: {total_passing_time}min")
+        # print(f"    Headway: {headway}min")
+        # print(f"    Service count: {service_count}")
+        # print(f"    All services: {all_services}")
+        # print(f"    Stopping services: {stopping_services}")
+        # print(f"    Passing services: {passing_services_list}")
+
+        # Fractional track support: .5 increments halve section travel times
+        is_fractional = (track % 1 == 0.5)  # True for 1.5, 2.5, 3.5, 4.5, 5.5, etc.
+        base_track = math.floor(track)  # 1.5→1, 2.5→2, 3.5→3, 4.5→4, etc.
+
+        if is_fractional:
+            # Halve travel times to simulate section_length_m / 2
+            total_stopping_time = total_stopping_time / 2.0
+            total_passing_time = total_passing_time / 2.0
+            travel_time_penalty = max(0.0, total_stopping_time - total_passing_time - headway)
+            formula_track = base_track
+            # print(f"    Fractional track ({track}): Using formula_track={formula_track}, times halved")
+        else:
+            formula_track = int(track)
+            # print(f"    Track formula: formula_track={formula_track} (is_fractional={is_fractional})")
+
+        if formula_track == 1:
+            single_capacity = float("nan")
+            if total_stopping_time > 0:
+                # Floor the per-direction value (not the bidirectional), so odd
+                # bidirectional capacities round down conservatively rather than
+                # leaving a .5 train slot.
+                bidirectional_capacity = 60.0 / float(total_stopping_time)
+                single_capacity = _floor_capacity(bidirectional_capacity / 2.0)
+            capacity_columns["capacity_single_track_tphpd"] = single_capacity
+            demand_single_track = (
+                total_tphpd if not math.isnan(total_tphpd) else (total_tph / 2.0 if not math.isnan(total_tph) else float("nan"))
+            )
+            capacity_columns["utilization_single_track"] = _utilization(single_capacity, demand_single_track)
+        elif formula_track == 2:
+            if not stopping_services or not passing_services_list:
+                uniform_capacity = _floor_capacity(60.0 / headway)
+                capacity_columns["capacity_uniform_pattern_tphpd"] = uniform_capacity
+                capacity_columns["utilization_uniform_pattern"] = _utilization(
+                    uniform_capacity, total_tphpd
                 )
-                print("Available options:")
-                for idx, (strategy_key, cap_value, util_value) in enumerate(strategy_metrics, start=1):
-                    label = strategy_key.capitalize()
-                    cap_display = "n/a" if cap_value is None or math.isnan(cap_value) else str(cap_value)
-                    util_display = "n/a" if util_value is None or math.isnan(util_value) else f"{util_value:.3f}"
-                    print(f"  {idx}) {label} (capacity={cap_display}, utilization={util_display})")
-                while True:
-                    response = input("Select the strategy number to apply (press Enter to skip): ").strip()
-                    if response == "":
-                        print("No strategy selected; leaving Capacity/Utilization empty for this section.")
-                        break
-                    if response.isdigit():
-                        choice = int(response)
-                        if 1 <= choice <= len(strategy_metrics):
-                            _, cap_value, util_value = strategy_metrics[choice - 1]
-                            selected_capacity = cap_value
-                            selected_utilization = util_value
-                            break
-                    print("Invalid selection. Please enter a listed number or press Enter to skip.")
-    elif formula_track == 3:
-        # THREE TRACKS: 2-track (good) + 1 passing track
-        capacity_value = _calculate_3_track_capacity(
-            headway, travel_time_penalty, service_count, n_stop, n_pass,
-            total_passing_time, has_stopping, has_passing
-        )
-        selected_capacity = _floor_capacity(capacity_value)
-        capacity_columns["capacity_good_tphpd"] = selected_capacity
-        selected_utilization = _utilization(selected_capacity, total_tphpd)
-        capacity_columns["utilization_good"] = selected_utilization
-    elif formula_track == 4:
-        # FOUR TRACKS: Separated pairs with overflow handling
-        capacity_value = _calculate_4_track_capacity(
-            section_id, start_node, end_node,
-            headway, travel_time_penalty, service_count, n_stop, n_pass,
-            stopping_tphpd_estimate, passing_tphpd_estimate,
-            has_stopping, has_passing
-        )
-        selected_capacity = _floor_capacity(capacity_value)
-        capacity_columns["capacity_good_tphpd"] = selected_capacity
-        selected_utilization = _utilization(selected_capacity, total_tphpd)
-        capacity_columns["utilization_good"] = selected_utilization
-    else:  # formula_track >= 5
-        # MULTI-TRACK: Recursive building blocks (4-track base + additions)
-        capacity_value = _calculate_multi_track_capacity(
-            section_id, start_node, end_node,
-            formula_track, headway, travel_time_penalty, service_count,
-            n_stop, n_pass, total_passing_time,
-            stopping_tphpd_estimate, passing_tphpd_estimate,
-            has_stopping, has_passing
-        )
-        selected_capacity = _floor_capacity(capacity_value)
-        capacity_columns["capacity_good_tphpd"] = selected_capacity
-        selected_utilization = _utilization(selected_capacity, total_tphpd)
-        capacity_columns["utilization_good"] = selected_utilization
+            elif service_count > 0:
+                strategy_definitions: List[str] = []
+                if service_count >= 6:
+                    strategy_definitions = ["bad", "base", "good"]
+                elif service_count >= 4:
+                    strategy_definitions = ["bad", "good"]
+                elif service_count >= 2:
+                    strategy_definitions = ["bad"]
+                for strategy_key in strategy_definitions:
+                    pattern_changes = _strategy_pattern_changes(strategy_key, n_stop, n_pass)
+                    feasible_changes = min(pattern_changes, max(service_count - 1, 0))
+                    denominator = headway + (feasible_changes / service_count) * travel_time_penalty
+                    capacity_value = _floor_capacity(60.0 / denominator) if denominator > 0 else float("nan")
+                    capacity_columns[f"capacity_{strategy_key}_tphpd"] = capacity_value
+                    capacity_columns[f"pattern_changes_{strategy_key}"] = float(feasible_changes)
+                    capacity_columns[f"utilization_{strategy_key}"] = _utilization(
+                        capacity_value, total_tphpd
+                    )
+                    strategy_metrics.append(
+                        (
+                            strategy_key,
+                            capacity_columns[f"capacity_{strategy_key}_tphpd"],
+                            capacity_columns[f"utilization_{strategy_key}"],
+                        )
+                    )
+        selected_capacity = float("nan")
+        selected_utilization = float("nan")
+
+        # Helper variables for 3+ track calculations
+        has_stopping = bool(stopping_services)
+        has_passing = bool(passing_services_list)
+
+        if formula_track == 1:
+            selected_capacity = capacity_columns["capacity_single_track_tphpd"]
+            selected_utilization = capacity_columns["utilization_single_track"]
+        elif formula_track == 2:
+            if not stopping_services or not passing_services_list:
+                selected_capacity = capacity_columns["capacity_uniform_pattern_tphpd"]
+                selected_utilization = capacity_columns["utilization_uniform_pattern"]
+            elif strategy_metrics:
+                if len(strategy_metrics) == 1:
+                    _, cap_value, util_value = strategy_metrics[0]
+                    selected_capacity = cap_value
+                    selected_utilization = util_value
+                else:
+                    all_caps = [m[1] for m in strategy_metrics]
+                    if len(set(all_caps)) == 1:
+                        _, cap_value, util_value = strategy_metrics[0]
+                        selected_capacity = cap_value
+                        selected_utilization = util_value
+                    elif grouping_strategy == "conservative":
+                        _, cap_value, util_value = min(strategy_metrics, key=lambda m: m[1])
+                        selected_capacity = cap_value
+                        selected_utilization = util_value
+                    elif grouping_strategy == "optimal":
+                        _, cap_value, util_value = max(strategy_metrics, key=lambda m: m[1])
+                        selected_capacity = cap_value
+                        selected_utilization = util_value
+                    elif grouping_strategy == "baseline":
+                        _, cap_value, util_value = strategy_metrics[len(strategy_metrics) // 2]
+                        selected_capacity = cap_value
+                        selected_utilization = util_value
+                    else:  # manual
+                        print(
+                            f"\nSection {section_id} ({start_node}->{end_node}) offers multiple capacity groupings."
+                        )
+                        print("Available options:")
+                        for idx, (strategy_key, cap_value, util_value) in enumerate(strategy_metrics, start=1):
+                            label = strategy_key.capitalize()
+                            cap_display = "n/a" if cap_value is None or math.isnan(cap_value) else str(cap_value)
+                            util_display = "n/a" if util_value is None or math.isnan(util_value) else f"{util_value:.3f}"
+                            print(f"  {idx}) {label} (capacity={cap_display}, utilization={util_display})")
+                        while True:
+                            response = input("Select the strategy number to apply (press Enter to skip): ").strip()
+                            if response == "":
+                                print("No strategy selected; leaving Capacity/Utilization empty for this section.")
+                                break
+                            if response.isdigit():
+                                choice = int(response)
+                                if 1 <= choice <= len(strategy_metrics):
+                                    _, cap_value, util_value = strategy_metrics[choice - 1]
+                                    selected_capacity = cap_value
+                                    selected_utilization = util_value
+                                    break
+                            print("Invalid selection. Please enter a listed number or press Enter to skip.")
+        elif formula_track == 3:
+            # THREE TRACKS: 2-track (good) + 1 passing track
+            capacity_value = _calculate_3_track_capacity(
+                headway, travel_time_penalty, service_count, n_stop, n_pass,
+                total_passing_time, has_stopping, has_passing
+            )
+            selected_capacity = _floor_capacity(capacity_value)
+            capacity_columns["capacity_good_tphpd"] = selected_capacity
+            selected_utilization = _utilization(selected_capacity, total_tphpd)
+            capacity_columns["utilization_good"] = selected_utilization
+        elif formula_track == 4:
+            # FOUR TRACKS: Separated pairs with overflow handling
+            capacity_value = _calculate_4_track_capacity(
+                section_id, start_node, end_node,
+                headway, travel_time_penalty, service_count, n_stop, n_pass,
+                stopping_tphpd_estimate, passing_tphpd_estimate,
+                has_stopping, has_passing
+            )
+            selected_capacity = _floor_capacity(capacity_value)
+            capacity_columns["capacity_good_tphpd"] = selected_capacity
+            selected_utilization = _utilization(selected_capacity, total_tphpd)
+            capacity_columns["utilization_good"] = selected_utilization
+        else:  # formula_track >= 5
+            # MULTI-TRACK: Recursive building blocks (4-track base + additions)
+            capacity_value = _calculate_multi_track_capacity(
+                section_id, start_node, end_node,
+                formula_track, headway, travel_time_penalty, service_count,
+                n_stop, n_pass, total_passing_time,
+                stopping_tphpd_estimate, passing_tphpd_estimate,
+                has_stopping, has_passing
+            )
+            selected_capacity = _floor_capacity(capacity_value)
+            capacity_columns["capacity_good_tphpd"] = selected_capacity
+            selected_utilization = _utilization(selected_capacity, total_tphpd)
+            capacity_columns["utilization_good"] = selected_utilization
 
     # print(f"  Section {section_id} complete:")
     # print(f"    Route: {start_node} ({start_name}) -> {end_node} ({end_name})")

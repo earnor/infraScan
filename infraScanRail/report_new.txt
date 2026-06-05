@@ -1,0 +1,101 @@
+INFRASCANRAIL NEW PIPELINE - RUN LOG
+
+================================================================================
+  RUN CONFIGURATION
+================================================================================
+  Infrastructure   : Build_New  -->  build as 'AS_2026_ZH'
+  Raw version      : Raw_ZH
+  Services         : AK_2026_S18
+  GTFS version     : GTFS_SVC2026_ZH
+  Canton           : ZH
+  Catchment method : PT_Feeder  (OD: feeder_weighted)
+  Travel cost      : absolute  (transfer: explicit)
+  Capacity mode    : Dynamic
+  OD type          : canton_ZH  (base year 2035)
+  Population base  : 2035
+  Scenarios        : 100 x [2018-2100]
+--------------------------------------------------------------------------------
+
+
+--- Grid Scaling (Step 2.2) ---
+
+  Grid scaling 2023 → 2035 by Bezirk:
+  Bezirk       | Population | Employment
+  -------------+------------+-----------
+  Affoltern    |     1.1096 |     1.1074
+  Andelfingen  |     1.1214 |     1.1255
+  Bülach       |     1.0986 |     1.1006
+  Dielsdorf    |     1.1120 |     1.1149
+  Dietikon     |     1.1646 |     1.1571
+  Hinwil       |     1.1116 |     1.1128
+  Horgen       |     1.1257 |     1.1276
+  Meilen       |     1.1244 |     1.1229
+  Pfäffikon    |     1.1205 |     1.1197
+  Uster        |     1.1503 |     1.1550
+  Winterthur   |     1.1175 |     1.1163
+  Zürich       |     1.1111 |     1.1111
+  -------------+------------+-----------
+  Mean         |     1.1223 |     1.1226
+
+  Total population  :    1,609,779 (2023) →    1,802,726 (2035)
+  Total employment  :      914,349 (2023) →    1,021,643 (2035)
+
+--- Enhancement Stats: AS_2026_ZH_enhanced ---
+  Total segments         : 691
+  TT_Stopping filled     : 664 (96.1%)
+  speed_source = gtfs    : 691
+  speed_source = formula : 0
+  speed_source = estimate: 0
+  speed_source = design  : 0
+  Feeder-derived segs    : 27
+
+================================================================================
+  CALIBRATION INPUTS (Phase 4A)
+================================================================================
+  Travel cost method     : absolute
+  Transfer cost model    : explicit
+--------------------------------------------------------------------------------
+  Generalised-cost weights (cost_parameters.py)
+    W_IVT      = 1.0 (overridden)
+    W_WAIT     = 1.0 (overridden)
+    W_WALK     = 1.0 (overridden)
+    W_BIKE     = 1.0 (overridden)
+    W_TRANSFER = 1.0 (overridden)
+--------------------------------------------------------------------------------
+  Transfer-penalty parameters
+    Active transfer penalty : 7.10 min  (raw 7.1 min (no comfort weighting))
+    PI_TRANSFER_MIN         : 12.10 min  (comfort-weighted, 'fixed_value' model)
+    TRANSFER_WALK_MIN       : 4.00 min  ('explicit' model only)
+    average_train_change_time : 7.10 min  (Axhausen 2014 raw)
+    change_time_comfort_factor: 1.70
+--------------------------------------------------------------------------------
+  Wait-function parameters (piecewise; Wardman 2004 / Bates 2001)
+    WAIT_THRESHOLD_MIN = 12.00 min
+    WAIT_SLOPE_ABOVE   = 0.250
+--------------------------------------------------------------------------------
+  Speed and detour factors
+    WALK_SPEED_KMH     = 5.00
+    WALK_DETOUR        = 1.250
+    CYCLE_SPEED_KMH    = 15.00
+    CYCLE_DETOUR       = 1.200
+    CYCLE_MAX_RADIUS_M = 2500 m
+--------------------------------------------------------------------------------
+  Walk-buffer radii (catchment_allocate.py — ARE 2022)
+    BUFFER_RAIL_M = 1000 m
+    BUFFER_TRAM_M = 750 m
+    BUFFER_BUS_M  = 500 m
+================================================================================
+
+PHASE RUNTIMES
+================================================================================
+
+Phase 1: Initialisation..................................... 0m 0s (0.77s)
+Phase 2: Data Preparation................................... 0m 53s (53.02s)
+Phase 3A: Infrastructure Network Build...................... 0m 20s (20.82s)
+Phase 3B: Services Network Build............................ 1m 24s (84.46s)
+Phase 3C: Capacity Analysis................................. 0m 4s (4.98s)
+Phase 4A: Catchment Allocation.............................. 2m 44s (164.82s)
+
+================================================================================
+TOTAL TIME.................................................. 5m 28s (328.87s)
+================================================================================

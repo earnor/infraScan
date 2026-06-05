@@ -51,8 +51,9 @@ def future_scenario_pop(n):
     total_growth = scenario_zh[scenario_zh['jahr'] == 2050]['anzahl'].sum() - scenario_zh[scenario_zh['jahr'] == 2020]['anzahl'].sum()
 
     # Read the CSV file and select relevant columns
-    pop_gemeinden = pd.read_excel(r"data/_basic_data/KTZH_00000127_00001245.xlsx", 
-                                  sheet_name="Gemeinden", header=5).dropna()[['BFS-NR', 'GEMEINDE', 'TOTAL_2021']]
+    _raw = pd.read_excel(paths.POPULATION_CANTON_ZH_XLSX, sheet_name="Gemeinden", header=5)
+    _raw.columns = [str(c).strip() for c in _raw.columns]
+    pop_gemeinden = _raw.dropna(subset=['BFS-NR'])[['BFS-NR', 'GEMEINDE', 'TOTAL_2021']]
 
     def calculate_growth(pop_gemeinden, total_growth, k_urban, k_equal, k_rural):
         # Urban growth
