@@ -1044,12 +1044,13 @@ def GetCommuneEmployment(y0):  # we find employment in each commune.
     return jobvec
 
 
-def GetOevDemandPerCommune(tau = 0.13): # Data is in trips per OD combination per day. Now we assume the number of trips gone in peak hour
-    # now we extract an od matrix for oev tripps from year 2019
+def GetOevDemandPerCommune(tau = 0.13, year = 2018): # Data is in trips per OD combination per day. Now we assume the number of trips gone in peak hour
+    # now we extract an od matrix for oev tripps from the requested year (2018 actual or
+    # 2040 forecast — both present in the KTZH GVM Excel)
     # we then modify the OD matrix to fit our needs of expressing peak hour travel demand
     rawOD = pd.read_excel(paths.OD_KT_ZH_PATH)
     communalOD = rawOD.loc[
-        (rawOD['jahr'] == 2018) & (rawOD['kategorie'] == 'Verkehrsaufkommen') & (rawOD['verkehrsmittel'] == 'oev')]
+        (rawOD['jahr'] == year) & (rawOD['kategorie'] == 'Verkehrsaufkommen') & (rawOD['verkehrsmittel'] == 'oev')]
     # communalOD = data.drop(['jahr','quelle_name','quelle_gebietart','ziel_name','ziel_gebietart',"kategorie","verkehrsmittel","einheit","gebietsstand_jahr","zeit_dimension"],axis=1)
     # sum(communalOD['wert'])
     # # # Not binnenverkehr ... removes about 50% of trips

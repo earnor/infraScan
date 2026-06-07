@@ -52,8 +52,9 @@ CATCHMENT_CANTON_ABBREV = 'ZH'               # canton abbreviation — used in f
 # PHASE 2 — DATA PREPARATION  (raw filter inputs for infra + services)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Base year for the population/employment grids, OD matrices, and scenario scaling
-POPULATION_BASE_YEAR = 2035
+# Base year for the population/employment grids, OD matrices and demand scaling is
+# settings.start_year_scenario (defined in the SCENARIOS section below) — it is both
+# the deterministic snapshot year and the origin of the scenario demand trajectory.
 
 # Named output folder for infrabuild_filter_network (Phase 2 skip-guard)
 INFRA_RAW_VERSION   = 'Raw_ZH'             # infrabuild_filter_network output: data/Infrastructure/<INFRA_RAW_VERSION>/
@@ -144,9 +145,19 @@ TRANSFER_COST_MODEL = 'explicit'
 
 # OD attribution mode — how communal OD is split across a commune's stations in the PT-Feeder branch.
 # 'specific' — origins weighted by population share, destinations by FTE share (production/attraction split)
-# 'blended'  — both origins and destinations weighted by OD_SCALING_POP_WEIGHT×pop_share + OD_SCALING_EMPL_WEIGHT×empl_share (symmetric)
+# 'blended'  — both ends weighted by a count-based trip-end blend (OD_BLEND_POP_RATE·pop_in_station +
+#              OD_BLEND_EMPL_RATE·empl_in_station, normalised by commune total activity; symmetric)
 # Municipal branch is 1:1 commune→station and ignores this setting.
 OD_ATTRIBUTION_MODE = 'specific'
+
+# Blended attribution trip-end rates (PT-Feeder 'blended' mode only).
+# weight(commune→station) ∝ OD_BLEND_POP_RATE·pop_in_station + OD_BLEND_EMPL_RATE·empl_in_station,
+# normalised by the commune's total activity (α·pop_total + β·empl_total) so the no-PT share is still
+# dropped (Σ weight ≤ 1). α=β=1: one daily trip-end per resident and per job — production/attraction
+# balance for a symmetric whole-day matrix; no independent calibration available. Decoupled from the
+# OD_SCALING_* growth weights below (spatial attribution, not temporal projection).
+OD_BLEND_POP_RATE  = 1.0   # α — trip-ends per resident per day
+OD_BLEND_EMPL_RATE = 1.0   # β — trip-ends per job per day
 
 # DEPRECATED — the main pipeline always runs on the full_day union (top-level
 # files), which is the single source of truth. This setting no longer affects
@@ -160,7 +171,9 @@ TEMPORAL = 'full_day'
 # PHASE 4B — STATION OD MATRIX
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# OD scaling weights — control how population and employment growth are blended when computing per-commune OD growth factors.
+# OD growth-projection weights — blend population and employment GROWTH when computing per-commune
+# OD growth factors (get_commune_growth_factors). Temporal projection only; these no longer drive the
+# blended OD attribution (see OD_BLEND_POP_RATE / OD_BLEND_EMPL_RATE above for that).
 # OD_SCALING_EMPL_WEIGHT = 0.0 because employment is derived from population (empl scales with pop), so adding employment weight changes nothing.
 # Set OD_SCALING_EMPL_WEIGHT > 0 only when an independent employment projection is available (e.g. BFS STATENT projections beyond 2023).
 OD_SCALING_POP_WEIGHT  = 1.0
@@ -222,6 +235,9 @@ DEV_ID_START_CAP = 102000              # capacity passing sidings (auto-generate
 scenario_type = 'GENERATED'
 
 amount_of_scenarios = 100
+# Base year for the population/employment grids, OD matrices and demand scaling
+# (deterministic snapshot year) AND the origin of the scenario demand trajectory.
+# Formerly the separate POPULATION_BASE_YEAR; the two are now unified here.
 start_year_scenario = 2018
 end_year_scenario = 2100
 start_valuation_year = 2050

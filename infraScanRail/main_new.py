@@ -260,7 +260,7 @@ def phase_1_initialisation(runtimes: dict) -> tuple:
         f"  Travel cost      : {settings.TRAVEL_COST_METHOD}  "
         f"(transfer: {settings.TRANSFER_COST_MODEL})",
         f"  Capacity mode    : {settings.CAPACITY_MODE}",
-        f"  Population base  : {settings.POPULATION_BASE_YEAR}",
+        f"  Population base  : {settings.start_year_scenario}",
         f"  Scenarios        : {settings.amount_of_scenarios} x "
         f"[{settings.start_year_scenario}-{settings.end_year_scenario}]",
         "-" * 80,
@@ -335,10 +335,10 @@ def phase_2_data_preparation(
 
     # ── Step 2.2: Population & employment grid (catchment_base) ──────────────
     print("--- Step 2.2: Population & Employment Grid ---\n")
-    print(f"  Running catchment_base for POPULATION_BASE_YEAR={settings.POPULATION_BASE_YEAR} ...")
+    print(f"  Running catchment_base for start_year_scenario={settings.start_year_scenario} ...")
     import catchment_base as _cb
     scale_report = _cb.main(
-        year=settings.POPULATION_BASE_YEAR,
+        year=settings.start_year_scenario,
         do_plots=settings.PLOT_DATA,
     )
     if scale_report:
@@ -346,7 +346,7 @@ def phase_2_data_preparation(
         with open(rt_file, 'a', encoding='utf-8') as f:
             f.write("\n--- Grid Scaling (Step 2.2) ---\n")
             f.write(scale_report + "\n")
-    loaded.append(f"pop/empl grid ({settings.POPULATION_BASE_YEAR})")
+    loaded.append(f"pop/empl grid ({settings.start_year_scenario})")
     print()
 
     # ── Step 2.3: BAV infrastructure filter ──────────────────────────────────
@@ -1166,10 +1166,10 @@ def phase_4b_station_od_matrix(runtimes: dict) -> None:
     """Phase 4B — Station OD Matrix.
 
     Runs catchment_OD_preparation.prepare_all_od_matrices() for the active
-    settings.CATCHMENT_METHOD. Communal OD is scaled forward to
-    POPULATION_BASE_YEAR (per-commune geometric mean), out-of-catchment demand is
-    routed to gateway (boundary) stations, and a top-10 origins/destinations Excel
-    is exported for study-area stations.
+    settings.CATCHMENT_METHOD. Communal OD is the GVM-anchored blend at
+    start_year_scenario (2018 actual scaled toward the symmetrised 2040 forecast;
+    od_communal), out-of-catchment demand is routed to gateway (boundary) stations,
+    and a top-10 origins/destinations Excel is exported for study-area stations.
 
     Gateway assignment behaves like the municipal station assignment: if a saved
     assignment exists the user is offered to reuse or recreate it; if none exists
@@ -1198,7 +1198,7 @@ def phase_4b_station_od_matrix(runtimes: dict) -> None:
     print(f"  Attribution mode     : {settings.OD_ATTRIBUTION_MODE}")
     print(f"  Service version      : {svc_version}  -> '{svc_network}'")
     print(f"  Infrastructure       : {PIPELINE_CONFIG.infra_version}")
-    print(f"  Population base year  : {settings.POPULATION_BASE_YEAR}\n")
+    print(f"  Population base year  : {settings.start_year_scenario}\n")
 
     # ── Step 4B.2: Skip-if-cached check ──────────────────────────────────────
     expected = [paths.get_station_od_window_xlsx(svc_network, method, w)
@@ -1334,7 +1334,7 @@ def _write_station_od_to_report(method: str, svc_network: str) -> None:
         f"  Method               : {method}",
         f"  Attribution mode     : {settings.OD_ATTRIBUTION_MODE}",
         f"  Service version      : {svc_network}",
-        f"  Population base year  : {settings.POPULATION_BASE_YEAR}",
+        f"  Population base year  : {settings.start_year_scenario}",
         f"  Temporal window      : {getattr(settings, 'TEMPORAL', 'full_day')}",
         f"  OD output dir        : data/Traffic_Flow/OD/{svc_network}/",
         "=" * 80,

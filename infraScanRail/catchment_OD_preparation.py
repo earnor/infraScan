@@ -9,9 +9,9 @@ Public entry point: prepare_all_od_matrices(use_cache: bool) -> None
 
 Pipeline (W3):
   1. Load catchment boundary, rail stations (within boundary), name lookup.
-  2. Load daily communal OD via scoring.GetOevDemandPerCommune(tau=1).
-  3. Scale each OD pair forward to POPULATION_BASE_YEAR using the geometric
-     mean of its endpoints' per-commune growth factors.
+  2. Load the GVM-anchored commune OD for the target year via od_communal (2018
+     actual blended toward the symmetrised 2040 forecast; exact at 2018 / 2040,
+     population-only beyond 2040).
   4. PT-feeder branch: apply per-(commune, station) Pop/FTE shares read from
      catchment_allocate's station_commune_breakdown.csv as origin/dest weights.
   5. Municipal branch (Phase 3): commune→station 1:1 mapping (Phase 3).
@@ -113,16 +113,14 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
     # (rail_stops_sa.gpkg) and for gateway routing.
     infra_version = _resolve_infra_version(svc_version, infra_version)
 
-    scale_factors, agg_fallback = _compute_commune_scale_factors()
-
-    communal_od   = _load_communal_od()
-    total_before  = float(communal_od['wert'].sum())
-    communal_od   = _apply_scale_factors(communal_od, scale_factors, agg_fallback)
-    total_after   = float(communal_od['wert'].sum())
-    growth_pct    = 100.0 * (total_after / total_before - 1.0) if total_before else 0.0
-    print(f"  Communal OD scaled 2018→{settings.POPULATION_BASE_YEAR} "
-          f"(per-commune geometric mean): "
-          f"total {total_before:,.0f} → {total_after:,.0f} ({growth_pct:+.1f}%)")
+    # Demand layer (network-agnostic): GVM-anchored commune OD at the target year.
+    # od_communal scales the 2018 actual toward the symmetrised 2040 forecast (exact
+    # at 2018 / 2040), replacing the former pop-only geometric-mean scaling. The
+    # spatial station attribution (count-blend) below is unchanged. The target year
+    # matches the catchment pop/empl grid (settings.start_year_scenario) so demand
+    # and attribution stay on the same year.
+    target_year = settings.start_year_scenario
+    communal_od = od_communal(year=target_year)
 
     # --- Gateway routing: classify in/out of catchment, assign gateways ---
     commune_gdf, bfs_col = _load_commune_boundaries()
@@ -212,6 +210,8 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
                                          branch, svc_version, attr_mode)
                 build_corridor_sankeys(long_df, name_lookup, svc_version, branch,
                                        attr_mode)
+                _plot_sa_relation_heatmaps(long_df, sa_ids, name_lookup,
+                                           svc_version, branch)
 
     # --- Method comparison + diagnostic plots (only when both methods present) ---
     if pt_long is not None and muni_long is not None:
@@ -243,71 +243,6 @@ def _resolve_methods(method: str) -> list:
 # ===============================================================================
 # NEW SHARED HELPERS (W3)
 # ===============================================================================
-
-def _compute_commune_scale_factors() -> tuple:
-    """Per-commune forward growth factors pop_{POPULATION_BASE_YEAR} / pop_2018.
-
-    Both years are loaded via catchment_base.load_commune_pop(year) (cantonal
-    xlsx actuals 1962-2025; bezirk projection 2026-2050; Eurostat-extended
-    2051-2100). A factor is produced for every commune with positive 2018
-    population. Communes absent from either series fall back to the catchment-
-    wide aggregate factor.
-
-    Returns:
-        (factors, agg_fallback)
-        factors:      dict[int BFS_NR -> float growth factor]
-        agg_fallback: float — aggregate pop_base / pop_2018 over all communes.
-    """
-    base_year = settings.POPULATION_BASE_YEAR
-    print(f"  Computing per-commune 2018->{base_year} growth factors ...")
-
-    pop_2018 = catchment_base.load_commune_pop(2018)
-    pop_base = catchment_base.load_commune_pop(base_year)
-
-    factors = {}
-    for bfs, p0 in pop_2018.items():
-        p0 = float(p0)
-        p1 = float(pop_base.get(bfs, 0.0))
-        if p0 > 0 and p1 > 0:
-            factors[int(bfs)] = p1 / p0
-
-    tot0 = float(pop_2018[pop_2018 > 0].sum())
-    tot1 = float(pop_base[pop_base.index.isin(pop_2018.index)].sum())
-    agg_fallback = (tot1 / tot0) if tot0 > 0 else 1.0
-
-    if factors:
-        vals = np.array(list(factors.values()), dtype=float)
-        print(f"    {len(factors)} commune factors  "
-              f"min={vals.min():.3f}  median={np.median(vals):.3f}  "
-              f"max={vals.max():.3f}")
-    print(f"    Aggregate fallback factor 2018->{base_year}: {agg_fallback:.4f}")
-    return factors, agg_fallback
-
-
-def _apply_scale_factors(communal_od: pd.DataFrame, factors: dict,
-                         agg_fallback: float) -> pd.DataFrame:
-    """Scale each OD pair by the geometric mean of its endpoint growth factors.
-
-    trips_scaled(i,j) = wert(i,j) * sqrt(factor_i * factor_j)
-
-    The geometric mean avoids the over-statement of the multiplicative
-    factor_i * factor_j form (e.g. two communes each growing 20% would inflate a
-    flow by 44% rather than 20%). Communes without a factor use agg_fallback.
-
-    Args:
-        communal_od:  DataFrame[quelle_code, ziel_code, wert].
-        factors:      dict[int BFS_NR -> float] from _compute_commune_scale_factors.
-        agg_fallback: float fallback factor for communes missing from `factors`.
-
-    Returns:
-        Copy of communal_od with `wert` scaled in place.
-    """
-    od = communal_od.copy()
-    f_o = od['quelle_code'].map(factors).fillna(agg_fallback)
-    f_d = od['ziel_code'].map(factors).fillna(agg_fallback)
-    od['wert'] = od['wert'] * np.sqrt(f_o * f_d)
-    return od
-
 
 # ===============================================================================
 # GATEWAY ROUTING (out-of-catchment handling)
@@ -428,7 +363,8 @@ def _load_boundary_stations(svc_network: str, infra_version: str) -> list:
     return out
 
 
-def _build_boundary_station_index(boundary_ids: list, infra_version: str) -> dict:
+def _build_boundary_station_index(boundary_ids: list, infra_version: str,
+                                  verbose: bool = True) -> dict:
     """Map each boundary station id -> (name, shapely point).
 
     Reads the infrastructure nodes GeoPackage
@@ -436,6 +372,10 @@ def _build_boundary_station_index(boundary_ids: list, infra_version: str) -> dic
     services projection uses for boundary-station names — so every boundary
     station resolves to its name and coordinates, including the ones outside the
     catchment buffer (rail stops only cover in-catchment stations).
+
+    verbose=False suppresses the "absent from infra nodes" note (used when
+    indexing the full served-station set, where many stops are legitimately not
+    infra nodes).
     """
     if not boundary_ids:
         return {}
@@ -456,10 +396,55 @@ def _build_boundary_station_index(boundary_ids: list, infra_version: str) -> dic
         name = str(r.get('Name') or r['num_int'])
         idx[r['num_int']] = (name, r.geometry)
     missing = want - set(idx.keys())
-    if missing:
+    if missing and verbose:
         print(f"    Note: {len(missing)} boundary station(s) absent from infra "
               f"nodes: {sorted(missing)}")
     return idx
+
+
+def _build_gateway_station_rows(svc_network: str, infra_version: str = '',
+                                extra_ids=None) -> gpd.GeoDataFrame:
+    """rail_stations-schema rows for the gateway (boundary) stations plus any
+    extra_ids (e.g. convergence stations), so the routing graph can host
+    boardable gateway portals keyed by integer id.
+
+    Gateways lie outside the catchment, so catchment_allocate._load_rail_stations
+    omits them; this fills the gap from the infrastructure nodes.gpkg. Columns
+    match _load_rail_stations: stop_id, stop_name, diva_nr, id_point, mode,
+    geometry (stop_id == id_point == str(node number)).
+
+    Args:
+        svc_network:   Service network folder name.
+        infra_version: Infra subfolder holding nodes.gpkg / boundary_stations.json
+                       (resolved when empty).
+        extra_ids:     Optional iterable of additional node ids to include
+                       (convergence stations are served nodes outside the
+                       catchment, otherwise absent from the routing graph).
+
+    Returns:
+        GeoDataFrame (EPSG:2056); empty (with the schema columns) when no
+        gateways resolve.
+    """
+    cols = ['stop_id', 'stop_name', 'diva_nr', 'id_point', 'mode', 'geometry']
+    infra = _resolve_infra_version(svc_network, infra_version)
+    ids = [int(x) for x in _load_boundary_stations(svc_network, infra)]
+    if extra_ids:
+        ids += [int(x) for x in extra_ids]
+    if not ids:
+        return gpd.GeoDataFrame(columns=cols, geometry='geometry',
+                                crs=_CODEBASE_CRS)
+    bs_index = _build_boundary_station_index(sorted(set(ids)), infra)
+    rows = []
+    for sid, (nm, geom) in bs_index.items():
+        if geom is None:
+            continue
+        rows.append({'stop_id': str(int(sid)), 'stop_name': str(nm),
+                     'diva_nr': None, 'id_point': str(int(sid)),
+                     'mode': 'gateway', 'geometry': geom})
+    if not rows:
+        return gpd.GeoDataFrame(columns=cols, geometry='geometry',
+                                crs=_CODEBASE_CRS)
+    return gpd.GeoDataFrame(rows, geometry='geometry', crs=_CODEBASE_CRS)
 
 
 def _normalise_assignment(raw: dict) -> dict:
@@ -776,6 +761,150 @@ def _compute_gateway_splits(gateway_ids, svc_network, infra_version,
     return df
 
 
+def _load_line_name_lookup(svc_network: str, infra_version: str) -> dict:
+    """route_id (str) -> line_short_name from the full-day rail_lines.gpkg.
+
+    Readability only for the connection table; falls back to the route_id when a
+    name is missing.
+    """
+    lines_path = os.path.join(paths.MAIN, paths.RAIL_LINES_DIR, svc_network,
+                              infra_version, 'rail_lines.gpkg')
+    if not os.path.exists(lines_path):
+        return {}
+    out = {}
+    for lyr in list_layers(lines_path)[:, 0].tolist():
+        g = gpd.read_file(lines_path, layer=lyr)
+        if 'route_id' not in g.columns or 'line_short_name' not in g.columns:
+            continue
+        for rid, nm in zip(g['route_id'], g['line_short_name']):
+            if pd.notna(nm) and str(nm).strip():
+                out.setdefault(str(rid), str(nm).strip())
+    return out
+
+
+def _build_gateway_connections(gateway_ids, svc_network: str, infra_version: str,
+                               splits_df: pd.DataFrame, freq_lookup: dict,
+                               bs_index: dict) -> pd.DataFrame:
+    """Per-gateway service-connection table consumed by passenger routing.
+
+    One row per (gateway_station_id, direction_role, route_id, direction_id,
+    variant_rank): the crossing service's type (local/longdist from the segment
+    layer), whether it stops at the gateway, its whole-day freq_per_h_window, and
+    the nested boarding weight. Weights sum to 1.0 per (gateway, direction_role).
+
+    The boarding weight is the **nested key**: the service-type total comes from
+    the gateway's supply share (`local_share`/`longdist_share`), then *within* a
+    type demand is distributed by per-service `freq_per_h_window`. Type shares are
+    renormalised over the types actually present in that (gateway, role) so the
+    weights always sum to 1.0. (Numerically equal to a flat per-service frequency
+    split while both levels are frequency-derived; the structure is kept so the
+    type totals can be re-sourced/calibrated later.)
+
+    direction_role: 'inbound' (boundary_entry_node == gateway; used when the
+    gateway is an OD origin) / 'outbound' (boundary_exit_node == gateway; gateway
+    as an OD destination).
+
+    Only boundary gateways appear here. Convergence stations (served hubs used as
+    substitutes for dead boundary stations) route via normal graph portals, not
+    this table — their crossing services are not reliably flagged at the
+    convergence node (e.g. Zug carries no boundary crossing), so a connection-
+    table split would misroute them.
+
+    Returns an empty DataFrame when no projected segments / gateways resolve.
+    """
+    gateway_ids = sorted({int(g) for g in gateway_ids})
+    seg_path = _gateway_segments_path(svc_network, infra_version)
+    if not gateway_ids or not os.path.exists(seg_path):
+        return pd.DataFrame()
+
+    type_share = {int(r.gateway_station_id):
+                  {'local': float(r.local_share), 'longdist': float(r.longdist_share)}
+                  for r in splits_df.itertuples(index=False)} if not splits_df.empty else {}
+    layer_type = {**{l: 'local' for l in _LOCAL_LAYERS},
+                  **{l: 'longdist' for l in _LDIRT_LAYERS}}
+    name_lookup = _load_line_name_lookup(svc_network, infra_version)
+
+    try:
+        available = list_layers(seg_path)[:, 0].tolist()
+    except Exception:
+        available = []
+
+    want = set(gateway_ids)
+    recs = []
+    for layer, stype in layer_type.items():
+        if layer not in available:
+            continue
+        seg = gpd.read_file(seg_path, layer=layer)
+        if 'geometry' in seg.columns:
+            seg = pd.DataFrame(seg.drop(columns='geometry'))
+        for c in ('boundary_entry_node', 'boundary_exit_node',
+                  'from_stop_nr', 'to_stop_nr'):
+            seg[c] = pd.to_numeric(seg.get(c), errors='coerce')
+        for gid in want:
+            for role, col in (('inbound', 'boundary_entry_node'),
+                              ('outbound', 'boundary_exit_node')):
+                sub = seg[seg[col] == gid]
+                if sub.empty:
+                    continue
+                for (rid, did, vr), _g in sub.groupby(
+                        ['GTFS_ID', 'direction_id', 'variant_rank'], sort=False):
+                    freq = float(freq_lookup.get((str(rid), str(did), str(vr)), 0.0))
+                    vrows = seg[(seg['GTFS_ID'] == rid)
+                                & (seg['direction_id'] == did)
+                                & (seg['variant_rank'] == vr)]
+                    stops = bool((vrows['from_stop_nr'] == gid).any()
+                                 or (vrows['to_stop_nr'] == gid).any())
+                    recs.append({
+                        'gateway_station_id': gid,
+                        'station_name': bs_index.get(gid, (str(gid), None))[0],
+                        'direction_role': role,
+                        'route_id': str(rid), 'direction_id': str(did),
+                        'variant_rank': vr,
+                        'line_short_name': name_lookup.get(str(rid), str(rid)),
+                        'service_type': stype,
+                        'stops_at_gateway': stops,
+                        'freq_per_h_window': round(freq, 4),
+                    })
+
+    df = pd.DataFrame(recs)
+    if df.empty:
+        return df
+    df = df.drop_duplicates(['gateway_station_id', 'direction_role',
+                             'route_id', 'direction_id', 'variant_rank'])
+    df = _apply_nested_boarding_weights(df, type_share)
+    return df.sort_values(['gateway_station_id', 'direction_role',
+                           'service_type', 'freq_per_h_window'],
+                          ascending=[True, True, True, False]).reset_index(drop=True)
+
+
+def _apply_nested_boarding_weights(df: pd.DataFrame, type_share: dict) -> pd.DataFrame:
+    """Add boarding_weight per (gateway, direction_role): renormalised type share
+    × within-type frequency share. Weights sum to 1.0 per group (or 0 when the
+    group has no positive frequency)."""
+    out = []
+    for (gid, _role), grp in df.groupby(['gateway_station_id', 'direction_role'],
+                                        sort=False):
+        grp = grp.copy()
+        ts = type_share.get(int(gid), {})
+        tfreq = grp.groupby('service_type')['freq_per_h_window'].sum()
+        present = [t for t in tfreq.index if tfreq[t] > 0]
+        denom = sum(ts.get(t, 0.0) for t in present)
+        if present and denom > 0:
+            eff = {t: ts.get(t, 0.0) / denom for t in present}
+        elif present:                       # no supply share available -> equal types
+            eff = {t: 1.0 / len(present) for t in present}
+        else:
+            eff = {}
+        w = []
+        for _, row in grp.iterrows():
+            t, f = row['service_type'], row['freq_per_h_window']
+            intra = (f / tfreq[t]) if tfreq.get(t, 0.0) > 0 else 0.0
+            w.append(round(eff.get(t, 0.0) * intra, 6))
+        grp['boarding_weight'] = w
+        out.append(grp)
+    return pd.concat(out, ignore_index=True)
+
+
 def _build_region_gateways_table(gw_weights: dict, zone_names: dict,
                                  bs_index: dict) -> pd.DataFrame:
     """Wide region→gateway share table for the workbook's 'Region_Gateways' sheet.
@@ -838,6 +967,19 @@ def _write_gateway_splits_xlsx(splits: pd.DataFrame, gw_weights: dict,
           f"{len(region_tbl)} regions) → {out_path}")
 
 
+def _write_gateway_connections_xlsx(connections: pd.DataFrame,
+                                    out_path: str) -> None:
+    """Write the gateway service-connection table (single 'Connections' sheet)."""
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    df = connections if connections is not None and not connections.empty \
+        else pd.DataFrame()
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Connections', index=False)
+    n_gw = df['gateway_station_id'].nunique() if not df.empty else 0
+    print(f"    Gateway service-connection table ({len(df)} variant-rows, "
+          f"{n_gw} gateways) → {out_path}")
+
+
 def _build_gateway_weights(assignment: dict, volumes: dict) -> dict:
     """Turn a code -> [station, ...] assignment into code -> [(station, share)].
 
@@ -888,6 +1030,192 @@ def _build_gateway_od(external_od: pd.DataFrame, gw_weights: dict,
     return pd.DataFrame(rows, columns=['quelle_code', 'ziel_code', 'wert'])
 
 
+def _served_station_ids(svc_network: str, infra_version: str) -> set:
+    """Station numbers that appear as a from/to stop in the projected segments
+    (i.e. boardable in the service network) — used to validate convergence
+    targets."""
+    seg_path = _gateway_segments_path(svc_network, infra_version)
+    if not os.path.exists(seg_path):
+        return set()
+    served = set()
+    for lyr in list_layers(seg_path)[:, 0].tolist():
+        g = gpd.read_file(seg_path, layer=lyr)
+        for col in ('from_stop_nr', 'to_stop_nr'):
+            served |= set(pd.to_numeric(g.get(col), errors='coerce')
+                          .dropna().astype(int).tolist())
+    return served
+
+
+def _served_station_index(svc_network: str, infra_version: str) -> dict:
+    """dict[int station id -> name] for served stations (boardable in the service
+    network), so convergence targets can be entered and stored by name as well as
+    by number."""
+    served = _served_station_ids(svc_network, infra_version)
+    if not served:
+        return {}
+    return {i: nm for i, (nm, _g)
+            in _build_boundary_station_index(sorted(served), infra_version,
+                                             verbose=False).items()}
+
+
+def _resolve_station_token(text, served_ids: set, id_to_name: dict,
+                           allow_substring: bool = True) -> tuple:
+    """Resolve a typed token (station number or name) to a served station id.
+
+    Returns (id, None) on success, else (None, message). Matching: a numeric token
+    is taken as the id; otherwise a case-insensitive exact name match, then
+    (optionally) a unique case-insensitive substring match.
+    """
+    t = str(text).strip()
+    if not t:
+        return None, "empty"
+    if t.isdigit():
+        return (int(t), None) if int(t) in served_ids \
+            else (None, f"id {t} is not a served station")
+    tl = t.lower()
+    exact = [i for i, n in id_to_name.items()
+             if i in served_ids and str(n).strip().lower() == tl]
+    if len(exact) == 1:
+        return exact[0], None
+    if len(exact) > 1:
+        return None, "ambiguous name: " + ", ".join(
+            f"{id_to_name[i]} ({i})" for i in exact)
+    if allow_substring:
+        subs = [i for i, n in id_to_name.items()
+                if i in served_ids and tl in str(n).strip().lower()]
+        if len(subs) == 1:
+            return subs[0], None
+        if len(subs) > 1:
+            return None, "matches several: " + ", ".join(
+                f"{id_to_name[i]} ({i})" for i in subs[:10])
+    return None, "no served station matches"
+
+
+def _load_convergence_map(gateway_dir: str, id_to_name: dict = None) -> dict:
+    """Load the optional convergence-map override
+    (gateway_convergence_map.json): {"<zone_or_gateway_id>": <served_station>}.
+
+    A key matching an assignment zone redirects that whole zone to the convergence
+    station; any other key is treated as a gateway station id and replaced wherever
+    it appears. The value may be a bare id, a readable {"id":.., "name":..} object,
+    or a station NAME (a bare string or {"name":..}); names are resolved against
+    served stations when `id_to_name` is supplied (exact case-insensitive match).
+    Absent file -> {}.
+    """
+    path = os.path.join(gateway_dir, 'gateway_convergence_map.json')
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding='utf-8') as f:
+        raw = json.load(f)
+    served_ids = set(id_to_name) if id_to_name else set()
+    out = {}
+    for k, v in raw.items():
+        val  = v.get('id') if isinstance(v, dict) else v
+        name = v.get('name') if isinstance(v, dict) else None
+        sid = None
+        if val is not None:
+            try:
+                sid = int(val)
+            except (ValueError, TypeError):
+                name = name or val          # value was a name string, not an id
+        if sid is None and name and id_to_name:
+            sid, msg = _resolve_station_token(name, served_ids, id_to_name,
+                                              allow_substring=False)
+            if sid is None:
+                print(f"  Convergence map: cannot resolve '{name}' for key {k} "
+                      f"({msg}); skipped.")
+                continue
+        if sid is None:
+            continue
+        try:
+            out[int(k)] = sid
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def _save_convergence_map(conv_map: dict, bs_index: dict, gateway_dir: str) -> None:
+    """Persist the convergence map in the readable {key: {"id":.., "name":..}} form."""
+    path = os.path.join(gateway_dir, 'gateway_convergence_map.json')
+    payload = {str(k): {'id': int(v),
+                        'name': bs_index.get(int(v), (str(int(v)), None))[0]}
+               for k, v in conv_map.items()}
+    os.makedirs(gateway_dir, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _apply_convergence_redirect(assignment: dict, conv_map: dict) -> dict:
+    """Redirect `assignment` per `conv_map`. Keys matching an assignment zone
+    redirect that whole zone to [conv_id]; other keys are gateway station ids and
+    are replaced wherever they occur (order-preserving dedupe). Mutates and returns
+    `assignment`."""
+    if not conv_map:
+        return assignment
+    for key, conv in conv_map.items():
+        if key in assignment:
+            assignment[key] = [int(conv)]
+    gw_redirect = {k: int(v) for k, v in conv_map.items() if k not in assignment}
+    if gw_redirect:
+        for z, stns in assignment.items():
+            seen, out = set(), []
+            for s in (gw_redirect.get(int(s), int(s)) for s in stns):
+                if s not in seen:
+                    seen.add(s)
+                    out.append(s)
+            assignment[z] = out
+    return assignment
+
+
+def _guard_dead_gateways(assignment: dict, dead_set: set, served_ids: set,
+                         id_to_name: dict, bs_index: dict, conv_map: dict,
+                         gateway_dir: str) -> dict:
+    """Ensure no zone routes only through dead (no-service) gateways. Zones whose
+    entire assignment is dead get a convergence station: prompt interactively, else
+    raise. The prompt accepts a station NAME or number; the resolved name+number is
+    persisted. Mutates+returns assignment.
+    """
+    problem = {z: stns for z, stns in assignment.items()
+               if stns and all(int(s) in dead_set for s in stns)}
+    if not problem:
+        return assignment
+    conv_json = os.path.join(gateway_dir, 'gateway_convergence_map.json')
+    if not _INTERACTIVE_MODE:
+        raise FileNotFoundError(
+            f"Gateway zones {sorted(problem)} route only through dead (no-service) "
+            f"boundary stations: "
+            f"{ {z: [bs_index.get(int(s),(str(s),None))[0] for s in stns] for z,stns in problem.items()} }. "
+            f"Add a convergence (served upstream) station for each to {conv_json}, "
+            f"or run catchment_OD_preparation standalone to assign one.")
+    print(f"\n  {len(problem)} zone(s) route only through dead gateways — assign a "
+          f"convergence (served upstream) station for each (enter a station name "
+          f"or number):")
+    changed = False
+    for z, stns in problem.items():
+        dead_names = ', '.join(bs_index.get(int(s), (str(s), None))[0] for s in stns)
+        while True:
+            raw = input(f"    Zone {z} (dead: {dead_names}) -> served station "
+                        f"name or number (or 's' to skip/drop demand): ").strip()
+            if raw.lower() == 's':
+                print(f"      zone {z} left dead (demand will drop)")
+                break
+            sid, msg = _resolve_station_token(raw, served_ids, id_to_name)
+            if sid is None:
+                print(f"      {msg} — enter a served station name or number, or 's'.")
+                continue
+            nm = id_to_name.get(sid, str(sid))
+            assignment[z] = [sid]
+            conv_map[z] = sid
+            bs_index[sid] = (nm, bs_index.get(sid, (None, None))[1])
+            changed = True
+            print(f"      zone {z} -> {nm} ({sid})")
+            break
+    if changed:
+        _save_convergence_map(conv_map, bs_index, gateway_dir)
+        print(f"  Saved convergence map → {conv_json}")
+    return assignment
+
+
 def _prepare_gateways(external_od, commune_gdf, bfs_col, in_bnd_bfs,
                       svc_network, infra_version) -> dict:
     """Load gateway stations, assign external zones (multi) + out-of-catchment
@@ -930,9 +1258,43 @@ def _prepare_gateways(external_od, commune_gdf, bfs_col, in_bnd_bfs,
     for code, stn in commune_map.items():
         assignment[code] = [stn]
 
-    used_gateways = {s for stations in assignment.values() for s in stations}
-    splits = _compute_gateway_splits(used_gateways, svc_network, infra,
-                                     bs_index)
+    # Convergence overrides: redirect specific zones / dead gateways to an upstream
+    # served station (e.g. Schaffhausen for Thayngen+Neunkirch, Zug for Zug Casino).
+    # Loaded from a separate map so the boundary assignment stays untouched.
+    boundary_set = {int(b) for b in boundary_ids}
+    served_names = _served_station_index(svc_network, infra)   # id -> name
+    served_ids   = set(served_names)
+    conv_map     = _load_convergence_map(gateway_dir, served_names)
+    if conv_map:
+        bad = sorted({int(v) for v in conv_map.values()
+                      if served_ids and int(v) not in served_ids})
+        if bad:
+            raise ValueError(
+                f"Convergence target(s) {bad} are not served stations (no stop in "
+                f"the service network); pick an upstream served station.")
+        assignment = _apply_convergence_redirect(assignment, conv_map)
+
+    # Dead-gateway guard: boundary gateways with no crossing service can't board
+    # demand. Detect them, then ensure no zone routes only through dead gateways
+    # (prompt for a convergence station interactively, else raise).
+    boundary_used = {int(s) for stns in assignment.values() for s in stns} & boundary_set
+    splits = _compute_gateway_splits(boundary_used, svc_network, infra, bs_index)
+    dead_set = {int(r.gateway_station_id) for r in splits.itertuples(index=False)
+                if (float(r.local_freq) + float(r.longdist_freq)) == 0.0}
+    assignment = _guard_dead_gateways(assignment, dead_set, served_ids,
+                                      served_names, bs_index, conv_map, gateway_dir)
+
+    # Final gateway set (post redirect + guard). Convergence stations are served
+    # nodes outside the catchment; pull their names/geometry into bs_index so the
+    # name lookup and the OD matrix label them, and split off the boundary subset
+    # (only boundary gateways get a connection-table entry; convergence stations
+    # route via normal graph portals).
+    used_gateways = {int(s) for stns in assignment.values() for s in stns}
+    conv_ids      = sorted(used_gateways - boundary_set)
+    if conv_ids:
+        bs_index.update(_build_boundary_station_index(conv_ids, infra))
+    boundary_used = used_gateways & boundary_set
+    splits = _compute_gateway_splits(boundary_used, svc_network, infra, bs_index)
 
     volumes = {}
     if not splits.empty:
@@ -942,13 +1304,24 @@ def _prepare_gateways(external_od, commune_gdf, bfs_col, in_bnd_bfs,
 
     _write_gateway_splits_xlsx(splits, gw_weights, zone_names, bs_index, splits_xlsx)
 
+    # Per-service connection table: which crossing services (stopping + passing)
+    # each boundary gateway feeds, with the nested type-then-frequency boarding
+    # weights the router uses to inject + split demand. Written for routing.
+    freq_lookup = _load_line_freq_per_h_window(svc_network, infra)
+    connections = _build_gateway_connections(
+        boundary_used, svc_network, infra, splits, freq_lookup, bs_index)
+    conn_xlsx = paths.get_gateway_connections_xlsx(svc_network)
+    _write_gateway_connections_xlsx(connections, conn_xlsx)
+
     multi = sum(1 for v in gw_weights.values() if len(v) > 1)
     print(f"  Gateways ready: {len(zone_map)} external zones "
           f"({multi} split across multiple gateways), "
           f"{len(commune_map)} out-of-catchment communes, "
-          f"{len(used_gateways)} gateways used.")
+          f"{len(used_gateways)} gateways used"
+          f"{f' ({len(conv_ids)} convergence)' if conv_ids else ''}.")
     return {'gw_weights': gw_weights, 'gateway_station_ids': used_gateways,
-            'bs_index': bs_index, 'splits': splits}
+            'bs_index': bs_index, 'splits': splits, 'connections': connections,
+            'convergence_ids': conv_ids}
 
 
 def _build_station_name_lookup(rail_stations) -> dict:
@@ -1202,15 +1575,19 @@ def _load_station_breakdown(method: str) -> pd.DataFrame:
 
     pop_share_pct / empl_share_pct are the population / FTE shares of each
     commune attributed to a station — already computed by the allocation
-    (year-scaled, boundary-filtered, no-PT cells excluded), so they are used
-    directly as the OD origin / destination weights. No-PT rows (station id
-    NO_PT_ID = -1) are dropped; the remaining shares sum to ≤ 1 per commune.
+    (year-scaled, boundary-filtered, no-PT cells excluded). The 'specific' mode
+    uses the shares directly as origin / destination weights; the 'blended' mode
+    uses the absolute counts (pop_count / empl_count) with the commune totals
+    (pop_total / empl_total) for a count-based trip-end blend. No-PT rows (station
+    id NO_PT_ID = -1) are dropped; the remaining shares sum to ≤ 1 per commune.
 
     Args:
         method: 'pt_feeder' | 'municipal' — selects the versioned data dir.
 
     Returns:
-        DataFrame[BFS (int), station_id (int), pop_share (float), empl_share (float)].
+        DataFrame[BFS (int), station_id (int), pop_share, empl_share, pop_count,
+        empl_count, pop_total, empl_total (floats)]. pop_total / empl_total are
+        the commune-wide totals, constant per commune (repeated on every row).
     """
     data_dir = (catchment_base.PT_FEEDER_DATA_DIR if method == 'pt_feeder'
                 else catchment_base.MUNICIPAL_DATA_DIR)
@@ -1222,7 +1599,9 @@ def _load_station_breakdown(method: str) -> pd.DataFrame:
         )
     print(f"  Loading station-commune catchment breakdown ({method}) ...")
     df = pd.read_csv(path, encoding='utf-8-sig')
-    df = df[['BFS_NR', 'station_number', 'pop_share_pct', 'empl_share_pct']].copy()
+    df = df[['BFS_NR', 'station_number', 'pop_share_pct', 'empl_share_pct',
+             'pop_in_station', 'empl_in_station',
+             'pop_total_commune', 'empl_total_commune']].copy()
     df['BFS']        = pd.to_numeric(df['BFS_NR'],         errors='coerce')
     df['station_id'] = pd.to_numeric(df['station_number'], errors='coerce')
     df = df.dropna(subset=['BFS', 'station_id'])
@@ -1231,7 +1610,12 @@ def _load_station_breakdown(method: str) -> pd.DataFrame:
     df = df[df['station_id'] > 0]   # drop No-PT sentinel (NO_PT_ID = -1)
     df['pop_share']  = pd.to_numeric(df['pop_share_pct'],  errors='coerce').fillna(0.0) / 100.0
     df['empl_share'] = pd.to_numeric(df['empl_share_pct'], errors='coerce').fillna(0.0) / 100.0
-    out = df[['BFS', 'station_id', 'pop_share', 'empl_share']].reset_index(drop=True)
+    df['pop_count']  = pd.to_numeric(df['pop_in_station'],     errors='coerce').fillna(0.0)
+    df['empl_count'] = pd.to_numeric(df['empl_in_station'],    errors='coerce').fillna(0.0)
+    df['pop_total']  = pd.to_numeric(df['pop_total_commune'],  errors='coerce').fillna(0.0)
+    df['empl_total'] = pd.to_numeric(df['empl_total_commune'], errors='coerce').fillna(0.0)
+    out = df[['BFS', 'station_id', 'pop_share', 'empl_share',
+              'pop_count', 'empl_count', 'pop_total', 'empl_total']].reset_index(drop=True)
     print(f"    {out['BFS'].nunique()} communes, {out['station_id'].nunique()} stations, "
           f"{len(out):,} (commune, station) pairs")
     return out
@@ -1298,8 +1682,9 @@ def _run_pt_feeder_branch(communal_od: pd.DataFrame, gateway_station_ids=None,
 
     Attribution mode:
         'specific' — origin weights = population share, dest weights = FTE share.
-        'blended'  — both sides = OD_SCALING_POP_WEIGHT×pop_share +
-                     OD_SCALING_EMPL_WEIGHT×empl_share (symmetric).
+        'blended'  — both sides = count-based trip-end blend
+                     (OD_BLEND_POP_RATE·pop_in_station + OD_BLEND_EMPL_RATE·empl_in_station,
+                     normalised by commune total activity; symmetric).
 
     Gateway ends in the OD are already station ids (the external leg was expanded
     upstream), so each gateway station is injected as an identity (weight 1.0) row
@@ -1312,7 +1697,34 @@ def _run_pt_feeder_branch(communal_od: pd.DataFrame, gateway_station_ids=None,
     """
     print("\n  --- PT-feeder branch ---")
     breakdown = _load_station_breakdown('pt_feeder')
+    orig_weights, dest_weights = _attribution_weight_tables(
+        breakdown, attribution_mode, gateway_station_ids)
 
+    print(f"    Origin weights: {orig_weights['BFS'].nunique()} communes, "
+          f"{orig_weights['station_id'].nunique()} stations")
+    print(f"    Dest  weights: {dest_weights['BFS'].nunique()} communes, "
+          f"{dest_weights['station_id'].nunique()} stations")
+
+    long_df = _reaggregate_to_stations(communal_od, orig_weights, dest_weights)
+    return long_df, orig_weights
+
+
+def _attribution_weight_tables(breakdown: pd.DataFrame,
+                               attribution_mode: str = 'blended',
+                               gateway_station_ids=None) -> tuple:
+    """Build the (orig_weights, dest_weights) spatial attribution tables from a
+    station-commune breakdown.
+
+    'specific' — orig = population share, dest = FTE share (directional).
+    'blended'  — both = count-based trip-end blend (symmetric).
+    Gateway stations are injected as identity (weight 1.0) rows so an already-
+    expanded gateway end resolves to itself. Shared by _run_pt_feeder_branch and
+    the standalone attribution_weights() seam so both stay in lock-step.
+
+    Returns:
+        (orig_weights[BFS, station_id, orig_weight],
+         dest_weights[BFS, station_id, dest_weight]).
+    """
     if attribution_mode == 'blended':
         blended      = _compute_blended_weights(breakdown)
         orig_weights = blended.rename(columns={'weight': 'orig_weight'})
@@ -1322,19 +1734,11 @@ def _run_pt_feeder_branch(communal_od: pd.DataFrame, gateway_station_ids=None,
                         .rename(columns={'pop_share': 'orig_weight'}))
         dest_weights = (breakdown[['BFS', 'station_id', 'empl_share']]
                         .rename(columns={'empl_share': 'dest_weight'}))
-
     orig_weights = _inject_identity_weights(orig_weights, gateway_station_ids,
                                             'orig_weight')
     dest_weights = _inject_identity_weights(dest_weights, gateway_station_ids,
                                             'dest_weight')
-
-    print(f"    Origin weights: {orig_weights['BFS'].nunique()} communes, "
-          f"{orig_weights['station_id'].nunique()} stations")
-    print(f"    Dest  weights: {dest_weights['BFS'].nunique()} communes, "
-          f"{dest_weights['station_id'].nunique()} stations")
-
-    long_df = _reaggregate_to_stations(communal_od, orig_weights, dest_weights)
-    return long_df, orig_weights
+    return orig_weights, dest_weights
 
 
 def _inject_identity_weights(weights: pd.DataFrame, gateway_station_ids,
@@ -1351,26 +1755,163 @@ def _inject_identity_weights(weights: pd.DataFrame, gateway_station_ids,
 
 
 def _compute_blended_weights(breakdown: pd.DataFrame) -> pd.DataFrame:
-    """Symmetric blended weight per (commune, station):
-    (POP_WEIGHT×pop_share + EMPL_WEIGHT×empl_share) / (POP_WEIGHT + EMPL_WEIGHT).
+    """Symmetric count-based trip-end weight per (commune, station):
 
-    With OD_SCALING_EMPL_WEIGHT = 0 this reduces to the population share, applied
-    to both origin and destination sides. pop_share / empl_share come from the
-    catchment breakdown (each (commune, station) row carries both).
+        weight = (α·pop_in_station + β·empl_in_station)
+                 / (α·pop_total_commune + β·empl_total_commune)
+
+    α = OD_BLEND_POP_RATE, β = OD_BLEND_EMPL_RATE (both 1.0 by default: one daily
+    trip-end per resident and per job). Normalising by the commune total — not the
+    per-station sum — keeps Σ weight ≤ 1 per commune, so the no-PT share is dropped
+    exactly as in the share-based attribution. Applied to both origin and
+    destination ends, which (with a symmetric communal OD) yields a symmetric
+    station OD. Employment's influence is proportional to the actual job count, so
+    job-dense stations are credited without a global ratio overriding the local
+    pop:jobs mix. For single-station communes this resolves to ≈ 1.0 (minus no-PT),
+    matching the previous behaviour; multi-station communes shift toward their
+    job-dense stations.
 
     Args:
-        breakdown: DataFrame[BFS, station_id, pop_share, empl_share] from
-                   _load_station_breakdown.
+        breakdown: DataFrame[BFS, station_id, pop_count, empl_count, pop_total,
+                   empl_total] from _load_station_breakdown.
 
     Returns:
         DataFrame[BFS, station_id, weight].
     """
-    pw = float(settings.OD_SCALING_POP_WEIGHT)
-    ew = float(settings.OD_SCALING_EMPL_WEIGHT)
-    denom = (pw + ew) if (pw + ew) > 0 else 1.0
+    a = float(settings.OD_BLEND_POP_RATE)
+    b = float(settings.OD_BLEND_EMPL_RATE)
     m = breakdown.copy()
-    m['weight'] = (pw * m['pop_share'] + ew * m['empl_share']) / denom
+    numer = a * m['pop_count'] + b * m['empl_count']
+    denom = a * m['pop_total'] + b * m['empl_total']
+    m['weight'] = np.where(denom > 0, numer / denom, 0.0)
     return m[['BFS', 'station_id', 'weight']]
+
+
+# ===============================================================================
+# COMMUNE OD DEMAND LAYER (GVM-anchored, network-agnostic)
+# ===============================================================================
+# Year-parameterised commune OD: the 2018 actual scaled by population for the
+# trajectory shape and converging exactly to the canton's symmetrised 2040 forecast
+# at OD_ANCHOR_YEAR (both years are in the KTZH GVM Excel). No base-year switch —
+# the blend is a continuous function of year. Decoupled from the spatial station
+# attribution (the count-blend) below; the future scenario loop multiplies a
+# per-commune population deviation onto od_communal (the `scenario` hook).
+#
+#     T(i,j;Y) = T18·pf(i,j;Y) + w(Y)·[Gsym(i,j) − T18·pf(i,j;OD_ANCHOR_YEAR)]
+#     pf(i,j;Y) = sqrt(g_i(Y)·g_j(Y)),  g = pop(Y)/pop(OD_BASE_YEAR)
+#     Gsym(i,j) = mean(T2040(i,j), T2040(j,i))   # symmetrised → whole-day invariant
+#     w(Y)      = clip((Y−OD_BASE_YEAR)/(OD_ANCHOR_YEAR−OD_BASE_YEAR), 0, 1)
+#     Y>OD_ANCHOR_YEAR: T = Gsym · pf(Y)/pf(OD_ANCHOR_YEAR)   # population beyond anchor
+
+# Immutable data anchors (years present in the KTZH GVM Excel) — the single source
+# of truth for the OD trajectory; not run parameters.
+OD_BASE_YEAR = 2018
+OD_ANCHOR_YEAR = 2040
+
+
+def od_communal(year: int, scenario=None) -> pd.DataFrame:
+    """GVM-anchored commune OD at `year` (symmetric, whole-day, full daily demand).
+
+    Additive blend of the population-scaled 2018 OD and the symmetrised 2040
+    forecast, phased so the result equals the 2018 OD at OD_BASE_YEAR and the 2040
+    forecast at OD_ANCHOR_YEAR exactly; beyond OD_ANCHOR_YEAR the 2040 level is
+    carried forward by population only. The additive form (vs multiplicative)
+    handles the ~1,210 pairs that are new in 2040 (zero in 2018) and never divides
+    by a 2018 flow.
+
+    Args:
+        year:     Target year for the OD.
+        scenario: Reserved scenario hook for the future scenario loop (dormant).
+                  When wired, it resolves to a per-commune population deviation
+                  delta_i = pop_i(scenario, year) / pop_i(mean, year) (ratio-to-mean,
+                  ~1 centrally), applied per pair as wert * sqrt(delta_i * delta_j),
+                  so the scenario fan is centred on this GVM-anchored mean without
+                  double-counting the structural uplift already in the 2040 anchor.
+                  None -> deterministic mean (the central scenario at `year`).
+
+    Returns:
+        DataFrame[quelle_code (int), ziel_code (int), wert (float)] with positive
+        demand; symmetric. Used by both the PT-Feeder and Municipal branches.
+    """
+    if scenario is not None:
+        # Layer-2 hook (see scenario/delta seams): the scenario loop will scale the
+        # mean by per-commune population deviation. Not yet wired — return the mean.
+        pass
+
+    t18 = _od_year_symmetric(OD_BASE_YEAR).rename(columns={'wert': 't18'})
+    g   = _od_year_symmetric(OD_ANCHOR_YEAR).rename(columns={'wert': 'g'})
+    df  = t18.merge(g, on=['quelle_code', 'ziel_code'], how='outer')
+    df[['t18', 'g']] = df[['t18', 'g']].fillna(0.0)
+
+    f_y, agg_y = _commune_pop_factors(year)
+    f_a, agg_a = _commune_pop_factors(OD_ANCHOR_YEAR)
+
+    def _pf(factors, agg):
+        fq = df['quelle_code'].map(factors).fillna(agg)
+        fz = df['ziel_code'].map(factors).fillna(agg)
+        return np.sqrt(fq.to_numpy(dtype=float) * fz.to_numpy(dtype=float))
+
+    pf_y = _pf(f_y, agg_y)
+    pf_a = _pf(f_a, agg_a)
+    span = float(OD_ANCHOR_YEAR - OD_BASE_YEAR)
+    w = min(max((year - OD_BASE_YEAR) / span, 0.0), 1.0)
+
+    t18v, gv = df['t18'].to_numpy(dtype=float), df['g'].to_numpy(dtype=float)
+    blended = t18v * pf_y + w * (gv - t18v * pf_a)
+    beyond = np.where(pf_a > 0, gv * (pf_y / pf_a), gv)
+    wert = np.where(year > OD_ANCHOR_YEAR, beyond, blended)
+    df['wert'] = np.clip(wert, 0.0, None)
+
+    out = df[df['wert'] > 0][['quelle_code', 'ziel_code', 'wert']].reset_index(drop=True)
+    print(f"  od_communal({year}): {len(out):,} pairs, total {out['wert'].sum():,.0f} "
+          f"(w={w:.2f}; 2018={t18v.sum():,.0f}, Gsym={gv.sum():,.0f})")
+    return out
+
+
+def _od_year_symmetric(year: int) -> pd.DataFrame:
+    """Load one GVM year (tau=1 full daily demand), drop intrazonal, symmetrise.
+
+    The raw 2040 forecast carries ~1,148 directionally-asymmetric pairs; averaging
+    (i,j)/(j,i) preserves the whole-day-symmetric invariant and conserves total
+    demand. The already-symmetric 2018 actual round-trips unchanged.
+    """
+    od = scoring.GetOevDemandPerCommune(tau=1, year=year)
+    od = od[od['quelle_code'] != od['ziel_code']].copy()
+    od = od[od['wert'] > 0][['quelle_code', 'ziel_code', 'wert']].copy()
+    od['quelle_code'] = od['quelle_code'].astype(int)
+    od['ziel_code']   = od['ziel_code'].astype(int)
+    if od.empty:
+        return od
+    od['lo'] = np.minimum(od['quelle_code'], od['ziel_code'])
+    od['hi'] = np.maximum(od['quelle_code'], od['ziel_code'])
+    pair_mean = od.groupby(['lo', 'hi'], as_index=False)['wert'].mean()
+    fwd = pair_mean.rename(columns={'lo': 'quelle_code', 'hi': 'ziel_code'})
+    rev = pair_mean.rename(columns={'hi': 'quelle_code', 'lo': 'ziel_code'})
+    out = pd.concat([fwd, rev], ignore_index=True)
+    out = out[out['quelle_code'] != out['ziel_code']]
+    return out[['quelle_code', 'ziel_code', 'wert']].reset_index(drop=True)
+
+
+def _commune_pop_factors(year: int) -> tuple:
+    """Per-commune population factor pop(year)/pop(OD_BASE_YEAR).
+
+    Returns:
+        (factors, agg_fallback)
+        factors:      dict[int BFS_NR -> float] for communes with positive base pop.
+        agg_fallback: float aggregate pop(year)/pop(OD_BASE_YEAR) for missing communes.
+    """
+    pop_base = catchment_base.load_commune_pop(OD_BASE_YEAR)
+    pop_year = catchment_base.load_commune_pop(year)
+    factors = {}
+    for bfs, p0 in pop_base.items():
+        p0 = float(p0)
+        p1 = float(pop_year.get(bfs, 0.0))
+        if p0 > 0 and p1 > 0:
+            factors[int(bfs)] = p1 / p0
+    tot0 = float(pop_base[pop_base > 0].sum())
+    tot1 = float(pop_year[pop_year.index.isin(pop_base.index)].sum())
+    agg_fallback = (tot1 / tot0) if tot0 > 0 else 1.0
+    return factors, agg_fallback
 
 
 # ===============================================================================
@@ -1403,22 +1944,6 @@ def _load_commune_boundaries() -> tuple:
     muni = muni[[bfs_col, 'geometry']].dropna(subset=[bfs_col])
     print(f"    {len(muni)} communes loaded (BFS column: '{bfs_col}')")
     return muni, bfs_col
-
-
-def _load_communal_od() -> pd.DataFrame:
-    """Load canton-level PT OD (tau=1 = full daily demand), drop intrazonal pairs.
-
-    Returns:
-        DataFrame with columns: quelle_code (int), ziel_code (int), wert (float).
-    """
-    print("  Loading communal OD ...")
-    od = scoring.GetOevDemandPerCommune(tau=1)
-    od = od[od['quelle_code'] != od['ziel_code']].copy()
-    od = od[od['wert'] > 0][['quelle_code', 'ziel_code', 'wert']].copy()
-    od['quelle_code'] = od['quelle_code'].astype(int)
-    od['ziel_code']   = od['ziel_code'].astype(int)
-    print(f"    {len(od)} OD pairs with positive demand (intrazonal removed)")
-    return od
 
 
 def _reaggregate_to_stations(
@@ -1472,6 +1997,68 @@ def _reaggregate_to_stations(
     station_od = station_od[station_od['trips'] > 0].copy()
     print(f"    {len(station_od):,} non-zero station OD pairs")
     return station_od
+
+
+# ===============================================================================
+# SCENARIO / DELTA SEAMS  (dormant — NOT on the deterministic W3 path)
+# ===============================================================================
+# Interfaces the future scenario loop and per-intervention delta engine will call.
+# They reuse the live attribution / reaggregation internals so behaviour stays in
+# lock-step, but nothing in prepare_all_od_matrices invokes them today — they lie
+# dormant until the scenario tool is wired in.
+#
+# Composition contract (temporal demand ⟂ spatial attribution):
+#     station_OD(network, year, scenario)
+#         = _reaggregate_to_stations( od_communal(year, scenario),
+#                                     *attribution_weights(network...) )
+# W_network is network-specific and — under Option A's frozen pop:job ratio —
+# time-invariant, so it is computed once per network and a per-intervention delta
+# is merged for the affected communes only (see reaggregate_subset).
+
+def attribution_weights(method: str = 'pt_feeder',
+                        attribution_mode: str = 'blended',
+                        gateway_station_ids=None) -> tuple:
+    """Network-tagged spatial weights W_network as standalone (orig, dest) tables.
+
+    Wraps the same producer the live PT-Feeder branch uses
+    (_attribution_weight_tables) so the scenario loop / delta engine can cache base
+    weights and merge per-intervention deltas without re-running the branch.
+    Municipal uses a 1:1 commune→station map (see _load_municipal_assignment); this
+    seam covers the PT-Feeder count-blend / specific weights.
+
+    Returns:
+        (orig_weights, dest_weights) — DataFrame[BFS, station_id, *_weight].
+    """
+    breakdown = _load_station_breakdown(method)
+    return _attribution_weight_tables(breakdown, attribution_mode,
+                                      gateway_station_ids)
+
+
+def commune_candidates(method: str = 'pt_feeder') -> dict:
+    """dict[int BFS -> sorted list[int station_id]] of each commune's candidate
+    stations (those it is attributed to in the breakdown).
+
+    Lets the delta engine identify the communes an intervention touches:
+        affected_communes = { c : candidates(c) ∩ affected_stations ≠ ∅ }.
+    """
+    breakdown = _load_station_breakdown(method)
+    return {int(bfs): sorted(int(s) for s in grp['station_id'].unique())
+            for bfs, grp in breakdown.groupby('BFS')}
+
+
+def reaggregate_subset(communal_od: pd.DataFrame, orig_weights: pd.DataFrame,
+                       dest_weights: pd.DataFrame, communes) -> pd.DataFrame:
+    """Delta entry point: station OD for only the pairs whose origin OR destination
+    commune is in `communes` (the affected set).
+
+    The caller merges the returned long_df into the cached base station OD,
+    replacing the affected pairs. Reuses _reaggregate_to_stations on the filtered
+    communal OD, so the maths matches a full run exactly.
+    """
+    cset = {int(c) for c in communes}
+    sub = communal_od[communal_od['quelle_code'].isin(cset)
+                      | communal_od['ziel_code'].isin(cset)]
+    return _reaggregate_to_stations(sub, orig_weights, dest_weights)
 
 
 # ===============================================================================
@@ -2121,6 +2708,131 @@ def _plot_od_diagnostics(pt_long, muni_long, rail_stations, boundary,
     _plot_bar_attracted(summary, top_n=20)
     _plot_spatial_attracted(summary, boundary)
     _plot_diff_map(summary, boundary, top_n_label=5)
+
+
+# ===============================================================================
+# SA RELATION HEATMAPS  (study-area stations x partners / x study area)
+# ===============================================================================
+# Annotated trip heatmaps mirroring the routing skim heatmaps
+# (catchment_OD_rail_network._draw_matrix_heatmap), but for OD trip volumes.
+# Rows are the SA corridor stations (SANKEY_CORRIDORS order). Two views per method:
+#   (a) SA x top-N partner stations  — the N stations with the most aggregate
+#       SA-origin trips (gateways included; they dominate by design).
+#   (b) SA x SA — the corridor stations among themselves.
+# Values are read from the FULL-DAY station matrix built by _build_window_matrix
+# (the same construction as od_matrix_stations_full_day.xlsx), so the heatmaps
+# match the produced full-day Excel exactly. One set of plots per method, written
+# under that method's own OD plot dir.
+
+def _ordered_sa_ids(present: set) -> list:
+    """SA station ids in SANKEY_CORRIDORS (geographic) order, deduped, filtered to
+    those present in the OD data."""
+    seen, out = set(), []
+    for ids in SANKEY_CORRIDORS.values():
+        for s in ids:
+            si = int(s)
+            if si not in seen and si in present:
+                seen.add(si)
+                out.append(si)
+    return out
+
+
+def _heat_text_colour(rgba) -> str:
+    """Black/white annotation colour for legibility on a cell (WCAG luminance)."""
+    lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+    return 'white' if lum < 0.55 else 'black'
+
+
+def _fmt_trips(v: float) -> str:
+    """Compact trip-count cell label (k-suffixed above 1000)."""
+    if v >= 10000:
+        return f"{v / 1000:.0f}k"
+    if v >= 1000:
+        return f"{v / 1000:.1f}k"
+    if v >= 1:
+        return f"{v:.0f}"
+    return f"{v:.1f}" if v > 0 else ''
+
+
+def _draw_relation_heatmap(mat: np.ndarray, row_labels: list, col_labels: list,
+                           title: str, out_pdf: str, cmap: str = 'YlOrRd') -> None:
+    """One annotated trip heatmap (rows x cols, trips/day) with a colourbar."""
+    vmax = float(np.nanmax(mat)) if mat.size else 0.0
+    vmax = vmax if vmax > 0 else 1.0
+    fig, ax = plt.subplots(figsize=(max(0.6 * len(col_labels) + 3.0, 6.0),
+                                    max(0.5 * len(row_labels) + 2.0, 5.0)))
+    im = ax.imshow(mat, aspect='auto', cmap=cmap, vmin=0.0, vmax=vmax)
+    ax.set_xticks(range(len(col_labels)))
+    ax.set_xticklabels(col_labels, rotation=45, ha='right', fontsize=8)
+    ax.set_yticks(range(len(row_labels)))
+    ax.set_yticklabels(row_labels, fontsize=8)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Trips/day (full-day)', fontsize=9)
+    cmap_obj = im.cmap
+    for i in range(mat.shape[0]):
+        for j in range(mat.shape[1]):
+            v = mat[i, j]
+            if v > 0:
+                ax.text(j, i, _fmt_trips(v), ha='center', va='center', fontsize=7,
+                        fontweight='bold', color=_heat_text_colour(cmap_obj(v / vmax)))
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    fig.tight_layout()
+    Path(out_pdf).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_pdf, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"    Saved relation heatmap → {out_pdf}")
+
+
+def _plot_sa_relation_heatmaps(long_df: pd.DataFrame, sa_ids: set,
+                               name_lookup: dict, svc_version: str, method: str,
+                               top_n: int = 10) -> None:
+    """Two full-day trip heatmaps for one method's SA corridor stations:
+    (a) SA x top-`top_n` partner stations/gateways, (b) SA x SA. Built from the
+    full-day station matrix (matches od_matrix_stations_full_day.xlsx) and written
+    under the method's own OD plot dir."""
+    if long_df is None or long_df.empty or not sa_ids:
+        print(f"    SA relation heatmaps ({method}): no data — skipped")
+        return
+    full_mat = _build_window_matrix(long_df, cp.TAU_FULL_DAY_SHARE, name_lookup)
+    if full_mat is None or full_mat.empty:
+        print(f"    SA relation heatmaps ({method}): no full-day matrix — skipped")
+        return
+
+    sa_set = set(int(s) for s in sa_ids)
+    sa_names = []
+    for sid in _ordered_sa_ids(sa_set):
+        nm = name_lookup.get(str(int(sid)))
+        if nm in full_mat.index and nm not in sa_names:
+            sa_names.append(nm)
+    if not sa_names:
+        print(f"    SA relation heatmaps ({method}): no SA origins in matrix — skipped")
+        return
+
+    method_label = 'PT-Feeder' if method == 'pt_feeder' else 'Municipal'
+    out_dir = paths.get_od_method_plot_dir(svc_version, method)
+    print(f"\n  Building SA relation heatmaps ({method_label}, full-day) ...")
+
+    # (a) SA x top-N partners / gateways (cols ranked by total SA-origin trips,
+    #     SA stations themselves excluded — those are the (b) view).
+    sa_rows = full_mat.loc[sa_names]
+    partner_cols = sa_rows.drop(columns=[c for c in sa_names if c in sa_rows.columns],
+                                errors='ignore')
+    partners = list(partner_cols.sum(axis=0).sort_values(ascending=False).index[:top_n])
+    if partners:
+        mat_a = full_mat.reindex(index=sa_names, columns=partners,
+                                 fill_value=0.0).to_numpy(dtype=float)
+        _draw_relation_heatmap(
+            mat_a, sa_names, partners,
+            f'{method_label}: SA → top-{top_n} partner stations / gateways (full-day trips)',
+            os.path.join(out_dir, 'od_heatmap_sa_top_partners.pdf'))
+
+    # (b) SA x SA
+    mat_b = full_mat.reindex(index=sa_names, columns=sa_names,
+                             fill_value=0.0).to_numpy(dtype=float)
+    _draw_relation_heatmap(
+        mat_b, sa_names, sa_names,
+        f'{method_label}: SA → SA (study area, full-day trips)',
+        os.path.join(out_dir, 'od_heatmap_sa_x_sa.pdf'))
 
 
 # ===============================================================================

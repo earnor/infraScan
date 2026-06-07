@@ -10,6 +10,7 @@ infraScanRail/_unused_files/
 # (e.g. "look at C:\Users\ETH\Documents\GitHub\infraScan\infraScanRoad\some_file.py")
 # or comment out the line below for the session.
 infraScanRoad/
+infraScanCycle/
 
 # Node / JS tooling (not used in this project but guard against accidental installs)
 node_modules/

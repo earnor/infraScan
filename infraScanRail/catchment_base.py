@@ -729,7 +729,7 @@ def _load_grid(df, boundary, label, year: int = None):
 
     Loads the 2023 federal grid, filters to the catchment boundary, then
     scales cell values to `year` using commune-level cantonal data.  When
-    year == 2023 (or None with POPULATION_BASE_YEAR == 2023) no scaling
+    year == 2023 (or None with start_year_scenario == 2023) no scaling
     is applied.  Saves the result as data/Catchment_Area/{label}_{year}_{canton}.csv.
 
     Cells are included if their centroid is strictly inside the boundary OR
@@ -738,7 +738,7 @@ def _load_grid(df, boundary, label, year: int = None):
     check to cells within one cell-width of the boundary.
     """
     if year is None:
-        year = settings.POPULATION_BASE_YEAR
+        year = settings.start_year_scenario
     # Swiss CSVs may use comma as decimal separator (e.g. "5,376" → 5.376).
     for col in ['E_KOORD', 'N_KOORD', 'NUMMER']:
         df[col] = pd.to_numeric(
@@ -808,7 +808,7 @@ def _cumulate_per_municipality(pop_grid, empl_grid, boundary, year: int = None):
         empl_grid: Employment grid GeoDataFrame (already scaled to year).
         boundary:  Catchment boundary polygon.
         year:      Target year for the summary CSV filename; defaults to
-                   settings.POPULATION_BASE_YEAR.
+                   settings.start_year_scenario.
 
     Returns
     -------
@@ -816,7 +816,7 @@ def _cumulate_per_municipality(pop_grid, empl_grid, boundary, year: int = None):
         Summary with columns [BFS_NR, NAME, total_population, total_employment, geometry].
     """
     if year is None:
-        year = settings.POPULATION_BASE_YEAR
+        year = settings.start_year_scenario
     print("  Cumulating population/employment per municipality ...")
 
     muni = gpd.read_file(paths.MUNICIPAL_BOUNDARIES_GPKG)
@@ -920,7 +920,7 @@ def _plot_municipal_distributions(summary_df, boundary, year: int = None):
     For MultiPolygon boundaries a separate plot is produced per component.
     """
     if year is None:
-        year = settings.POPULATION_BASE_YEAR
+        year = settings.start_year_scenario
     print("  Plotting municipal distributions ...")
 
     pop_cfg = dict(
@@ -1045,7 +1045,7 @@ def _plot_raster_map(gdf, label, boundary, year: int = None):
     For MultiPolygon boundaries a separate plot is produced per component.
     """
     if year is None:
-        year = settings.POPULATION_BASE_YEAR
+        year = settings.start_year_scenario
     print(f"  Plotting {label} raster map ...")
 
     is_pop = (label == 'population')
@@ -1289,10 +1289,10 @@ def _cache_csv_path(label: str, year: int = None) -> str:
 
     Args:
         label: 'population' or 'employment'
-        year:  Target year; defaults to settings.POPULATION_BASE_YEAR.
+        year:  Target year; defaults to settings.start_year_scenario.
     """
     if year is None:
-        year = settings.POPULATION_BASE_YEAR
+        year = settings.start_year_scenario
     area_tag = '_'.join(settings.CATCHMENT_AREA_ADMIN_NAMES).replace(' ', '').replace('(', '').replace(')', '')
     return os.path.join(POP_EMPL_DATA_DIR, f'{label}_{year}_{area_tag}.csv')
 
@@ -1319,7 +1319,7 @@ def _read_grid_csv(csv_path: str, label: str) -> gpd.GeoDataFrame:
 def load_population_grid_cached() -> gpd.GeoDataFrame:
     """Read the boundary-filtered, year-scaled population grid from the cache.
 
-    Cache file: data/Catchment_Area/population_{POPULATION_BASE_YEAR}_<canton>.csv
+    Cache file: data/Catchment_Area/population_{start_year_scenario}_<canton>.csv
     Written by catchment_base.main(). Raises FileNotFoundError if missing.
     """
     csv_path = _cache_csv_path('population')
@@ -1331,7 +1331,7 @@ def load_population_grid_cached() -> gpd.GeoDataFrame:
 def load_employment_grid_cached() -> gpd.GeoDataFrame:
     """Read the boundary-filtered, year-scaled employment grid from the cache.
 
-    Cache file: data/Catchment_Area/employment_{POPULATION_BASE_YEAR}_<canton>.csv
+    Cache file: data/Catchment_Area/employment_{start_year_scenario}_<canton>.csv
     Written by catchment_base.main(). Raises FileNotFoundError if missing.
     """
     csv_path = _cache_csv_path('employment')
@@ -1341,12 +1341,12 @@ def load_employment_grid_cached() -> gpd.GeoDataFrame:
 
 
 def load_summary_cached() -> gpd.GeoDataFrame:
-    """Read the per-municipality summary from the cache (year = POPULATION_BASE_YEAR).
+    """Read the per-municipality summary from the cache (year = start_year_scenario).
 
     Cache file: data/Catchment_Area/municipal_pop_empl_summary_{year}.csv
     Returns: GeoDataFrame with [BFS_NR, NAME, total_population, total_employment, geometry].
     """
-    year = settings.POPULATION_BASE_YEAR
+    year = settings.start_year_scenario
     csv_path = os.path.join(POP_EMPL_DATA_DIR, f'municipal_pop_empl_summary_{year}.csv')
     if not os.path.exists(csv_path):
         raise FileNotFoundError(_missing_cache_msg(csv_path))
@@ -1673,7 +1673,7 @@ def main(year: int = None, do_plots: bool = True) -> str:
 
     Args:
         year:     Target year for cell scaling and output filenames.
-                  Defaults to settings.POPULATION_BASE_YEAR.
+                  Defaults to settings.start_year_scenario.
         do_plots: When True, generates choropleth and raster PDF maps.
 
     Returns:
@@ -1700,7 +1700,7 @@ def main(year: int = None, do_plots: bool = True) -> str:
     _TOTALS = {}
 
     if year is None:
-        year = settings.POPULATION_BASE_YEAR
+        year = settings.start_year_scenario
 
     print(f"\n=== catchment_base: Step 2 (year={year}) ===")
     os.chdir(paths.MAIN)
@@ -1733,9 +1733,9 @@ def _run_step2_cli():
 
     print(f"\n[3.1]  Target year")
     print(f"       Coverage: 1962–2025 (actual), 2026–2050 (bezirk projection), 2051–2100 (Eurostat)")
-    print(f"       Default: {settings.POPULATION_BASE_YEAR} (settings.py)")
+    print(f"       Default: {settings.start_year_scenario} (settings.py)")
     while True:
-        year_str = input(f"   Year [{settings.POPULATION_BASE_YEAR}]: ").strip() or str(settings.POPULATION_BASE_YEAR)
+        year_str = input(f"   Year [{settings.start_year_scenario}]: ").strip() or str(settings.start_year_scenario)
         try:
             chosen_year = int(year_str)
             if 1962 <= chosen_year <= 2100:

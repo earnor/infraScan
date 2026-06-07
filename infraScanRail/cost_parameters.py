@@ -18,20 +18,21 @@ duration = 50  # 50 years
 tts_valuation_period = (2050,2100)
 construction_start_year = 2050
 
-# --- Demand-window share factors (fraction of daily interzonal PT demand
-# per representative hour). No Swiss authority publishes an explicit τ;
-# values triangulated from Swiss and international precedent. ---
-TAU_PEAK_SHARE     = 0.13   # Peak hour (busiest single hour). Range 0.12-0.15 for
-                            # commute-dominated commuter rail. Source: FHWA K-factor
-                            # (8-15% urban, 15% rural); NPVM 2023 MSP/ASP-implied
-                            # 12-15% range; UK PDFH commuter convention (Worsley
-                            # 2012). Central value defensible for ZH-region S-Bahn.
-TAU_OFFPEAK_SHARE  = 0.06   # Off-peak representative hour. Conservation over the
-                            # 06:00-20:00 operational day (14 h) with the two
-                            # busiest peak hours (AM + PM) at τ_peak:
-                            # (1 − 2·0.13) / 12 ≈ 0.062. Peak windows are
-                            # 06:00-09:00 and 16:00-19:00; the inter-peak off-peak
-                            # window is 09:00-16:00.
+# --- Demand-window share factors (fraction of daily interzonal PT demand in the busiest hour of each window). Both τ are now the empirical busiest-hour
+# share ("design hour"), calibrated to the official SBB station-users hourly distribution (b01x, sheet 'Tag_Jour_Giorno_Day', 2024 & 2025 mean) over the
+# 8 canton-Zürich stations carried by that sheet. The temporal share of station boardings/alightings is used as the proxy for the interzonal OD temporal
+# profile. Validation: _helper_files/analyze_station_load_distribution.py.
+TAU_PEAK_SHARE     = 0.11   # Peak design hour = busiest single hour (17:00-18:00 at all 8 stations). SBB empirical: 0.111 unweighted,
+                            # 0.109 passenger-weighted (insensitive to weighting; Zürich HB = 47% of sampled volume yet near-average).
+                            # Smaller study-area (Oberland) stations are peakier, so the unweighted 0.11 is the safer central value.
+                            # Alt. representative-hour value (mean over the 06:00-09:00 & 16:00-19:00 window) = 0.078 ≈ 0.08 — not used.
+                            # Previously 0.13 — triangulated from precedent, not local data: FHWA K-factor (8-15% urban, 15% rural);
+                            # NPVM 2023 MSP/ASP-implied 12-15%; UK PDFH commuter convention (Worsley 2012). Superseded by SBB data.
+TAU_OFFPEAK_SHARE  = 0.07   # Off-peak design hour = busiest inter-peak hour (12:00-13:00 lunch crest). SBB empirical: 0.067
+                            # unweighted. Symmetric "busiest hour" semantics with τ_peak. Alt. representative-hour value (mean over the
+                            # 09:00-16:00 window) = 0.051 ≈ 0.05 — not used. Previously 0.06 — derived by conservation
+                            # (1 − 2·0.13) / 12 ≈ 0.062, not measured. Peak windows: 06:00-09:00 & 16:00-19:00; inter-peak
+                            # off-peak window: 09:00-16:00.
 TAU_FULL_DAY_SHARE = 1.00   # Full daily total. No scaling.
 
 # Logit route-choice scale parameter (1 / GC-minute). Controls concentration

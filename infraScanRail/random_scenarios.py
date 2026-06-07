@@ -801,7 +801,7 @@ def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, u
     scenarios = generate_od_growth_scenarios(
         _get_od_base_matrix(start_year),
         pd.read_excel(paths.COMMUNE_TO_STATION_PATH),
-        _build_communes_population_df(settings.POPULATION_BASE_YEAR),
+        _build_communes_population_df(settings.start_year_scenario),
         start_year=start_year,
         end_year=end_year,
         num_of_scenarios=num_of_scenarios,

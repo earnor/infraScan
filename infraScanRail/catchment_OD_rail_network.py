@@ -660,6 +660,172 @@ def _assign_logit(G: nx.DiGraph, od_long: pd.DataFrame, engine: str,
 
 
 # ===============================================================================
+# GATEWAY INJECTION  (inject external demand at boundary gateways onto the
+# crossing services — stopping AND passing — split by the connection table)
+# ===============================================================================
+
+def _merge_primitives(dst: dict, src: dict) -> None:
+    """Extend dst's primitive lists in place with src's."""
+    for k in ('paths', 'segments', 'events', 'unresolved'):
+        dst[k].extend(src[k])
+
+
+def _norm_vk_parts(rid, did, vr) -> tuple:
+    """Normalise (route_id, direction_id, variant_rank) so a connection-table
+    triple matches a graph variant_key regardless of int/float/str formatting."""
+    def _i(x):
+        try:
+            return str(int(float(x)))
+        except (TypeError, ValueError):
+            return str(x)
+    return (str(rid), _i(did), _i(vr))
+
+
+def _build_gateway_conn_lookup(conn_df: pd.DataFrame, variant_seq: dict) -> tuple:
+    """Resolve connection-table rows to graph variants and renormalise weights.
+
+    Returns (lookup, gateway_ids):
+        lookup: dict[(gateway_id:int, role:str) -> list[(variant_key, weight,
+                attach_skey)]], weights renormalised to sum 1.0 over the variants
+                actually present in the graph for that (gateway, role).
+        gateway_ids: set of boundary gateway ids with >=1 resolved connection.
+
+    attach_skey: the gateway's own id when the variant stops there, else the
+    variant's first (inbound) / last (outbound) in-network stop.
+    """
+    if conn_df is None or conn_df.empty:
+        return {}, set()
+    graph_vk = {}
+    for vk in variant_seq:
+        rid, did, vr = vk.rsplit('_', 2)
+        graph_vk[_norm_vk_parts(rid, did, vr)] = vk
+
+    raw = {}
+    for r in conn_df.itertuples(index=False):
+        vk = graph_vk.get(_norm_vk_parts(r.route_id, r.direction_id, r.variant_rank))
+        if vk is None:
+            continue
+        seq = variant_seq.get(vk)
+        if not seq:
+            continue
+        gid, role = int(r.gateway_station_id), str(r.direction_role)
+        if gid in seq:
+            attach = gid
+        else:
+            attach = seq[0] if role == 'inbound' else seq[-1]
+        raw.setdefault((gid, role), []).append(
+            (vk, float(r.boarding_weight), attach))
+
+    lookup, gateway_ids = {}, set()
+    for (gid, role), items in raw.items():
+        tot = sum(w for _vk, w, _a in items)
+        if tot <= 0:
+            continue
+        lookup[(gid, role)] = [(vk, w / tot, a) for (vk, w, a) in items]
+        gateway_ids.add(gid)
+    return lookup, gateway_ids
+
+
+def _augment_gateway_graph(G: nx.DiGraph, lookup: dict, vfreq: dict) -> None:
+    """Add per-(gateway, service) virtual source/sink nodes that force boarding /
+    alighting a specific crossing service at the gateway's attach stop.
+
+    inbound  -> gwsrc_<gid>_<vk> --board--> sub_<attach>_<vk>   (kind='entry')
+    outbound -> sub_<attach>_<vk> --0--> gwsnk_<gid>_<vk>       (kind='exit')
+
+    Boarding wait mirrors the in-graph board edge (w_wait * t_wait(headway)).
+    """
+    w_wait = _active_weights()['wait']
+    for (gid, role), items in lookup.items():
+        for vk, _w, attach in items:
+            sub = f"sub_{attach}_{vk}"
+            if sub not in G:
+                continue
+            if role == 'inbound':
+                src = f"gwsrc_{gid}_{vk}"
+                G.add_node(src, kind='entry', station_key=gid)
+                freq = float(vfreq.get(vk, 0.0))
+                h = 60.0 / freq if freq > 0 else 60.0
+                G.add_edge(src, sub, gc=w_wait * _wait_min(h), time=_wait_min(h))
+            else:
+                snk = f"gwsnk_{gid}_{vk}"
+                G.add_node(snk, kind='exit', station_key=gid)
+                G.add_edge(sub, snk, gc=0.0, time=0.0)
+
+
+def _expand_gateway_od(od_long: pd.DataFrame, lookup: dict,
+                       gateway_ids: set) -> tuple:
+    """Split the OD into (normal, gateway) frames with explicit src/tgt graph nodes.
+
+    Gateway-origin rows are expanded per inbound service (trips × renormalised
+    boarding weight); gateway-destination rows per outbound service; gateway↔
+    gateway over the cross-product. Returns:
+        od_normal: original columns (both ends non-gateway) for the standard
+                   per-method assignment (entry_/exit_ portals implied).
+        od_gw:     columns origin_id, dest_id, trips, src_node, tgt_node — routed
+                   all-or-nothing from the forced boarding/alighting nodes.
+    """
+    gset = set(int(g) for g in gateway_ids)
+    normal_rows, gw_rows = [], []
+    for r in od_long.itertuples(index=False):
+        o, d, trips = int(r.origin_id), int(r.dest_id), float(r.trips)
+        o_in = lookup.get((o, 'inbound')) if o in gset else None
+        d_out = lookup.get((d, 'outbound')) if d in gset else None
+        if not o_in and not d_out:
+            normal_rows.append((o, d, trips))
+            continue
+        if o_in and not d_out:
+            for vk, w, _a in o_in:
+                gw_rows.append((o, d, trips * w, f"gwsrc_{o}_{vk}", f"exit_{d}"))
+        elif d_out and not o_in:
+            for vk, w, _a in d_out:
+                gw_rows.append((o, d, trips * w, f"entry_{o}", f"gwsnk_{d}_{vk}"))
+        else:                                   # both ends are gateways
+            for vki, wi, _ai in o_in:
+                for vko, wo, _ao in d_out:
+                    gw_rows.append((o, d, trips * wi * wo,
+                                    f"gwsrc_{o}_{vki}", f"gwsnk_{d}_{vko}"))
+    od_normal = pd.DataFrame(normal_rows, columns=['origin_id', 'dest_id', 'trips'])
+    od_gw = pd.DataFrame(
+        gw_rows, columns=['origin_id', 'dest_id', 'trips', 'src_node', 'tgt_node'])
+    return od_normal, od_gw
+
+
+def _assign_gateway(G: nx.DiGraph, od_gw: pd.DataFrame) -> dict:
+    """All-or-nothing least-GC assignment for gateway-injected demand, routed from
+    the forced src_node to tgt_node (one multi-target Dijkstra per source node).
+
+    Deterministic and method-independent: the service split is already fixed by the
+    connection-table weights in od_gw, so both shortest_path and logit runs share
+    this same gateway assignment.
+    """
+    prim = _empty_primitives()
+    n_ok = n_unres = 0
+    for src, grp in od_gw.groupby('src_node', sort=False):
+        if src not in G:
+            for r in grp.itertuples(index=False):
+                prim['unresolved'].append({'origin_id': int(r.origin_id),
+                                           'dest_id': int(r.dest_id),
+                                           'trips': float(r.trips)})
+                n_unres += 1
+            continue
+        _dist, sp_paths = nx.single_source_dijkstra(G, src, weight='gc')
+        for r in grp.itertuples(index=False):
+            path = sp_paths.get(r.tgt_node)
+            if path is None:
+                prim['unresolved'].append({'origin_id': int(r.origin_id),
+                                           'dest_id': int(r.dest_id),
+                                           'trips': float(r.trips)})
+                n_unres += 1
+                continue
+            _record_path(prim, int(r.origin_id), int(r.dest_id), 0, 1.0,
+                         float(r.trips), _walk_path(G, path))
+            n_ok += 1
+    print(f"  [gateway] injected {n_ok:,} service-legs, unresolved {n_unres:,}.")
+    return prim
+
+
+# ===============================================================================
 # SKIMS
 # ===============================================================================
 
@@ -1587,6 +1753,21 @@ def _load_rail_line_freqs_full_day() -> pd.DataFrame:
     return df
 
 
+def _load_gateway_connections(svc_version: str) -> pd.DataFrame:
+    """Load the gateway service-connection table written by
+    catchment_OD_preparation (Gateway/gateway_service_connections.xlsx). Returns an
+    empty DataFrame when absent (gateway injection then disabled)."""
+    path = paths.get_gateway_connections_xlsx(svc_version)
+    if not os.path.exists(path):
+        print(f"  No gateway connection table at {path} — gateway injection "
+              f"disabled (gateway demand routes via plain portals only).")
+        return pd.DataFrame()
+    df = pd.read_excel(path, sheet_name='Connections')
+    print(f"  Loaded gateway connection table: {len(df)} variant-rows, "
+          f"{df['gateway_station_id'].nunique() if not df.empty else 0} gateways.")
+    return df
+
+
 def _load_w3_od(od_path: str, rail_stations: gpd.GeoDataFrame,
                 name_lookup: dict, sheet_name='Specific') -> pd.DataFrame:
     """Load a W3 per-window station-pair OD workbook; return long-format with
@@ -1697,6 +1878,27 @@ def passenger_routing(svc_version: str = '',
     name_lookup = cod._build_station_name_lookup(rail_stations)
     cod._extend_name_lookup_from_breakdown(name_lookup, od_method)
 
+    # Gateway (boundary) stations sit outside the catchment, so the in-catchment
+    # rail_stations load above omits them. Without this, _load_w3_od cannot
+    # reverse-map the gateway-keyed OD rows (names absent from name_lookup -> the
+    # rows are silently dropped) and the graph has no integer-id portal for them.
+    # Recover both: add gateway names to name_lookup (plain, mirroring
+    # catchment_OD_preparation) and seed gateway rows into the graph's station set.
+    infra_version    = cod._resolve_infra_version(svc_version, '')
+    conv_map         = cod._load_convergence_map(
+        paths.get_gateway_dir(svc_version),
+        cod._served_station_index(svc_version, infra_version))
+    conv_ids         = sorted(set(conv_map.values()))
+    gateway_rows     = cod._build_gateway_station_rows(svc_version, infra_version,
+                                                       extra_ids=conv_ids)
+    for _sid, _nm in zip(gateway_rows.get('id_point', []),
+                         gateway_rows.get('stop_name', [])):
+        _k = str(int(_sid))
+        if _k not in name_lookup:
+            name_lookup[_k] = str(_nm)
+    rail_stations_g = (pd.concat([rail_stations, gateway_rows], ignore_index=True)
+                       if not gateway_rows.empty else rail_stations)
+
     od_path = paths.get_station_od_window_xlsx(svc_version, od_method, 'full_day')
     if od_method == 'pt_feeder':
         od_sheet = 'Blended' if settings.OD_ATTRIBUTION_MODE.strip().lower() == 'blended' \
@@ -1710,10 +1912,23 @@ def passenger_routing(svc_version: str = '',
     rail_segs_tt = _load_rail_segments_with_tt()
     rail_lines   = _load_rail_line_freqs_full_day()
     G, vfreq, direct_freq, variant_seq, report_ctx = _build_rail_graph(
-        rail_segs_tt, rail_lines, rail_stations)
+        rail_segs_tt, rail_lines, rail_stations_g)
 
     global _ROUTE_NAME
     _ROUTE_NAME = report_ctx['route_name']
+
+    # --- Gateway injection setup (boundary gateways only; convergence stations
+    # route normally via their portals seeded above). Demand at a boundary gateway
+    # is split across its crossing services (stopping + passing) by the connection
+    # table's nested type-then-frequency weights, then forced onto each service. ---
+    print("\n[Step 2b] Gateway service-connection wiring ...")
+    conn_df = _load_gateway_connections(svc_version)
+    gw_lookup, gw_ids = _build_gateway_conn_lookup(conn_df, variant_seq)
+    _augment_gateway_graph(G, gw_lookup, vfreq)
+    od_normal, od_gw = _expand_gateway_od(od_long, gw_lookup, gw_ids)
+    print(f"  Gateways wired: {len(gw_ids)} boundary gateways, "
+          f"{len(gw_lookup)} (gateway,role) entries; OD split into "
+          f"{len(od_normal):,} normal + {len(od_gw):,} gateway service-legs.")
 
     windows = [(cp.TAU_PEAK_SHARE, 'peak'),
                (cp.TAU_OFFPEAK_SHARE, 'off_peak'),
@@ -1724,10 +1939,10 @@ def passenger_routing(svc_version: str = '',
     for method in methods:
         print(f"\n[Step 3] Assigning — {method} ...")
         if method == 'shortest_path':
-            prim = _assign_shortest_path(G, od_long)
+            prim = _assign_shortest_path(G, od_normal)
         else:
             prim = _assign_logit(
-                G, od_long,
+                G, od_normal,
                 engine=getattr(settings, 'ROUTING_LOGIT_ENGINE', 'table'),
                 variant_seq=variant_seq,
                 k=settings.ROUTING_K_PATHS,
@@ -1736,6 +1951,8 @@ def passenger_routing(svc_version: str = '',
                 max_transfers=settings.ROUTING_MAX_TRANSFERS,
                 max_examine=settings.ROUTING_MAX_EXAMINE,
                 theta=cp.LOGIT_ROUTE_THETA)
+        if not od_gw.empty:
+            _merge_primitives(prim, _assign_gateway(G, od_gw))
         skims = _build_skims(prim, report_ctx['vfreq_report'],
                              report_ctx['direct_freq_report'])
 

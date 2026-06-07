@@ -233,6 +233,20 @@ def get_gateway_dir(svc_network: str) -> str:
     return os.path.join(get_od_version_dir(svc_network), 'Gateway')
 
 
+def get_gateway_connections_xlsx(svc_network: str) -> str:
+    """Return absolute path to the gateway service-connection table
+    (Gateway/gateway_service_connections.xlsx) consumed by passenger routing."""
+    return os.path.join(get_gateway_dir(svc_network),
+                        'gateway_service_connections.xlsx')
+
+
+def get_gateway_convergence_map_json(svc_network: str) -> str:
+    """Return absolute path to the optional gateway convergence-map override
+    (Gateway/gateway_convergence_map.json)."""
+    return os.path.join(get_gateway_dir(svc_network),
+                        'gateway_convergence_map.json')
+
+
 def get_od_routing_dir(svc_network: str) -> str:
     """Return absolute path to the W4b rail-routing output dir
     (data/Traffic_Flow/OD/<svc_network>/Routing/)."""
