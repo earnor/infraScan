@@ -270,20 +270,19 @@ start_valuation_year = 2050
 # ═══════════════════════════════════════════════════════════════════════════════
 # One toggle per phase; data/CSV outputs are always written regardless of these.
 
-PLOT_DATA      = False   # catchment_base population/employment maps (Phase 2)
-PLOT_INFRA     = False    # infrabuild network plots (Phase 3A)
-PLOT_SERVICES  = False    # services pipeline plots (Phase 3B)
+PLOT_DATA      = True   # catchment_base population/employment maps (Phase 2)
+PLOT_INFRA     = True    # infrabuild network plots (Phase 3A)
+PLOT_SERVICES  = True    # services pipeline plots (Phase 3B)
 PLOT_CAPACITY  = True    # capacity analysis plots (Phase 3C)
-PLOT_CATCHMENT = False   # catchment allocation plots (Phase 4A)
-PLOT_STATION_OD = False   # station OD pie map + corridor Sankeys (Phase 4B)
+PLOT_CATCHMENT = True   # catchment allocation plots (Phase 4A)
+PLOT_STATION_OD = True   # station OD pie map + corridor Sankeys (Phase 4B)
 PLOT_ASSIGNMENT = True   # rail assignment heatmaps + Sankeys + service loads (Phase 4C)
 PLOT_INFRA_INTS = True   # infra-int master tagged network .qgz (Phase 5A)
 PLOT_SVC_INTS  = True    # svc-int delta + per-type/all-produced overlays (Phase 5B)
 PLOT_MIXED_INTS = True   # per-svc-int capacity/service maps + CAP diff (Phase 5C)
-PLOT_RESULTS   = False   # final CBA/result visualisations
+PLOT_RESULTS   = False   # final CBA/result visualisations (not yet wired into main_new)
 
-plot_passenger_flow = False
-plot_railway_line_load = False
+plot_passenger_flow = False   # legacy only (main.py / main_cap.py); ignored by main_new
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # A2. CACHE  (load pre-computed outputs instead of recomputing — all phases)

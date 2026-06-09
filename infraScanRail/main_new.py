@@ -1576,7 +1576,7 @@ def phase_5c_capacity_on_matched(runtimes: dict) -> dict:
         result = _mix.phase_5c_capacity_on_matched(
             base_infra=_phase5_base_infra(),
             base_svc=PIPELINE_CONFIG.svc_version or _io._resolve_svc_version(),
-            make_plots=settings.PLOT_MIXED_INTS,
+            make_plots=getattr(settings, 'PLOT_MIXED_INTS', False),
         ) or {}
     except Exception as exc:
         print(f"  WARNING: Phase 5C failed: {exc}")

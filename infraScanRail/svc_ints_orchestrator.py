@@ -858,6 +858,7 @@ def phase_5b_service_interventions(
 
     # Data outputs — always written (independent of make_plots) ---------------
     _write_svc_int_csvs(base_infra, result, network=combo)
+    _write_affected_set_csv(base_infra, base_svc, network=combo)
 
     # Candidate-overview + delta / overlay plots ------------------------------
     if make_plots:
@@ -934,6 +935,61 @@ def _write_svc_int_csvs(base_infra: str, result: Dict,
         aff_path = out_dir / f"svc_int_affected_sets_{base_infra}.csv"
         pd.DataFrame(aff_rows).to_csv(aff_path, index=False, encoding='utf-8-sig')
         print(f"  [csv] wrote {aff_path.name}")
+
+
+def _resolve_affected_sets(records: List[Dict], base_lines: Dict,
+                           base_segs: Dict) -> List[Dict]:
+    """Resolve each svc-int's affected_set to the keys Phase 6's closure consumes.
+
+    services → concrete variant_keys (``route_id_direction_rank``, the 4C routing
+    key): for an EXT, every (direction_id, variant_rank) of the route in the base
+    network; for an NDC, the new line's synthetic keys (int_id, both directions,
+    its variant_rank). stations → id_point (== from_stop_nr), resolved from the
+    stored station names. Names that don't resolve are dropped (no crash)."""
+    # route_id -> {(direction_id, variant_rank)} from the base line layers
+    route_variants: Dict[str, set] = {}
+    for ldf in base_lines.values():
+        for _, r in ldf.iterrows():
+            route_variants.setdefault(str(r['route_id']), set()).add(
+                (str(r['direction_id']), int(r['variant_rank'])))
+    name_to_nr = {n: nr for n, (nr, _e, _n) in _build_stop_index(base_segs).items()}
+
+    rows: List[Dict] = []
+    for rec in records:
+        iid, itype = str(rec['int_id']), rec['int_type']
+        rid = str(rec.get('route_id', ''))
+        if itype == 'ndc':
+            rank = int(rec.get('variant_rank', 1) or 1)
+            vks = [f"{rid}_{d}_{rank}" for d in ('0', '1')]
+        else:
+            vks = sorted(f"{rid}_{d}_{v}"
+                         for (d, v) in route_variants.get(rid, set()))
+        stations = sorted({name_to_nr[str(n)]
+                           for n in (rec.get('affected_stations') or [])
+                           if str(n) in name_to_nr})
+        rows.append({'int_id': iid, 'int_type': itype,
+                     'affected_stations': stations, 'affected_services': vks})
+    return rows
+
+
+def _write_affected_set_csv(base_infra: str, base_svc: str,
+                            network: Optional[str] = None) -> None:
+    """Write the canonical per-svc-int affected_set (id_point stations + concrete
+    variant_keys) — additive Phase-6 hook. Leaves the legacy
+    svc_int_affected_sets_<base_infra>.csv untouched."""
+    recs = [r for it in ('ext', 'ndc') for r in read_records(it, network=network)]
+    if not recs:
+        return
+    base_lines, base_segs, _ = _load_base_unprojected(base_svc)
+    rows = _resolve_affected_sets(recs, base_lines, base_segs)
+    for row in rows:
+        row['affected_stations'] = serialize_list(row['affected_stations'])
+        row['affected_services'] = serialize_list(row['affected_services'])
+    out_dir = Path(paths.get_svc_int_catalogue_dir(_svc_network(network)))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"svc_int_affected_set_{base_infra}.csv"
+    pd.DataFrame(rows).to_csv(out_path, index=False, encoding='utf-8-sig')
+    print(f"  [csv] wrote {out_path.name} ({len(rows)} svc-int(s), variant_key + id_point)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

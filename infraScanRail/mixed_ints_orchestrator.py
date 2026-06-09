@@ -438,12 +438,13 @@ def _svc_int_capacity_artifacts(base_infra, base_svc, combo, p, composed_full, c
         # pre/post CAP (CAP adds track, not service), so render it once on the preCAP net.
         if tag == 'preCAP':
             try:
+                # Mirror the Phase-3C service map exactly: schematic workbook geometry
+                # (no infra_version → no BAV curve-following) with the info tables and
+                # line short-name labels (include_labels=True is the 3C default).
                 svc_png = cnp.plot_service_network(
                     workbook_path=wb,
                     output_path=str(plot_dir / f"service_{svc_id}.pdf"),
-                    network_label=f"{svc_id}", lakes_path=lakes_sa,
-                    include_labels=False,
-                    infra_version=composed_ver, infra_dir=infra_dir)
+                    network_label=f"{svc_id}", lakes_path=lakes_sa)
                 written.append(str(svc_png))
                 print(f"  [plot] {svc_id}: wrote {Path(svc_png).name}")
             except Exception as exc:

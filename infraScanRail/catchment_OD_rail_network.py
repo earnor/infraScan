@@ -1832,44 +1832,24 @@ def _resolve_methods(assignment_method: str) -> list:
                      f"(expected shortest_path | logit | both).")
 
 
-def passenger_routing(svc_version: str = '',
-                      use_cache: bool = False,
-                      od_method: str = 'pt_feeder',
-                      assignment_method: str = '',
-                      make_plots: bool = True) -> None:
-    """Assign W3 station-pair OD onto the rail network (shortest-path and/or Logit).
+def _build_routing_graph(svc_version: str, od_method: str = 'pt_feeder',
+                         infra_version: str = '', rail_base: str = None) -> dict:
+    """Build the full-day rail routing graph + gateway wiring for a network.
 
-    Args:
-        svc_version:       Service network folder name (with '_network').
-        use_cache:         Skip writing CSVs that already exist.
-        od_method:         W3 OD source — 'pt_feeder' | 'municipal'.
-        assignment_method: '' -> settings.ROUTING_ASSIGNMENT_METHOD;
-                           'shortest_path' | 'logit' | 'both'.
-        make_plots:        When True (default; standalone), render the Phase-4C
-                           assignment plots (skim heatmaps, corridor Sankeys,
-                           per-service load sequences). main_new passes
-                           settings.PLOT_ASSIGNMENT so the plots honour the
-                           Phase-4C visualisation toggle. Excel/CSV outputs are
-                           always written regardless.
+    Encapsulates the shared-data / graph-build / gateway-wiring sequence so both
+    passenger_routing (full run) and route_subset (Phase 6 subset) construct an
+    identical graph. `rail_base` overrides catchment_allocate._RAIL_BASE so a
+    developed (svc-int) network can be routed; default reuses the version's
+    Unprojected services dir, giving byte-identical behaviour for the full run.
+
+    Returns:
+        dict with G, name_lookup, rail_stations (in-catchment only), rail_segs_tt,
+        variant_seq, report_ctx, gw_lookup, gw_ids, infra_version.
     """
-    if not svc_version:
-        raise ValueError("passenger_routing requires svc_version to locate the "
-                         "versioned W3 OD matrix under data/Traffic_Flow/OD/.")
-
     catchment_base.setup_versioned_dirs(svc_version)
-    catchment_allocate._RAIL_BASE = os.path.join(
+    catchment_allocate._RAIL_BASE = rail_base or os.path.join(
         paths.RAIL_LINES_DIR, svc_version, paths.SERVICES_UNPROJECTED_SUBDIR)
     os.chdir(paths.MAIN)
-
-    methods = _resolve_methods(assignment_method)
-    print("=" * 70)
-    print("PASSENGER ROUTING (Phase 4C)")
-    print(f"  Service version : {svc_version}")
-    print(f"  W3 OD method    : {od_method}")
-    print(f"  Methods         : {', '.join(methods)}")
-    print(f"  Cost model      : {settings.TRAVEL_COST_METHOD} / "
-          f"{settings.TRANSFER_COST_MODEL}  |  temporal=full_day")
-    print("=" * 70)
 
     # --- Shared data ---
     boundary      = catchment_base._load_catchment_boundary()
@@ -1884,7 +1864,7 @@ def passenger_routing(svc_version: str = '',
     # rows are silently dropped) and the graph has no integer-id portal for them.
     # Recover both: add gateway names to name_lookup (plain, mirroring
     # catchment_OD_preparation) and seed gateway rows into the graph's station set.
-    infra_version    = cod._resolve_infra_version(svc_version, '')
+    infra_version    = cod._resolve_infra_version(svc_version, infra_version)
     conv_map         = cod._load_convergence_map(
         paths.get_gateway_dir(svc_version),
         cod._served_station_index(svc_version, infra_version))
@@ -1899,6 +1879,76 @@ def passenger_routing(svc_version: str = '',
     rail_stations_g = (pd.concat([rail_stations, gateway_rows], ignore_index=True)
                        if not gateway_rows.empty else rail_stations)
 
+    print("\n[Step 2] Building rail graph (full-day services) ...")
+    rail_segs_tt = _load_rail_segments_with_tt()
+    rail_lines   = _load_rail_line_freqs_full_day()
+    G, vfreq, direct_freq, variant_seq, report_ctx = _build_rail_graph(
+        rail_segs_tt, rail_lines, rail_stations_g)
+
+    print("\n[Step 2b] Gateway service-connection wiring ...")
+    conn_df = _load_gateway_connections(svc_version)
+    gw_lookup, gw_ids = _build_gateway_conn_lookup(conn_df, variant_seq)
+    _augment_gateway_graph(G, gw_lookup, vfreq)
+
+    return {'G': G, 'name_lookup': name_lookup, 'rail_stations': rail_stations,
+            'rail_segs_tt': rail_segs_tt, 'variant_seq': variant_seq,
+            'report_ctx': report_ctx, 'gw_lookup': gw_lookup, 'gw_ids': gw_ids,
+            'infra_version': infra_version}
+
+
+def passenger_routing(svc_version: str = '',
+                      use_cache: bool = False,
+                      od_method: str = 'pt_feeder',
+                      assignment_method: str = '',
+                      make_plots: bool = True,
+                      infra_version: str = '') -> None:
+    """Assign W3 station-pair OD onto the rail network (shortest-path and/or Logit).
+
+    Args:
+        svc_version:       Service network folder name (with '_network').
+        use_cache:         Skip writing CSVs that already exist.
+        od_method:         W3 OD source — 'pt_feeder' | 'municipal'.
+        assignment_method: '' -> settings.ROUTING_ASSIGNMENT_METHOD;
+                           'shortest_path' | 'logit' | 'both'.
+        make_plots:        When True (default; standalone), render the Phase-4C
+                           assignment plots (skim heatmaps, corridor Sankeys,
+                           per-service load sequences). main_new passes
+                           settings.PLOT_ASSIGNMENT so the plots honour the
+                           Phase-4C visualisation toggle. Excel/CSV outputs are
+                           always written regardless.
+        infra_version:     Infrastructure version holding boundary_stations.json /
+                           nodes.gpkg for gateway recovery. main_new passes the
+                           propagated (enhanced) version so no prompt fires; empty
+                           (standalone) resolves/prompts via _resolve_infra_version.
+    """
+    if not svc_version:
+        raise ValueError("passenger_routing requires svc_version to locate the "
+                         "versioned W3 OD matrix under data/Traffic_Flow/OD/.")
+
+    methods = _resolve_methods(assignment_method)
+    print("=" * 70)
+    print("PASSENGER ROUTING (Phase 4C)")
+    print(f"  Service version : {svc_version}")
+    print(f"  W3 OD method    : {od_method}")
+    print(f"  Methods         : {', '.join(methods)}")
+    print(f"  Cost model      : {settings.TRAVEL_COST_METHOD} / "
+          f"{settings.TRANSFER_COST_MODEL}  |  temporal=full_day")
+    print("=" * 70)
+
+    ctx = _build_routing_graph(svc_version, od_method, infra_version)
+    G            = ctx['G']
+    name_lookup  = ctx['name_lookup']
+    rail_stations = ctx['rail_stations']
+    rail_segs_tt = ctx['rail_segs_tt']
+    variant_seq  = ctx['variant_seq']
+    report_ctx   = ctx['report_ctx']
+    gw_lookup    = ctx['gw_lookup']
+    gw_ids       = ctx['gw_ids']
+    infra_version = ctx['infra_version']
+
+    global _ROUTE_NAME
+    _ROUTE_NAME = report_ctx['route_name']
+
     od_path = paths.get_station_od_window_xlsx(svc_version, od_method, 'full_day')
     if od_method == 'pt_feeder':
         od_sheet = 'Blended' if settings.OD_ATTRIBUTION_MODE.strip().lower() == 'blended' \
@@ -1908,23 +1958,6 @@ def passenger_routing(svc_version: str = '',
     print(f"\n[Step 1] Loading W3 full-day OD ({od_method}, sheet '{od_sheet}') ...")
     od_long = _load_w3_od(od_path, rail_stations, name_lookup, sheet_name=od_sheet)
 
-    print("\n[Step 2] Building rail graph (full-day services) ...")
-    rail_segs_tt = _load_rail_segments_with_tt()
-    rail_lines   = _load_rail_line_freqs_full_day()
-    G, vfreq, direct_freq, variant_seq, report_ctx = _build_rail_graph(
-        rail_segs_tt, rail_lines, rail_stations_g)
-
-    global _ROUTE_NAME
-    _ROUTE_NAME = report_ctx['route_name']
-
-    # --- Gateway injection setup (boundary gateways only; convergence stations
-    # route normally via their portals seeded above). Demand at a boundary gateway
-    # is split across its crossing services (stopping + passing) by the connection
-    # table's nested type-then-frequency weights, then forced onto each service. ---
-    print("\n[Step 2b] Gateway service-connection wiring ...")
-    conn_df = _load_gateway_connections(svc_version)
-    gw_lookup, gw_ids = _build_gateway_conn_lookup(conn_df, variant_seq)
-    _augment_gateway_graph(G, gw_lookup, vfreq)
     od_normal, od_gw = _expand_gateway_od(od_long, gw_lookup, gw_ids)
     print(f"  Gateways wired: {len(gw_ids)} boundary gateways, "
           f"{len(gw_lookup)} (gateway,role) entries; OD split into "
@@ -1965,12 +1998,86 @@ def passenger_routing(svc_version: str = '',
         print(f"\n[Step 4] Writing outputs — {method} ...")
         _write_method_outputs(prim, skims, name_lookup, svc_network, method,
                               windows, use_cache)
+        _persist_primitive(prim, svc_network, method, use_cache)
 
         _write_reports(prim, skims, rail_segs_tt, rail_stations, name_lookup,
                        svc_network, method, windows, sa_ids, variant_seq,
                        report_ctx['variant_period_freq'], make_plots=make_plots)
 
     print("\n=== Phase 4C passenger routing done ===")
+
+
+def _persist_primitive(prim: dict, svc_network: str, method: str,
+                       use_cache: bool) -> None:
+    """Persist the pre-τ per-pair primitive (paths/segments/events/unresolved) as
+    parquet — the reloadable baseline a Phase 6 subset recompute overwrites per
+    (origin_id, dest_id) and re-aggregates. Additive: the τ-scaled workbooks above
+    are unchanged."""
+    for table in ('paths', 'segments', 'events', 'unresolved'):
+        fpath = paths.get_routing_primitive_path(svc_network, method, table)
+        os.makedirs(os.path.dirname(fpath), exist_ok=True)
+        if use_cache and Path(fpath).exists():
+            print(f"    cached: {fpath}")
+            continue
+        df = pd.DataFrame(prim[table])
+        # from_id/to_id/station_id mix int and 'x<stop_id>' (out-of-catchment)
+        # ids; cast object columns to str so each parquet column has one type.
+        for c in df.columns:
+            if df[c].dtype == object:
+                df[c] = df[c].astype(str)
+        df.to_parquet(fpath, index=False)
+    print(f"    primitive parquet -> {paths.get_assignment_method_dir(svc_network, method)}")
+
+
+def route_subset(svc_version: str, od_subset: pd.DataFrame, method: str = '',
+                 rail_base: str = None, infra_version: str = '',
+                 od_method: str = 'pt_feeder') -> dict:
+    """Route a subset of OD pairs on a given network; return the pre-τ primitive.
+
+    The Phase 6 subset-routing entry: builds the routing graph (optionally on a
+    developed `rail_base`), expands gateways on `od_subset`, and runs the same
+    assignment the full path uses. Writes no files — Phase 6 owns the merge into
+    the persisted baseline primitive and the re-aggregation.
+
+    Args:
+        svc_version: service network folder name (with '_network').
+        od_subset:   DataFrame[origin_id, dest_id, trips] — the pairs to route.
+        method:      '' -> settings.ROUTING_ASSIGNMENT_METHOD; 'both' -> 'logit';
+                     else 'shortest_path' | 'logit'.
+        rail_base:   override for catchment_allocate._RAIL_BASE (developed network);
+                     None reuses the version's Unprojected services dir.
+
+    Returns:
+        prim dict {paths, segments, events, unresolved} at pre-τ trips.
+    """
+    m = (method or settings.ROUTING_ASSIGNMENT_METHOD).strip().lower()
+    if m == 'both':
+        m = 'logit'
+    if m not in ('shortest_path', 'logit'):
+        raise ValueError(f"Unknown method '{m}' (expected shortest_path | logit).")
+
+    ctx = _build_routing_graph(svc_version, od_method, infra_version, rail_base=rail_base)
+    G = ctx['G']
+    global _ROUTE_NAME
+    _ROUTE_NAME = ctx['report_ctx']['route_name']
+
+    od_normal, od_gw = _expand_gateway_od(od_subset, ctx['gw_lookup'], ctx['gw_ids'])
+    if m == 'shortest_path':
+        prim = _assign_shortest_path(G, od_normal)
+    else:
+        prim = _assign_logit(
+            G, od_normal,
+            engine=getattr(settings, 'ROUTING_LOGIT_ENGINE', 'table'),
+            variant_seq=ctx['variant_seq'],
+            k=settings.ROUTING_K_PATHS,
+            window_min=settings.ROUTING_COST_WINDOW_MIN,
+            window_pct=settings.ROUTING_COST_WINDOW_PCT,
+            max_transfers=settings.ROUTING_MAX_TRANSFERS,
+            max_examine=settings.ROUTING_MAX_EXAMINE,
+            theta=cp.LOGIT_ROUTE_THETA)
+    if not od_gw.empty:
+        _merge_primitives(prim, _assign_gateway(G, od_gw))
+    return prim
 
 
 # ===============================================================================

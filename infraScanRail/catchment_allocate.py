@@ -4852,6 +4852,64 @@ def _plot_gueteklassen_comparison(feeder_stops, rail_stops, boundary, pop_grid, 
 # ORCHESTRATORS
 # ===============================================================================
 
+def allocate_cells_subset(cells_subset, svc_network):
+    """Phase-6 hook: PT-Feeder allocation for a subset of grid cells on a given
+    service network. Returns (allocation, affected_communes); writes no files.
+
+    The full run (_run_pt_feeder_method) and this hook share the same
+    _allocate_pt_feeder_core, so a subset is allocated by the identical
+    frequency-aware argmin.
+
+    Args:
+        cells_subset: GeoDataFrame[RELI, E_KOORD, N_KOORD, NUMMER, geometry] — a
+            subset of the pop/empl grid.
+        svc_network: dict of pre-built network objects (rail_stations, feeder_stops,
+            feeder_stop_to_rail_times/_components, transfer_free_headway,
+            station_freq_penalty), as assembled by _run_pt_feeder_method (or by
+            Phase 6 for a developed svc-int network).
+
+    Returns:
+        (allocation, affected_communes) — allocation has the _allocate_cells schema;
+        affected_communes is the set of BFS_NR the subset cells fall in.
+    """
+    alloc, _walk, _cycle, _feeder = _allocate_pt_feeder_core(cells_subset, svc_network)
+    return alloc, _communes_of_cells(cells_subset)
+
+
+def _allocate_pt_feeder_core(cells, svc_network):
+    """Compute per-cell walk/cycle/feeder access times and allocate each cell to its
+    best station — the network-dependent core shared by the full PT-feeder run and
+    allocate_cells_subset. Returns (allocation, walk_df, cycle_df, feeder_df)."""
+    rail_stations = svc_network['rail_stations']
+    walk   = _compute_walk_to_rail_times(cells, rail_stations)
+    cycle  = _compute_cycle_to_rail_times(cells, rail_stations)
+    feeder = _compute_feeder_to_rail_times(
+        cells, svc_network['feeder_stops'], svc_network['feeder_stop_to_rail_times'],
+        feeder_stop_to_rail_components=svc_network['feeder_stop_to_rail_components'],
+        transfer_free_headway=svc_network['transfer_free_headway'],
+    )
+    alloc = _allocate_cells(walk, cycle, feeder, cells, rail_stations,
+                            station_freq_penalty=svc_network['station_freq_penalty'])
+    return alloc, walk, cycle, feeder
+
+
+def _communes_of_cells(cells) -> set:
+    """Set of BFS_NR the given grid cells fall in (spatial join to municipal
+    boundaries; same boundary load + BFS detection as the PT-feeder breakdown)."""
+    muni = gpd.read_file(paths.MUNICIPAL_BOUNDARIES_GPKG).to_crs(CODEBASE_CRS)
+    if 'objektart' in muni.columns:
+        muni = muni[muni['objektart'] == 'Gemeindegebiet'].copy()
+    bfs_col = next((c for c in ['BFS_NR', 'bfs_nr', 'BFS_NUMMER', 'bfs_nummer',
+                                 'GMDNR', 'gmdnr'] if c in muni.columns), None)
+    if bfs_col is None:
+        return set()
+    muni[bfs_col] = pd.to_numeric(muni[bfs_col], errors='coerce').astype('Int64')
+    muni = muni.dropna(subset=[bfs_col])[[bfs_col, 'geometry']]
+    cg = cells[['RELI', 'geometry']].copy()
+    joined = gpd.sjoin(cg, muni, how='left', predicate='within')
+    return {int(b) for b in joined[bfs_col].dropna().unique()}
+
+
 def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
                           visualize: bool = True):
     """Full PT-Feeder allocation pipeline.
@@ -4913,18 +4971,21 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
     print(f"  [Step 3 complete: {time.time() - st:.1f}s]")
     st = time.time()
 
+    # Bundle the pre-built network objects so the cell→station allocation core is
+    # shared verbatim by the full run and the Phase-6 subset hook (allocate_cells_subset).
+    svc_network = {
+        'rail_stations': rail_stations,
+        'feeder_stops': feeder_stops,
+        'feeder_stop_to_rail_times': feeder_stop_to_rail_times,
+        'feeder_stop_to_rail_components': feeder_stop_to_rail_components,
+        'transfer_free_headway': transfer_free_headway,
+        'station_freq_penalty': station_freq_penalty,
+    }
+
     # Step 4: Allocate cells — population grid first
     print("\n  Allocating population cells ...")
-    walk_pop  = _compute_walk_to_rail_times(pop_grid, rail_stations)
-    cycle_pop = _compute_cycle_to_rail_times(pop_grid, rail_stations)
-    feeder_pop = _compute_feeder_to_rail_times(
-        pop_grid, feeder_stops, feeder_stop_to_rail_times,
-        feeder_stop_to_rail_components=feeder_stop_to_rail_components,
-        transfer_free_headway=transfer_free_headway,
-    )
-    alloc_pop = _allocate_cells(walk_pop, cycle_pop, feeder_pop,
-                                pop_grid, rail_stations,
-                                station_freq_penalty=station_freq_penalty)
+    alloc_pop, walk_pop, cycle_pop, feeder_pop = _allocate_pt_feeder_core(
+        pop_grid, svc_network)
 
     print(f"  [Pop allocation complete: {time.time() - st:.1f}s]")
     st = time.time()
@@ -4935,16 +4996,8 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
     empl_only_grid = empl_grid[~empl_grid['RELI'].isin(pop_relis_set)].copy()
     if not empl_only_grid.empty:
         print(f"\n  Allocating {len(empl_only_grid):,} employment-only cells ...")
-        walk_empl   = _compute_walk_to_rail_times(empl_only_grid, rail_stations)
-        cycle_empl  = _compute_cycle_to_rail_times(empl_only_grid, rail_stations)
-        feeder_empl = _compute_feeder_to_rail_times(
-            empl_only_grid, feeder_stops, feeder_stop_to_rail_times,
-            feeder_stop_to_rail_components=feeder_stop_to_rail_components,
-            transfer_free_headway=transfer_free_headway,
-        )
-        alloc_empl = _allocate_cells(walk_empl, cycle_empl, feeder_empl,
-                                     empl_only_grid, rail_stations,
-                                     station_freq_penalty=station_freq_penalty)
+        alloc_empl, walk_empl, cycle_empl, feeder_empl = _allocate_pt_feeder_core(
+            empl_only_grid, svc_network)
         alloc_combined = pd.concat([alloc_pop, alloc_empl], ignore_index=True)
         walk_all   = pd.concat([walk_pop,   walk_empl  ], ignore_index=True)
         cycle_all  = pd.concat([cycle_pop,  cycle_empl ], ignore_index=True)

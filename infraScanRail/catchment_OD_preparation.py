@@ -194,6 +194,42 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
                 _write_window_xlsx(attr_longs, tau, name_lookup, out_path,
                                    label=f'{branch} {suffix}')
 
+    # --- Persist reloadable baseline artifacts (Phase 6B subset reaggregation) ---
+    # Additive only: the whole-day long-format OD, the PT-feeder attribution weights
+    # and the gateway-expanded communal OD are written so reaggregate_subset can be
+    # driven from disk without re-running this function. The wide xlsx outputs above
+    # are unchanged. Weights are reproduced via the attribution_weights() seam (same
+    # producer as the live branch) so disk and live stay in lock-step.
+    print("\n  Persisting long-format OD + attribution weights ...")
+    for branch in methods:
+        attr_longs = branch_attr_longs.get(branch)
+        if not attr_longs:
+            continue
+        for label, long_df in attr_longs.items():
+            attribution = label.lower()
+            long_path = paths.get_station_od_long_csv(svc_version, branch, attribution)
+            Path(long_path).parent.mkdir(parents=True, exist_ok=True)
+            if use_cache and Path(long_path).exists():
+                print(f"    cached: {long_path}")
+            else:
+                long_df.to_csv(long_path, index=False, encoding='utf-8-sig')
+            if branch == 'pt_feeder':
+                ow, dw = attribution_weights('pt_feeder', attribution, gw_ids)
+                ow.to_csv(paths.get_attribution_weights_csv(
+                    svc_version, branch, attribution, 'orig'),
+                    index=False, encoding='utf-8-sig')
+                dw.to_csv(paths.get_attribution_weights_csv(
+                    svc_version, branch, attribution, 'dest'),
+                    index=False, encoding='utf-8-sig')
+    communal_path = paths.get_communal_od_csv(svc_version)
+    Path(communal_path).parent.mkdir(parents=True, exist_ok=True)
+    if use_cache and Path(communal_path).exists():
+        print(f"    cached: {communal_path}")
+    else:
+        branch_od.to_csv(communal_path, index=False, encoding='utf-8-sig')
+    print(f"    long OD + weights + communal OD under "
+          f"{paths.get_od_version_dir(svc_version)}")
+
     # --- Top-5 origins/destinations Excel export + per-method OD pie map ---
     sa_stations_gdf = _load_sa_stations(rail_stations, svc_version, infra_version)
     sa_ids = set(pd.to_numeric(sa_stations_gdf['id_point'], errors='coerce')

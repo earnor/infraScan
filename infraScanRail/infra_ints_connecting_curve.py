@@ -379,6 +379,9 @@ def _materialize_record(rv: Dict, int_id: str, base_version: str, interactive: b
         'Segment_ID': [f"{int_id}_curve"], 'From_Name': [j1], 'To_Name': [j2],
         'Num_Tracks': [1.0], 'Length': [arc_len],
         'Gauge': [rv['gauge']], 'Electrification_Class': [rv['electrification']],
+        # Rail by construction (it joins two rail branches): tag 'train' so the capacity
+        # loader's train-segment filter keeps the curve (a missing mode is dropped).
+        'Transport_Mode': ['train'],
         'Average_Speed': [v], 'Predominant_Speed': [v], 'Speed_Coverage_Pct': [100.0],
         'TT_Stopping': [tt_stop], 'TT_Passing': [tt_pass], 'speed_source': ['design'],
         'geometry': [arc],

@@ -4011,6 +4011,9 @@ def _split_row_template(S, geom, from_name, to_name,
         'Route_Number':          S['Route_Number'],
         'Route_Name':            S['Route_Name'],
         'Route_Owner':           S['Route_Owner'],
+        # Split pieces are the same physical track as the host: inherit its mode so the
+        # capacity loader's train-segment filter keeps them (a missing mode is dropped).
+        'Transport_Mode':        S.get('Transport_Mode', pd.NA),
         'Average_Speed':         S.get('Average_Speed', pd.NA),
         'Predominant_Speed':     S.get('Predominant_Speed', pd.NA),
         'Speed_Coverage_Pct':    S.get('Speed_Coverage_Pct', 0.0),

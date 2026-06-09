@@ -292,6 +292,32 @@ def get_station_od_matrix_xlsx(svc_network: str, method: str) -> str:
                         'od_matrix_stations.xlsx')
 
 
+def get_station_od_long_csv(svc_network: str, method: str, attribution: str) -> str:
+    """Return absolute path to the persisted long-format station OD
+    (origin_station_id, dest_station_id, trips) for a (method, attribution).
+
+    Reloadable baseline for the Phase 6B subset reaggregation; attribution is the
+    lower-cased sheet label ('specific' | 'blended' | 'municipal')."""
+    return os.path.join(get_station_od_dir(svc_network, method),
+                        f'od_long_{attribution}.csv')
+
+
+def get_attribution_weights_csv(svc_network: str, method: str, attribution: str,
+                                side: str) -> str:
+    """Return absolute path to a persisted attribution weight table
+    (BFS, station_id, <side>_weight) for a (method, attribution).
+
+    side: 'orig' | 'dest'. Consumed (with the communal OD) by reaggregate_subset."""
+    return os.path.join(get_station_od_dir(svc_network, method),
+                        f'weights_{side}_{attribution}.csv')
+
+
+def get_communal_od_csv(svc_network: str) -> str:
+    """Return absolute path to the persisted gateway-expanded communal OD
+    (quelle_code, ziel_code, wert) that reaggregate_subset consumes."""
+    return os.path.join(get_od_version_dir(svc_network), 'communal_od_branch.csv')
+
+
 def get_od_method_plot_dir(svc_network: str, method: str) -> str:
     """Return absolute path to the per-method OD plot dir
     (plots/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/).
@@ -353,6 +379,16 @@ def get_assignment_method_dir(svc_network: str, method: str) -> str:
         method:      'shortest_path' | 'logit'.
     """
     return os.path.join(get_assignment_dir(svc_network), method)
+
+
+def get_routing_primitive_path(svc_network: str, method: str, table: str) -> str:
+    """Return absolute path to a persisted pre-τ routing-primitive table
+    (data/Traffic_Flow/Assignment/<svc_network>/<method>/primitive_<table>.parquet).
+
+    table: 'paths' | 'segments' | 'events' | 'unresolved'. The reloadable baseline
+    a Phase 6 subset recompute overwrites per (origin_id, dest_id) and re-aggregates."""
+    return os.path.join(get_assignment_method_dir(svc_network, method),
+                        f'primitive_{table}.parquet')
 
 
 def get_assignment_report_xlsx(svc_network: str, method: str, name: str) -> str:
