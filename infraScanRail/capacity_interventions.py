@@ -1,10 +1,11 @@
 """
 Capacity Expansion Interventions
-Last modified: 2026-05-23
+Last modified: 2026-06-09
 
 Identifies capacity-constrained sections and designs Tier-1 infrastructure
-interventions (real nodes + adjusted segments) to bring all sections to
-≥ settings.capacity_threshold tphpd available capacity.
+interventions (real nodes + adjusted segments) to restore the reactive trigger
+margin (≥ settings.SVC_INT_CAP_THRESHOLD_TPHPD tphpd available capacity) on the
+constrained sections. Phase 5C is the sole, cost-bearing CAP generator.
 
 Intervention types
 ------------------
@@ -157,18 +158,41 @@ class CapacityIntervention:
         }
 
 
+def _pick_col(df: pd.DataFrame, *names: str) -> str:
+    """Return the first of `names` present in df (period-schema compatibility)."""
+    for n in names:
+        if n in df.columns:
+            return n
+    raise KeyError(f"none of {names} present in columns {list(df.columns)}")
+
+
+def _alias_cols(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
+    """Add target columns aliased from source columns when missing (non-destructive).
+
+    mapping: {target_name: source_name}. Used to bridge the period-suffixed sections
+    schema (Track_Count/Length/…) to the names the capacity engine reads (tracks/length_m/…).
+    """
+    out = df.copy()
+    for target, source in mapping.items():
+        if target not in out.columns and source in out.columns:
+            out[target] = out[source]
+    return out
+
+
 def identify_capacity_constrained_sections(
     sections_df: pd.DataFrame,
-    threshold_tphpd: float = 2.0
+    threshold_tphpd: float = 1.0
 ) -> pd.DataFrame:
     """
     Identify sections with available capacity below threshold.
 
-    Available capacity = Capacity - total_tphpd (remaining capacity)
+    Available capacity = Capacity - total_tphpd (remaining capacity). Accepts both the
+    legacy unsuffixed columns and the current period-suffixed schema
+    (Capacity_peak / total_tphpd_peak).
 
     Args:
         sections_df: Sections DataFrame from Phase 3
-        threshold_tphpd: Minimum required available capacity (default: 2.0)
+        threshold_tphpd: Minimum required available capacity (default: 1.0)
 
     Returns:
         DataFrame of constrained sections
@@ -177,8 +201,11 @@ def identify_capacity_constrained_sections(
 
     # Calculate available capacity (remaining capacity)
     sections_df = sections_df.copy()
+    cap_col = _pick_col(sections_df, 'Capacity', 'Capacity_peak')
+    load_col = _pick_col(sections_df, 'total_tphpd', 'total_tphpd_peak')
     sections_df['available_capacity'] = (
-        sections_df['Capacity'] - sections_df['total_tphpd']
+        pd.to_numeric(sections_df[cap_col], errors='coerce')
+        - pd.to_numeric(sections_df[load_col], errors='coerce')
     )
 
     # Filter constrained sections
@@ -232,11 +259,8 @@ def _find_geometric_center_station(
             if not stations_with_distances or stations_with_distances[-1][0] != from_node:
                 stations_with_distances.append((from_node, cumulative_dist))
 
-            # Look up segment length
-            seg_row = segments_df[
-                (segments_df['from_node'] == from_node) &
-                (segments_df['to_node'] == to_node)
-            ]
+            # Look up segment length (orientation-agnostic)
+            seg_row = segments_df[_seg_mask(segments_df, from_node, to_node)]
 
             if len(seg_row) == 0:
                 raise ValueError(f"Segment {seg} not found in segments_df")
@@ -288,6 +312,26 @@ def _find_geometric_center_station(
         station_id = int(middle_segment.split('-')[0])
 
         return station_id, "fallback_index"
+
+
+def _seg_mask(df: pd.DataFrame, from_node: int, to_node: int) -> pd.Series:
+    """Orientation-agnostic segment mask: match (from,to) OR (to,from).
+
+    Section ``segment_sequence`` and the Segments sheet can order a segment's two
+    nodes differently; a single-direction match silently misses the row (and made
+    the enhancement loop a no-op). Mirror _lookup_segment's both-directions logic.
+    """
+    f = pd.to_numeric(df['from_node'], errors='coerce')
+    t = pd.to_numeric(df['to_node'], errors='coerce')
+    return ((f == from_node) & (t == to_node)) | ((f == to_node) & (t == from_node))
+
+
+def _target_key(intervention: 'CapacityIntervention'):
+    """Physical target identity (orientation-agnostic) for once-per-run dedup."""
+    if intervention.type == 'station_track':
+        return ('station', int(intervention.node_id))
+    fn, tn = str(intervention.segment_id).split('-')
+    return ('segment', frozenset((int(fn), int(tn))))
 
 
 def design_section_intervention(
@@ -378,10 +422,7 @@ def design_section_intervention(
         from_node, to_node = segment_id.split('-')
         from_node, to_node = int(from_node), int(to_node)
 
-        segment_row = segments_df[
-            (segments_df['from_node'] == from_node) &
-            (segments_df['to_node'] == to_node)
-        ]
+        segment_row = segments_df[_seg_mask(segments_df, from_node, to_node)]
 
         if len(segment_row) == 0:
             logger.warning(f"Segment {segment_id} not found in segments_df")
@@ -510,6 +551,14 @@ def apply_interventions_to_workbook(
     stations_df = pd.read_excel(prep_workbook_path, sheet_name='Stations')
     segments_df = pd.read_excel(prep_workbook_path, sheet_name='Segments')
 
+    # Track columns must be float — siding_with_junctions applies a +0.5 delta that
+    # cannot be assigned into an int64 column.
+    for _c in ('tracks', 'platforms'):
+        if _c in stations_df.columns:
+            stations_df[_c] = pd.to_numeric(stations_df[_c], errors='coerce').astype(float)
+    if 'tracks' in segments_df.columns:
+        segments_df['tracks'] = pd.to_numeric(segments_df['tracks'], errors='coerce').astype(float)
+
     # Track changes for logging
     station_changes = {}
     segment_changes = {}
@@ -548,8 +597,7 @@ def apply_interventions_to_workbook(
             delta = (1.0 if intervention.strategy == 'extra_track'
                      else intervention.tracks_added)
 
-            mask = ((segments_df['from_node'] == from_node) &
-                   (segments_df['to_node'] == to_node))
+            mask = _seg_mask(segments_df, from_node, to_node)
 
             if mask.sum() > 0:
                 old_tracks = segments_df.loc[mask, 'tracks'].values[0]
@@ -648,20 +696,10 @@ def visualize_enhanced_network(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cap-int → spatial conversion (bridge to infra-int registry)
+# Cap-int geometry lookup helpers (siding planning; used by infra_ints_capacity)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CAP_JUNCTION_NR_START = 9_100_001
-
-
-def _make_cap_int_id(intervention: 'CapacityIntervention') -> str:
-    """Map an intervention to its canonical registry int_id."""
-    counter = int(intervention.intervention_id.split('_')[-1])
-    if intervention.type == 'station_track':
-        return f"cap_st_{counter:04d}"
-    if intervention.strategy == 'extra_track':
-        return f"cap_et_{counter:04d}"
-    return f"cap_ps_{counter:04d}"
 
 
 def _lookup_segment(
@@ -690,219 +728,6 @@ def _next_junction_nr(nodes_base: gpd.GeoDataFrame) -> int:
     return int(cap_existing.max()) + 1 if not cap_existing.empty else _CAP_JUNCTION_NR_START
 
 
-def _spatial_station_track(
-    intervention: 'CapacityIntervention',
-    int_id: str,
-    nodes_base: gpd.GeoDataFrame,
-) -> Tuple[Optional[gpd.GeoDataFrame], None, None]:
-    """Return updated node row for a station_track intervention."""
-    mask = nodes_base['Number'] == intervention.node_id
-    if not mask.any():
-        logger.warning(f"  [bridge] station node {intervention.node_id} not found; skipping")
-        return None, None, None
-    node_row = nodes_base[mask].copy()
-    node_row['Track_Count'] = node_row['Track_Count'] + 1
-    if intervention.platforms_added:
-        node_row['Platform_Count'] = (
-            node_row['Platform_Count'].fillna(0) + intervention.platforms_added
-        )
-    node_row['int_id'] = int_id
-    return node_row, None, None
-
-
-def _spatial_extra_track(
-    intervention: 'CapacityIntervention',
-    int_id: str,
-    segs_base: gpd.GeoDataFrame,
-    comp_base: gpd.GeoDataFrame,
-) -> Tuple[None, gpd.GeoDataFrame, Optional[gpd.GeoDataFrame]]:
-    """Return updated segment row (+1 track) for an extra_track intervention."""
-    from_nr, to_nr = intervention.segment_id.split('-')
-    seg_row = _lookup_segment(segs_base, from_nr, to_nr).copy()
-    seg_row['Num_Tracks'] = seg_row['Num_Tracks'] + 1
-    seg_row['int_id'] = int_id
-
-    orig_seg_id = seg_row['Segment_ID'].iloc[0]
-    comp_rows = comp_base[comp_base['Segment_ID'] == orig_seg_id].copy()
-    comp_rows['int_id'] = int_id
-
-    return None, seg_row, comp_rows if not comp_rows.empty else None
-
-
-def _spatial_siding_with_junctions(
-    intervention: 'CapacityIntervention',
-    int_id: str,
-    segs_base: gpd.GeoDataFrame,
-    comp_base: gpd.GeoDataFrame,
-    nodes_base: gpd.GeoDataFrame,
-) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, Optional[gpd.GeoDataFrame]]:
-    """Return 2 junction nodes + 4 segment rows (tombstone + 3 sub-segs) for a siding intervention."""
-    from_nr, to_nr = intervention.segment_id.split('-')
-    seg_row = _lookup_segment(segs_base, from_nr, to_nr)
-    seg_geom = seg_row.geometry.iloc[0]
-    line = linemerge(seg_geom) if seg_geom.geom_type == 'MultiLineString' else seg_geom
-
-    kp_A, kp_B = _plan_siding_km_positions(
-        intervention.section_length_m, intervention.siding_length_m
-    )
-    pt_A = line.interpolate(kp_A)
-    pt_B = line.interpolate(kp_B)
-
-    junc_a_nr = _next_junction_nr(nodes_base)
-    junc_b_nr = junc_a_nr + 1
-
-    # Build junction node rows using an existing junction as schema template
-    junction_nodes = nodes_base[nodes_base['Node_Class'] == 'junction']
-    if junction_nodes.empty:
-        junction_nodes = nodes_base
-    template = junction_nodes.iloc[[0]].copy()
-
-    def _make_junction(nr, point):
-        row = template.copy()
-        row['Number'] = nr
-        row['Node_ID'] = f"cap_junc_{int_id}_{nr}"
-        row['Name'] = f"Cap junction {nr}"
-        row['Code'] = f"CJ{nr % 10000:04d}"
-        row['E'] = point.x
-        row['N'] = point.y
-        row['Node_Class'] = 'junction'
-        row['Transport_Mode'] = seg_row['Transport_Mode'].iloc[0]
-        row['Track_Count'] = seg_row['Num_Tracks'].iloc[0]
-        row['Platform_Count'] = None
-        row['Parent_Node'] = None
-        row['int_id'] = int_id
-        row['geometry'] = point
-        return row
-
-    junc_a_row = _make_junction(junc_a_nr, pt_A)
-    junc_b_row = _make_junction(junc_b_nr, pt_B)
-
-    # Build sub-segment rows
-    base_tracks = seg_row['Num_Tracks'].iloc[0]
-    seg_len = seg_row['Length'].iloc[0] if 'Length' in seg_row.columns else line.length
-    orig_seg_id = seg_row['Segment_ID'].iloc[0]
-
-    def _make_sub_segment(f_nr, t_nr, geom, tracks):
-        row = seg_row.copy()
-        row['Segment_ID'] = f"{orig_seg_id}_{f_nr}_{t_nr}"
-        row['Number'] = f"{f_nr}_{t_nr}"
-        row['Code'] = f"CJ{int(f_nr) % 10000:04d}_CJ{int(t_nr) % 10000:04d}"
-        row['Num_Tracks'] = tracks
-        row['Length'] = geom.length
-        frac = geom.length / (seg_len or 1.0)
-        row['Tunnel_Length'] = (seg_row['Tunnel_Length'].iloc[0] or 0.0) * frac
-        row['Bridge_Length'] = (seg_row['Bridge_Length'].iloc[0] or 0.0) * frac
-        row['Conventional_Length'] = (seg_row['Conventional_Length'].iloc[0] or 0.0) * frac
-        row['geometry'] = MultiLineString([list(geom.coords)]) if geom.geom_type == 'LineString' else geom
-        row['int_id'] = int_id
-        return row
-
-    geom_ab = substring(line, 0,          kp_A)
-    geom_bc = substring(line, kp_A,       kp_B)
-    geom_cd = substring(line, kp_B, line.length)
-
-    seg_ab = _make_sub_segment(from_nr,   junc_a_nr, geom_ab, base_tracks)
-    seg_bc = _make_sub_segment(junc_a_nr, junc_b_nr, geom_bc, base_tracks + 1)
-    seg_cd = _make_sub_segment(junc_b_nr, to_nr,     geom_cd, base_tracks)
-
-    # Tombstone: original segment row with _delete=True so resolve_or_build removes it
-    tombstone = seg_row.copy()
-    tombstone['_delete'] = True
-    tombstone['int_id'] = int_id
-
-    # Composition rows for the siding sub-segment (BC) via proportional allocation
-    comp_orig = comp_base[comp_base['Segment_ID'] == orig_seg_id]
-    siding_frac = (kp_B - kp_A) / (line.length or 1.0)
-    comp_bc_rows = []
-    bc_seg_id = seg_bc['Segment_ID'].iloc[0]
-    for _, piece in comp_orig.iterrows():
-        piece_row = piece.copy()
-        piece_row['Segment_ID'] = bc_seg_id
-        piece_row['Piece_Length'] = piece['Piece_Length'] * siding_frac
-        piece_row['int_id'] = int_id
-        piece_row['geometry'] = geom_bc
-        comp_bc_rows.append(piece_row)
-
-    new_nodes = gpd.GeoDataFrame(
-        pd.concat([junc_a_row, junc_b_row], ignore_index=True),
-        crs=nodes_base.crs,
-    )
-    new_segs = gpd.GeoDataFrame(
-        pd.concat([tombstone, seg_ab, seg_bc, seg_cd], ignore_index=True),
-        crs=segs_base.crs,
-    )
-    new_comp = (
-        gpd.GeoDataFrame(comp_bc_rows, crs=comp_base.crs)
-        if comp_bc_rows else None
-    )
-    return new_nodes, new_segs, new_comp
-
-
-def cap_ints_to_spatial(
-    interventions: List['CapacityIntervention'],
-    infra_version: str,
-) -> Tuple[Optional[gpd.GeoDataFrame], Optional[gpd.GeoDataFrame], Optional[gpd.GeoDataFrame]]:
-    """Convert CapacityIntervention objects to spatial registry rows.
-
-    Loads the base infra network from infra_version and produces GeoDataFrames
-    suitable for append_cap_intervention_rows(). Called by run_enhanced_workflow()
-    after run_phase_four() returns.
-
-    Args:
-        interventions: list from run_phase_four().
-        infra_version: name of the base infra version (e.g. 'AS_2026_ZH').
-
-    Returns:
-        (nodes_gdf, segments_gdf, comp_gdf) — any may be None if no interventions
-        of that category were generated.
-    """
-    base_dir = Path(paths.get_infra_version_dir(infra_version))
-    nodes_base = gpd.read_file(base_dir / 'nodes.gpkg')
-    segs_base  = gpd.read_file(base_dir / 'segments.gpkg')
-    comp_path  = base_dir / 'segments_composition.gpkg'
-    comp_base  = (gpd.read_file(comp_path)
-                  if comp_path.exists()
-                  else gpd.GeoDataFrame(columns=['Segment_ID'], crs=nodes_base.crs))
-
-    out_nodes: List[gpd.GeoDataFrame] = []
-    out_segs:  List[gpd.GeoDataFrame] = []
-    out_comp:  List[gpd.GeoDataFrame] = []
-
-    for intervention in interventions:
-        int_id = _make_cap_int_id(intervention)
-        try:
-            if intervention.type == 'station_track':
-                n, s, c = _spatial_station_track(intervention, int_id, nodes_base)
-            elif intervention.strategy == 'extra_track':
-                n, s, c = _spatial_extra_track(intervention, int_id, segs_base, comp_base)
-            else:
-                n, s, c = _spatial_siding_with_junctions(
-                    intervention, int_id, segs_base, comp_base, nodes_base
-                )
-        except Exception as exc:
-            logger.warning(f"  [bridge] skipping {int_id}: {exc}")
-            continue
-
-        if n is not None and not n.empty:
-            out_nodes.append(n)
-        if s is not None and not s.empty:
-            out_segs.append(s)
-        if c is not None and not c.empty:
-            out_comp.append(c)
-
-    nodes_gdf = gpd.GeoDataFrame(
-        pd.concat(out_nodes, ignore_index=True), crs=nodes_base.crs
-    ) if out_nodes else None
-    segs_gdf = gpd.GeoDataFrame(
-        pd.concat(out_segs, ignore_index=True), crs=segs_base.crs
-    ) if out_segs else None
-    comp_gdf = gpd.GeoDataFrame(
-        pd.concat(out_comp, ignore_index=True), crs=comp_base.crs
-    ) if out_comp else None
-
-    return nodes_gdf, segs_gdf, comp_gdf
-
-
 def run_phase_four(
     original_sections_df: pd.DataFrame,
     original_segments_df: pd.DataFrame,
@@ -910,7 +735,7 @@ def run_phase_four(
     prep_workbook_path: Path,
     output_dir: Path,
     network_label: str,
-    threshold_tphpd: float = 2.0,
+    threshold_tphpd: float = 1.0,
     max_iterations: int = 10
 ) -> Tuple[List[CapacityIntervention], Path, pd.DataFrame]:
     """
@@ -922,7 +747,7 @@ def run_phase_four(
         original_stations_df: Stations DataFrame
         prep_workbook_path: Path to original prep workbook
         output_dir: Directory for enhanced baseline outputs
-        threshold_tphpd: Minimum required available capacity (default: 2.0)
+        threshold_tphpd: Minimum required available capacity (default: 1.0)
         max_iterations: Maximum number of intervention iterations
 
     Returns:
@@ -932,9 +757,17 @@ def run_phase_four(
     logger.info("Phase 4: Capacity Enhancement Interventions")
     logger.info("=" * 60)
 
+    # Bridge the current period-suffixed sheet schema to the names the engine reads
+    # (Stations_Peak: Track_Count/Platform_Count; Segments_Peak: Length/Num_Tracks/Average_Speed).
+    original_stations_df = _alias_cols(
+        original_stations_df, {'tracks': 'Track_Count', 'platforms': 'Platform_Count'})
+    original_segments_df = _alias_cols(
+        original_segments_df, {'length_m': 'Length', 'tracks': 'Num_Tracks', 'speed': 'Average_Speed'})
+
     # Initialize
     all_interventions = []
     intervention_counter = 1
+    treated_targets: set = set()   # physical targets treated this run (once-per-run dedup)
 
     # Working copies
     current_sections_df = original_sections_df.copy()
@@ -954,7 +787,9 @@ def run_phase_four(
             logger.info(f"✓ All sections have ≥{threshold_tphpd} tphpd available capacity")
             break
 
-        # Step 2: Design interventions for this iteration
+        # Step 2: Design interventions for this iteration. Skip any target already
+        # treated this run (dedup safeguard): keeps the catalogue to one intervention
+        # per physical segment/station even if a section needs escalation.
         iteration_interventions = []
         for idx, section in constrained_sections.iterrows():
             intervention = design_section_intervention(
@@ -964,8 +799,18 @@ def run_phase_four(
                 intervention_counter,
                 iteration
             )
+            key = _target_key(intervention)
+            if key in treated_targets:
+                logger.info(f"  skip section {section.get('section_id')}: "
+                            f"target {key} already treated this run")
+                continue
+            treated_targets.add(key)
             intervention_counter += 1
             iteration_interventions.append(intervention)
+
+        if not iteration_interventions:
+            logger.info("No new (untreated) targets among constrained sections — stopping")
+            break
 
         logger.info(f"Designed {len(iteration_interventions)} interventions:")
         station_count = sum(1 for i in iteration_interventions if i.type == 'station_track')

@@ -3,41 +3,41 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
 ================================================================================
   RUN CONFIGURATION
 ================================================================================
-  Infrastructure   : Build_New  -->  build as 'AS_2026_ZH'
+  Infrastructure   : AS_2026_ZH
   Raw version      : Raw_ZH
-  Services         : Build_New  [needs projection]
+  Services         : AK_2026_S18
   GTFS version     : GTFS_SVC2026_ZH
   Canton           : ZH
   Catchment method : PT_Feeder  (OD: feeder_weighted)
   Travel cost      : calibrated  (transfer: explicit)
   Capacity mode    : Dynamic
-  Population base  : 2035
+  Population base  : 2018
   Scenarios        : 100 x [2018-2100]
 --------------------------------------------------------------------------------
 
 
 --- Grid Scaling (Step 2.2) ---
 
-  Grid scaling 2023 → 2035 by Bezirk:
+  Grid scaling 2023 → 2018 by Bezirk:
   Bezirk       | Population | Employment
   -------------+------------+-----------
-  Affoltern    |     1.1096 |     1.1074
-  Andelfingen  |     1.1214 |     1.1255
-  Bülach       |     1.0986 |     1.1006
-  Dielsdorf    |     1.1120 |     1.1149
-  Dietikon     |     1.1646 |     1.1571
-  Hinwil       |     1.1116 |     1.1128
-  Horgen       |     1.1257 |     1.1276
-  Meilen       |     1.1244 |     1.1229
-  Pfäffikon    |     1.1205 |     1.1197
-  Uster        |     1.1503 |     1.1550
-  Winterthur   |     1.1175 |     1.1163
-  Zürich       |     1.1111 |     1.1111
+  Affoltern    |     0.9471 |     0.9619
+  Andelfingen  |     0.9586 |     0.9285
+  Bülach       |     0.9231 |     0.8960
+  Dielsdorf    |     0.9509 |     0.9619
+  Dietikon     |     0.9321 |     0.9072
+  Hinwil       |     0.9485 |     0.9628
+  Horgen       |     0.9504 |     0.9687
+  Meilen       |     0.9591 |     0.9497
+  Pfäffikon    |     0.9583 |     0.9478
+  Uster        |     0.9406 |     0.9845
+  Winterthur   |     0.9405 |     0.9266
+  Zürich       |     0.9569 |     0.9049
   -------------+------------+-----------
-  Mean         |     1.1223 |     1.1226
+  Mean         |     0.9472 |     0.9417
 
-  Total population  :    1,609,779 (2023) →    1,802,726 (2035)
-  Total employment  :      914,349 (2023) →    1,021,643 (2035)
+  Total population  :    1,609,779 (2023) →    1,524,721 (2018)
+  Total employment  :      914,349 (2023) →      843,506 (2018)
 
 --- Enhancement Stats: AS_2026_ZH_enhanced ---
   Total segments         : 687
@@ -90,9 +90,9 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
   STATION OD MATRIX (Phase 4B)
 ================================================================================
   Method               : pt_feeder
-  Attribution mode     : specific
+  Attribution mode     : blended
   Service version      : AK_2026_S18_network
-  Population base year  : 2035
+  Population base year  : 2018
   Temporal window      : full_day
   OD output dir        : data/Traffic_Flow/OD/AK_2026_S18_network/
 ================================================================================
@@ -112,15 +112,18 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
 PHASE RUNTIMES
 ================================================================================
 
-Phase 1: Initialisation..................................... 0m 0s (0.84s)
-Phase 2: Data Preparation................................... 0m 53s (53.82s)
-Phase 3A: Infrastructure Network Build...................... 0m 25s (25.85s)
-Phase 3B: Services Network Build............................ 7m 24s (444.07s)
-Phase 3C: Capacity Analysis................................. 0m 5s (5.03s)
-Phase 4A: Catchment Allocation.............................. 2m 41s (161.23s)
-Phase 4B: Station OD Matrix................................. 0m 33s (33.99s)
-Phase 4C: Passenger Routing................................. 11m 47s (707.61s)
+Phase 1: Initialisation..................................... 0m 0s (0.61s)
+Phase 2: Data Preparation................................... 0m 6s (6.76s)
+Phase 3A: Infrastructure Network Build...................... 0m 0s (0.16s)
+Phase 3B: Services Network Build............................ 0m 5s (5.58s)
+Phase 3C: Capacity Analysis................................. 0m 5s (5.94s)
+Phase 4A: Catchment Allocation.............................. 1m 57s (117.09s)
+Phase 4B: Station OD Matrix................................. 0m 47s (47.85s)
+Phase 4C: Passenger Routing................................. 6m 17s (377.41s)
+Phase 5A: Infrastructure Interventions...................... 0m 16s (16.77s)
+Phase 5B: Service Interventions............................. 1m 18s (78.90s)
+Phase 5C: Capacity on Matched Network....................... 3m 2s (182.47s)
 
 ================================================================================
-TOTAL TIME.................................................. 23m 52s (1432.43s)
+TOTAL TIME.................................................. 13m 59s (839.54s)
 ================================================================================

@@ -1454,6 +1454,7 @@ def _load_boundary(boundary_path: str) -> Optional["GeoDataFrame"]:
 def _load_map_overlays(
     infra_version: Optional[str] = None,
     lakes_path: Optional[str] = None,
+    infra_dir: Optional[str] = None,
 ) -> Tuple[Optional["GeoDataFrame"], Dict[Tuple[int, int], List[Tuple[float, float]]]]:
     """Load optional GIS overlays used to enrich the network map.
 
@@ -1500,7 +1501,7 @@ def _load_map_overlays(
         try:
             import pandas as _pd
             from infrabuild_network_builder import load_version as _load_v
-            _nodes_gdf, _segs_gdf = _load_v(infra_version)
+            _nodes_gdf, _segs_gdf = _load_v(infra_version, infra_dir=infra_dir)
 
             # Train-mode filter mirrors capacity_calculator.load_infra_data so the
             # BFS graph uses the same Numbers as the workbook. Without this, a
@@ -2895,6 +2896,7 @@ def network_current_map(
     is_catchment: bool = False,
     marker_scale: float = 1.5,
     boundary_path: Optional[str] = None,
+    infra_dir: Optional[str] = None,
 ) -> Union[Path, Tuple[Path, Figure]]:
     """Render the current network infrastructure map.
 
@@ -2930,7 +2932,8 @@ def network_current_map(
     if not segments_list:
         raise ValueError("No segments were found linking the stations.")
 
-    water_layer, segment_geometries = _load_map_overlays(infra_version, lakes_path=lakes_path)
+    water_layer, segment_geometries = _load_map_overlays(infra_version, lakes_path=lakes_path,
+                                                          infra_dir=infra_dir)
 
     figsize = _calculate_figure_size(stations)
     fig, ax = plt.subplots(figsize=figsize)
@@ -3022,6 +3025,7 @@ def plot_capacity_network(
     is_catchment: bool = False,
     network_marker_scale: float = 1.5,
     boundary_path: Optional[str] = None,
+    infra_dir: Optional[str] = None,
 ) -> Tuple[Path, Path]:
     """Plot the capacity prep workbook and return the saved image paths (network, capacity).
 
@@ -3086,6 +3090,7 @@ def plot_capacity_network(
             is_catchment=is_catchment,
             marker_scale=network_marker_scale,
             boundary_path=boundary_path,
+            infra_dir=infra_dir,
         )
 
         if isinstance(base_result, tuple):
@@ -3114,7 +3119,8 @@ def plot_capacity_network(
     capacity_fig, capacity_ax = plt.subplots(figsize=figsize)
 
     # Draw lakes on capacity figure; also load segment geometries for BFS routing
-    _cap_water, _ = _load_map_overlays(infra_version=infra_version, lakes_path=lakes_path)
+    _cap_water, _ = _load_map_overlays(infra_version=infra_version, lakes_path=lakes_path,
+                                       infra_dir=infra_dir)
     if _cap_water is not None and not getattr(_cap_water, "empty", True):
         try:
             _cap_water.plot(ax=capacity_ax, color="#b7d4f0", edgecolor="#6ea3d5", linewidth=0.5, zorder=1)
@@ -3251,6 +3257,8 @@ def plot_service_network(
     lakes_path: Optional[str] = None,
     include_labels: bool = True,
     allowed_node_classes: Optional[Set[str]] = None,
+    infra_version: Optional[str] = None,
+    infra_dir: Optional[str] = None,
 ) -> Path:
     """Plot network services with frequency-based styling and return the saved image path.
 
@@ -3260,6 +3268,9 @@ def plot_service_network(
         show: If True, display the plot.
         network_label: Optional custom network label (e.g., "AK_2035_dev_100023").
         output_dir: Optional custom output directory.
+        infra_version: Infra version whose segments.gpkg supplies true BAV geometry;
+            pass a composed (Derived) name for a svc-int so its CC/extension track
+            renders as real curves. infra_dir locates a Derived version's parent dir.
 
     Returns:
         Path to saved service network image.
@@ -3281,7 +3292,8 @@ def plot_service_network(
     if not segments_with_services:
         raise ValueError("No service frequency data was found in the segments sheet.")
 
-    water_layer, segment_geometries = _load_map_overlays(lakes_path=lakes_path)
+    water_layer, segment_geometries = _load_map_overlays(
+        infra_version, lakes_path=lakes_path, infra_dir=infra_dir)
 
     station_shapes = _compute_station_shapes(stations, segments_with_services)
 

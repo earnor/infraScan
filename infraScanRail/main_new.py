@@ -178,25 +178,11 @@ def phase_1_initialisation(runtimes: dict) -> tuple:
         else:
             raise SystemExit("Aborted: infrastructure version not found.")
 
-    # ── Step 1.3b: Derived infra version from active interventions (Topic 2) ─
-    print("\n--- Step 1.3b: Derived Infra Version ---\n")
-    try:
-        import infrabuild_version_manager as _vm
-        _active_infra_ints = _vm.enumerate_active_infra_ints()
-        if _active_infra_ints and PIPELINE_CONFIG.infra_version not in ('Build_New', None):
-            print(f"  Active infra ints: {_active_infra_ints}")
-            _derived = _vm.resolve_or_build(
-                PIPELINE_CONFIG.infra_version, _active_infra_ints,
-            )
-            if _derived != PIPELINE_CONFIG.infra_version:
-                print(f"  Pipeline infra version: '{PIPELINE_CONFIG.infra_version}'"
-                      f" → '{_derived}'")
-                PIPELINE_CONFIG.infra_version = _derived
-        else:
-            print("  No active infra ints — base infra version retained.")
-    except Exception as _exc:
-        print(f"  WARNING: derived version resolution failed: {_exc}")
-        print("  Continuing with base infra version.")
+    # The pre-development pipeline (Phases 3A–4) runs on the plain baseline infra
+    # version. Infra interventions (connecting curves etc.) are NOT folded into the
+    # baseline here — they are layered on top as Phase-5 developments via
+    # infra_ints_orchestrator.compose_infra, which resolves its base from
+    # settings.INFRA_VERSION independently of PIPELINE_CONFIG.infra_version.
 
     # ── Step 1.4: Services version check ─────────────────────────────────────
     print("\n--- Step 1.4: Services Version ---\n")
@@ -456,22 +442,25 @@ def phase_3a_infrastructure(runtimes: dict) -> None:
         )
         print(f"  Base network built → {paths.get_infra_version_dir(base_name)}\n")
 
-        # 3A.2 — open version manager to create the named version
+        # 3A.2 — create the named version (version manager opens only if toggle is on)
         print("--- Step 3A.2: Infrastructure Version ---\n")
-        print(f"  Opening Infrastructure Version Manager to create '{infra_v}'.")
-        print(f"  ┌─ INSTRUCTIONS ──────────────────────────────────────────────────")
-        print(f"  │  Base version : {base_name}  (auto-selected)")
-        print(f"  │  Version name : {infra_v}  (auto-filled)")
-        print(f"  │  Edit nodes/segments as needed, then Save and close.")
-        print(f"  └─────────────────────────────────────────────────────────────────\n")
         script_path = os.path.join(paths.MAIN, 'infrabuild_version_manager.py')
-        result = subprocess.run(
-            [sys.executable, script_path,
-             '--create-from', base_name,
-             '--name',        infra_v,
-             '--overwrite'],
-            cwd=paths.MAIN,
-        )
+        vm_cmd = [sys.executable, script_path,
+                  '--create-from', base_name,
+                  '--name',        infra_v,
+                  '--overwrite']
+        if settings.OPEN_INFRA_VERSION_MANAGER:
+            print(f"  Opening Infrastructure Version Manager to create '{infra_v}'.")
+            print(f"  ┌─ INSTRUCTIONS ──────────────────────────────────────────────────")
+            print(f"  │  Base version : {base_name}  (auto-selected)")
+            print(f"  │  Version name : {infra_v}  (auto-filled)")
+            print(f"  │  Edit nodes/segments as needed, then Save and close.")
+            print(f"  └─────────────────────────────────────────────────────────────────\n")
+        else:
+            vm_cmd.append('--non-interactive')
+            print(f"  OPEN_INFRA_VERSION_MANAGER = False — creating '{infra_v}' from "
+                  f"'{base_name}' without opening the editor.")
+        result = subprocess.run(vm_cmd, cwd=paths.MAIN)
         if result.returncode != 0:
             print(f"  WARNING: infrabuild_version_manager.py exited with code "
                   f"{result.returncode}.")
@@ -514,6 +503,7 @@ def phase_3a_infrastructure(runtimes: dict) -> None:
                 plot_gauge_map,
                 plot_electrification_map,
                 plot_speed_map,
+                plot_engineering_structures,
                 NetworkData,
             )
             import matplotlib.pyplot as plt
@@ -566,6 +556,23 @@ def phase_3a_infrastructure(runtimes: dict) -> None:
             for _fn, _net, _ext, _fname, _kw in _plots:
                 print(f"    {_fname} ...")
                 _fig = _fn(_net, extent=_ext, output_path=plot_dir / _fname, **_kw)
+                plt.close(_fig)
+
+            # Engineering structures (tunnels/bridges) — SA only, mirrors the standalone
+            # builder's 'sa_construct' map. Needs segments_composition.gpkg (the per-piece
+            # construct types); skipped with a note when composition is absent/empty.
+            _comp_path = os.path.join(paths.get_infra_version_dir(infra_v),
+                                      'segments_composition.gpkg')
+            _composition = gpd.read_file(_comp_path) if os.path.isfile(_comp_path) \
+                else gpd.GeoDataFrame()
+            if _composition.empty:
+                print("    sa_engineering_structures.pdf — skipped (no composition data).")
+            else:
+                print(f"    sa_engineering_structures.pdf ...")
+                _fig = plot_engineering_structures(
+                    net_sa, _composition, extent=sa_ext,
+                    output_path=plot_dir / 'sa_engineering_structures.pdf',
+                    show_outside=True, nodes=nodes)
                 plt.close(_fig)
 
             print(f"  Plots complete.\n")
@@ -652,13 +659,16 @@ def phase_3b_services(
         else:
             print(f"  Network build complete.\n")
 
-        print(f"  Opening version manager for '{svc_network}' ...")
-        result = subprocess.run(
-            [sys.executable, vm_script,
-             '--infra-version', infra_v,
-             '--network',       svc_network],
-            cwd=paths.MAIN,
-        )
+        svc_vm_cmd = [sys.executable, vm_script,
+                      '--infra-version', infra_v,
+                      '--network',       svc_network]
+        if settings.OPEN_SVC_VERSION_MANAGER:
+            print(f"  Opening version manager for '{svc_network}' ...")
+        else:
+            svc_vm_cmd.append('--non-interactive')
+            print(f"  OPEN_SVC_VERSION_MANAGER = False — finalising '{svc_network}' "
+                  f"without opening the editor.")
+        result = subprocess.run(svc_vm_cmd, cwd=paths.MAIN)
         if result.returncode != 0:
             print(f"  WARNING: services_version_manager.py exited with code "
                   f"{result.returncode}.")
@@ -1222,14 +1232,20 @@ def phase_4b_station_od_matrix(runtimes: dict) -> None:
     print("\n--- Step 4B.3: Run Station OD Preparation ---\n")
     import catchment_OD_preparation as _odp
     _odp._INTERACTIVE_MODE = True
-    _odp.prepare_all_od_matrices(
-        use_cache=settings.use_cache_stationsOD,
-        svc_version=svc_network,
-        infra_version=PIPELINE_CONFIG.infra_version,
-        method=method,
-        attribution_mode=settings.OD_ATTRIBUTION_MODE,
-        make_plots=settings.PLOT_STATION_OD,
-    )
+    try:
+        _odp.prepare_all_od_matrices(
+            use_cache=settings.use_cache_stationsOD,
+            svc_version=svc_network,
+            infra_version=PIPELINE_CONFIG.infra_version,
+            method=method,
+            attribution_mode=settings.OD_ATTRIBUTION_MODE,
+            make_plots=settings.PLOT_STATION_OD,
+        )
+    finally:
+        # The interactive flag is enabled only for the gateway zone-assignment step;
+        # reset it so it cannot leak into later phases (e.g. the Phase-4C infra-version
+        # resolve, which is now automated via the threaded infra_version).
+        _odp._INTERACTIVE_MODE = False
 
     _write_station_od_to_report(method, svc_network)
     runtimes["Phase 4B: Station OD Matrix"] = time.time() - st
@@ -1292,7 +1308,8 @@ def phase_4c_network_assignment(runtimes: dict) -> None:
         use_cache=settings.use_cache_railRouting,
         od_method=method,
         assignment_method=assignment_method,
-        make_plots=settings.PLOT_ASSIGNMENT)
+        make_plots=settings.PLOT_ASSIGNMENT,
+        infra_version=PIPELINE_CONFIG.infra_version)
 
     _write_assignment_to_report(method, svc_network, assignment_method)
     runtimes["Phase 4C: Passenger Routing"] = time.time() - st
@@ -1448,6 +1465,125 @@ def _save_runtimes(runtimes: dict, filename: str) -> None:
     print(f"Runtimes saved to: {filename}")
 
 
+def _phase5_base_infra() -> str:
+    """Base infra version for Phase 5 — the network the pipeline propagated.
+
+    Phase 5 (5A/5B/5C) discovers, composes and measures interventions on the SAME
+    network the rest of the run used: the enhanced version produced by Phase 3B
+    (PIPELINE_CONFIG.infra_version), not the unenhanced base name. Falls back to the
+    configured base when the pipeline value is unset (partial runs).
+    """
+    import infra_ints_orchestrator as _io
+    v = PIPELINE_CONFIG.infra_version
+    return v if v and v != 'Build_New' else _io._resolve_base_version()
+
+
+def phase_5a_infrastructure_interventions(sa_boundary, runtimes: dict) -> None:
+    """Phase 5A: generate the infra-int registry + master tagged network.
+
+    Discovers connecting curves (CC) against the base infra + service version and
+    collects the capacity interventions (CAP) registered during Phase 3C, then
+    materialises the master tagged 'Dev_Full' network. Gated by settings.INFRA_INT_MODE
+    ('NONE' skips). Does not alter the baseline infra version; the per-svc-int deltas
+    are consumed downstream (Phase 6) via infra_ints_orchestrator.compose_infra.
+
+    Args:
+        sa_boundary: study-area polygon, used to restrict CC discovery centres.
+        runtimes:    dict tracking phase execution times.
+    """
+    if str(getattr(settings, 'INFRA_INT_MODE', 'NONE')).upper() == 'NONE':
+        return {}
+    print("\n" + "=" * 80)
+    print("PHASE 5A: INFRASTRUCTURE INTERVENTIONS")
+    print("=" * 80 + "\n")
+    st = time.time()
+    result: dict = {}
+    try:
+        import infra_ints_orchestrator as _io
+        result = _io.phase_5a_infra_interventions(
+            base_version=_phase5_base_infra(),
+            svc_version=PIPELINE_CONFIG.svc_version or _io._resolve_svc_version(),
+            polygon=sa_boundary,
+        ) or {}
+    except Exception as exc:
+        print(f"  WARNING: Phase 5A failed: {exc}")
+    runtimes["Phase 5A: Infrastructure Interventions"] = time.time() - st
+    return result
+
+
+def phase_5b_service_interventions(sa_boundary, sa_buffer, runtimes: dict,
+                                   ndc_candidates=None) -> dict:
+    """Phase 5B: discover, register and materialise the service-intervention catalogue.
+
+    Generates EXT (line extensions) and/or NDC (new direct connections) per
+    settings.SVC_INT_MODE, materialises each one's delta network (real infra TT) for
+    the downstream 5C capacity pass, and writes the catalogue + delta plots. Gated by
+    settings.SVC_INT_MODE ('NONE' skips). NDC consumes the connecting-curve candidates
+    handed over by Phase 5A so the CC is not re-discovered.
+
+    Args:
+        sa_boundary: study-area polygon (EXT terminus / NDC scope gate).
+        sa_buffer:   study-area buffer (EXT/NDC candidate-station extent).
+        runtimes:    dict tracking phase execution times.
+        ndc_candidates: 5A connecting-curve candidates (branch_a/b, requires_infra).
+    """
+    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
+        return {}
+    print("\n" + "=" * 80)
+    print("PHASE 5B: SERVICE INTERVENTIONS")
+    print("=" * 80 + "\n")
+    st = time.time()
+    result: dict = {}
+    try:
+        import infra_ints_orchestrator as _io
+        import svc_ints_orchestrator as _so
+        result = _so.phase_5b_service_interventions(
+            base_infra=_phase5_base_infra(),
+            base_svc=PIPELINE_CONFIG.svc_version or _io._resolve_svc_version(),
+            sa_polygon=sa_boundary, buffer_polygon=sa_buffer,
+            ndc_candidates=ndc_candidates,
+        ) or {}
+    except Exception as exc:
+        print(f"  WARNING: Phase 5B failed: {exc}")
+    runtimes["Phase 5B: Service Interventions"] = time.time() - st
+    return result
+
+
+def phase_5c_capacity_on_matched(runtimes: dict) -> dict:
+    """Phase 5C: per-svc-int capacity interventions on the matched composed network.
+
+    For each registered svc-int, designs CAP on its own composed (base+CC+merged-services)
+    network — one-shot resolve over the modified sections — registers/composes/plots the
+    CAP like a CC, and writes the svc-int→CAP attribution table for the CBA. Gated by
+    settings.SVC_INT_MODE (no svc-ints → nothing to do) and settings.CAPACITY_MODE
+    ('None' skips). Phase 5C is the sole, cost-bearing CAP generator.
+
+    Args:
+        runtimes: dict tracking phase execution times.
+    """
+    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
+        return {}
+    if str(getattr(settings, 'CAPACITY_MODE', 'None')) == 'None':
+        return {}
+    print("\n" + "=" * 80)
+    print("PHASE 5C: CAPACITY ON THE MATCHED NETWORK")
+    print("=" * 80 + "\n")
+    st = time.time()
+    result: dict = {}
+    try:
+        import infra_ints_orchestrator as _io
+        import mixed_ints_orchestrator as _mix
+        result = _mix.phase_5c_capacity_on_matched(
+            base_infra=_phase5_base_infra(),
+            base_svc=PIPELINE_CONFIG.svc_version or _io._resolve_svc_version(),
+            make_plots=settings.PLOT_MIXED_INTS,
+        ) or {}
+    except Exception as exc:
+        print(f"  WARNING: Phase 5C failed: {exc}")
+    runtimes["Phase 5C: Capacity on Matched Network"] = time.time() - st
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main orchestrator
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1466,6 +1602,10 @@ def infrascanrail_new():
     phase_4a_catchment_allocation(sa_boundary, ca_boundary, runtimes)
     phase_4b_station_od_matrix(runtimes)
     phase_4c_network_assignment(runtimes)
+    infra5a = phase_5a_infrastructure_interventions(sa_boundary, runtimes)
+    phase_5b_service_interventions(sa_boundary, sa_buffer, runtimes,
+                                   ndc_candidates=(infra5a or {}).get('ndc_candidates'))
+    phase_5c_capacity_on_matched(runtimes)
 
     _save_runtimes(runtimes, 'report_new.txt')
 

@@ -239,11 +239,14 @@ def _parse_service_direction_frequency_string(cell: str) -> Dict[Tuple[str, str]
 # New infrabuild / projected-services loaders (replace legacy processed/ loaders)
 # ---------------------------------------------------------------------------
 
-def load_infra_data(infra_version: str) -> tuple:
+def load_infra_data(infra_version: str, infra_dir: Optional[str] = None) -> tuple:
     """Load nodes and segments from infrabuild outputs.
 
     Args:
         infra_version: Named infra version (e.g. 'AS_2026_ZH_enhanced').
+        infra_dir: Optional root directory holding ``<infra_version>/`` — pass the
+            Developments/Derived parent to load a composed (base+CC/CAP) version
+            (Phase 5C). When None, the standard NETWORK_INFRASTRUCTURE_DIR is used.
 
     Returns:
         (nodes_df, segments_df, name_to_number, number_to_name)
@@ -254,7 +257,7 @@ def load_infra_data(infra_version: str) -> tuple:
     """
     from infrabuild_network_builder import load_version
 
-    nodes_gdf, segments_gdf = load_version(infra_version)
+    nodes_gdf, segments_gdf = load_version(infra_version, infra_dir=infra_dir)
 
     # Retain only rail (train) nodes and segments — excludes tram, funicular, etc.
     # Nodes with no Transport_Mode that are referenced by at least one train segment are
@@ -340,7 +343,33 @@ def load_infra_data(infra_version: str) -> tuple:
     return nodes_df, segments_df, name_to_number, number_to_name
 
 
-def load_projected_services(svc_version: str, infra_version: str) -> pd.DataFrame:
+# Identity of a projected service link (one row per route × direction × variant ×
+# stop-pair × period). The full_day union rail_segments.gpkg can carry exact duplicate
+# rows (a Phase-3B build artefact); summed per segment they inflate the load N-fold.
+_SERVICE_LINK_ID = ['GTFS_ID', 'direction_id', 'variant_rank',
+                    'from_stop_nr', 'to_stop_nr', 'service_period']
+
+
+def _dedup_service_links(raw: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Drop byte-identical duplicate service-link rows before per-segment aggregation.
+
+    Collapses rows identical on the service identity (route/direction/variant/stop-pair/
+    period). Legitimately-distinct variants, directions and periods differ on these keys
+    and are preserved, so a genuinely additive service is never under-counted.
+    """
+    key = [c for c in _SERVICE_LINK_ID if c in raw.columns]
+    if not key:
+        return raw
+    before = len(raw)
+    out = raw.drop_duplicates(subset=key).reset_index(drop=True)
+    if len(out) < before:
+        print(f"  [dedup] {label}: dropped {before - len(out)} duplicate service-link row(s) "
+              f"({before} -> {len(out)})")
+    return out
+
+
+def load_projected_services(svc_version: str, infra_version: str,
+                            gpkg_path: Optional[str] = None) -> pd.DataFrame:
     """Load projected service links expanded to per-BAV-segment contributions.
 
     Reads all route-type layers from the projected rail_segments.gpkg, then
@@ -350,6 +379,10 @@ def load_projected_services(svc_version: str, infra_version: str) -> pd.DataFram
     Args:
         svc_version:   Service version name (e.g. 'AK_2026').
         infra_version: Infra version used for projection (e.g. 'AS_2026_ZH_enhanced').
+        gpkg_path:     Optional explicit path to a projected rail_segments.gpkg —
+            pass a svc-int delta path (Phase 5C) instead of the derived
+            (svc_version, infra_version) location. svc_version/infra_version are
+            then used only for log messages.
 
     Returns:
         DataFrame with one row per service × direction × BAV-segment:
@@ -362,7 +395,8 @@ def load_projected_services(svc_version: str, infra_version: str) -> pd.DataFram
     """
     import fiona
 
-    gpkg_path = paths.get_projected_services_path(svc_version, infra_version)
+    if gpkg_path is None:
+        gpkg_path = paths.get_projected_services_path(svc_version, infra_version)
     if not Path(gpkg_path).exists():
         raise FileNotFoundError(
             f"Projected services not found: {gpkg_path}\n"
@@ -385,6 +419,7 @@ def load_projected_services(svc_version: str, infra_version: str) -> pd.DataFram
         raise ValueError(f"No data found in projected services file: {gpkg_path}")
 
     raw = pd.concat(gdfs, ignore_index=True)
+    raw = _dedup_service_links(raw, 'load_projected_services')
     print(f"  load_projected_services: {len(raw)} service links from '{svc_version}'"
           f" projected on '{infra_version}' ({len(layers)} layers)")
 
@@ -472,13 +507,15 @@ def load_projected_services(svc_version: str, infra_version: str) -> pd.DataFram
 # Spatially filtered loaders — Study Area and Catchment Area variants
 # ---------------------------------------------------------------------------
 
-def _extract_sa_node_set(infra_version: str) -> Set[int]:
+def _extract_sa_node_set(infra_version: str, infra_dir: Optional[str] = None) -> Set[int]:
     """Return all BAV node Numbers whose point geometry falls within the SA boundary.
 
     Spatially filters nodes.gpkg against study_area_boundary.gpkg (EPSG:2056).
 
     Args:
         infra_version: Infra version name (e.g. 'AS_2026_ZH_enhanced').
+        infra_dir:     Parent dir for a Derived/composed version (so a base+CC/CAP
+            network's SA junctions are found); None for a real Infrastructure version.
 
     Returns:
         Set of integer BAV node Numbers within the study area.
@@ -492,7 +529,7 @@ def _extract_sa_node_set(infra_version: str) -> Set[int]:
     sa_boundary = gpd.read_file(str(sa_boundary_path)).to_crs(epsg=2056)
     sa_polygon  = sa_boundary.unary_union
 
-    nodes_gdf, _ = load_version(infra_version)
+    nodes_gdf, _ = load_version(infra_version, infra_dir=infra_dir)
     if nodes_gdf.crs is None:
         nodes_gdf = nodes_gdf.set_crs(epsg=2056)
     else:
@@ -546,7 +583,8 @@ def _get_ca_node_set(infra_version: str) -> Set[int]:
     return ca_nodes
 
 
-def load_infra_data_filtered(infra_version: str, node_set: Set[int]) -> tuple:
+def load_infra_data_filtered(infra_version: str, node_set: Set[int],
+                             infra_dir: Optional[str] = None) -> tuple:
     """Load nodes and segments from infrabuild outputs, filtered to a node set.
 
     Shared by the Study Area and Catchment Area workflows. Only segments where
@@ -555,12 +593,14 @@ def load_infra_data_filtered(infra_version: str, node_set: Set[int]) -> tuple:
     Args:
         infra_version: Named infra version (e.g. 'AS_2026_ZH_enhanced').
         node_set:      Set of integer BAV node Numbers to retain.
+        infra_dir:     Parent dir for a Derived/composed version; None for a real one.
 
     Returns:
         Same (nodes_df, segments_df, name_to_number, number_to_name) tuple as
         load_infra_data(), but filtered to node_set.
     """
-    nodes_df, segments_df, name_to_number, number_to_name = load_infra_data(infra_version)
+    nodes_df, segments_df, name_to_number, number_to_name = load_infra_data(
+        infra_version, infra_dir=infra_dir)
 
     nodes_df = nodes_df[nodes_df["NR"].isin(node_set)].reset_index(drop=True)
 
@@ -583,6 +623,7 @@ def load_projected_services_sa(
     svc_version: str,
     infra_version: str,
     sa_node_set: Set[int],
+    gpkg_path: Optional[str] = None,
 ) -> pd.DataFrame:
     """Load SA-clipped projected service links from the full rail_segments.gpkg.
 
@@ -605,7 +646,8 @@ def load_projected_services_sa(
     """
     import fiona
 
-    gpkg_path = Path(paths.get_projected_services_path(svc_version, infra_version))
+    gpkg_path = Path(gpkg_path) if gpkg_path is not None \
+        else Path(paths.get_projected_services_path(svc_version, infra_version))
     if not gpkg_path.exists():
         raise FileNotFoundError(
             f"Projected services not found: {gpkg_path}\n"
@@ -627,6 +669,7 @@ def load_projected_services_sa(
         raise ValueError(f"No data found in projected services file: {gpkg_path}")
 
     raw = pd.concat(gdfs, ignore_index=True)
+    raw = _dedup_service_links(raw, 'load_projected_services_sa')
     print(f"  load_projected_services_sa: {len(raw)} total service links from '{svc_version}' "
           f"({len(layers)} layers)")
 

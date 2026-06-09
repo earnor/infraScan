@@ -10,6 +10,9 @@ RAIL_SERVICES_AK2024_EXTENDED_PATH = r'data/temp/network2024_railway_services_ex
 NEW_LINKS_UPDATED_PATH = r"data\Network\processed\updated_new_links.gpkg"
 NEW_RAILWAY_LINES_PATH = r"data\Network\processed\new_railway_lines.gpkg"
 NETWORK_WITH_ALL_MODIFICATIONS = r"data\Network\processed\combined_network_with_all_modifications.gpkg"
+# DEPRECATED (Phase 5A) — legacy per-dev_id gpkg directory. Superseded by the
+# infra-int registry + master tagged network (data/Infrastructure/Developments/).
+# Retained only until the last legacy reader is removed in Phase 5 wiring.
 DEVELOPMENT_DIRECTORY = r"data\Network\processed\developments"
 
 RAIL_NODES_PATH = r"data\Network\Rail_Node.csv"
@@ -51,14 +54,16 @@ NETWORK_INFRASTRUCTURE_DIR  = r"data/Infrastructure"
 NETWORK_INFRASTRUCTURE_RAW  = r"data/Infrastructure/Raw"
 # Seeds/ : per-INFRA_VERSION seed nodes/segments auto-applied during base build (Topic 3)
 INFRASTRUCTURE_SEEDS_DIR    = r"data/Infrastructure/Seeds"
-# Developments/ : infra-intervention registries (cc, cap, …) — Topic 2
-INFRASTRUCTURE_DEVELOPMENTS_DIR = r"data/Infrastructure/Developments"
-# Dev_Full/ : reference version with ALL infra ints applied (visualisation)
-INFRASTRUCTURE_DEV_FULL_DIR     = r"data/Infrastructure/Developments/Dev_Full"
-# Derived/ : auto-built derived versions for capacity runs (not main infra folder)
-INFRASTRUCTURE_DERIVED_DIR      = r"data/Infrastructure/Developments/Derived"
-# Network Developments/ : service-intervention registries (ext, …) — Topic 2
-NETWORK_DEVELOPMENTS_DIR        = r"data/Network/Developments"
+# Developments/ : all intervention outputs in one combined workspace per <infra>__<svc>
+# (decision H, Phases 5A-5C). Registries nest under the combo (cc/ext/ndc/cap); the
+# composed-network trees are shared — Derived/ and Dev_Full/ names are globally unique
+# (deterministic on base + sorted int_ids), so no per-combo nesting is needed.
+# Note: svc-int delta networks still live under RAIL_LINES_DIR (see get_svc_int_network_dir).
+DEVELOPMENTS_DIR          = r"data/Developments"
+DEVELOPMENTS_DERIVED_DIR  = r"data/Developments/Derived"     # base+int composed nets (shared)
+DEVELOPMENTS_DEV_FULL_DIR = r"data/Developments/Dev_Full"    # master "all-ints" net (shared)
+# Mirrored plots tree (plots/Developments/<combo>/<subtype>/)
+DEVELOPMENTS_PLOTS_DIR    = r"plots/Developments"
 
 
 def _extract_seed_year(year_or_version: str) -> str:
@@ -91,34 +96,110 @@ def get_seed_qgz(year_or_version: str) -> str:
     return os.path.join(MAIN, INFRASTRUCTURE_SEEDS_DIR, f"seed_{_extract_seed_year(year_or_version)}.qgz")
 
 
-def get_infra_int_registry(int_type: str) -> str:
-    """Return absolute path to the infra-int registry gpkg for a given type.
+def get_infra_int_registry(int_type: str, combo: str) -> str:
+    """Return absolute path to the intervention registry gpkg for a type + combo.
+
+    All registries partition on the '<infra>__<svc>' combo (decision H), so each lands
+    under Developments/<combo>/<int_type>/. CC is regenerated per combo even though it is
+    infra-only (accepted simplicity trade-off).
 
     Args:
-        int_type: short code (e.g. 'cc' for connecting curves, 'cap' for passing sidings).
+        int_type: short code — 'cc' (connecting curves, infra ints) or 'cap' (capacity,
+            mixed ints).
+        combo: the '<infra>__<svc>' workspace key.
     """
-    return os.path.join(MAIN, INFRASTRUCTURE_DEVELOPMENTS_DIR, f"{int_type}_interventions.gpkg")
+    return os.path.join(MAIN, DEVELOPMENTS_DIR, combo, int_type, f"{int_type}_interventions.gpkg")
 
 
-def get_svc_int_registry(int_type: str) -> str:
-    """Return absolute path to the svc-int registry xlsx for a given type.
+def get_svc_int_registry(int_type: str, combo: str) -> str:
+    """Return absolute path to the svc-int registry xlsx for a type + combo.
 
     Args:
-        int_type: short code (e.g. 'ext' for extended lines).
+        int_type: short code — 'ext' (extended lines) or 'ndc' (new direct connections).
+            Stored under Developments/<combo>/<int_type>/.
+        combo: the '<infra>__<svc>' workspace key.
     """
-    return os.path.join(MAIN, NETWORK_DEVELOPMENTS_DIR, f"{int_type}_interventions.xlsx")
+    return os.path.join(MAIN, DEVELOPMENTS_DIR, combo, int_type,
+                        f"{int_type}_interventions.xlsx")
+
+
+def get_cc_composition_cache(combo: str) -> str:
+    """Return absolute path to the per-combo CC composition cache CSV."""
+    return os.path.join(MAIN, DEVELOPMENTS_DIR, combo, 'cc', 'cc_composition.csv')
+
+
+def get_svc_int_catalogue_dir(combo: str) -> str:
+    """Return the combo-root directory for svc-int catalogue / affected-set CSVs.
+
+    Catalogues span both EXT and NDC, so they sit at the combo root
+    (Developments/<combo>/) alongside the cc/ext/ndc/cap subfolders.
+    """
+    return os.path.join(MAIN, DEVELOPMENTS_DIR, combo)
+
+
+def get_svc_int_cap_attribution_path(combo: str) -> str:
+    """Return absolute path to the svc-int→CAP attribution CSV (mixed ints, 5C).
+
+    Args:
+        combo: the '<infra>__<svc>' workspace key this CAP set was generated against.
+    """
+    return os.path.join(MAIN, DEVELOPMENTS_DIR, combo, 'cap', 'svc_int_cap_attribution.csv')
+
+
+def get_svc_int_cap_dir(combo: str) -> str:
+    """Return the data-side cap workspace dir (Developments/<combo>/cap/).
+
+    Data artifacts (registry, attribution, per-svc-int capacity workbooks) live here;
+    the mirrored plots live under plots/Developments/<combo>/cap/ (get_developments_plot_dir).
+    """
+    return os.path.join(MAIN, DEVELOPMENTS_DIR, combo, 'cap')
+
+
+def get_developments_plot_dir(combo: str, subtype: str = None) -> str:
+    """Return a plots dir under the mirrored plots/Developments/<combo>/<subtype>/ tree.
+
+    Args:
+        combo: the '<infra>__<svc>' workspace key.
+        subtype: optional leaf (e.g. 'cc', 'cap', 'ext', 'ndc').
+    """
+    parts = [MAIN, DEVELOPMENTS_PLOTS_DIR, combo]
+    if subtype:
+        parts.append(subtype)
+    return os.path.join(*parts)
+
+def get_svc_int_network_dir(svc_int_id: str) -> str:
+    """Return absolute path to a per-svc-int delta network folder.
+
+    Mirrors the ``<svc_version>_network`` layout so the existing catchment/OD/routing
+    readers consume a svc-int's materialised delta unchanged (Phase 5B apply_svc_int).
+
+    Args:
+        svc_int_id: svc-int id (e.g. 'ext_100001', 'ndc_103001').
+    """
+    return os.path.join(MAIN, RAIL_LINES_DIR, svc_int_id + '_network')
+
+
+def get_svc_int_projected_path(svc_int_id: str, infra_version: str) -> str:
+    """Return absolute path to a svc-int's projected rail segments delta.
+
+    (data/Network/Rail_Lines/<svc_int_id>_network/<infra_version>/rail_segments.gpkg)
+    """
+    return get_projected_services_path(svc_int_id, infra_version)
+
 
 def get_infra_version_dir(version: str) -> str:
     """Return absolute path to the named infrastructure version directory."""
     return os.path.join(MAIN, NETWORK_INFRASTRUCTURE_DIR, version)
 
 def get_derived_infra_version_dir(version: str) -> str:
-    """Return absolute path to a derived infra version under Developments/Derived/.
+    """Return absolute path to a derived (composed) infra version under the shared
+    Developments/Derived/ tree. Version names are globally unique (deterministic on
+    base + sorted int_ids), so no per-combo nesting is needed.
 
     Args:
         version: derived version name (e.g. 'AS_2026_ZH+cap_ps_0001').
     """
-    return os.path.join(MAIN, INFRASTRUCTURE_DERIVED_DIR, version)
+    return os.path.join(MAIN, DEVELOPMENTS_DERIVED_DIR, version)
 
 def derived_version_exists(version: str) -> bool:
     """True if nodes.gpkg, segments.gpkg and segments_composition.gpkg all exist
@@ -423,6 +504,10 @@ EMPLOYMENT_CANTON_ZH_CSV  = r"data/Spatial_Data/Land_Use/Employment/Canton_Zuric
 LAKES_SHP    = r"data/Spatial_Data/Land_Use/Hydrography/swissTLMRegio_Lake.shp"
 LAKES_CA_GPKG = r"data/Spatial_Data/Land_Use/Hydrography/lakes_ca.gpkg"
 LAKES_SA_GPKG = r"data/Spatial_Data/Land_Use/Hydrography/lakes_sa.gpkg"
+
+# Connecting-curve composition cache (per-CC structure breakdown) is now partitioned by
+# infra network — see get_cc_composition_cache(network). Filled on cache-miss by the
+# infra_ints_connecting_curve standalone CLI.
 
 CONSTRUCTION_COSTS =  r"data/costs/construction_cost.csv"
 TOTAL_COST_WITH_GEOMETRY = r"data/costs/total_costs_with_geometry.csv"
