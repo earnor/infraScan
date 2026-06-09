@@ -2304,6 +2304,8 @@ def main():
                         help='Infra version for station catalog (auto-select, no prompt)')
     parser.add_argument('--network', default=None,
                         help='Auto-select this network in adjust mode, skipping the Phase 0 menu')
+    parser.add_argument('--non-interactive', action='store_true',
+                        help='Skip all editing; load, save, and propagate without prompts')
     args, _ = parser.parse_known_args()
 
     try:
@@ -2315,6 +2317,17 @@ def main():
             auto_network=args.network,
         )
     except SystemExit:
+        return
+
+    if args.non_interactive:
+        print("\n  [non-interactive] Saving '%s/Unprojected/' without editing..." % version_name)
+        _save_svc_data(rail_seg, rail_line, feed_seg, feed_line, out_rail_dir, out_feeder_dir)
+        _propagate_to_period_folders(
+            orig_rail_seg, rail_seg,
+            orig_rail_line, rail_line,
+            out_rail_dir,
+        )
+        print("  Done.")
         return
 
     # Phase 1 — Rail services editing

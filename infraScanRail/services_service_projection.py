@@ -4430,24 +4430,74 @@ def _write_rail_outputs(
 # Phase 1 — Projection Orchestrator
 # =============================================================================
 
-def _run_phase1(
-    config: ProjectionConfig,
-) -> Tuple[gpd.GeoDataFrame, Dict[str, gpd.GeoDataFrame], Dict[str, gpd.GeoDataFrame]]:
+@dataclass
+class ProjectionContext:
+    """Infrastructure-side state shared by full and per-line rail projection.
+
+    Built once by ``build_projection_context`` from the resolved (or in-memory
+    composed) infra; consumed by ``_run_phase1`` (full 3B projection) and by
+    ``project_lines`` (per-svc-int delta re-projection, Phase 5B).
     """
-    Phase 1: load data, match stops, route paths.
+    nodes: gpd.GeoDataFrame
+    bav_segments: gpd.GeoDataFrame
+    raw_nodes: Optional[gpd.GeoDataFrame]
+    raw_segs: Optional[gpd.GeoDataFrame]
+    G: nx.Graph
+    seg_lookup: Dict
+    node_attrs: Dict
+    lookups: Dict
+    gauge_graphs: Dict
+    hub_topology: Dict
+    buffer_geom: object
+    zvv_available: bool
+
+
+# Pre-projection rail-input column names → internal processing names.
+_RAIL_INPUT_COL_MAPPING: Dict[str, str] = {
+    'GTFS_ID':        'Service',      # route_id (GTFS identifier)
+    'Service':        'TrainType',    # line_short_name (human-readable)
+    'direction_id':   'Direction',
+    'from_stop_nr':   'FromCode',     # BAV parent station integer
+    'to_stop_nr':     'ToCode',
+    'from_stop_name': 'FromStation',
+    'to_stop_name':   'ToStation',
+    'from_stop_E':    'x_origin',
+    'from_stop_N':    'y_origin',
+    'to_stop_E':      'x_dest',
+    'to_stop_N':      'y_dest',
+    'TT':             'TravelTime',
+    'IVWT':           'InVehWait',
+}
+
+
+def build_projection_context(
+    config: ProjectionConfig,
+    infra_nodes: Optional[gpd.GeoDataFrame] = None,
+    infra_segments: Optional[gpd.GeoDataFrame] = None,
+) -> ProjectionContext:
+    """Build the infra-side projection state (graph, lookups, hubs, ZVV, stop_coord).
+
+    Identical setup to the original ``_run_phase1`` 1a–1d block; extracted so the
+    full 3B projection and the per-svc-int delta projection (Phase 5B) share one
+    code path. When ``infra_nodes`` / ``infra_segments`` are supplied (e.g. a
+    composed base+CC network), they are used in place of ``config.infra_dir``; the
+    raw-infra Tier-4 fallback, buffer, stop_coord and ZVV load are unchanged.
 
     Returns:
-        (rail_enriched, track_feeder_enriched, non_track_feeder_processed)
+        ProjectionContext bundling everything ``enrich_rail_links`` /
+        ``enrich_feeder_segments`` need.
     """
     main = Path(paths.MAIN)
-    print("\n" + "─" * 60)
-    print("  Phase 1 — Service Projection")
-    print("─" * 60)
 
     # 1a. Load infrastructure
-    print("\n  Loading infrastructure...")
-    nodes = gpd.read_file(config.infra_dir / "nodes.gpkg").reset_index(drop=True)
-    bav_segments = gpd.read_file(config.infra_dir / "segments.gpkg").reset_index(drop=True)
+    if infra_nodes is not None and infra_segments is not None:
+        print("\n  Using in-memory (composed) infrastructure...")
+        nodes = infra_nodes.reset_index(drop=True)
+        bav_segments = infra_segments.reset_index(drop=True)
+    else:
+        print("\n  Loading infrastructure...")
+        nodes = gpd.read_file(config.infra_dir / "nodes.gpkg").reset_index(drop=True)
+        bav_segments = gpd.read_file(config.infra_dir / "segments.gpkg").reset_index(drop=True)
     print(f"  {len(nodes)} nodes, {len(bav_segments)} segments loaded.")
 
     # Load raw infrastructure for Tier 4 fallback
@@ -4493,9 +4543,96 @@ def _run_phase1(
     _zvv_chain_index.clear()
     _zvv_sbahn_index.clear()
     _zvv_sbahn_jgraph.clear()
-    _zvv_geometry_available = _load_zvv_geometry()
-    if not _zvv_geometry_available:
+    zvv_available = _load_zvv_geometry()
+    if not zvv_available:
         print("  ZVV geometry unavailable — straight-line fallback for non-track modes.")
+
+    return ProjectionContext(
+        nodes=nodes, bav_segments=bav_segments, raw_nodes=raw_nodes, raw_segs=raw_segs,
+        G=G, seg_lookup=seg_lookup, node_attrs=node_attrs, lookups=lookups,
+        gauge_graphs=gauge_graphs, hub_topology=hub_topology,
+        buffer_geom=buffer_geom, zvv_available=zvv_available,
+    )
+
+
+def project_lines(
+    lines_gdf: gpd.GeoDataFrame,
+    config: ProjectionConfig,
+    *,
+    infra_nodes: Optional[gpd.GeoDataFrame] = None,
+    infra_segments: Optional[gpd.GeoDataFrame] = None,
+    run_zvv: bool = True,
+    context: Optional[ProjectionContext] = None,
+) -> gpd.GeoDataFrame:
+    """Project a subset of rail lines onto the (possibly composed) infra graph.
+
+    The per-svc-int counterpart of ``_run_phase1``'s rail block: takes the changed/
+    added stop-pair rows directly (pre-projection ``rail_segments`` schema — GTFS_ID,
+    direction_id, from_stop_nr, …) instead of reading the full ``rail_segments.gpkg``,
+    enriches them with real infrastructure geometry + travel time, and (optionally)
+    applies the ZVV post-pass — so a svc-int's new segments get true infra TT, never a
+    speed/length default.
+
+    Args:
+        lines_gdf: changed/added segments in the pre-projection schema.
+        config: paths (svc_dir, raw_infra_dir, infra_dir) for context building.
+        infra_nodes/infra_segments: in-memory composed infra (else load config.infra_dir).
+        run_zvv: apply the ZVV geometry post-pass (matches the full pipeline default).
+        context: reuse a pre-built ProjectionContext instead of rebuilding it.
+
+    Returns:
+        The enriched (projected) segments GeoDataFrame.
+    """
+    if lines_gdf is None or lines_gdf.empty:
+        return gpd.GeoDataFrame()
+    ctx = context or build_projection_context(config, infra_nodes, infra_segments)
+
+    rail_edges = lines_gdf.rename(columns=_RAIL_INPUT_COL_MAPPING)
+    if "_source_layer" not in rail_edges.columns:
+        rail_edges["_source_layer"] = rail_edges.get("mode_label", "rail")
+    if 'TrainType' in rail_edges.columns:
+        rail_edges['line_short_name'] = rail_edges['TrainType']
+
+    rail_enriched = enrich_rail_links(
+        rail_edges, ctx.nodes, ctx.bav_segments, ctx.G, ctx.seg_lookup, ctx.node_attrs,
+        ctx.lookups, ctx.buffer_geom, ctx.raw_nodes, ctx.raw_segs, config.infra_dir,
+        hub_topology=ctx.hub_topology, gauge_graphs=ctx.gauge_graphs,
+    )
+    if run_zvv and ctx.zvv_available:
+        rail_enriched = _apply_zvv_postpass(
+            rail_enriched, "rail", is_track_based=True, buffer_geom=ctx.buffer_geom
+        )
+    return rail_enriched
+
+
+def _run_phase1(
+    config: ProjectionConfig,
+) -> Tuple[gpd.GeoDataFrame, Dict[str, gpd.GeoDataFrame], Dict[str, gpd.GeoDataFrame]]:
+    """
+    Phase 1: load data, match stops, route paths.
+
+    Returns:
+        (rail_enriched, track_feeder_enriched, non_track_feeder_processed)
+    """
+    main = Path(paths.MAIN)
+    print("\n" + "─" * 60)
+    print("  Phase 1 — Service Projection")
+    print("─" * 60)
+
+    # 1a–1d. Infrastructure-side setup (shared with project_lines)
+    ctx = build_projection_context(config)
+    nodes = ctx.nodes
+    bav_segments = ctx.bav_segments
+    raw_nodes = ctx.raw_nodes
+    raw_segs = ctx.raw_segs
+    G = ctx.G
+    seg_lookup = ctx.seg_lookup
+    node_attrs = ctx.node_attrs
+    lookups = ctx.lookups
+    gauge_graphs = ctx.gauge_graphs
+    hub_topology = ctx.hub_topology
+    buffer_geom = ctx.buffer_geom
+    _zvv_geometry_available = ctx.zvv_available
 
     # 1e. Load service data (all feeder layers dynamically)
     print("\n  Loading service data...")
@@ -4509,23 +4646,7 @@ def _run_phase1(
         rail_gdfs.append(gdf)
     rail_segments = pd.concat(rail_gdfs, ignore_index=True) if rail_gdfs else gpd.GeoDataFrame()
 
-    col_mapping = {
-        # New pre-projection names → internal processing names (unchanged)
-        'GTFS_ID':        'Service',      # route_id (GTFS identifier)
-        'Service':        'TrainType',    # line_short_name (human-readable)
-        'direction_id':   'Direction',
-        'from_stop_nr':   'FromCode',     # BAV parent station integer
-        'to_stop_nr':     'ToCode',
-        'from_stop_name': 'FromStation',
-        'to_stop_name':   'ToStation',
-        'from_stop_E':    'x_origin',
-        'from_stop_N':    'y_origin',
-        'to_stop_E':      'x_dest',
-        'to_stop_N':      'y_dest',
-        'TT':             'TravelTime',
-        'IVWT':           'InVehWait',
-    }
-    rail_edges = rail_segments.rename(columns=col_mapping)
+    rail_edges = rail_segments.rename(columns=_RAIL_INPUT_COL_MAPPING)
     if 'TrainType' in rail_edges.columns:
         rail_edges['line_short_name'] = rail_edges['TrainType']
 
