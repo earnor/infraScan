@@ -38,6 +38,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 import paths
 import settings
 
+# Force UTF-8 on stdout/stderr so the box-drawing/bullet/ellipsis glyphs used in the
+# CLI and validation output never raise UnicodeEncodeError under a cp1252-strict
+# redirected stream (piped / logged runs on Windows). No-op when already UTF-8.
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except (AttributeError, ValueError):
+    pass
+
 
 # =============================================================================
 # Color Schemes
@@ -203,6 +212,9 @@ def list_versions(infra_dir: Optional[str] = None) -> List[str]:
 
     A subfolder qualifies when it contains both nodes.gpkg and segments.gpkg.
     Raw/ is excluded (intermediate artifact, not a selectable network state).
+    Developments/ is excluded (composed/derived intervention outputs, not a base
+    network state — these live deeper under data/Developments/ now, but the name is
+    skipped defensively in case a stray gpkg ever lands at its root).
 
     Returns version names sorted alphabetically, with 'Base' first when present.
     """
@@ -214,7 +226,7 @@ def list_versions(infra_dir: Optional[str] = None) -> List[str]:
     for sub in sorted(root.iterdir()):
         if not sub.is_dir():
             continue
-        if sub.name.startswith('Raw'):
+        if sub.name.startswith('Raw') or sub.name == 'Developments':
             continue
         if (sub / 'nodes.gpkg').exists() and (sub / 'segments.gpkg').exists():
             versions.append(sub.name)
@@ -1387,7 +1399,7 @@ def _filter_composition_for_version(
     version_segment_ids and are simply dropped.  Manually added segments
     (new_From_To IDs) have no composition entry, so they are absent already.
     """
-    if composition_base.empty or 'ID' not in composition_base.columns:
+    if composition_base.empty or 'Segment_ID' not in composition_base.columns:
         return composition_base
     mask = composition_base['Segment_ID'].isin(version_segment_ids)
     return composition_base[mask].reset_index(drop=True)
@@ -1670,10 +1682,14 @@ def _build_infra_qgz(
     ca_id   = f'ca_{uuid.uuid4().hex[:8]}'
     sa_id   = f'sa_{uuid.uuid4().hex[:8]}'
 
-    # Relative paths from the version directory to boundary files
-    # data/Infrastructure/<version>/ → ../../Catchment_Area/Boundaries/
-    ca_relpath = '../../Catchment_Area/Boundaries/catchment_area_boundary.gpkg'
-    sa_relpath = '../../Catchment_Area/Boundaries/study_area_boundary.gpkg'
+    # Relative paths from the project's version_dir to the boundary gpkgs, computed
+    # dynamically (as_posix for QGIS) so they resolve at any folder depth — Dev_Full /
+    # Derived sit deeper than the depth-2 data/Infrastructure/<version>/ that the old
+    # hardcoded ../../ assumed, which is why their boundary layers failed to load.
+    _ca_abs = Path(paths.MAIN) / paths.CATCHMENT_AREA_BOUNDARY_GPKG
+    _sa_abs = Path(paths.MAIN) / paths.STUDY_AREA_BOUNDARY_GPKG
+    ca_relpath = Path(os.path.relpath(_ca_abs, version_dir)).as_posix()
+    sa_relpath = Path(os.path.relpath(_sa_abs, version_dir)).as_posix()
 
     seg_block = _segments_maplayer_xml(seg_id, segments_file,
                                         f'Segments — {version}')
@@ -2886,8 +2902,25 @@ def plot_infrastructure_diff(
     show_labels: bool = True,
     is_catchment: bool = False,
     show_outside: bool = False,
+    added_color: Optional[str] = None,
+    added_edge: Optional[str] = None,
+    added_label: Optional[str] = None,
+    superseded_seg_ids: Optional[set] = None,
+    superseded_color: Optional[str] = None,
+    added_type_colors: Optional[dict] = None,
 ) -> plt.Figure:
     """Diff plot: net_a is the reference, net_b is the comparison.
+
+    ``added_color`` / ``added_edge`` / ``added_label`` recolour the "added /
+    track-gained" category (default green) — used by the infra-int per-type plots
+    to draw CC additions in purple and CAP additions in orange.
+
+    ``added_type_colors`` (optional) colours added / track-gained segments and nodes
+    BY their ``int_type`` tag in ``net_b`` — e.g.
+    ``{'cc': {'color': purple, 'edge': ..., 'label': 'Connecting curve'},
+       'cap': {'color': orange, 'edge': ..., 'label': 'Capacity intervention'}}`` —
+    so one combined plot distinguishes CC from CAP. Overrides the single ``added_color``
+    for the added category; untyped added items fall back to ``added_color``/green.
 
     Segments
     --------
@@ -2910,6 +2943,11 @@ def plot_infrastructure_diff(
     """
     if title is None:
         title = f"Infrastructure diff — {net_b.version} vs {net_a.version}"
+
+    # colour overrides for the added/track-gained category (per-type int diffs)
+    _GREEN = added_color or _DIFF_GREEN
+    _GREEN_EDGE = added_edge or '#005a00'
+    _ADDED_LABEL = added_label or 'Added'
 
     fig, ax = _base_plot(net_b, title, figsize, extent=extent)
     if is_catchment:
@@ -2952,6 +2990,20 @@ def plot_infrastructure_diff(
 
     removed_segs = segs_a[segs_a['Segment_ID'].isin(ids_a - ids_b)]
     added_segs   = segs_b[segs_b['Segment_ID'].isin(ids_b - ids_a)]
+
+    # Superseded base segments (e.g. a connecting curve's split host legs): present in
+    # A, absent in B because they were replaced by sub-pieces. When a superseded colour
+    # is given, peel them out of 'removed' and draw them in that lighter shade — the
+    # strong added_color stays for the genuinely-new curve + junctions.
+    _SUPERSEDED = superseded_color or '#c9a8f5'
+    _sup_ids = {str(s) for s in (superseded_seg_ids or ())}
+    if superseded_color and _sup_ids:
+        _sup_mask = removed_segs['Segment_ID'].astype(str).isin(_sup_ids)
+        superseded_segs = removed_segs[_sup_mask]
+        removed_segs = removed_segs[~_sup_mask]
+    else:
+        superseded_segs = removed_segs.iloc[0:0]
+
     common_ids   = ids_a & ids_b
 
     common_a = segs_a[segs_a['Segment_ID'].isin(common_ids)].set_index('Segment_ID')
@@ -2974,7 +3026,7 @@ def plot_infrastructure_diff(
 
     unchanged_ids = []
     modified_ids  = []
-    track_gained  = []  # list of (geom, n_a, n_b)
+    track_gained  = []  # list of (geom, n_a, n_b, sid)
     track_lost    = []  # list of (geom, n_a, n_b)
 
     for sid in common_ids:
@@ -2984,7 +3036,7 @@ def plot_infrastructure_diff(
         n_b  = int(common_b.loc[sid].get('Num_Tracks', 1) or 1)
         geom = common_b.loc[sid].geometry
         if n_b > n_a:
-            track_gained.append((geom, n_a, n_b))
+            track_gained.append((geom, n_a, n_b, sid))
         elif n_b < n_a:
             track_lost.append((geom, n_a, n_b))
         else:
@@ -3035,6 +3087,44 @@ def plot_infrastructure_diff(
     modified_nodes  = nodes_b[nodes_b['Name'].isin(modified_node_names)]
     unchanged_nodes = nodes_b[nodes_b['Name'].isin(unchanged_node_names)]
 
+    # ── Per-int-type colouring of the added / track-gained category ───────────
+    # When added_type_colors is given, added segments/nodes and track-gained segments
+    # are coloured by their int_type tag (CC vs CAP); otherwise the single added_color.
+    _seg_type = ({str(k): v for k, v in
+                  zip(segs_b['Segment_ID'].astype(str), segs_b['int_type'])}
+                 if added_type_colors and 'int_type' in segs_b.columns else {})
+    _node_type = ({str(k): v for k, v in
+                   zip(nodes_b['Name'].astype(str), nodes_b['int_type'])}
+                  if added_type_colors and 'int_type' in nodes_b.columns else {})
+
+    def _type_rgb(itype):
+        spec = added_type_colors.get(itype) if added_type_colors else None
+        if spec:
+            return spec.get('color', _GREEN), spec.get('edge', _GREEN_EDGE)
+        return _GREEN, _GREEN_EDGE
+
+    def _added_seg_groups(gdf):
+        """Yield (sub_gdf, color) partitions of added segments by int_type colour."""
+        if gdf is None or gdf.empty:
+            return []
+        if not added_type_colors:
+            return [(gdf, _GREEN)]
+        key = gdf['Segment_ID'].astype(str).map(lambda s: _seg_type.get(s))
+        return [(sub, _type_rgb(itype)[0]) for itype, sub in gdf.groupby(key, dropna=False)]
+
+    def _added_node_groups(gdf):
+        """Yield (sub_gdf, color, edge) partitions of added nodes by int_type colour."""
+        if gdf is None or gdf.empty:
+            return []
+        if not added_type_colors:
+            return [(gdf, _GREEN, _GREEN_EDGE)]
+        key = gdf['Name'].astype(str).map(lambda s: _node_type.get(s))
+        out = []
+        for itype, sub in gdf.groupby(key, dropna=False):
+            col, edge = _type_rgb(itype)
+            out.append((sub, col, edge))
+        return out
+
     ms_ts = 20 if is_catchment else 55
     ms_jn = 5  if is_catchment else 8
 
@@ -3069,28 +3159,36 @@ def plot_infrastructure_diff(
             _draw_parallel_tracks(ax, row.geometry, int(row.get('Num_Tracks', 1) or 1),
                                   color=_DIFF_YELLOW, linewidth=1.4, alpha=_ga, zorder=3,
                                   track_spacing_m=ts)
+        for _, row in superseded_segs.iterrows():
+            _draw_parallel_tracks(ax, row.geometry, int(row.get('Num_Tracks', 1) or 1),
+                                  color=_SUPERSEDED, linewidth=1.4, alpha=_ga, zorder=4,
+                                  track_spacing_m=ts)
         for _, row in removed_segs.iterrows():
             _draw_parallel_tracks(ax, row.geometry, int(row.get('Num_Tracks', 1) or 1),
                                   color=_DIFF_RED, linewidth=1.4, alpha=_ga, zorder=4,
                                   track_spacing_m=ts)
-        for _, row in added_segs.iterrows():
-            _draw_parallel_tracks(ax, row.geometry, int(row.get('Num_Tracks', 1) or 1),
-                                  color=_DIFF_GREEN, linewidth=1.4, alpha=_ga, zorder=5,
-                                  track_spacing_m=ts)
+        for _sub, _col in _added_seg_groups(added_segs):
+            for _, row in _sub.iterrows():
+                _draw_parallel_tracks(ax, row.geometry, int(row.get('Num_Tracks', 1) or 1),
+                                      color=_col, linewidth=1.4, alpha=_ga, zorder=5,
+                                      track_spacing_m=ts)
         for geom, n_a, n_b in track_lost:
             _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_b + [_DIFF_RED] * (n_a - n_b),
                                         linewidth=1.2, alpha=_ga, zorder=4, track_spacing_m=ts)
-        for geom, n_a, n_b in track_gained:
-            _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_a + [_DIFF_GREEN] * (n_b - n_a),
+        for geom, n_a, n_b, _sid in track_gained:
+            _gain = _type_rgb(_seg_type.get(str(_sid)))[0]
+            _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_a + [_gain] * (n_b - n_a),
                                         linewidth=1.2, alpha=_ga, zorder=5, track_spacing_m=ts)
         _plot_node_set(unchanged_nodes, _DIFF_BLACK,   _DIFF_BLACK,   _ga, 5)
         _plot_node_set(modified_nodes,  _DIFF_YELLOW, '#7a6000',    _ga, 6)
         _plot_node_set(removed_nodes,   _DIFF_RED,    '#7f0000',    _ga, 7)
-        _plot_node_set(added_nodes,     _DIFF_GREEN,  '#005a00',    _ga, 8)
+        for _sub, _col, _edge in _added_node_groups(added_nodes):
+            _plot_node_set(_sub, _col, _edge, _ga, 8)
 
         # Clip all categories to boundary for the solid pass
         unchanged_segs  = _clip_to_boundary(unchanged_segs,  boundary)
         modified_segs   = _clip_to_boundary(modified_segs,   boundary)
+        superseded_segs = _clip_to_boundary(superseded_segs, boundary)
         removed_segs    = _clip_to_boundary(removed_segs,    boundary)
         added_segs      = _clip_to_boundary(added_segs,      boundary)
         unchanged_nodes = _clip_to_boundary(unchanged_nodes, boundary)
@@ -3099,7 +3197,7 @@ def plot_infrastructure_diff(
         added_nodes     = _clip_to_boundary(added_nodes,     boundary)
         if boundary is not None and not boundary.empty:
             _bgeom      = boundary.geometry.union_all()
-            track_gained = [(g, na, nb) for g, na, nb in track_gained
+            track_gained = [(g, na, nb, sid) for g, na, nb, sid in track_gained
                             if g is not None and not g.is_empty
                             and g.centroid.within(_bgeom)]
             track_lost   = [(g, na, nb) for g, na, nb in track_lost
@@ -3111,26 +3209,30 @@ def plot_infrastructure_diff(
     # _draw_seg_category merges all geometries per Num_Tracks group into a
     # single MultiLineString before drawing — eliminates per-segment alpha
     # compositing that creates darker blobs at junctions. alpha=1.0 throughout.
-    _draw_seg_category(ax, unchanged_segs, _DIFF_BLACK,  linewidth=1.05, alpha=1.0, zorder=2, ts=ts)
-    _draw_seg_category(ax, modified_segs,  _DIFF_YELLOW, linewidth=1.4,  alpha=1.0, zorder=3, ts=ts)
-    _draw_seg_category(ax, removed_segs,   _DIFF_RED,    linewidth=1.4,  alpha=1.0, zorder=4, ts=ts)
-    _draw_seg_category(ax, added_segs,     _DIFF_GREEN,  linewidth=1.4,  alpha=1.0, zorder=5, ts=ts)
+    _draw_seg_category(ax, unchanged_segs,  _DIFF_BLACK,  linewidth=1.05, alpha=1.0, zorder=2, ts=ts)
+    _draw_seg_category(ax, modified_segs,   _DIFF_YELLOW, linewidth=1.4,  alpha=1.0, zorder=3, ts=ts)
+    _draw_seg_category(ax, superseded_segs, _SUPERSEDED,  linewidth=1.4,  alpha=1.0, zorder=4, ts=ts)
+    _draw_seg_category(ax, removed_segs,    _DIFF_RED,    linewidth=1.4,  alpha=1.0, zorder=4, ts=ts)
+    for _sub, _col in _added_seg_groups(added_segs):
+        _draw_seg_category(ax, _sub, _col, linewidth=1.4, alpha=1.0, zorder=5, ts=ts)
     for geom, n_a, n_b in track_lost:
         _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_b + [_DIFF_RED] * (n_a - n_b),
                                     linewidth=1.2, alpha=1.0, zorder=4, track_spacing_m=ts)
-    for geom, n_a, n_b in track_gained:
-        _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_a + [_DIFF_GREEN] * (n_b - n_a),
+    for geom, n_a, n_b, _sid in track_gained:
+        _gain = _type_rgb(_seg_type.get(str(_sid)))[0]
+        _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_a + [_gain] * (n_b - n_a),
                                     linewidth=1.2, alpha=1.0, zorder=5, track_spacing_m=ts)
 
     # ── Draw nodes (solid pass) ───────────────────────────────────────────────
     _plot_node_set(unchanged_nodes, _DIFF_BLACK,   _DIFF_BLACK,   1.0, 5)
     _plot_node_set(modified_nodes,  _DIFF_YELLOW, '#7a6000',    1.0, 6)
     _plot_node_set(removed_nodes,   _DIFF_RED,    '#7f0000',    1.0, 7)
-    _plot_node_set(added_nodes,     _DIFF_GREEN,  '#005a00',    1.0, 8)
+    for _sub, _col, _edge in _added_node_groups(added_nodes):
+        _plot_node_set(_sub, _col, _edge, 1.0, 8)
 
     # ── Labels (added/removed/modified stations only) ─────────────────────────
     if show_labels and not is_catchment:
-        for nodes_gdf, color in ((added_nodes,    _DIFF_GREEN),
+        for nodes_gdf, color in ((added_nodes,    _GREEN),
                                  (removed_nodes,  _DIFF_RED),
                                  (modified_nodes, _DIFF_YELLOW)):
             ts_n, tf_n, _ = _classify_nodes(nodes_gdf)
@@ -3153,10 +3255,18 @@ def plot_infrastructure_diff(
                          label='Unchanged'))
     legend.append(Line2D([0], [0], color=_DIFF_YELLOW, linewidth=1.4,
                          label='Modified'))
-    legend.append(Line2D([0], [0], color=_DIFF_GREEN,  linewidth=1.4,
-                         label='Added'))
+    if added_type_colors:
+        for _itype, _spec in added_type_colors.items():
+            legend.append(Line2D([0], [0], color=_spec.get('color', _GREEN), linewidth=1.4,
+                                 label=_spec.get('label', str(_itype))))
+    else:
+        legend.append(Line2D([0], [0], color=_GREEN,       linewidth=1.4,
+                             label=_ADDED_LABEL))
     legend.append(Line2D([0], [0], color=_DIFF_RED,    linewidth=1.4,
                          label='Removed'))
+    if superseded_color:
+        legend.append(Line2D([0], [0], color=_SUPERSEDED, linewidth=1.4,
+                             label='Superseded (split)'))
     legend.append(Line2D([0], [0], color='none', label=r'$\bf{Nodes}$'))
     legend.append(Line2D([0], [0], marker='o', color='w',
                          markerfacecolor=_DIFF_BLACK, markersize=6,
@@ -3165,10 +3275,17 @@ def plot_infrastructure_diff(
                          markerfacecolor=_DIFF_YELLOW,
                          markeredgecolor='#7a6000', markersize=8,
                          label='Modified'))
-    legend.append(Line2D([0], [0], marker='o', color='w',
-                         markerfacecolor=_DIFF_GREEN,
-                         markeredgecolor='#005a00', markersize=8,
-                         label='Added'))
+    if added_type_colors:
+        for _itype, _spec in added_type_colors.items():
+            legend.append(Line2D([0], [0], marker='o', color='w',
+                                 markerfacecolor=_spec.get('color', _GREEN),
+                                 markeredgecolor=_spec.get('edge', _GREEN_EDGE), markersize=8,
+                                 label=_spec.get('label', str(_itype))))
+    else:
+        legend.append(Line2D([0], [0], marker='o', color='w',
+                             markerfacecolor=_GREEN,
+                             markeredgecolor=_GREEN_EDGE, markersize=8,
+                             label=_ADDED_LABEL))
     legend.append(Line2D([0], [0], marker='o', color='w',
                          markerfacecolor=_DIFF_RED,
                          markeredgecolor='#7f0000', markersize=8,
@@ -3910,6 +4027,19 @@ def _redistribute_composition(composition, old_seg_id, split_dist,
     old_comp = composition[composition['Segment_ID'] == old_seg_id].copy()
     composition = composition[composition['Segment_ID'] != old_seg_id].reset_index(drop=True)
 
+    # Each piece keeps its OWN sub-geometry sliced from the relevant half — NOT the whole
+    # half. Assigning the full geom_A/geom_B to every piece made a single bridge/tunnel piece
+    # paint the entire half-segment in the engineering-structures plot (which draws per piece).
+    def _slice(half_geom, a, b):
+        a = max(0.0, min(a, half_geom.length))
+        b = max(0.0, min(b, half_geom.length))
+        if b - a <= 0.01:
+            return half_geom
+        try:
+            return shp_substring(half_geom, a, b)
+        except Exception:
+            return half_geom
+
     new_rows = []
     cumulative = 0.0
     for _, piece in old_comp.iterrows():
@@ -3922,20 +4052,22 @@ def _redistribute_composition(composition, old_seg_id, split_dist,
         if piece_end <= split_dist:
             new_rows.append({**base, 'Segment_ID': id_A,
                              'From_Name': from_name, 'To_Name': mid_name,
-                             '_geom': geom_A})
+                             '_geom': _slice(geom_A, piece_start, piece_end)})
         elif piece_start >= split_dist:
             new_rows.append({**base, 'Segment_ID': id_B,
                              'From_Name': mid_name, 'To_Name': to_name,
-                             '_geom': geom_B})
+                             '_geom': _slice(geom_B, piece_start - split_dist, piece_end - split_dist)})
         else:
             len_in_A = split_dist - piece_start
             len_in_B = piece_end  - split_dist
             new_rows.append({**base, 'Segment_ID': id_A,
                              'From_Name': from_name, 'To_Name': mid_name,
-                             'Piece_Length': len_in_A, '_geom': geom_A})
+                             'Piece_Length': len_in_A,
+                             '_geom': _slice(geom_A, piece_start, split_dist)})
             new_rows.append({**base, 'Segment_ID': id_B,
                              'From_Name': mid_name, 'To_Name': to_name,
-                             'Piece_Length': len_in_B, '_geom': geom_B})
+                             'Piece_Length': len_in_B,
+                             '_geom': _slice(geom_B, 0.0, len_in_B)})
         cumulative = piece_end
 
     if new_rows:
@@ -4802,18 +4934,23 @@ if __name__ == "__main__":
             _segments.to_file(_version_dir / 'segments.gpkg', driver='GPKG')
             print(f"  segments.gpkg updated → {_version_dir / 'segments.gpkg'}")
 
-        # Derive and export composition for this version
+        # Composition for this version: prefer the version's OWN segments_composition.gpkg
+        # (written when the version was created — its Segment_IDs match exactly). Only fall
+        # back to filtering the Base composition for legacy versions that never wrote one.
+        _ver_comp_path  = _version_dir / "segments_composition.gpkg"
         _base_comp_path = _base_path / "segments_composition.gpkg"
-        if _base_comp_path.exists():
-            _base_comp    = gpd.read_file(_base_comp_path)
-            _ver_sids     = set(_segments['Segment_ID'].dropna())
-            _composition  = _filter_composition_for_version(_base_comp, _ver_sids)
-            _composition.to_file(_version_dir / "segments_composition.gpkg", driver="GPKG")
-            print(f"  segments_composition.gpkg → {_version_dir / 'segments_composition.gpkg'}"
-                  f"  ({len(_composition)} pieces)")
+        if _ver_comp_path.exists():
+            _composition = gpd.read_file(_ver_comp_path)
+            print(f"  segments_composition.gpkg  ({len(_composition)} pieces)")
+        elif _base_comp_path.exists():
+            _base_comp   = gpd.read_file(_base_comp_path)
+            _ver_sids    = set(_segments['Segment_ID'].dropna())
+            _composition = _filter_composition_for_version(_base_comp, _ver_sids)
+            _composition.to_file(_ver_comp_path, driver="GPKG")
+            print(f"  segments_composition.gpkg → {_ver_comp_path}  ({len(_composition)} pieces)")
         else:
             _composition = gpd.GeoDataFrame()
-            print("  Warning: Base composition not found — skipping composition export.")
+            print("  Warning: no version or Base composition found — skipping composition export.")
 
         # QGIS project
         print("\n--- QGIS project ---")
