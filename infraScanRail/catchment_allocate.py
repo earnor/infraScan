@@ -4924,7 +4924,7 @@ _PHASE6_BUNDLE_CACHE: dict = {}
 
 def reallocate_for_svc_int(svc_int_id, affected_stations, base_svc_network,
                            dev_rail_base, make_plots=False,
-                           full_recompute=False) -> dict:
+                           full_recompute=False, combo='') -> dict:
     """Phase-6A: PT-Feeder subset reallocation for one service intervention.
 
     Affected cells = cells whose candidate-station set (cell_station_candidates
@@ -4935,7 +4935,8 @@ def reallocate_for_svc_int(svc_int_id, affected_stations, base_svc_network,
     `dev_rail_base`; the feeder-side members are reused from the base bundle.
     The result is merged per-cell into the baseline allocation, the breakdown is
     recomputed in full from the merged allocation, and the per-svc-int catchment
-    outputs are written under data/Catchment_Area/<svc_int_id>_network/PT_Feeder/.
+    outputs are written under
+    data/Catchment_Area/Developments/<combo>/<svc_int_id>_network/PT_Feeder/.
 
     Args:
         svc_int_id:        svc-int id (e.g. 'ext_100001').
@@ -4948,6 +4949,9 @@ def reallocate_for_svc_int(svc_int_id, affected_stations, base_svc_network,
                            the developed network — no per-cell merge — through
                            the same bundle, so a parity check against the
                            selective result isolates the affected-cell rule.
+        combo:             the '<infra>__<svc>' workspace key for the output
+                           paths; '' resolves via ints_core.default_combo
+                           (standalone use).
 
     Returns:
         dict(allocation, affected_communes, breakdown, n_cells_affected).
@@ -5043,8 +5047,13 @@ def reallocate_for_svc_int(svc_int_id, affected_stations, base_svc_network,
         breakdown = _compute_station_commune_breakdown_pt_feeder(
             merged, pop_grid, empl_grid, bundle['rail_stations'])
 
-        # Per-svc-int outputs (Phase-4A schema, keyed <svc_int_id>_network)
-        catchment_base.setup_versioned_dirs(f'{svc_int_id}_network')
+        # Per-svc-int outputs (Phase-4A schema, combo-keyed network name)
+        if not combo:
+            import ints_core as _core
+            combo = _core.default_combo(
+                svc_version=base_svc_network.removesuffix('_network'))
+        catchment_base.setup_versioned_dirs(
+            paths.svc_int_network_name(svc_int_id, combo))
         out_dir = catchment_base.PT_FEEDER_DATA_DIR
         os.makedirs(out_dir, exist_ok=True)
         merged.to_parquet(os.path.join(out_dir, 'allocation_pt_feeder.parquet'),

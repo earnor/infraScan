@@ -524,9 +524,10 @@ def _composed_sections(base_infra, composed_infra, projected_services_path, *,
         network_label, composed_infra, gpkg_path=str(projected_services_path))
     if service_links_df.empty:
         return None
-
     junction_numbers = set(
         nodes_df.loc[nodes_df["Node_Class"] == "junction", "NR"].astype(int))
+    service_links_df = _expand_unmatched_hops(service_links_df, segments_df,
+                                              junction_numbers)
 
     sl_peak = build_stop_lookup(service_links_df, "peak")
     sta_peak = aggregate_station_metrics(nodes_df, service_links_df, junction_numbers, "peak")
@@ -541,6 +542,66 @@ def _composed_sections(base_infra, composed_infra, projected_services_path, *,
         grouping_strategy=grouping_strategy)
     return {'sta_peak': sta_peak, 'seg_peak': seg_peak, 'seg_off': seg_off,
             'junction_numbers': junction_numbers, 'sections_df': sections_df}
+
+
+def _expand_unmatched_hops(service_links_df: pd.DataFrame,
+                           segments_df: pd.DataFrame,
+                           junction_numbers: set = None) -> pd.DataFrame:
+    """Re-expand service hops whose node pair has no composed segment.
+
+    Base services are projected on the BASE infra, so their path_nodes hop
+    a→b straight over a CC-split host; the composed network only carries the
+    post-split pieces a→j→…→b and aggregate_segment_metrics would silently
+    drop the load exactly where the CAP check runs (5C supply undercount,
+    decision 2026-06-10). Each unmatched hop is walked through the
+    pass-through degree-2 junction chain and credited to every sub-segment;
+    unresolvable hops are kept unchanged (today's behaviour: no segment
+    match, dropped downstream). No-op when everything matches (EXT /
+    baseline: composed == base).
+    """
+    import ints_core as core
+
+    if service_links_df.empty or segments_df.empty:
+        return service_links_df
+    pair_set: set = set()
+    adjacency: dict = {}
+    for fn, tn in zip(segments_df['from_node'].astype(int),
+                      segments_df['to_node'].astype(int)):
+        pair_set.add(tuple(sorted((fn, tn))))
+        adjacency.setdefault(fn, set()).add(tn)
+        adjacency.setdefault(tn, set()).add(fn)
+
+    mask = [tuple(sorted((a, b))) not in pair_set
+            for a, b in zip(service_links_df['seg_from_node'].astype(int),
+                            service_links_df['seg_to_node'].astype(int))]
+    if not any(mask):
+        return service_links_df
+
+    keep = service_links_df.loc[[not m for m in mask]]
+    new_rows: list = []
+    n_walked = n_unres = 0
+    for _, row in service_links_df.loc[mask].iterrows():
+        a, b = int(row['seg_from_node']), int(row['seg_to_node'])
+        path = core.walk_segment_chain(adjacency, a, b,
+                                       pass_nodes=junction_numbers)
+        if path is None:
+            new_rows.append(row)
+            n_unres += 1
+            continue
+        n_walked += 1
+        last = len(path) - 2
+        for i in range(len(path) - 1):
+            r = row.copy()
+            r['seg_from_node'] = path[i]
+            r['seg_to_node'] = path[i + 1]
+            r['is_origin'] = bool(row['is_origin']) and i == 0
+            r['is_destination'] = bool(row['is_destination']) and i == last
+            new_rows.append(r)
+    out = pd.concat([keep, pd.DataFrame(new_rows)], ignore_index=True)
+    print(f"  [cap-composed] split-aware expansion: {n_walked} hop(s) walked "
+          f"onto split sections (+{len(out) - len(service_links_df)} row(s)); "
+          f"{n_unres} unresolvable hop(s) left as-is")
+    return out
 
 
 def write_sa_composed_capacity_workbook(base_infra, composed_infra, projected_services_path, *,
@@ -570,9 +631,10 @@ def write_sa_composed_capacity_workbook(base_infra, composed_infra, projected_se
         svc_version, composed_infra, sa_node_set, gpkg_path=str(projected_services_path))
     if service_links_df.empty:
         return None
-
     junction_numbers = set(
         nodes_df.loc[nodes_df["Node_Class"] == "junction", "NR"].astype(int))
+    service_links_df = _expand_unmatched_hops(service_links_df, segments_df,
+                                              junction_numbers)
     sl_peak = build_stop_lookup(service_links_df, "peak")
     sta_peak = aggregate_station_metrics(nodes_df, service_links_df, junction_numbers, "peak")
     seg_peak = aggregate_segment_metrics(segments_df, service_links_df, sl_peak,

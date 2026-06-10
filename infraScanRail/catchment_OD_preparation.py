@@ -2131,8 +2131,9 @@ def prepare_svc_int_od(svc_int_id, base_svc_network, infra_version,
     static). The merge is `long_dev = long_base − reagg(base, S) + reagg(dev, S)`
     — exact because the station attribution is linear in the communal rows.
     Outputs are written in the Phase-4B schema under
-    Traffic_Flow/OD/<svc_int_id>_network/PT_Feeder/ (long CSV, weight CSVs,
-    full_day workbook); Phase 7 consumes the long CSV unchanged.
+    Traffic_Flow/OD/Developments/<combo>/<svc_int_id>_network/PT_Feeder/ (long
+    CSV, weight CSVs, full_day workbook); Phase 7 consumes the long CSV
+    unchanged.
 
     Args:
         svc_int_id:        svc-int id (e.g. 'ext_100001').
@@ -2154,6 +2155,8 @@ def prepare_svc_int_od(svc_int_id, base_svc_network, infra_version,
     branch = 'pt_feeder'
     sheet_label = 'Blended' if attribution == 'blended' else 'Specific'
     mode = 'ORACLE full reaggregation' if full_recompute else 'OD delta merge'
+    combo = f"{infra_version}__{base_svc_network.removesuffix('_network')}"
+    int_network = paths.svc_int_network_name(svc_int_id, combo)
     print(f"\n--- Phase 6B [{svc_int_id}]: {mode} ({attribution}) ---")
 
     # Baseline artifacts (Hook 3)
@@ -2180,14 +2183,13 @@ def prepare_svc_int_od(svc_int_id, base_svc_network, infra_version,
     # the changed services); frequencies = base lookup overridden by the delta's
     # (replaced EXT variants share their key, NDC adds new ones).
     seg_merged = str(Path(paths.get_svc_int_projected_path(
-        svc_int_id, infra_version)).with_name('rail_segments_merged.gpkg'))
+        svc_int_id, infra_version, combo)).with_name('rail_segments_merged.gpkg'))
     if not os.path.exists(seg_merged):
         raise FileNotFoundError(
             f"Merged projected segments missing at {seg_merged}. Run Phase 5C "
             f"(merged services) for {svc_int_id} first.")
     freq_dev = dict(_load_line_freq_per_h_window(base_svc_network, infra_version))
-    freq_dev.update(_load_line_freq_per_h_window(f'{svc_int_id}_network',
-                                                 infra_version))
+    freq_dev.update(_load_line_freq_per_h_window(int_network, infra_version))
     all_assigned = {int(s) for stns in assignment.values() for s in stns}
     vols_dev = _gateway_volumes(seg_merged, all_assigned, freq_dev)
     gw_weights_dev = _build_gateway_weights(assignment, vols_dev)
@@ -2206,8 +2208,8 @@ def prepare_svc_int_od(svc_int_id, base_svc_network, infra_version,
 
     S = {int(c) for c in (affected_communes or set())} | changed_gateways
 
-    # Dev weights from the 6A breakdown (written under <svc_int_id>_network)
-    catchment_base.setup_versioned_dirs(f'{svc_int_id}_network')
+    # Dev weights from the 6A breakdown (written under the combo-keyed network)
+    catchment_base.setup_versioned_dirs(int_network)
     try:
         breakdown_dev = _load_station_breakdown('pt_feeder')
     finally:
@@ -2242,8 +2244,7 @@ def prepare_svc_int_od(svc_int_id, base_svc_network, infra_version,
           f"{len(changed_pairs):,} changed station pair(s); OD total "
           f"{long_dev['trips'].sum():,.1f} (base {long_base['trips'].sum():,.1f})")
 
-    # Persist per-svc-int OD (Phase-4B schema, keyed <svc_int_id>_network)
-    int_network = f'{svc_int_id}_network'
+    # Persist per-svc-int OD (Phase-4B schema, combo-keyed network name)
     long_path = paths.get_station_od_long_csv(int_network, branch, attribution)
     Path(long_path).parent.mkdir(parents=True, exist_ok=True)
     long_dev.to_csv(long_path, index=False, encoding='utf-8-sig')

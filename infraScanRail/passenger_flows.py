@@ -28,6 +28,7 @@ from matplotlib.lines import Line2D
 from shapely.geometry import LineString
 
 import cache_manifest
+import ints_core
 import paths
 import settings
 
@@ -39,19 +40,27 @@ _FLOW_FILES = ('flow_segments.gpkg', 'flow_segments_by_service.csv',
 
 def build_passenger_flows(svc_network: str, infra_version: str, method: str = '',
                           make_plots: bool = True,
-                          use_cache: bool = False) -> dict:
+                          use_cache: bool = False,
+                          links_infra_version: str = '') -> dict:
     """Build the Phase-6D flow tables (+ map) for one routed network.
 
     Args:
         svc_network:   network folder name WITH the '_network' suffix — the
-                       baseline ('AK_2026_S18_network') or a per-svc-int network
-                       ('ext_100001_network').
-        infra_version: composed infra version whose segments/nodes the loads are
-                       unrolled onto (e.g. 'AS_2026_ZH_enhanced').
+                       baseline ('AK_2026_S18_network') or a per-svc-int
+                       network (combo-keyed, e.g.
+                       'Developments/<combo>/ext_100001_network').
+        infra_version: infra version whose segments/nodes the loads are
+                       unrolled onto — the svc-int's CC-only composed version
+                       (real or Developments/Derived), the base for the
+                       baseline.
         method:        'shortest_path' | 'logit' ('' -> settings; 'both' falls
                        back to 'logit').
         make_plots:    render the flow map (data outputs always written).
         use_cache:     skip when all four flow outputs already exist.
+        links_infra_version: dirname the projected links / 5C merged gpkg live
+                       under — apply_svc_int writes them under the BASE infra
+                       name even when projected on the composed infra; ''
+                       falls back to infra_version (baseline case).
 
     Returns:
         dict(segments=GeoDataFrame, nodes=GeoDataFrame, trips_total=float,
@@ -101,7 +110,8 @@ def build_passenger_flows(svc_network: str, infra_version: str, method: str = ''
     hops['from_name'] = hops['from_nr'].map(stop_names)
     hops['to_name'] = hops['to_nr'].map(stop_names)
 
-    links = _load_projected_links(svc_network, infra_version)
+    links = _load_projected_links(svc_network,
+                                  links_infra_version or infra_version)
     joined = hops.merge(
         links, how='left',
         left_on=['route_id', 'did', 'vr', 'from_name', 'to_name'],
@@ -112,13 +122,14 @@ def build_passenger_flows(svc_network: str, infra_version: str, method: str = ''
           f"trip-legs; {n_unmatched:,} hop(s) with no projected link "
           f"({unmatched_trips:,.1f} trips) -> synthetic")
 
-    seg_by_pair, node_names, node_pts = _infra_lookup(infra_version)
+    seg_by_pair, node_names, node_pts, adjacency, junctions = _infra_lookup(
+        infra_version)
 
     seg_total: dict = {}
     seg_service: dict = {}
     passing_interior: dict = {}
     synthetic_rows = []
-    n_empty_via = n_missing_pair = 0
+    n_empty_via = n_missing_pair = n_walked_pairs = 0
     for r in joined.itertuples(index=False):
         trips, vk = float(r.trips), str(r.variant_key)
         via = '' if (not isinstance(r.Via_Segment, str)) else r.Via_Segment
@@ -128,14 +139,24 @@ def build_passenger_flows(svc_network: str, infra_version: str, method: str = ''
             synthetic_rows.append((r.from_nr, r.to_nr, r.from_name, r.to_name,
                                    vk, trips))
             continue
-        pairs = [tuple(int(t) for t in p.split('-')) for p in via.split('|')]
+        # Resolve each Via pair to composed sub-pairs: a pair authored on the
+        # pre-split infra (base links over a CC-split host) is walked through
+        # the pass-through junction chain instead of falling synthetic.
+        raw_pairs = [tuple(int(t) for t in p.split('-')) for p in via.split('|')]
+        pairs = []
         chain_ok = True
-        for (u, v) in pairs:
-            sid = seg_by_pair.get((u, v)) or seg_by_pair.get((v, u))
-            if sid is None:
+        for (u, v) in raw_pairs:
+            if (u, v) in seg_by_pair or (v, u) in seg_by_pair:
+                pairs.append((u, v))
+                continue
+            walked = ints_core.walk_segment_chain(adjacency, u, v,
+                                                  pass_nodes=junctions)
+            if walked is None:
                 n_missing_pair += 1
                 chain_ok = False
                 break
+            n_walked_pairs += 1
+            pairs.extend(zip(walked[:-1], walked[1:]))
         if not chain_ok:
             synthetic_rows.append((r.from_nr, r.to_nr, r.from_name, r.to_name,
                                    vk, trips))
@@ -183,7 +204,8 @@ def build_passenger_flows(svc_network: str, infra_version: str, method: str = ''
           f"(primitive total {trips_total:,.1f})")
     print(f"  synthetic legs: {len(synthetic_rows):,} "
           f"(empty Via_Segment: {n_empty_via:,}, no projected link: "
-          f"{n_unmatched:,}, unmatched infra pair: {n_missing_pair:,})")
+          f"{n_unmatched:,}, unmatched infra pair: {n_missing_pair:,}); "
+          f"{n_walked_pairs:,} pair(s) walked onto split sections")
 
     if make_plots:
         _plot_flow_map(segments_gdf, svc_network, method)
@@ -193,12 +215,21 @@ def build_passenger_flows(svc_network: str, infra_version: str, method: str = ''
 
 
 def build_flow_diff(base_network: str, dev_network: str, infra_version: str,
-                    method: str = '', make_plots: bool = True) -> None:
+                    method: str = '', make_plots: bool = True,
+                    dev_infra_version: str = '') -> None:
     """Diff the developed network's infra-segment loads against the baseline.
 
     Writes flow_segments_diff.gpkg under the DEV network's flow dir and (gated)
     renders the red/green diff map: green = load increase, red = decrease,
     width ∝ |Δ|, synthetic legs dashed — the legacy main_cap Phase-7 semantics.
+
+    Args:
+        infra_version:     the BASELINE's infra version.
+        dev_infra_version: the dev network's (composed) infra version when it
+            differs — baseline host segments split by a CC/CAP are then
+            re-keyed onto the dev split pieces before the join, so the diff
+            lands at piece granularity instead of a spurious host decrease
+            plus piece increases.
     """
     method = method or settings.ROUTING_ASSIGNMENT_METHOD
     if method == 'both':
@@ -207,6 +238,9 @@ def build_flow_diff(base_network: str, dev_network: str, infra_version: str,
                                                    'flow_segments.gpkg'))
     dev = gpd.read_file(paths.get_flow_table_path(dev_network, method,
                                                   'flow_segments.gpkg'))
+    if dev_infra_version and dev_infra_version != infra_version:
+        base = _replicate_base_onto_split_pieces(base, infra_version,
+                                                 dev_infra_version)
     key = 'Segment_ID'
     merged = dev.merge(
         pd.DataFrame(base.drop(columns='geometry'))[[key, 'trips']]
@@ -240,6 +274,50 @@ def build_flow_diff(base_network: str, dev_network: str, infra_version: str,
 # ===============================================================================
 # LOADERS
 # ===============================================================================
+
+def _replicate_base_onto_split_pieces(base: gpd.GeoDataFrame, base_infra: str,
+                                      dev_infra: str) -> gpd.GeoDataFrame:
+    """Re-key baseline host-segment flows onto the dev network's split pieces.
+
+    The dev flow table is unrolled on the composed infra, whose CC/CAP splits
+    replace a base host segment with pieces under new Segment_IDs; an outer
+    join would then show a spurious full decrease on the host plus full
+    increases on the pieces. Baseline host trips replicate losslessly onto
+    every piece (base trains traverse the whole host), so the diff lands at
+    piece granularity (decision 2026-06-10). Hosts without a pass-through
+    piece chain stay unchanged.
+    """
+    seg_base, _names_b, _pts_b, _adj_b, _jn_b = _infra_lookup(base_infra)
+    seg_dev, _names_d, _pts_d, adj_dev, jn_dev = _infra_lookup(dev_infra)
+    parent_pieces: dict = {}
+    for (a, b), sid in sorted(seg_base.items()):
+        if (a, b) in seg_dev or (b, a) in seg_dev:
+            continue
+        walked = ints_core.walk_segment_chain(adj_dev, a, b,
+                                              pass_nodes=jn_dev)
+        if walked is None:
+            continue
+        parent_pieces[sid] = [seg_dev.get((u, v)) or seg_dev.get((v, u))
+                              for u, v in zip(walked[:-1], walked[1:])]
+    hosts = base['Segment_ID'].isin(parent_pieces)
+    if not hosts.any():
+        return base
+    piece_geom = gpd.read_file(
+        os.path.join(paths.resolve_infra_dir(dev_infra), 'segments.gpkg')
+    ).set_index('Segment_ID')['geometry']
+    rows = []
+    for _, r in base[hosts].iterrows():
+        for psid in parent_pieces[r['Segment_ID']]:
+            nr = r.copy()
+            nr['Segment_ID'] = psid
+            if psid in piece_geom.index:
+                nr['geometry'] = piece_geom[psid]
+            rows.append(nr)
+    out = pd.concat([base[~hosts], pd.DataFrame(rows)], ignore_index=True)
+    print(f"  [flow diff] split mapping: {int(hosts.sum())} base host "
+          f"segment(s) re-keyed onto {len(rows)} split piece row(s)")
+    return gpd.GeoDataFrame(out, geometry='geometry', crs=base.crs)
+
 
 def _load_projected_links(svc_network: str, infra_version: str) -> pd.DataFrame:
     """All projected service links of a network as one frame with string join
@@ -292,30 +370,60 @@ def _stop_lookup(svc_network: str) -> tuple:
 
 
 def _infra_lookup(infra_version: str) -> tuple:
-    """(seg_by_pair, node_names, node_pts) from the composed infra version.
+    """(seg_by_pair, node_names, node_pts, adjacency, junctions) from an infra
+    version (real or composed — Developments/Derived resolved transparently).
 
-    seg_by_pair keys both orientations of each segment's BAV node pair (from the
-    'Number' column 'from_to'); node lookups key Betriebspunkt_Nummer ints.
+    seg_by_pair keys each segment's BAV node pair (the 'Number' column
+    'from_to'; lookups try both orientations). CC/CAP split pieces carry no
+    'Number', so segments without a parsable pair fall back to
+    From_Name/To_Name -> node Number (the capacity loader's resolution).
+    adjacency is the undirected node graph of all keyed pairs and junctions
+    the junction-class node set — together they drive the split-chain walk
+    (a CC wye junction is degree-3 here, so degree alone cannot identify it
+    as pass-through).
     """
-    d = paths.get_infra_version_dir(infra_version)
-    seg = gpd.read_file(os.path.join(d, 'segments.gpkg'))
-    seg_by_pair = {}
-    for r in seg.itertuples(index=False):
-        num = str(getattr(r, 'Number', ''))
-        if '_' not in num:
-            continue
-        a, b = num.split('_', 1)
-        try:
-            seg_by_pair[(int(a), int(b))] = r.Segment_ID
-        except ValueError:
-            continue
+    d = paths.resolve_infra_dir(infra_version)
     nodes = gpd.read_file(os.path.join(d, 'nodes.gpkg'))
     node_names = {int(n): str(nm) for n, nm in zip(nodes['Number'],
                                                    nodes['Name'])}
     node_pts = {int(n): g for n, g in zip(nodes['Number'], nodes.geometry)}
-    print(f"  infra '{infra_version}': {len(seg_by_pair):,} segment pair keys, "
-          f"{len(node_names):,} nodes")
-    return seg_by_pair, node_names, node_pts
+    if 'Node_Class' in nodes.columns:
+        junctions = {int(n) for n, c in zip(nodes['Number'],
+                                            nodes['Node_Class'])
+                     if str(c) == 'junction'}
+    else:
+        junctions = set()
+    name_to_nr: dict = {}
+    for n, nm in node_names.items():
+        name_to_nr.setdefault(nm, n)
+
+    seg = gpd.read_file(os.path.join(d, 'segments.gpkg'))
+    seg_by_pair: dict = {}
+    n_name_fallback = 0
+    for r in seg.itertuples(index=False):
+        num = str(getattr(r, 'Number', ''))
+        a = b = None
+        if '_' in num:
+            sa, sb = num.split('_', 1)
+            try:
+                a, b = int(sa), int(sb)
+            except ValueError:
+                a = b = None
+        if a is None:
+            a = name_to_nr.get(str(getattr(r, 'From_Name', '')))
+            b = name_to_nr.get(str(getattr(r, 'To_Name', '')))
+            if a is None or b is None or a == b:
+                continue
+            n_name_fallback += 1
+        seg_by_pair[(a, b)] = r.Segment_ID
+    adjacency: dict = {}
+    for (a, b) in seg_by_pair:
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+    print(f"  infra '{infra_version}': {len(seg_by_pair):,} segment pair keys "
+          f"({n_name_fallback} via name fallback), {len(node_names):,} nodes "
+          f"({len(junctions)} junction-class)")
+    return seg_by_pair, node_names, node_pts, adjacency, junctions
 
 
 # ===============================================================================
@@ -326,7 +434,7 @@ def _build_segments_gdf(seg_total: dict, infra_version: str, synthetic_rows,
                         stop_pts) -> gpd.GeoDataFrame:
     """Infra-segment flow table: real segments with totals + synthetic straight
     legs ('SYN_<from>_<to>', dashed in maps)."""
-    d = paths.get_infra_version_dir(infra_version)
+    d = paths.resolve_infra_dir(infra_version)
     seg = gpd.read_file(os.path.join(d, 'segments.gpkg'))
     seg = seg[['Segment_ID', 'From_Name', 'To_Name', 'geometry']].copy()
     seg['trips'] = seg['Segment_ID'].map(seg_total)

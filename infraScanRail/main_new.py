@@ -1569,7 +1569,7 @@ def phase_5b_service_interventions(sa_boundary, sa_buffer, runtimes: dict,
     return result
 
 
-def phase_5c_capacity_on_matched(runtimes: dict) -> dict:
+def phase_5c_capacity_on_matched(runtimes: dict, svc_int_ids=None) -> dict:
     """Phase 5C: per-svc-int capacity interventions on the matched composed network.
 
     For each registered svc-int, designs CAP on its own composed (base+CC+merged-services)
@@ -1580,6 +1580,10 @@ def phase_5c_capacity_on_matched(runtimes: dict) -> dict:
 
     Args:
         runtimes: dict tracking phase execution times.
+        svc_int_ids: optional subset of svc-int ids (None = all registered;
+            mirrors phase_6_intervention_recompute). NOTE: a subset run with
+            use_cache_svc_int_cap=False rewrites the attribution CSV with the
+            subset's rows only.
     """
     if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
         return {}
@@ -1597,6 +1601,7 @@ def phase_5c_capacity_on_matched(runtimes: dict) -> dict:
             base_infra=_phase5_base_infra(),
             base_svc=PIPELINE_CONFIG.svc_version or _io._resolve_svc_version(),
             make_plots=getattr(settings, 'PLOT_MIXED_INTS', False),
+            svc_int_ids=svc_int_ids,
         ) or {}
     except Exception as exc:
         print(f"  WARNING: Phase 5C failed: {exc}")
@@ -1750,7 +1755,8 @@ def _phase6_parity(sel: dict, orc: dict) -> tuple:
     return rows, pair_rows
 
 
-def _phase6_worker(int_type: str, rec: dict, merged_dir: str, aff: dict,
+def _phase6_worker(int_type: str, rec: dict, merged_dir: str,
+                   composed_infra: str, aff: dict,
                    ctx: dict, capture_log: bool = True) -> dict:
     """Phase-6 body for one svc-int: 6A/6B (PT_Feeder only), 6C, 6D + diff.
 
@@ -1764,10 +1770,14 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str, aff: dict,
         int_type:   'ext' | 'ndc'.
         rec:        svc-int record (read_records row).
         merged_dir: merged developed-network dir from the serial pre-pass.
+        composed_infra: the svc-int's CC-only composed infra version from the
+                    serial pre-pass (== base_infra for EXT) — 6D unrolls onto
+                    it; the projected links stay under the base-infra dirname.
         aff:        {'stations': set[int], 'services': list[str]} (Hook-1).
-        ctx:        dict(svc_network, base_infra, od_method, assignment_method,
-                    catchment_method, od_attribution_mode, plot_int_recompute,
-                    plot_flows, use_cache_flows, write_workbooks).
+        ctx:        dict(svc_network, base_infra, combo, od_method,
+                    assignment_method, catchment_method, od_attribution_mode,
+                    plot_int_recompute, plot_flows, use_cache_flows,
+                    write_workbooks).
         capture_log: buffer stdout and return it (parallel mode).
 
     Returns:
@@ -1788,7 +1798,7 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str, aff: dict,
             import catchment_OD_rail_network as _pr
             import passenger_flows as _pf
 
-            int_network = f'{iid}_network'
+            int_network = paths.svc_int_network_name(iid, ctx['combo'])
             if not aff['stations'] and not aff['services']:
                 print(f"  WARNING: no affected set for {iid} — closure falls "
                       f"back to endpoint/OD-changed pairs only.")
@@ -1803,7 +1813,8 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str, aff: dict,
                 res6a = _ca.reallocate_for_svc_int(
                     iid, aff['stations'], ctx['svc_network'],
                     dev_rail_base=merged_dir,
-                    make_plots=ctx['plot_int_recompute'])
+                    make_plots=ctx['plot_int_recompute'],
+                    combo=ctx['combo'])
                 res6b = _odp.prepare_svc_int_od(
                     iid, ctx['svc_network'], ctx['base_infra'],
                     res6a['affected_communes'],
@@ -1828,14 +1839,16 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str, aff: dict,
                   f"{res['routed_trips']:,.1f} / unresolved "
                   f"{res['unresolved_trips']:,.1f} trips.")
 
-            _pf.build_passenger_flows(int_network, ctx['base_infra'],
+            _pf.build_passenger_flows(int_network, composed_infra,
                                       method=ctx['assignment_method'],
                                       make_plots=ctx['plot_flows'],
-                                      use_cache=ctx['use_cache_flows'])
+                                      use_cache=ctx['use_cache_flows'],
+                                      links_infra_version=ctx['base_infra'])
             _pf.build_flow_diff(ctx['svc_network'], int_network,
                                 ctx['base_infra'],
                                 method=ctx['assignment_method'],
-                                make_plots=ctx['plot_flows'])
+                                make_plots=ctx['plot_flows'],
+                                dev_infra_version=composed_infra)
         except Exception as exc:
             status = 'fail'
             error = f"{exc}\n{traceback.format_exc()}"
@@ -1843,7 +1856,8 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str, aff: dict,
             'error': error, 'log': buf.getvalue() if capture_log else ''}
 
 
-def _phase6_run_oracle(iid: str, merged_dir: str, aff: dict, ctx: dict,
+def _phase6_run_oracle(iid: str, merged_dir: str, composed_infra: str,
+                       aff: dict, ctx: dict,
                        combo: str, parity_results: dict) -> None:
     """Full-recompute oracle + parity report for one svc-int (decision C).
 
@@ -1853,7 +1867,7 @@ def _phase6_run_oracle(iid: str, merged_dir: str, aff: dict, ctx: dict,
     import catchment_OD_rail_network as _pr
     import passenger_flows as _pf
 
-    int_network = f'{iid}_network'
+    int_network = paths.svc_int_network_name(iid, ctx['combo'])
     include_pt = ctx['catchment_method'] == 'PT_Feeder'
     sel_snap = _phase6_snapshot(int_network, ctx['assignment_method'],
                                 include_pt)
@@ -1866,7 +1880,7 @@ def _phase6_run_oracle(iid: str, merged_dir: str, aff: dict, ctx: dict,
         res6a_o = _ca.reallocate_for_svc_int(
             iid, aff['stations'], ctx['svc_network'],
             dev_rail_base=merged_dir, make_plots=False,
-            full_recompute=True)
+            full_recompute=True, combo=ctx['combo'])
         res6b_o = _odp.prepare_svc_int_od(
             iid, ctx['svc_network'], ctx['base_infra'],
             res6a_o['affected_communes'],
@@ -1881,11 +1895,13 @@ def _phase6_run_oracle(iid: str, merged_dir: str, aff: dict, ctx: dict,
         method=ctx['assignment_method'], od_method=ctx['od_method'],
         make_plots=False, full_recompute=True,
         write_workbooks=ctx['write_workbooks'])
-    _pf.build_passenger_flows(int_network, ctx['base_infra'],
+    _pf.build_passenger_flows(int_network, composed_infra,
                               method=ctx['assignment_method'],
-                              make_plots=False, use_cache=False)
+                              make_plots=False, use_cache=False,
+                              links_infra_version=ctx['base_infra'])
     _pf.build_flow_diff(ctx['svc_network'], int_network, ctx['base_infra'],
-                        method=ctx['assignment_method'], make_plots=False)
+                        method=ctx['assignment_method'], make_plots=False,
+                        dev_infra_version=composed_infra)
     orc_snap = _phase6_snapshot(int_network, ctx['assignment_method'],
                                 include_pt)
     summary, pair_rows = _phase6_parity(sel_snap, orc_snap)
@@ -1992,6 +2008,7 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
     # Everything runtime-resolved the workers need: loky children re-import
     # settings from file, so values mutated at runtime only reach them here.
     ctx = {'svc_network': svc_network, 'base_infra': base_infra,
+           'combo': combo,
            'od_method': od_method, 'assignment_method': assignment_method,
            'catchment_method': catchment_method,
            'od_attribution_mode': settings.OD_ATTRIBUTION_MODE,
@@ -2009,7 +2026,7 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
     for int_type, rec in records:
         iid = str(rec['int_id'])
         try:
-            int_network = f'{iid}_network'
+            int_network = paths.svc_int_network_name(iid, combo)
             probe = [paths.get_routing_primitive_path(int_network,
                                                       assignment_method, t)
                      for t in ('paths', 'segments', 'events', 'unresolved')]
@@ -2034,7 +2051,14 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
                 print(f"  {iid}: empty delta — network equals baseline, skipping.")
                 n_skip += 1
                 continue
-            todo.append((int_type, rec, merged_dir,
+            # CC-only composed version for the 6D unroll, resolved serially
+            # (Derived compose race) — NOT from apply_svc_int's return, whose
+            # cached path reports base_infra. compose_infra([]) == base_infra.
+            import ints_core as _core
+            composed = _core.compose_infra(
+                base_infra, list(rec.get('requires_infra') or []),
+                svc_version=svc_version)
+            todo.append((int_type, rec, merged_dir, composed,
                          affected.get(iid, {'stations': set(),
                                             'services': []})))
         except Exception as exc:
@@ -2043,8 +2067,8 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
 
     parity_results: dict = {}
     if n_jobs == 1 or len(todo) <= 1:
-        for int_type, rec, merged_dir, aff in todo:
-            r = _phase6_worker(int_type, rec, merged_dir, aff, ctx,
+        for int_type, rec, merged_dir, composed, aff in todo:
+            r = _phase6_worker(int_type, rec, merged_dir, composed, aff, ctx,
                                capture_log=False)
             if r['status'] != 'done':
                 print(f"  WARNING: Phase 6 failed for {r['iid']}: {r['error']}")
@@ -2052,8 +2076,8 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
                 continue
             if oracle:
                 try:
-                    _phase6_run_oracle(r['iid'], merged_dir, aff, ctx, combo,
-                                       parity_results)
+                    _phase6_run_oracle(r['iid'], merged_dir, composed, aff,
+                                       ctx, combo, parity_results)
                 except Exception as exc:
                     print(f"  WARNING: Phase 6 oracle failed for {r['iid']}: "
                           f"{exc}")
@@ -2070,12 +2094,12 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
         try:
             results = Parallel(n_jobs=n_jobs, backend='loky',
                                return_as='generator')(
-                delayed(_phase6_worker)(t, r, m, a, ctx)
-                for t, r, m, a in todo)
+                delayed(_phase6_worker)(t, r, m, c, a, ctx)
+                for t, r, m, c, a in todo)
         except TypeError:                       # joblib < 1.3: no return_as
             results = Parallel(n_jobs=n_jobs, backend='loky')(
-                delayed(_phase6_worker)(t, r, m, a, ctx)
-                for t, r, m, a in todo)
+                delayed(_phase6_worker)(t, r, m, c, a, ctx)
+                for t, r, m, c, a in todo)
         for r in results:
             if r['log']:
                 print(r['log'], end='' if r['log'].endswith('\n') else '\n')

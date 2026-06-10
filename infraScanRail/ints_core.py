@@ -135,6 +135,17 @@ def _default_network(int_type: str) -> str:
     return _combo()
 
 
+def default_combo(base_infra: Optional[str] = None, svc_version: Optional[str] = None) -> str:
+    """Default '<infra>__<svc>' combo on the PROPAGATED (enhanced) base.
+
+    The pipeline runs Phase 5+ on the enhanced network, so standalone / incidental
+    per-svc-int reads must default to the same combo (decision H) — unlike
+    ``_combo``, whose plain-base default suits registry creation before
+    propagation. Either half can be pinned explicitly.
+    """
+    return _combo(base_infra or _resolve_base_version_propagated(), svc_version)
+
+
 def read_registry(
     int_type: str,
     registry_path: Optional[str] = None,
@@ -552,6 +563,55 @@ def build_master_network(base_version: str, svc_version: Optional[str] = None) -
     _validate_and_write(nodes, segs, comp, target, full_name, build_qgz=True)
     _write_manifest(target, base_version, all_ids)
     return full_name
+
+
+def walk_segment_chain(adjacency: Dict[int, set], a: int, b: int,
+                       max_hops: int = 50,
+                       pass_nodes: Optional[set] = None) -> Optional[List[int]]:
+    """Shortest pass-through node path a→…→b over a split host segment.
+
+    A CC/CAP split turns host a–b into a chain a→j1→…→b. Intermediate nodes
+    must be pass-through: degree-2 in the segment graph, or members of
+    ``pass_nodes`` (junction-class — a CC wye junction carries the curve, so
+    it is degree-3 in the full graph; the capacity graph mode-filters the
+    curve away, hence degree-2 there). BFS shortest-hop with sorted neighbor
+    expansion: the direct piece chain always beats a detour through the curve
+    and ties resolve deterministically. Used to re-expand service hops
+    projected on the pre-split infra onto the composed sections (5C capacity
+    supply, 6D flow unroll — decision 2026-06-10).
+
+    Args:
+        adjacency:  node -> set of neighbor nodes (undirected segment graph).
+        a, b:       hop endpoints (BAV node numbers).
+        max_hops:   safety bound on path length.
+        pass_nodes: node numbers traversable regardless of degree
+                    (junction-class nodes).
+
+    Returns:
+        Full node path [a, j1, …, b], or None when b is only reachable
+        through a non-pass-through node (e.g. a real station).
+    """
+    from collections import deque
+
+    allowed = pass_nodes or set()
+    prev: Dict[int, Optional[int]] = {a: None}
+    queue = deque([(a, 0)])
+    while queue:
+        cur, dist = queue.popleft()
+        if dist >= max_hops:
+            continue
+        for nxt in sorted(adjacency.get(cur, ())):
+            if nxt in prev:
+                continue
+            prev[nxt] = cur
+            if nxt == b:
+                path = [b]
+                while prev[path[-1]] is not None:
+                    path.append(prev[path[-1]])
+                return path[::-1]
+            if len(adjacency.get(nxt, ())) == 2 or nxt in allowed:
+                queue.append((nxt, dist + 1))
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -58,12 +58,16 @@ INFRASTRUCTURE_SEEDS_DIR    = r"data/Infrastructure/Seeds"
 # (decision H, Phases 5A-5C). Registries nest under the combo (cc/ext/ndc/cap); the
 # composed-network trees are shared — Derived/ and Dev_Full/ names are globally unique
 # (deterministic on base + sorted int_ids), so no per-combo nesting is needed.
-# Note: svc-int delta networks still live under RAIL_LINES_DIR (see get_svc_int_network_dir).
+# Note: per-svc-int output trees nest as Developments/<combo>/<id>_network/ INSIDE each
+# domain tree (Rail_Lines, Catchment_Area, OD, Assignment, Scenario + plots mirrors) —
+# see svc_int_network_name. DEVELOPMENTS_DIR below is the absolute registry tree.
 DEVELOPMENTS_DIR          = r"data/Developments"
 DEVELOPMENTS_DERIVED_DIR  = r"data/Developments/Derived"     # base+int composed nets (shared)
 DEVELOPMENTS_DEV_FULL_DIR = r"data/Developments/Dev_Full"    # master "all-ints" net (shared)
 # Mirrored plots tree (plots/Developments/<combo>/<subtype>/)
 DEVELOPMENTS_PLOTS_DIR    = r"plots/Developments"
+# Subdir name nesting per-svc-int outputs inside each domain tree (combo-keyed layout)
+DEVELOPMENTS_SUBDIR_NAME  = "Developments"
 
 
 def _extract_seed_year(year_or_version: str) -> str:
@@ -175,24 +179,46 @@ def get_developments_plot_dir(combo: str, subtype: str = None) -> str:
         parts.append(subtype)
     return os.path.join(*parts)
 
-def get_svc_int_network_dir(svc_int_id: str) -> str:
-    """Return absolute path to a per-svc-int delta network folder.
+def svc_int_network_name(svc_int_id: str, combo: str) -> str:
+    """Relative per-svc-int network dirname: Developments/<combo>/<id>_network.
+
+    The single place the per-svc-int network name is constructed (decision
+    2026-06-10): svc-int ids restart per run, so the name must carry the
+    '<infra>__<svc>' combo to keep combinations from overwriting each other.
+    The value nests inside each domain tree (Rail_Lines, Catchment_Area, OD,
+    Assignment, Scenario + plots mirrors), which all plain-join it; baseline
+    '<svc_version>_network' names stay flat.
+
+    Args:
+        svc_int_id: svc-int id (e.g. 'ext_100001', 'ndc_103001').
+        combo:      the '<infra>__<svc>' workspace key.
+    """
+    return os.path.join(DEVELOPMENTS_SUBDIR_NAME, combo, svc_int_id + '_network')
+
+
+def get_svc_int_network_dir(svc_int_id: str, combo: str) -> str:
+    """Return absolute path to a per-svc-int delta network folder
+    (data/Network/Rail_Lines/Developments/<combo>/<id>_network/).
 
     Mirrors the ``<svc_version>_network`` layout so the existing catchment/OD/routing
     readers consume a svc-int's materialised delta unchanged (Phase 5B apply_svc_int).
 
     Args:
         svc_int_id: svc-int id (e.g. 'ext_100001', 'ndc_103001').
+        combo:      the '<infra>__<svc>' workspace key.
     """
-    return os.path.join(MAIN, RAIL_LINES_DIR, svc_int_id + '_network')
+    return os.path.join(MAIN, RAIL_LINES_DIR, svc_int_network_name(svc_int_id, combo))
 
 
-def get_svc_int_projected_path(svc_int_id: str, infra_version: str) -> str:
-    """Return absolute path to a svc-int's projected rail segments delta.
+def get_svc_int_projected_path(svc_int_id: str, infra_version: str, combo: str) -> str:
+    """Return absolute path to a svc-int's projected rail segments delta
+    (…/Developments/<combo>/<id>_network/<infra_version>/rail_segments.gpkg).
 
-    (data/Network/Rail_Lines/<svc_int_id>_network/<infra_version>/rail_segments.gpkg)
+    The <infra_version> subfolder is named after the BASE infra version even when
+    the delta was projected on a composed (base + CC) infra — see apply_svc_int.
     """
-    return get_projected_services_path(svc_int_id, infra_version)
+    return os.path.join(get_svc_int_network_dir(svc_int_id, combo),
+                        infra_version, 'rail_segments.gpkg')
 
 
 def get_infra_version_dir(version: str) -> str:
@@ -217,6 +243,26 @@ def derived_version_exists(version: str) -> bool:
         os.path.isfile(os.path.join(d, f))
         for f in ('nodes.gpkg', 'segments.gpkg', 'segments_composition.gpkg')
     )
+
+
+def resolve_infra_dir(version: str) -> str:
+    """Absolute dir of a real OR derived (composed) infra version.
+
+    Real versions win; falls back to Developments/Derived/<version>. Lets
+    consumers (e.g. Phase 6D) take any infra version string without knowing
+    whether it is a base or a compose_infra output.
+
+    Raises:
+        FileNotFoundError: when the version exists in neither tree.
+    """
+    if infra_version_exists(version):
+        return get_infra_version_dir(version)
+    if derived_version_exists(version):
+        return get_derived_infra_version_dir(version)
+    raise FileNotFoundError(
+        f"Infra version '{version}' found neither at "
+        f"{get_infra_version_dir(version)} nor at "
+        f"{get_derived_infra_version_dir(version)}.")
 
 def get_infra_raw_dir(version: str) -> str:
     """Return absolute path to the named infrastructure raw directory.
@@ -348,16 +394,19 @@ def get_gateway_dir(svc_network: str) -> str:
     return os.path.join(get_od_version_dir(svc_network), 'Gateway')
 
 
+SCENARIO_DIR = r"data/Scenario"
+
+
 def get_scenario_version_dir(svc_network: str) -> str:
     """Return absolute path to the versioned scenario factor-store dir
     (data/Scenario/<svc_network>/). Baseline stores are keyed by the svc
-    network, per-svc-int overrides by '<svc_int_id>_network' (same layout as
-    the OD/catchment per-version dirs).
+    network, per-svc-int overrides by the combo-keyed svc-int network name
+    (same layout as the OD/catchment per-version dirs).
 
     Args:
         svc_network: service version folder name WITH the '_network' suffix.
     """
-    return os.path.join(MAIN, 'data', 'Scenario', svc_network)
+    return os.path.join(MAIN, SCENARIO_DIR, svc_network)
 
 
 def get_scenario_factor_dir(svc_network: str, method: str) -> str:
@@ -613,6 +662,7 @@ STUDY_AREA_BOUNDARY_GPKG = r"data/Catchment_Area/Boundaries/study_area_boundary.
 STUDY_AREA_BUFFER_GPKG   = r"data/Catchment_Area/Boundaries/study_area_buffer.gpkg"
 
 CATCHMENT_AREA_DIR           = r"data/Catchment_Area"
+CATCHMENT_PLOTS_DIR          = r"plots/Catchment_Area"
 CATCHMENT_AREA_BOUNDARY_GPKG = r"data/Catchment_Area/Boundaries/catchment_area_boundary.gpkg"
 CATCHMENT_AREA_BUFFER_GPKG   = r"data/Catchment_Area/Boundaries/catchment_area_buffer.gpkg"
 # Catchment plots - mirrors the data folder structure (data/Catchment_Area/Pop_Empl_Data/...)

@@ -143,7 +143,8 @@ def build_svc_int_factor_overrides(svc_int_id: str, svc_version: str,
         Summary dict: 'overrides_path' (None if nothing changed),
         'changed_stations', 'new_stations', 'cached' flag.
     """
-    int_network = f'{svc_int_id}_network'
+    int_network = paths.svc_int_network_name(svc_int_id,
+                                             f'{base_infra}__{svc_version}')
     svc_network = f'{svc_version}_network'
     out_csv = paths.get_growth_factor_overrides_csv(int_network, method)
     if (use_cache and os.path.exists(out_csv)
@@ -215,8 +216,13 @@ def build_svc_int_factor_overrides(svc_int_id: str, svc_version: str,
 
 
 def load_factor_store(svc_version: str, method: str, attribution: str,
-                      svc_int_id: str = None) -> dict:
+                      svc_int_id: str = None, combo: str = '') -> dict:
     """Load the factor store + matching long OD for (baseline | one svc-int).
+
+    Args:
+        combo: the '<infra>__<svc>' workspace key locating the svc-int's
+            override/OD files; '' resolves via ints_core.default_combo
+            (standalone use — Phase 8A should pass it explicitly).
 
     Returns:
         {'factors': DataFrame(scenario, year, station_id, factor) — baseline
@@ -238,7 +244,10 @@ def load_factor_store(svc_version: str, method: str, attribution: str,
     od_path = paths.get_station_od_long_csv(svc_network, method, attribution)
 
     if svc_int_id is not None and method != 'municipal':
-        int_network = f'{svc_int_id}_network'
+        if not combo:
+            import ints_core as _core
+            combo = _core.default_combo(svc_version=svc_version)
+        int_network = paths.svc_int_network_name(svc_int_id, combo)
         override_csv = paths.get_growth_factor_overrides_csv(int_network,
                                                              method)
         if os.path.exists(override_csv):
@@ -261,13 +270,13 @@ def load_factor_store(svc_version: str, method: str, attribution: str,
 
 def compose_scenario_od(svc_int_id, scenario: int, year: int, *,
                         svc_version: str, method: str, attribution: str,
-                        store: dict = None) -> pd.DataFrame:
+                        store: dict = None, combo: str = '') -> pd.DataFrame:
     """Compose the scenario OD for (svc_int_id, scenario, year) on demand.
 
     Long-format throughout: trips x sqrt(f_origin * f_dest) x modal x
     distance. svc_int_id=None composes the baseline. Pass a preloaded
     load_factor_store result as store for bulk loops (Phase 8A) — it is
-    loaded per call otherwise.
+    loaded per call otherwise (combo as in load_factor_store).
 
     Returns:
         DataFrame(origin_station_id, dest_station_id, trips) — same schema
@@ -278,7 +287,8 @@ def compose_scenario_od(svc_int_id, scenario: int, year: int, *,
             a factor row (stale store — rebuild Phase 7).
     """
     if store is None:
-        store = load_factor_store(svc_version, method, attribution, svc_int_id)
+        store = load_factor_store(svc_version, method, attribution, svc_int_id,
+                                  combo=combo)
     f = store['factors']
     fs = f[(f['scenario'] == scenario) & (f['year'] == year)]
     if fs.empty:

@@ -34,6 +34,7 @@ per-svc-int path the existing catchment/OD/routing readers consume unchanged.
 """
 
 import json
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -242,6 +243,43 @@ def delete_records(
     kept.to_excel(xlsx, sheet_name=SHEET, index=False)
 
 
+def _purge_svc_int_outputs(int_ids: List[str], combo: str) -> None:
+    """Delete all per-svc-int output folders of de-registered ids (active combo).
+
+    Svc-int ids restart from the DEV_ID_START_* blocks each run, so once 5B
+    clears the registry the old ids' artifacts are stale and a regenerated id
+    of the same name would silently mix with them — disk must mirror the live
+    catalogue. Covers the five data trees + their plots mirrors, the 5C
+    cap/<id>/ workbooks and the per-id Developments PDFs; transitional: also
+    sweeps the legacy flat '<id>_network' layout (pre-2026-06-10).
+    """
+    if not int_ids:
+        return
+    data_roots = (paths.RAIL_LINES_DIR, paths.CATCHMENT_AREA_DIR,
+                  paths.TRAFFIC_FLOW_OD_DIR, paths.TRAFFIC_FLOW_ASSIGNMENT_DIR,
+                  paths.SCENARIO_DIR)
+    plot_roots = (paths.CATCHMENT_PLOTS_DIR, paths.TRAFFIC_FLOW_OD_PLOTS_DIR,
+                  paths.TRAFFIC_FLOW_ASSIGNMENT_PLOTS_DIR)
+    n_dirs = n_pdfs = 0
+    for iid in (str(i) for i in int_ids):
+        names = (paths.svc_int_network_name(iid, combo), f'{iid}_network')
+        dirs = [Path(paths.MAIN) / root / name
+                for root in data_roots + plot_roots for name in names]
+        dirs.append(Path(paths.get_svc_int_cap_dir(combo)) / iid)
+        for d in dirs:
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=True)
+                n_dirs += 1
+        for subtype in ('ext', 'ndc'):
+            pdir = Path(paths.get_developments_plot_dir(combo, subtype))
+            if pdir.is_dir():
+                for p in pdir.glob(f'svc_int_{iid}_*.pdf'):
+                    p.unlink(missing_ok=True)
+                    n_pdfs += 1
+    print(f"  [5B] purged {n_dirs} output folder(s) + {n_pdfs} plot PDF(s) of "
+          f"{len(int_ids)} de-registered svc-int(s)")
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # REGISTRY — id allocation
 # ═════════════════════════════════════════════════════════════════════════════
@@ -345,15 +383,15 @@ def apply_svc_int(
         use_cache = getattr(settings, 'use_cache_svc_ints', False)
 
     svc_int_id = str(svc_int['int_id'])
-    out_dir = Path(paths.get_svc_int_network_dir(svc_int_id))
+    combo = f'{base_infra_version}__{base_svc_version}'
+    out_dir = Path(paths.get_svc_int_network_dir(svc_int_id, combo))
     unproj_dir = out_dir / paths.SERVICES_UNPROJECTED_SUBDIR
     proj_dir = out_dir / base_infra_version
     projected_path = proj_dir / 'rail_segments.gpkg'
 
     if (use_cache and projected_path.exists()
             and cache_manifest.check_manifest(
-                paths.get_svc_int_catalogue_dir(
-                    f'{base_infra_version}__{base_svc_version}'),
+                paths.get_svc_int_catalogue_dir(combo),
                 'svc_ints_5b',
                 {'infra_version': base_infra_version,
                  'svc_version': base_svc_version})):
@@ -387,6 +425,9 @@ def apply_svc_int(
     seg_gdf = gpd.GeoDataFrame(
         pd.concat([gpd.GeoDataFrame(v, crs=SWISS_CRS) for v in delta_segs.values()],
                   ignore_index=True), crs=SWISS_CRS)
+    # svc_version here is a display label only (output dirs are explicit below);
+    # keep it flat — the combo-keyed name contains path separators that would
+    # break the projection's plot filenames.
     config = ssp.ProjectionConfig(
         infra_version=composed_infra, svc_version=svc_int_id + '_network',
         infra_dir=composed_dir,
@@ -448,13 +489,13 @@ def build_merged_unprojected(
     if use_cache is None:
         use_cache = getattr(settings, 'use_cache_svc_ints', False)
     svc_int_id = str(svc_int['int_id'])
-    out_dir = Path(paths.get_svc_int_network_dir(svc_int_id)) / 'Merged'
+    combo = f'{base_infra_version}__{base_svc_version}'
+    out_dir = Path(paths.get_svc_int_network_dir(svc_int_id, combo)) / 'Merged'
     targets = {n: out_dir / f'{n}.gpkg'
                for n in ('rail_lines', 'rail_segments', 'rail_stops')}
     if (use_cache and all(p.exists() for p in targets.values())
             and cache_manifest.check_manifest(
-                paths.get_svc_int_catalogue_dir(
-                    f'{base_infra_version}__{base_svc_version}'),
+                paths.get_svc_int_catalogue_dir(combo),
                 'svc_ints_5b',
                 {'infra_version': base_infra_version,
                  'svc_version': base_svc_version})):
@@ -463,9 +504,10 @@ def build_merged_unprojected(
 
     base_dir = (Path(paths.MAIN) / paths.RAIL_LINES_DIR /
                 f"{base_svc_version}_network" / paths.SERVICES_UNPROJECTED_SUBDIR)
-    delta_dir = (Path(paths.get_svc_int_network_dir(svc_int_id)) /
+    delta_dir = (Path(paths.get_svc_int_network_dir(svc_int_id, combo)) /
                  paths.SERVICES_UNPROJECTED_SUBDIR)
-    proj_delta = Path(paths.get_svc_int_projected_path(svc_int_id, base_infra_version))
+    proj_delta = Path(paths.get_svc_int_projected_path(svc_int_id, base_infra_version,
+                                                       combo))
 
     def _norm(x) -> str:
         try:
@@ -1038,7 +1080,9 @@ def phase_5b_service_interventions(
             result['ext_ids'] = list_svc_int_ids('ext', network=combo)
             print(f"  [ext] use_cache: keeping {len(result['ext_ids'])} existing EXT record(s)")
         else:
-            delete_records('ext', list_svc_int_ids('ext', network=combo), network=combo)
+            _old_ext = list_svc_int_ids('ext', network=combo)
+            delete_records('ext', _old_ext, network=combo)
+            _purge_svc_int_outputs(_old_ext, combo)
             import svc_ints_extend_lines as ext
             disc = ext.discover_and_register(base_infra, base_svc, sa_polygon, buffer_polygon,
                                              network=combo)
@@ -1057,7 +1101,9 @@ def phase_5b_service_interventions(
                     base_infra, base_svc, sa_polygon=sa_polygon,
                     buffer_polygon=buffer_polygon, interactive=interactive
                 ).get('ndc_candidates', [])
-            delete_records('ndc', list_svc_int_ids('ndc', network=combo), network=combo)
+            _old_ndc = list_svc_int_ids('ndc', network=combo)
+            delete_records('ndc', _old_ndc, network=combo)
+            _purge_svc_int_outputs(_old_ndc, combo)
             import svc_ints_new_direct_connections as ndc
             disc = ndc.discover_and_register(
                 base_infra, base_svc, ndc_candidates, sa_polygon=sa_polygon, network=combo)

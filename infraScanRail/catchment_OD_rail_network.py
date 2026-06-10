@@ -2264,7 +2264,13 @@ def route_svc_int(svc_int_id: str, base_svc_network: str, affected_stations,
     if write_workbooks is None:
         write_workbooks = getattr(settings, 'WRITE_INT_WORKBOOKS', False)
 
-    svc_int_network = f"{svc_int_id}_network"
+    if infra_version:
+        combo = f"{infra_version}__{base_svc_network.removesuffix('_network')}"
+    else:
+        import ints_core as _core
+        combo = _core.default_combo(
+            svc_version=base_svc_network.removesuffix('_network'))
+    svc_int_network = paths.svc_int_network_name(svc_int_id, combo)
     print("=" * 70)
     print(f"PHASE 6C {'FULL-RECOMPUTE ORACLE' if full_recompute else 'SELECTIVE ROUTING'} "
           f"— {svc_int_id}")
