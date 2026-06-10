@@ -720,6 +720,40 @@ def get_construction_cost_csv(combo: str) -> str:
     row per svc-int, legacy Dev_/CapInt_/Total*/Yearly* column schema)."""
     return os.path.join(get_costs_combo_dir(combo), 'construction_cost.csv')
 
+
+def get_costs_and_benefits_discounted_csv(combo: str) -> str:
+    """Return absolute path to the Phase-9 discounted cost-benefit table
+    (costs_and_benefits_discounted.csv — one row per svc-int x scenario x year,
+    columns const_cost/maint_cost/uncovered_op_cost/benefit)."""
+    return os.path.join(get_costs_combo_dir(combo),
+                        'costs_and_benefits_discounted.csv')
+
+
+def get_total_costs_raw_csv(combo: str) -> str:
+    """Return absolute path to the Phase-9 aggregated table (total_costs_raw.csv
+    — one row per svc-int x scenario, discounted sums over the valuation years)."""
+    return os.path.join(get_costs_combo_dir(combo), 'total_costs_raw.csv')
+
+
+def get_total_costs_csv(combo: str) -> str:
+    """Return absolute path to the Phase-9 wide table (total_costs.csv — one
+    row per svc-int, per-scenario savings/net-benefit/BCR columns)."""
+    return os.path.join(get_costs_combo_dir(combo), 'total_costs.csv')
+
+
+def get_total_costs_summary_csv(combo: str) -> str:
+    """Return absolute path to the Phase-9 summary (total_costs_summary.csv —
+    one row per svc-int, scenario statistics + net benefit + BCR)."""
+    return os.path.join(get_costs_combo_dir(combo), 'total_costs_summary.csv')
+
+
+def get_total_costs_geometry_gpkg(combo: str) -> str:
+    """Return absolute path to the Phase-9 result layer
+    (total_costs_with_geometry.gpkg — summary attributes + the svc-int's
+    projected service delta unioned with its required CC arcs, EPSG:2056)."""
+    return os.path.join(get_costs_combo_dir(combo),
+                        'total_costs_with_geometry.gpkg')
+
 PLOT_DIRECTORY = r"plots"
 PLOT_SCENARIOS = r"plots/scenarios"
 

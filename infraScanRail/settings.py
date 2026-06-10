@@ -289,6 +289,11 @@ start_valuation_year = 2050
 # Produces the per-svc-int CBA inputs: monetised travel-time savings per scenario x year (8A, rule of half on the 6C gc skims) and construction/maintenance/operating costs (8B); valuation years = start_valuation_year..end_year_scenario, monetary parameters from cost_parameters.py.
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 9. CBA RESULTS
+# ═══════════════════════════════════════════════════════════════════════════════
+# Produces the discounted CBA per svc-int: costs-and-benefits (scenario x year), aggregated totals, summary and the core result plots; discount rate from cost_parameters.py, PV base year = start_valuation_year (factor 1.0).
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # A1. PLOTS  (per-phase visualisation toggles — all phases)
 # ═══════════════════════════════════════════════════════════════════════════════
 # One toggle per phase; data/CSV outputs are always written regardless of these.
@@ -308,7 +313,7 @@ PLOT_FLOWS     = True    # infra-level passenger-flow maps + base-vs-dev diff (P
 PLOT_SCENARIOS = True    # population/modal/distance scenario fans (Phase 7)
 PLOT_TTS       = True    # per-svc-int benefit distribution across scenarios over years (Phase 8A)
 PLOT_COSTS     = True    # per-svc-int cost composition bars (Phase 8B)
-PLOT_RESULTS   = False   # final CBA/result visualisations (not yet wired into main_new)
+PLOT_RESULTS   = False   # core CBA result set — savings/net-benefit/BCR charts, waterfalls, network maps (Phase 9)
 
 plot_passenger_flow = False   # legacy only (main.py / main_cap.py); ignored by main_new
 

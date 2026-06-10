@@ -2298,6 +2298,51 @@ def phase_8_valuation_inputs(runtimes: dict, svc_int_ids=None) -> None:
     runtimes["Phase 8: Valuation Inputs"] = time.time() - st
 
 
+def phase_9_cba(runtimes: dict, svc_int_ids=None) -> None:
+    """Phase 9 — CBA: integration, discounting, aggregation, results.
+
+    Runs ONCE over the assembled Phase 8 tables (no per-svc-int pass —
+    discounting, aggregation and ranking need all svc-ints). Single track,
+    delta-only, string svc-int keys; PV base = start_valuation_year with the
+    corrected discount convention (factor 1.0 at the base year). Tables +
+    geometry gpkg land under data/costs/Developments/<combo>/; the core result
+    plot set is gated by PLOT_RESULTS. No cache — Phase 9 always recomputes.
+
+    Args:
+        runtimes:    dict tracking phase execution times.
+        svc_int_ids: optional subset of svc-int ids (None = all covered by the
+                     Phase 8 tables).
+    """
+    print("\n" + "=" * 80)
+    print("PHASE 9: CBA")
+    print("=" * 80 + "\n")
+    st = time.time()
+
+    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
+        print("  SVC_INT_MODE = NONE — no svc-ints to evaluate; skipping Phase 9.")
+        runtimes["Phase 9: CBA"] = time.time() - st
+        return
+
+    base_infra = _phase5_base_infra()
+    svc_version = PIPELINE_CONFIG.svc_version
+    if svc_version is None:
+        svc_version = settings.SVC_VERSION
+        if svc_version == 'Build_New':
+            svc_version = settings.SVC_BUILD_NEW_NAME
+    combo = f'{base_infra}__{svc_version}'
+    print(f"  Combo               : {combo}")
+
+    import cba_results as _cba
+    import cost_parameters as _cp
+
+    _cba.run_cba(svc_int_ids, combo=combo, base_infra=base_infra,
+                 svc_version=svc_version, discount_rate=_cp.discount_rate,
+                 base_year=settings.start_valuation_year,
+                 make_plots=settings.PLOT_RESULTS)
+
+    runtimes["Phase 9: CBA"] = time.time() - st
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main orchestrator
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2323,6 +2368,7 @@ def infrascanrail_new():
     phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes)
     phase_7_scenarios(runtimes)
     phase_8_valuation_inputs(runtimes)
+    phase_9_cba(runtimes)
 
     _save_runtimes(runtimes, 'report_new.txt')
 
