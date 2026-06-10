@@ -17,6 +17,7 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 
+import cache_manifest
 import cost_parameters as cp
 import paths
 import settings
@@ -1149,6 +1150,10 @@ def phase_4a_catchment_allocation(
             print(f"  use_cache_pt_catchment = True but {len(missing)} expected file(s) missing — running allocation.")
             for f in missing:
                 print(f"    missing: {f}")
+        elif not cache_manifest.check_manifest(
+                os.path.dirname(expected[0]), 'catchment_4a',
+                {'svc_network': svc_network}):
+            print("  use_cache_pt_catchment = True but manifest stale — running allocation.")
         else:
             print(f"  use_cache_pt_catchment = True and all {len(expected)} expected files present — skipping Phase 4A.")
             runtimes["Phase 4A: Catchment Allocation"] = time.time() - st
@@ -1216,13 +1221,20 @@ def phase_4b_station_od_matrix(runtimes: dict) -> None:
 
     if settings.use_cache_stationsOD:
         missing = [f for f in expected if not os.path.exists(f)]
-        if not missing:
+        if not missing and cache_manifest.check_manifest(
+                paths.get_od_version_dir(svc_network), 'station_od_4b',
+                {'svc_network': svc_network,
+                 'infra_version': PIPELINE_CONFIG.infra_version}):
             print(f"  use_cache_stationsOD = True and all {len(expected)} expected "
                   f"OD matrices present — skipping Phase 4B.")
             runtimes["Phase 4B: Station OD Matrix"] = time.time() - st
             return
-        print(f"  use_cache_stationsOD = True but {len(missing)} expected file(s) "
-              f"missing — running OD preparation.")
+        if missing:
+            print(f"  use_cache_stationsOD = True but {len(missing)} expected "
+                  f"file(s) missing — running OD preparation.")
+        else:
+            print("  use_cache_stationsOD = True but manifest stale — running "
+                  "OD preparation.")
     else:
         print("  use_cache_stationsOD = False — running OD preparation.")
 
@@ -1291,13 +1303,21 @@ def phase_4c_network_assignment(runtimes: dict) -> None:
     ]
     if settings.use_cache_railRouting:
         missing = [f for f in expected if not os.path.exists(f)]
-        if not missing:
+        if not missing and cache_manifest.check_manifest(
+                paths.get_assignment_method_dir(svc_network, assignment_method),
+                'assignment_4c',
+                {'svc_network': svc_network,
+                 'infra_version': PIPELINE_CONFIG.infra_version}):
             print(f"  use_cache_railRouting = True and all {len(expected)} expected "
                   f"outputs present — skipping Phase 4C.")
             runtimes["Phase 4C: Passenger Routing"] = time.time() - st
             return
-        print(f"  use_cache_railRouting = True but {len(missing)} output(s) missing "
-              f"— running routing.")
+        if missing:
+            print(f"  use_cache_railRouting = True but {len(missing)} output(s) "
+                  f"missing — running routing.")
+        else:
+            print("  use_cache_railRouting = True but manifest stale — running "
+                  "routing.")
     else:
         print("  use_cache_railRouting = False — running routing.")
 
@@ -1585,6 +1605,613 @@ def phase_5c_capacity_on_matched(runtimes: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Phase 6 — Intervention recompute (per-svc-int catchment / OD / routing / flows)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _load_affected_sets(combo: str, base_infra: str) -> dict:
+    """Read the Hook-1 affected-set CSV into dict[int_id -> {stations, services}].
+
+    stations = set[int] id_points; services = list[str] variant_keys. Missing
+    file or missing svc-int rows degrade to empty sets (the 6C closure then
+    falls back to endpoint/OD-changed pairs only, with a warning upstream).
+    """
+    path = os.path.join(paths.get_svc_int_catalogue_dir(combo),
+                        f'svc_int_affected_set_{base_infra}.csv')
+    if not os.path.exists(path):
+        print(f"  WARNING: affected-set CSV missing at {path} — closures will "
+              f"use endpoint pairs only. Re-run Phase 5B to produce it.")
+        return {}
+    df = pd.read_csv(path, encoding='utf-8-sig')
+    out = {}
+    for _, r in df.iterrows():
+        raw_st = '' if pd.isna(r.get('affected_stations')) else str(r.get('affected_stations'))
+        raw_sv = '' if pd.isna(r.get('affected_services')) else str(r.get('affected_services'))
+        out[str(r['int_id'])] = {
+            'stations': {int(float(t)) for t in raw_st.split(',') if t.strip()},
+            'services': [t.strip() for t in raw_sv.split(',') if t.strip()],
+        }
+    return out
+
+
+_PARITY_TOL = 1e-6
+
+
+def _phase6_snapshot(int_network: str, method: str, include_pt: bool) -> dict:
+    """Read the per-svc-int tables the parity check compares (routing
+    primitives + the PT_Feeder long OD / allocation) from disk into memory."""
+    snap = {t: pd.read_parquet(paths.get_routing_primitive_path(int_network,
+                                                                method, t))
+            for t in ('paths', 'segments', 'events')}
+    if include_pt:
+        attribution = settings.OD_ATTRIBUTION_MODE.strip().lower()
+        snap['od_long'] = pd.read_csv(
+            paths.get_station_od_long_csv(int_network, 'pt_feeder', attribution),
+            encoding='utf-8-sig')
+        import catchment_base as _cb
+        _cb.setup_versioned_dirs(int_network)
+        snap['allocation'] = pd.read_parquet(os.path.join(
+            _cb.PT_FEEDER_DATA_DIR, 'allocation_pt_feeder.parquet'))
+    return snap
+
+
+def _phase6_parity(sel: dict, orc: dict) -> tuple:
+    """Compare selective vs oracle tables (architecture decision C).
+
+    Returns (summary_rows, pair_rows): per-table n_rows_compared / n_mismatch /
+    max_abs_diff at tolerance 1e-6, and one row per mismatching OD pair with a
+    `residual_candidate` flag — True when the pair's oracle path transfers at a
+    station absent from its selective path (the documented transfer-through
+    residual of the closure). Reported, not failed.
+    """
+    rows = []
+    mismatch_pairs: dict = {}
+
+    def _pairgrain(df):
+        best = df[df['path_id'] == 0]
+        return best.groupby(['origin_id', 'dest_id']).agg(
+            jt=('journey_time_min', 'max'), gc=('gc_min', 'max'),
+            tr=('n_transfers', 'max'), trips=('trips', 'sum'))
+
+    j = _pairgrain(sel['paths']).join(_pairgrain(orc['paths']),
+                                      lsuffix='_s', rsuffix='_o', how='outer')
+    one_sided = j.isna().any(axis=1)
+    for col, name in (('jt', 'skim_journey_time'), ('gc', 'skim_gc'),
+                      ('tr', 'skim_transfers'), ('trips', 'pair_trips')):
+        d = (j[f'{col}_s'] - j[f'{col}_o']).abs()
+        bad = set(d[d > _PARITY_TOL].index) | set(j.index[one_sided])
+        rows.append({'table': name, 'n_rows_compared': len(j),
+                     'n_mismatch': len(bad),
+                     'max_abs_diff': float(d.max()) if d.notna().any() else 0.0})
+        for p in bad:
+            mismatch_pairs.setdefault(p, set()).add(name)
+    gc_diff = (j['gc_s'] - j['gc_o']).abs()
+
+    def _cmp_keyed(name, s, o, keys, val='trips'):
+        a = s.groupby(keys)[val].sum().rename('s')
+        b = o.groupby(keys)[val].sum().rename('o')
+        m = a.to_frame().join(b, how='outer').fillna(0.0)
+        d = (m['s'] - m['o']).abs()
+        rows.append({'table': name, 'n_rows_compared': len(m),
+                     'n_mismatch': int((d > _PARITY_TOL).sum()),
+                     'max_abs_diff': float(d.max()) if len(d) else 0.0})
+
+    _cmp_keyed('segment_loads', sel['segments'], orc['segments'],
+               ['from_id', 'to_id', 'variant_key'])
+    _cmp_keyed('station_events', sel['events'], orc['events'],
+               ['station_id', 'event', 'variant_key'])
+    if 'od_long' in sel:
+        _cmp_keyed('od_long', sel['od_long'], orc['od_long'],
+                   ['origin_station_id', 'dest_station_id'])
+    if 'allocation' in sel:
+        a = sel['allocation'].set_index('RELI')['id_point']
+        b = orc['allocation'].set_index('RELI')['id_point']
+        m = a.rename('s').to_frame().join(b.rename('o'), how='outer')
+        neq = (pd.to_numeric(m['s'], errors='coerce').fillna(-9)
+               != pd.to_numeric(m['o'], errors='coerce').fillna(-9))
+        rows.append({'table': 'allocation', 'n_rows_compared': len(m),
+                     'n_mismatch': int(neq.sum()), 'max_abs_diff': float('nan')})
+
+    # Residual-candidate flag for the mismatching pairs
+    pair_rows = []
+    if mismatch_pairs:
+        mp = set(mismatch_pairs)
+
+        def _pairsets(df, id_cols, only_transfer=False):
+            d = df
+            if only_transfer:
+                d = d[d['event'] == 'transfer']
+            k = pd.Series(list(zip(d['origin_id'].astype(int),
+                                   d['dest_id'].astype(int))), index=d.index)
+            d = d[k.isin(mp).values]
+            out: dict = {}
+            for r in d.itertuples(index=False):
+                key = (int(r.origin_id), int(r.dest_id))
+                st = out.setdefault(key, set())
+                for c in id_cols:
+                    st.add(str(getattr(r, c)).lstrip('x'))
+            return out
+
+        orc_transfers = _pairsets(orc['events'], ['station_id'],
+                                  only_transfer=True)
+        sel_stations = _pairsets(sel['segments'], ['from_id', 'to_id'])
+        n_residual = 0
+        for p in sorted(mp):
+            flag = bool(orc_transfers.get(p, set())
+                        - sel_stations.get(p, set()))
+            n_residual += int(flag)
+            pair_rows.append({
+                'origin_id': p[0], 'dest_id': p[1],
+                'mismatch_tables': '|'.join(sorted(mismatch_pairs[p])),
+                'gc_abs_diff': float(gc_diff.get(p, float('nan'))),
+                'residual_candidate': flag})
+        rows.append({'table': 'residual_candidates',
+                     'n_rows_compared': len(mp), 'n_mismatch': n_residual,
+                     'max_abs_diff': float('nan')})
+    return rows, pair_rows
+
+
+def _phase6_worker(int_type: str, rec: dict, merged_dir: str, aff: dict,
+                   ctx: dict, capture_log: bool = True) -> dict:
+    """Phase-6 body for one svc-int: 6A/6B (PT_Feeder only), 6C, 6D + diff.
+
+    Runs in a loky child process when PHASE6_N_JOBS > 1, so every
+    runtime-resolved decision arrives via ``ctx`` — children re-import settings
+    from file and must never read PIPELINE_CONFIG or mutated module state.
+    With ``capture_log`` the worker's stdout is buffered and returned so the
+    parent prints each svc-int's log as one ordered block.
+
+    Args:
+        int_type:   'ext' | 'ndc'.
+        rec:        svc-int record (read_records row).
+        merged_dir: merged developed-network dir from the serial pre-pass.
+        aff:        {'stations': set[int], 'services': list[str]} (Hook-1).
+        ctx:        dict(svc_network, base_infra, od_method, assignment_method,
+                    catchment_method, od_attribution_mode, plot_int_recompute,
+                    plot_flows, use_cache_flows, write_workbooks).
+        capture_log: buffer stdout and return it (parallel mode).
+
+    Returns:
+        dict(iid, int_type, status 'done'|'fail', error, log).
+    """
+    import contextlib
+    import io
+    import traceback
+
+    iid = str(rec['int_id'])
+    buf = io.StringIO()
+    redirect = (contextlib.redirect_stdout(buf) if capture_log
+                else contextlib.nullcontext())
+    status, error = 'done', ''
+    with redirect:
+        print(f"\n--- Phase 6 [{iid}] ({int_type.upper()}) ---")
+        try:
+            import catchment_OD_rail_network as _pr
+            import passenger_flows as _pf
+
+            int_network = f'{iid}_network'
+            if not aff['stations'] and not aff['services']:
+                print(f"  WARNING: no affected set for {iid} — closure falls "
+                      f"back to endpoint/OD-changed pairs only.")
+
+            od_changed_pairs = None
+            od_long_dev = None
+            if ctx['catchment_method'] == 'PT_Feeder':
+                import catchment_allocate as _ca
+                import catchment_OD_preparation as _odp
+                # loky children have no stdin; the module default is interactive.
+                _odp._INTERACTIVE_MODE = False
+                res6a = _ca.reallocate_for_svc_int(
+                    iid, aff['stations'], ctx['svc_network'],
+                    dev_rail_base=merged_dir,
+                    make_plots=ctx['plot_int_recompute'])
+                res6b = _odp.prepare_svc_int_od(
+                    iid, ctx['svc_network'], ctx['base_infra'],
+                    res6a['affected_communes'],
+                    attribution=ctx['od_attribution_mode'])
+                od_changed_pairs = res6b['changed_pairs']
+                od_long_dev = res6b['od_routing']
+                print(f"  [{iid}] 6A/6B done: {res6a['n_cells_affected']:,} "
+                      f"affected cell(s), {len(res6a['affected_communes'])} "
+                      f"commune(s), {len(res6b['changed_gateways'])} changed "
+                      f"gateway(s), {len(od_changed_pairs):,} changed OD "
+                      f"pair(s).")
+
+            res = _pr.route_svc_int(
+                iid, ctx['svc_network'], aff['stations'], aff['services'],
+                rail_base=merged_dir, infra_version=ctx['base_infra'],
+                od_changed_pairs=od_changed_pairs, od_long_dev=od_long_dev,
+                method=ctx['assignment_method'], od_method=ctx['od_method'],
+                make_plots=ctx['plot_int_recompute'],
+                write_workbooks=ctx['write_workbooks'])
+            print(f"  [{iid}] 6C done: {res['n_pairs_closure']:,} of "
+                  f"{res['n_pairs_total']:,} pairs re-routed; routed "
+                  f"{res['routed_trips']:,.1f} / unresolved "
+                  f"{res['unresolved_trips']:,.1f} trips.")
+
+            _pf.build_passenger_flows(int_network, ctx['base_infra'],
+                                      method=ctx['assignment_method'],
+                                      make_plots=ctx['plot_flows'],
+                                      use_cache=ctx['use_cache_flows'])
+            _pf.build_flow_diff(ctx['svc_network'], int_network,
+                                ctx['base_infra'],
+                                method=ctx['assignment_method'],
+                                make_plots=ctx['plot_flows'])
+        except Exception as exc:
+            status = 'fail'
+            error = f"{exc}\n{traceback.format_exc()}"
+    return {'iid': iid, 'int_type': int_type, 'status': status,
+            'error': error, 'log': buf.getvalue() if capture_log else ''}
+
+
+def _phase6_run_oracle(iid: str, merged_dir: str, aff: dict, ctx: dict,
+                       combo: str, parity_results: dict) -> None:
+    """Full-recompute oracle + parity report for one svc-int (decision C).
+
+    Serial-only: PHASE6_N_JOBS is forced to 1 when use_full_recompute_ints is
+    on, so this never runs inside a worker. Final on-disk outputs = oracle's.
+    """
+    import catchment_OD_rail_network as _pr
+    import passenger_flows as _pf
+
+    int_network = f'{iid}_network'
+    include_pt = ctx['catchment_method'] == 'PT_Feeder'
+    sel_snap = _phase6_snapshot(int_network, ctx['assignment_method'],
+                                include_pt)
+    print(f"\n--- Phase 6 ORACLE [{iid}]: full recompute "
+          f"(decision-C parity) ---")
+    od_changed_o = od_dev_o = None
+    if include_pt:
+        import catchment_allocate as _ca
+        import catchment_OD_preparation as _odp
+        res6a_o = _ca.reallocate_for_svc_int(
+            iid, aff['stations'], ctx['svc_network'],
+            dev_rail_base=merged_dir, make_plots=False,
+            full_recompute=True)
+        res6b_o = _odp.prepare_svc_int_od(
+            iid, ctx['svc_network'], ctx['base_infra'],
+            res6a_o['affected_communes'],
+            attribution=ctx['od_attribution_mode'],
+            full_recompute=True)
+        od_changed_o = res6b_o['changed_pairs']
+        od_dev_o = res6b_o['od_routing']
+    _pr.route_svc_int(
+        iid, ctx['svc_network'], aff['stations'], aff['services'],
+        rail_base=merged_dir, infra_version=ctx['base_infra'],
+        od_changed_pairs=od_changed_o, od_long_dev=od_dev_o,
+        method=ctx['assignment_method'], od_method=ctx['od_method'],
+        make_plots=False, full_recompute=True,
+        write_workbooks=ctx['write_workbooks'])
+    _pf.build_passenger_flows(int_network, ctx['base_infra'],
+                              method=ctx['assignment_method'],
+                              make_plots=False, use_cache=False)
+    _pf.build_flow_diff(ctx['svc_network'], int_network, ctx['base_infra'],
+                        method=ctx['assignment_method'], make_plots=False)
+    orc_snap = _phase6_snapshot(int_network, ctx['assignment_method'],
+                                include_pt)
+    summary, pair_rows = _phase6_parity(sel_snap, orc_snap)
+    ppath = paths.get_parity_csv(combo, iid)
+    os.makedirs(os.path.dirname(ppath), exist_ok=True)
+    pd.DataFrame(summary).to_csv(ppath, index=False, encoding='utf-8-sig')
+    if pair_rows:
+        pd.DataFrame(pair_rows).to_csv(
+            ppath.replace('.csv', '_pairs.csv'), index=False,
+            encoding='utf-8-sig')
+    parity_results[iid] = summary
+    worst = max((r['max_abs_diff'] for r in summary
+                 if r['max_abs_diff'] == r['max_abs_diff']),
+                default=0.0)
+    print(f"  [{iid}] parity -> {ppath} "
+          f"(worst max_abs_diff {worst:.3g}; final on-disk "
+          f"outputs = oracle's)")
+
+
+def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
+                                   svc_int_ids=None) -> None:
+    """Phase 6 — per-svc-int selective recompute against the Phase-4 baseline.
+
+    Loops the Phase-5B svc-int catalogue and recomputes only what each svc-int
+    changes (architecture decision C): 6A allocation / 6B OD (PT_Feeder only —
+    Municipal allocation is frequency-blind, so its OD is intervention-
+    invariant), 6C routing and 6D flows (always). 6C re-routes the affected
+    closure on the merged developed network and re-derives the Phase-4C outputs
+    under <svc_int_id>_network paths, so Phases 7/8 consume them exactly like the
+    baseline. Gated by settings.SVC_INT_MODE ('NONE' skips).
+
+    Args:
+        sa_boundary: study-area polygon (6A scope, PT_Feeder path).
+        ca_boundary: catchment-area polygon (6A scope, PT_Feeder path).
+        runtimes:    dict tracking phase execution times.
+        svc_int_ids: optional subset of svc-int ids to process (None = all
+                     registered; mirrors phase_5c_capacity_on_matched).
+    """
+    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
+        return
+    print("\n" + "=" * 80)
+    print("PHASE 6: INTERVENTION RECOMPUTE")
+    print("=" * 80 + "\n")
+    st = time.time()
+
+    import svc_ints_orchestrator as _so
+
+    base_infra = _phase5_base_infra()
+    svc_version = PIPELINE_CONFIG.svc_version
+    if svc_version is None:
+        svc_version = settings.SVC_VERSION
+        if svc_version == 'Build_New':
+            svc_version = settings.SVC_BUILD_NEW_NAME
+    svc_network = f'{svc_version}_network'
+    combo = f'{base_infra}__{svc_version}'
+    od_method = get_routing_od_method()
+    catchment_method = settings.CATCHMENT_METHOD
+
+    assignment_method = settings.ROUTING_ASSIGNMENT_METHOD
+    if assignment_method == 'both':
+        print("  WARNING: ROUTING_ASSIGNMENT_METHOD='both' is standalone-only — "
+              "using 'logit' for the pipeline run.")
+        assignment_method = 'logit'
+
+    records = [(t, r) for t in ('ext', 'ndc')
+               for r in _so.read_records(t, network=combo)]
+    if svc_int_ids is not None:
+        want = {str(i) for i in svc_int_ids}
+        records = [(t, r) for t, r in records if str(r['int_id']) in want]
+    if not records:
+        print(f"  No svc-ints registered for combo '{combo}' — nothing to do.")
+        runtimes["Phase 6: Intervention Recompute"] = time.time() - st
+        return
+    affected = _load_affected_sets(combo, base_infra)
+
+    import passenger_flows as _pf
+    print("\n--- Phase 6D: baseline passenger flows ---")
+    try:
+        _pf.build_passenger_flows(svc_network, base_infra,
+                                  method=assignment_method,
+                                  make_plots=settings.PLOT_FLOWS,
+                                  use_cache=settings.use_cache_flows)
+    except Exception as exc:
+        print(f"  WARNING: baseline flows failed: {exc}")
+
+    gate_note = ('6A/6B skipped (Municipal: allocation is frequency-blind, OD '
+                 'invariant)' if catchment_method == 'Municipal'
+                 else '6A/6B run (PT_Feeder)')
+    print(f"  Combo               : {combo}")
+    print(f"  Svc-ints            : {len(records)}")
+    print(f"  Catchment method    : {catchment_method} -> {gate_note}")
+    print(f"  OD / assignment     : {od_method} / {assignment_method}")
+    print(f"  Oracle              : use_full_recompute_ints="
+          f"{getattr(settings, 'use_full_recompute_ints', False)} "
+          f"(parity check lands in plan Phase 4)")
+
+    oracle = bool(getattr(settings, 'use_full_recompute_ints', False))
+    n_jobs = max(1, int(getattr(settings, 'PHASE6_N_JOBS', 1)))
+    if oracle and n_jobs > 1:
+        print("  use_full_recompute_ints = True — forcing serial Phase 6 "
+              "(oracle + parity stay debuggable).")
+        n_jobs = 1
+
+    # Everything runtime-resolved the workers need: loky children re-import
+    # settings from file, so values mutated at runtime only reach them here.
+    ctx = {'svc_network': svc_network, 'base_infra': base_infra,
+           'od_method': od_method, 'assignment_method': assignment_method,
+           'catchment_method': catchment_method,
+           'od_attribution_mode': settings.OD_ATTRIBUTION_MODE,
+           'plot_int_recompute': settings.PLOT_INT_RECOMPUTE,
+           'plot_flows': settings.PLOT_FLOWS,
+           'use_cache_flows': settings.use_cache_flows,
+           'write_workbooks': settings.WRITE_INT_WORKBOOKS}
+
+    # Serial pre-pass: cache probe + delta materialisation. apply/merge can
+    # compose into the SHARED Developments/Derived/<hash8>/ dirs (two svc-ints
+    # requiring the same CC collide), so they never run concurrently; after
+    # 5B/5C they are cache-hits.
+    n_done = n_skip = n_fail = 0
+    todo: list = []
+    for int_type, rec in records:
+        iid = str(rec['int_id'])
+        try:
+            int_network = f'{iid}_network'
+            probe = [paths.get_routing_primitive_path(int_network,
+                                                      assignment_method, t)
+                     for t in ('paths', 'segments', 'events', 'unresolved')]
+            if (settings.use_cache_int_recompute
+                    and all(os.path.exists(p) for p in probe)
+                    and cache_manifest.check_manifest(
+                        paths.get_assignment_method_dir(int_network,
+                                                        assignment_method),
+                        'assignment_4c',
+                        {'svc_network': svc_network,
+                         'infra_version': base_infra,
+                         'svc_int_id': iid})):
+                print(f"  use_cache_int_recompute = True and outputs present — "
+                      f"skipping {iid}.")
+                n_skip += 1
+                continue
+
+            _so.apply_svc_int(rec, svc_version, base_infra, use_cache=True)
+            merged_dir = _so.build_merged_unprojected(rec, svc_version,
+                                                      base_infra, use_cache=True)
+            if not merged_dir:
+                print(f"  {iid}: empty delta — network equals baseline, skipping.")
+                n_skip += 1
+                continue
+            todo.append((int_type, rec, merged_dir,
+                         affected.get(iid, {'stations': set(),
+                                            'services': []})))
+        except Exception as exc:
+            print(f"  WARNING: Phase 6 pre-pass failed for {iid}: {exc}")
+            n_fail += 1
+
+    parity_results: dict = {}
+    if n_jobs == 1 or len(todo) <= 1:
+        for int_type, rec, merged_dir, aff in todo:
+            r = _phase6_worker(int_type, rec, merged_dir, aff, ctx,
+                               capture_log=False)
+            if r['status'] != 'done':
+                print(f"  WARNING: Phase 6 failed for {r['iid']}: {r['error']}")
+                n_fail += 1
+                continue
+            if oracle:
+                try:
+                    _phase6_run_oracle(r['iid'], merged_dir, aff, ctx, combo,
+                                       parity_results)
+                except Exception as exc:
+                    print(f"  WARNING: Phase 6 oracle failed for {r['iid']}: "
+                          f"{exc}")
+                    n_fail += 1
+                    continue
+            n_done += 1
+    else:
+        # loky children inherit the env — pin the non-interactive backend
+        # before any worker imports matplotlib.
+        os.environ.setdefault('MPLBACKEND', 'Agg')
+        from joblib import Parallel, delayed
+        print(f"\n  Phase 6 parallel: {len(todo)} svc-int(s) on {n_jobs} loky "
+              f"workers — per-svc-int logs print as each completes.")
+        try:
+            results = Parallel(n_jobs=n_jobs, backend='loky',
+                               return_as='generator')(
+                delayed(_phase6_worker)(t, r, m, a, ctx)
+                for t, r, m, a in todo)
+        except TypeError:                       # joblib < 1.3: no return_as
+            results = Parallel(n_jobs=n_jobs, backend='loky')(
+                delayed(_phase6_worker)(t, r, m, a, ctx)
+                for t, r, m, a in todo)
+        for r in results:
+            if r['log']:
+                print(r['log'], end='' if r['log'].endswith('\n') else '\n')
+            if r['status'] == 'done':
+                n_done += 1
+            else:
+                print(f"  WARNING: Phase 6 failed for {r['iid']}: {r['error']}")
+                n_fail += 1
+
+    print(f"\n  Phase 6 summary: {n_done} recomputed, {n_skip} skipped, "
+          f"{n_fail} failed (of {len(records)}).")
+    if parity_results:
+        tables = []
+        for summary in parity_results.values():
+            for r in summary:
+                if r['table'] not in tables:
+                    tables.append(r['table'])
+        print("\n  Parity summary (selective vs full-recompute oracle, "
+              f"tol {_PARITY_TOL:g}):")
+        print(f"    {'svc-int':<14}" + ''.join(f"{t:>22}" for t in tables))
+        for iid, summary in parity_results.items():
+            by_t = {r['table']: r for r in summary}
+            cells = []
+            for t in tables:
+                r = by_t.get(t)
+                if r is None:
+                    cells.append(f"{'-':>22}")
+                else:
+                    mad = r['max_abs_diff']
+                    mad_s = '-' if mad != mad else f"{mad:.2g}"
+                    cells.append(f"{r['n_mismatch']:,}/{r['n_rows_compared']:,}"
+                                 f" ({mad_s})".rjust(22))
+            print(f"    {iid:<14}" + ''.join(cells))
+    runtimes["Phase 6: Intervention Recompute"] = time.time() - st
+
+
+def phase_7_scenarios(runtimes: dict, svc_int_ids=None) -> None:
+    """Phase 7 — demand-growth factor store + per-svc-int overrides.
+
+    Builds the baseline per-station growth-factor vectors (scenario x year;
+    seeded LHS, so baseline and every svc-int see identical stochastic paths)
+    plus the station-independent modal/distance scalars, then one override
+    table per registered PT_Feeder svc-int whose 6A allocation changed.
+    Phase 8A composes scenario ODs on demand via
+    random_scenarios.compose_scenario_od. Only scenario_type 'GENERATED' is
+    implemented ('STATIC_9' / 'dummy' are deferred).
+
+    Args:
+        runtimes:    dict tracking phase execution times.
+        svc_int_ids: optional subset of svc-int ids to process (None = all
+                     registered; mirrors phase_6_intervention_recompute).
+    """
+    print("\n" + "=" * 80)
+    print("PHASE 7: SCENARIOS")
+    print("=" * 80 + "\n")
+    st = time.time()
+
+    if settings.scenario_type != 'GENERATED':
+        raise ValueError(
+            f"scenario_type '{settings.scenario_type}' is not wired into "
+            f"main_new — 'STATIC_9' and 'dummy' are deferred; use 'GENERATED'.")
+
+    import random_scenarios as _rs
+
+    base_infra = _phase5_base_infra()
+    svc_version = PIPELINE_CONFIG.svc_version
+    if svc_version is None:
+        svc_version = settings.SVC_VERSION
+        if svc_version == 'Build_New':
+            svc_version = settings.SVC_BUILD_NEW_NAME
+    od_method = get_routing_od_method()
+    attribution = (settings.OD_ATTRIBUTION_MODE if od_method == 'pt_feeder'
+                   else 'municipal')
+    print(f"  Service version     : {svc_version}")
+    print(f"  Infrastructure      : {base_infra}")
+    print(f"  OD method / attrib. : {od_method} / {attribution}")
+    print(f"  Scenarios           : {settings.amount_of_scenarios} "
+          f"({settings.start_year_scenario}-{settings.end_year_scenario}, "
+          f"seeded LHS)")
+
+    _rs.build_scenario_factor_store(
+        svc_version, base_infra, od_method, attribution,
+        n_scenarios=settings.amount_of_scenarios,
+        start_year=settings.start_year_scenario,
+        end_year=settings.end_year_scenario,
+        make_plots=settings.PLOT_SCENARIOS,
+        use_cache=settings.use_cache_scenarios)
+
+    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
+        print("\n  SVC_INT_MODE = NONE — baseline factor store only.")
+        runtimes["Phase 7: Scenarios"] = time.time() - st
+        return
+    if od_method != 'pt_feeder':
+        print("\n  Municipal OD is intervention-invariant — no per-svc-int "
+              "overrides (compose uses the baseline factors).")
+        runtimes["Phase 7: Scenarios"] = time.time() - st
+        return
+
+    import svc_ints_orchestrator as _so
+    combo = f'{base_infra}__{svc_version}'
+    records = [(t, r) for t in ('ext', 'ndc')
+               for r in _so.read_records(t, network=combo)]
+    if svc_int_ids is not None:
+        want = {str(i) for i in svc_int_ids}
+        records = [(t, r) for t, r in records if str(r['int_id']) in want]
+    if not records:
+        print(f"\n  No svc-ints registered for combo '{combo}' — baseline "
+              f"factor store only.")
+        runtimes["Phase 7: Scenarios"] = time.time() - st
+        return
+
+    n_done = n_skip = n_fail = 0
+    for _, rec in records:
+        iid = str(rec['int_id'])
+        try:
+            res = _rs.build_svc_int_factor_overrides(
+                iid, svc_version, base_infra, od_method, attribution,
+                n_scenarios=settings.amount_of_scenarios,
+                start_year=settings.start_year_scenario,
+                end_year=settings.end_year_scenario,
+                use_cache=settings.use_cache_scenarios)
+            if res.get('cached') or res.get('overrides_path') is None:
+                n_skip += 1
+            else:
+                n_done += 1
+        except Exception as exc:
+            print(f"  WARNING: Phase 7 overrides failed for {iid}: {exc}")
+            n_fail += 1
+
+    print(f"\n  Phase 7 summary: {n_done} override table(s) written, "
+          f"{n_skip} skipped (cached / no allocation change), {n_fail} failed "
+          f"(of {len(records)} svc-int(s)).")
+    runtimes["Phase 7: Scenarios"] = time.time() - st
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Main orchestrator
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1606,6 +2233,8 @@ def infrascanrail_new():
     phase_5b_service_interventions(sa_boundary, sa_buffer, runtimes,
                                    ndc_candidates=(infra5a or {}).get('ndc_candidates'))
     phase_5c_capacity_on_matched(runtimes)
+    phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes)
+    phase_7_scenarios(runtimes)
 
     _save_runtimes(runtimes, 'report_new.txt')
 

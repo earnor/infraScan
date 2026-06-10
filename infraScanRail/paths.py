@@ -21,8 +21,8 @@ OD_KT_ZH_PATH = r'data/Spatial_Data/Transit_Network/Cantonal_OD_Demand/KTZH_0000
 # SBB official station-users statistics (2013-2025): daily passenger totals and the
 # hourly load distribution per major station (sheet 'Tag_Jour_Giorno_Day').
 SBB_STATION_USERS_XLSX = r'data/Spatial_Data/Transit_Network/SBB_Station_Flows/b01x-sbb-cff-ffs-bhfbenutzer-usagersgares-utentistazione-stationusers_2013-2025.xlsx'
-OD_STATIONS_KT_ZH_PATH      = r'data/Traffic_Flow/OD/Rail/ktzh/od_matrix_stations_ktzh_20.csv'
-OD_STATIONS_KT_ZH_2040_PATH = r'data/Traffic_Flow/OD/Rail/ktzh/od_matrix_stations_ktzh_2040.csv'
+OD_STATIONS_KT_ZH_PATH      = r'data/Traffic_Flow/OD/Rail/ktzh/od_matrix_stations_ktzh_20.csv'   # legacy only (main.py / main_cap.py)
+OD_STATIONS_KT_ZH_2040_PATH = r'data/Traffic_Flow/OD/Rail/ktzh/od_matrix_stations_ktzh_2040.csv' # legacy only (main.py / main_cap.py)
 
 # Versioned OD outputs (W3 station-pair matrices, W4b routing, gateways) live under
 # data/Traffic_Flow/OD/<svc_network>/<Method|Gateway|Routing>/ — built via the
@@ -35,7 +35,7 @@ TRAFFIC_FLOW_ASSIGNMENT_DIR = r'data/Traffic_Flow/Assignment'
 TRAFFIC_FLOW_ASSIGNMENT_PLOTS_DIR = os.path.join('plots', 'Traffic_Flow', 'Assignment')
 _OD_METHOD_DIRS = {'pt_feeder': 'PT_Feeder', 'municipal': 'Municipal'}
 
-COMMUNE_TO_STATION_PATH = r"data\Network\processed\Communes_to_railway_stations_ZH.xlsx"
+COMMUNE_TO_STATION_PATH = r"data\Network\processed\Communes_to_railway_stations_ZH.xlsx"  # legacy only (main.py / main_cap.py)
 GRAPH_POS_PATH = r"data\Network\processed\graph_data.pkl"
 
 # --- BAV Geopackages (Official Swiss Railway Infrastructure) ---
@@ -153,6 +153,14 @@ def get_svc_int_cap_dir(combo: str) -> str:
     the mirrored plots live under plots/Developments/<combo>/cap/ (get_developments_plot_dir).
     """
     return os.path.join(MAIN, DEVELOPMENTS_DIR, combo, 'cap')
+
+
+def get_parity_csv(combo: str, svc_int_id: str) -> str:
+    """Return absolute path to a svc-int's Phase-6 parity report CSV
+    (Developments/<combo>/parity/parity_<svc_int_id>.csv) — the selective-vs-
+    full-recompute comparison written when settings.use_full_recompute_ints."""
+    return os.path.join(MAIN, DEVELOPMENTS_DIR, combo, 'parity',
+                        f'parity_{svc_int_id}.csv')
 
 
 def get_developments_plot_dir(combo: str, subtype: str = None) -> str:
@@ -340,6 +348,65 @@ def get_gateway_dir(svc_network: str) -> str:
     return os.path.join(get_od_version_dir(svc_network), 'Gateway')
 
 
+def get_scenario_version_dir(svc_network: str) -> str:
+    """Return absolute path to the versioned scenario factor-store dir
+    (data/Scenario/<svc_network>/). Baseline stores are keyed by the svc
+    network, per-svc-int overrides by '<svc_int_id>_network' (same layout as
+    the OD/catchment per-version dirs).
+
+    Args:
+        svc_network: service version folder name WITH the '_network' suffix.
+    """
+    return os.path.join(MAIN, 'data', 'Scenario', svc_network)
+
+
+def get_scenario_factor_dir(svc_network: str, method: str) -> str:
+    """Return absolute path to the per-method factor dir
+    (data/Scenario/<svc_network>/<PT_Feeder|Municipal>/)."""
+    return os.path.join(get_scenario_version_dir(svc_network),
+                        _OD_METHOD_DIRS.get(method, method))
+
+
+def get_growth_factors_parquet(svc_network: str, method: str) -> str:
+    """Return absolute path to the baseline per-station growth-factor vectors
+    (scenario, year, station_id, factor) for a (svc_network, method).
+
+    Phase 7 output; composed with the per-svc-int overrides by
+    compose_scenario_od (Phase 8A demand input)."""
+    return os.path.join(get_scenario_factor_dir(svc_network, method),
+                        'growth_factors.parquet')
+
+
+def get_modal_distance_factors_csv(svc_network: str) -> str:
+    """Return absolute path to the station-independent modal-split and
+    distance-per-person factor table (scenario, year, modal_factor,
+    distance_factor). Method-independent, so version-level."""
+    return os.path.join(get_scenario_version_dir(svc_network),
+                        'modal_distance_factors.csv')
+
+
+def get_growth_factor_overrides_csv(svc_int_network: str, method: str) -> str:
+    """Return absolute path to a per-svc-int growth-factor override table
+    (scenario, year, station_id, factor — affected stations only).
+
+    Args:
+        svc_int_network: '<svc_int_id>_network' folder name.
+    """
+    return os.path.join(get_scenario_factor_dir(svc_int_network, method),
+                        'growth_factor_overrides.csv')
+
+
+def get_station_commune_breakdown_csv(svc_network: str, method: str) -> str:
+    """Return absolute path to the 4A/6A station-commune allocation breakdown
+    (data/Catchment_Area/<svc_network>/<PT_Feeder|Municipal>/station_commune_breakdown.csv).
+
+    Written by catchment_allocate (full run + reallocate_for_svc_int); Phase 7
+    reads pop_in_station from it as station-growth weights."""
+    return os.path.join(MAIN, CATCHMENT_AREA_DIR, svc_network,
+                        _OD_METHOD_DIRS.get(method, method),
+                        'station_commune_breakdown.csv')
+
+
 def get_gateway_connections_xlsx(svc_network: str) -> str:
     """Return absolute path to the gateway service-connection table
     (Gateway/gateway_service_connections.xlsx) consumed by passenger routing."""
@@ -389,6 +456,24 @@ def get_routing_primitive_path(svc_network: str, method: str, table: str) -> str
     a Phase 6 subset recompute overwrites per (origin_id, dest_id) and re-aggregates."""
     return os.path.join(get_assignment_method_dir(svc_network, method),
                         f'primitive_{table}.parquet')
+
+
+def get_flow_dir(svc_network: str, method: str) -> str:
+    """Return absolute path to the Phase-6D passenger-flow output dir
+    (data/Traffic_Flow/Assignment/<svc_network>/<method>/flows/)."""
+    return os.path.join(get_assignment_method_dir(svc_network, method), 'flows')
+
+
+def get_flow_table_path(svc_network: str, method: str, name: str) -> str:
+    """Return absolute path to a Phase-6D flow table inside get_flow_dir
+    (e.g. 'flow_segments.gpkg', 'flow_nodes.gpkg', 'flow_segments_by_service.csv')."""
+    return os.path.join(get_flow_dir(svc_network, method), name)
+
+
+def get_flow_plot_dir(svc_network: str, method: str) -> str:
+    """Return absolute path to the Phase-6D flow plot dir
+    (plots/Traffic_Flow/Assignment/<svc_network>/<method>/flows/)."""
+    return os.path.join(get_assignment_plot_dir(svc_network, method), 'flows')
 
 
 def get_assignment_report_xlsx(svc_network: str, method: str, name: str) -> str:
@@ -494,7 +579,7 @@ POPULATION_SCENARIO_CANTON_ZH_2050 = r"data\Scenario\KTZH_00000705_00001741.csv"
 POPULATION_SCENARIO_CH_BFS_2055 = r"data\Scenario\pop_scenario_switzerland_2055.csv"
 POPULATION_SCENARIO_CH_EUROSTAT_2100 = r"data\Scenario\Eurostat_population_CH_2100.xlsx"
 POPULATION_PER_COMMUNE_ZH_2018 = r"data\Scenario\population_by_gemeinde_2018.csv"
-RANDOM_SCENARIO_CACHE_PATH = r"data\Scenario\cache"
+RANDOM_SCENARIO_CACHE_PATH = r"data\Scenario\cache"  # legacy only (main.py / main_cap.py full-OD pickles; Phase 7 uses the factor store)
 DISTRICT_PATH     = r"data/Spatial_Data/Boundaries/SwissBoundaries_Bezirke_2026_CH.gpkg"
 COMMUNE_RASTER_TIF = r"data/Spatial_Data/Land_Use/Boundaries/gemeinde_zh.tif"
 CANTON_BOUNDARIES_GPKG = r"data/Spatial_Data/Boundaries/Swissboundaries_Cantons_2026_CH.gpkg"

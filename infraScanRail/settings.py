@@ -70,9 +70,9 @@ GTFS_FILTER_VERSION = 'GTFS_SVC2026_ZH'        # services_filter_gtfs output: da
 # 'AS_2026_ZH_enhanced' — AS_2026_ZH enriched with projected svc travel times and corrections
 # 'AS_2035_ZH'          — BAV network as-is for 2035 (must already exist on disk)
 # 'AS_2035_ZH_enhanced' — AS_2035_ZH enriched with projected svc travel times and corrections
-INFRA_VERSION = 'AS_2026_ZH'
+INFRA_VERSION = 'AS_2035_ZH'
 
-INFRA_BUILD_NEW_NAME = 'AS_2026_ZH'        # name for the new version — used only when INFRA_VERSION = 'Build_New'
+INFRA_BUILD_NEW_NAME = 'AS_2035_ZH'        # name for the new version — used only when INFRA_VERSION = 'Build_New'
 
 # When INFRA_VERSION = 'Build_New', open the interactive infra version manager to edit nodes/segments. False auto-creates the version from Base and saves without prompts.
 OPEN_INFRA_VERSION_MANAGER = False
@@ -88,9 +88,9 @@ OPEN_INFRA_VERSION_MANAGER = False
 # 'AK_2026_S18' — AK_2026 with the S18 line included
 # 'AK_2035'     — scheduled services as of the 2035 timetable
 # 'AK_2035_S18' — AK_2035 with the S18 line included
-SVC_VERSION = 'AK_2026_S18'
+SVC_VERSION = 'AK_2035_S18'
 
-SVC_BUILD_NEW_NAME = 'AK_2026_S18'                 # name for the new version — used only when SVC_VERSION = 'Build_New'
+SVC_BUILD_NEW_NAME = 'AK_2035_S18'                 # name for the new version — used only when SVC_VERSION = 'Build_New'
 
 # When SVC_VERSION = 'Build_New', open the interactive services version manager to edit lines/services. False finalises the freshly built network and saves without prompts.
 OPEN_SVC_VERSION_MANAGER = False
@@ -250,13 +250,31 @@ EXT_MIN_FREQ_DEP_PER_H = 2            # min directional whole-day frequency to e
 SVC_INT_CAP_THRESHOLD_TPHPD = capacity_threshold
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# X. SCENARIOS  (not yet wired into main_new)
+# PHASE 6 — INTERVENTION RECOMPUTE  (per-svc-int catchment / OD / routing / flows)
 # ═══════════════════════════════════════════════════════════════════════════════
+# Recomputes catchment (6A) / OD (6B) / routing (6C) only where each svc-int changes them and unrolls the flows onto the infrastructure (6D), per svc-int under <svc_int_id>_network paths; 6A/6B run for PT_Feeder only, 6C/6D always.
+
+# use_full_recompute_ints — selective vs full recompute per svc-int (correctness oracle).
+# False — exact selective recompute of the affected cells/communes/pairs only (default)
+# True  — full Phase-4 recompute per svc-int + parity report against the selective outputs
+use_full_recompute_ints = False
+
+# WRITE_INT_WORKBOOKS — per-svc-int 6C workbooks (path_assignment/segment_loads/station_events.xlsx).
+# False — skip the three large workbooks for 6C runs (machine consumers read the parquet primitives)
+# True  — write them per svc-int (human-facing; slow at ~1-3M rows each)
+WRITE_INT_WORKBOOKS = False
+
+PHASE6_N_JOBS = 3   # parallel Phase-6 workers (loky processes, ~1-2.5 GB each); 1 = serial; forced serial when use_full_recompute_ints
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7. SCENARIOS
+# ═══════════════════════════════════════════════════════════════════════════════
+# Builds the demand-growth factor store (baseline per-station vectors + per-svc-int overrides + modal/distance scalars) and the on-demand scenario-OD composer for Phase 8A.
 
 # scenario_type — scenario generation method.
 # 'GENERATED' — Monte Carlo random scenarios from population growth models
-# 'STATIC_9'  — fixed set of 9 canonical scenarios
-# 'dummy'     — minimal placeholder scenarios for testing
+# 'STATIC_9'  — fixed set of 9 canonical scenarios (deferred, not implemented in main_new — Phase 7 raises)
+# 'dummy'     — minimal placeholder scenarios for testing (deferred, not implemented in main_new — Phase 7 raises)
 scenario_type = 'GENERATED'
 
 amount_of_scenarios = 100
@@ -280,6 +298,9 @@ PLOT_ASSIGNMENT = True   # rail assignment heatmaps + Sankeys + service loads (P
 PLOT_INFRA_INTS = True   # infra-int master tagged network .qgz (Phase 5A)
 PLOT_SVC_INTS  = True    # svc-int delta + per-type/all-produced overlays (Phase 5B)
 PLOT_MIXED_INTS = True   # per-svc-int capacity/service maps + CAP diff (Phase 5C)
+PLOT_INT_RECOMPUTE = True  # per-svc-int catchment/OD/routing delta plots (Phase 6A-6C)
+PLOT_FLOWS     = True    # infra-level passenger-flow maps + base-vs-dev diff (Phase 6D)
+PLOT_SCENARIOS = True    # population/modal/distance scenario fans (Phase 7)
 PLOT_RESULTS   = False   # final CBA/result visualisations (not yet wired into main_new)
 
 plot_passenger_flow = False   # legacy only (main.py / main_cap.py); ignored by main_new
@@ -298,8 +319,10 @@ use_cache_railRouting = False         # Phase 4C — skip writing routing CSVs t
 use_cache_infra_ints = False         # Phase 5A — keep existing cc registry, skip re-discovery
 use_cache_svc_ints = False           # Phase 5B — keep svc-int catalogue + materialised deltas
 use_cache_svc_int_cap = False        # Phase 5C — keep svc-int CAP + merged-services workbooks
+use_cache_int_recompute = False      # Phase 6A-6C — skip svc-ints whose recompute outputs exist
+use_cache_flows = False              # Phase 6D — keep existing flow tables + maps
 use_cache_traveltime_graph = False
-use_cache_scenarios = False
+use_cache_scenarios = False           # Phase 7 — skip factor-store builds whose outputs exist
 use_cache_tts_calc = False
 
 # ═══════════════════════════════════════════════════════════════════════════════

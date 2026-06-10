@@ -3,9 +3,9 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
 ================================================================================
   RUN CONFIGURATION
 ================================================================================
-  Infrastructure   : AS_2026_ZH
+  Infrastructure   : AS_2035_ZH
   Raw version      : Raw_ZH
-  Services         : AK_2026_S18
+  Services         : AK_2035_S18
   GTFS version     : GTFS_SVC2026_ZH
   Canton           : ZH
   Catchment method : PT_Feeder  (OD: feeder_weighted)
@@ -39,10 +39,10 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
   Total population  :    1,609,779 (2023) →    1,524,721 (2018)
   Total employment  :      914,349 (2023) →      843,506 (2018)
 
---- Enhancement Stats: AS_2026_ZH_enhanced ---
-  Total segments         : 687
-  TT_Stopping filled     : 660 (96.1%)
-  speed_source = gtfs    : 687
+--- Enhancement Stats: AS_2035_ZH_enhanced ---
+  Total segments         : 693
+  TT_Stopping filled     : 666 (96.1%)
+  speed_source = gtfs    : 693
   speed_source = formula : 0
   speed_source = estimate: 0
   speed_source = design  : 0
@@ -91,10 +91,10 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
 ================================================================================
   Method               : pt_feeder
   Attribution mode     : blended
-  Service version      : AK_2026_S18_network
+  Service version      : AK_2035_S18_network
   Population base year  : 2018
   Temporal window      : full_day
-  OD output dir        : data/Traffic_Flow/OD/AK_2026_S18_network/
+  OD output dir        : data/Traffic_Flow/OD/AK_2035_S18_network/
 ================================================================================
 
 
@@ -103,27 +103,29 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
 ================================================================================
   OD method            : pt_feeder
   Assignment method    : logit
-  Service version      : AK_2026_S18_network
+  Service version      : AK_2035_S18_network
   Cost model           : calibrated / explicit
   Logit (K/maxT/theta) : 5 / 3 / 0.2
-  Output dir           : data/Traffic_Flow/Assignment/AK_2026_S18_network/
+  Output dir           : data/Traffic_Flow/Assignment/AK_2035_S18_network/
 ================================================================================
 
 PHASE RUNTIMES
 ================================================================================
 
-Phase 1: Initialisation..................................... 0m 0s (0.61s)
-Phase 2: Data Preparation................................... 0m 6s (6.76s)
-Phase 3A: Infrastructure Network Build...................... 0m 0s (0.16s)
-Phase 3B: Services Network Build............................ 0m 5s (5.58s)
-Phase 3C: Capacity Analysis................................. 0m 5s (5.94s)
-Phase 4A: Catchment Allocation.............................. 1m 57s (117.09s)
-Phase 4B: Station OD Matrix................................. 0m 47s (47.85s)
-Phase 4C: Passenger Routing................................. 6m 17s (377.41s)
-Phase 5A: Infrastructure Interventions...................... 0m 16s (16.77s)
-Phase 5B: Service Interventions............................. 1m 18s (78.90s)
-Phase 5C: Capacity on Matched Network....................... 3m 2s (182.47s)
+Phase 1: Initialisation..................................... 0m 0s (0.62s)
+Phase 2: Data Preparation................................... 0m 51s (51.33s)
+Phase 3A: Infrastructure Network Build...................... 0m 6s (6.41s)
+Phase 3B: Services Network Build............................ 0m 51s (51.47s)
+Phase 3C: Capacity Analysis................................. 0m 4s (4.98s)
+Phase 4A: Catchment Allocation.............................. 2m 55s (175.76s)
+Phase 4B: Station OD Matrix................................. 1m 26s (86.68s)
+Phase 4C: Passenger Routing................................. 6m 16s (376.95s)
+Phase 5A: Infrastructure Interventions...................... 0m 16s (16.34s)
+Phase 5B: Service Interventions............................. 2m 21s (141.64s)
+Phase 5C: Capacity on Matched Network....................... 4m 41s (281.50s)
+Phase 6: Intervention Recompute............................. 60m 5s (3605.02s)
+Phase 7: Scenarios.......................................... 0m 11s (11.59s)
 
 ================================================================================
-TOTAL TIME.................................................. 13m 59s (839.54s)
+TOTAL TIME.................................................. 80m 10s (4810.30s)
 ================================================================================
