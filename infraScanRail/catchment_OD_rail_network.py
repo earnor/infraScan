@@ -108,13 +108,13 @@ def _wait_min(headway_min: float) -> float:
 def _transfer_penalty_min(headway_next_min: float) -> float:
     """Weighted GC transfer penalty (min), keyed on the connecting line's headway.
 
-    explicit    -> w_transfer * (TRANSFER_WALK_MIN + t_wait(h_next))
+    explicit    -> w_transfer * max(TRANSFER_WALK_MIN, t_wait(h_next))
     fixed_value -> PI_TRANSFER_MIN (calibrated) | average_train_change_time (absolute)
     """
     is_abs = (settings.TRAVEL_COST_METHOD == 'absolute')
     if settings.TRANSFER_COST_MODEL == 'explicit':
         w = 1.0 if is_abs else float(cp.W_TRANSFER)
-        return w * (cp.TRANSFER_WALK_MIN + cp.t_wait_min(headway_next_min))
+        return w * max(cp.TRANSFER_WALK_MIN, cp.t_wait_min(headway_next_min))
     if is_abs:
         return float(cp.average_train_change_time)
     return float(cp.PI_TRANSFER_MIN)
@@ -123,7 +123,7 @@ def _transfer_penalty_min(headway_next_min: float) -> float:
 def _transfer_time_min(headway_next_min: float) -> float:
     """Unweighted clock time of a transfer (min)."""
     if settings.TRANSFER_COST_MODEL == 'explicit':
-        return cp.TRANSFER_WALK_MIN + cp.t_wait_min(headway_next_min)
+        return max(cp.TRANSFER_WALK_MIN, cp.t_wait_min(headway_next_min))
     return float(cp.average_train_change_time)
 
 

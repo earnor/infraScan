@@ -112,20 +112,20 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
 PHASE RUNTIMES
 ================================================================================
 
-Phase 1: Initialisation..................................... 0m 0s (0.62s)
-Phase 2: Data Preparation................................... 0m 51s (51.33s)
-Phase 3A: Infrastructure Network Build...................... 0m 6s (6.41s)
-Phase 3B: Services Network Build............................ 0m 51s (51.47s)
-Phase 3C: Capacity Analysis................................. 0m 4s (4.98s)
-Phase 4A: Catchment Allocation.............................. 2m 55s (175.76s)
-Phase 4B: Station OD Matrix................................. 1m 26s (86.68s)
-Phase 4C: Passenger Routing................................. 6m 16s (376.95s)
-Phase 5A: Infrastructure Interventions...................... 0m 16s (16.34s)
-Phase 5B: Service Interventions............................. 2m 21s (141.64s)
-Phase 5C: Capacity on Matched Network....................... 4m 41s (281.50s)
-Phase 6: Intervention Recompute............................. 60m 5s (3605.02s)
-Phase 7: Scenarios.......................................... 0m 11s (11.59s)
+Phase 1: Initialisation..................................... 0m 0s (0.63s)
+Phase 2: Data Preparation................................... 1m 3s (63.26s)
+Phase 3A: Infrastructure Network Build...................... 0m 6s (6.90s)
+Phase 3B: Services Network Build............................ 1m 33s (93.71s)
+Phase 3C: Capacity Analysis................................. 0m 5s (5.18s)
+Phase 4A: Catchment Allocation.............................. 0m 0s (0.52s)
+Phase 4B: Station OD Matrix................................. 0m 53s (53.21s)
+Phase 4C: Passenger Routing................................. 6m 30s (390.18s)
+Phase 5A: Infrastructure Interventions...................... 0m 15s (15.36s)
+Phase 5B: Service Interventions............................. 0m 19s (19.82s)
+Phase 5C: Capacity on Matched Network....................... 4m 39s (279.72s)
+Phase 6: Intervention Recompute............................. 116m 49s (7009.82s)
+Phase 7: Scenarios.......................................... 0m 10s (10.72s)
 
 ================================================================================
-TOTAL TIME.................................................. 80m 10s (4810.30s)
+TOTAL TIME.................................................. 132m 29s (7949.05s)
 ================================================================================

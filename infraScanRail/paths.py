@@ -688,6 +688,38 @@ COSTS_CONNECTION_CURVES = r"data/costs/costs_connection_curves.xlsx"
 
 TTS_CACHE = r"data/Network/travel_time/cache/compute_tts_cache.pkl"
 
+# Phase 8 valuation outputs — combo-keyed (main_new). The flat data/costs/*.csv
+# constants above remain the legacy main.py/main_cap.py chain.
+COSTS_DIR = r"data/costs"
+
+
+def get_costs_combo_dir(combo: str) -> str:
+    """Return the Phase-8 valuation output dir (data/costs/Developments/<combo>/).
+
+    Args:
+        combo: the '<infra>__<svc>' workspace key.
+    """
+    return os.path.join(MAIN, COSTS_DIR, DEVELOPMENTS_SUBDIR_NAME, combo)
+
+
+def get_tts_csv(combo: str) -> str:
+    """Return absolute path to the combined 8A benefits table
+    (traveltime_savings.csv — one row per svc-int x scenario x year)."""
+    return os.path.join(get_costs_combo_dir(combo), 'traveltime_savings.csv')
+
+
+def get_tts_cache_path(svc_int_id: str, combo: str) -> str:
+    """Return absolute path to a svc-int's 8A TTS cache parquet
+    (data/costs/Developments/<combo>/<id>_network/tts.parquet)."""
+    return os.path.join(MAIN, COSTS_DIR, svc_int_network_name(svc_int_id, combo),
+                        'tts.parquet')
+
+
+def get_construction_cost_csv(combo: str) -> str:
+    """Return absolute path to the 8B cost table (construction_cost.csv — one
+    row per svc-int, legacy Dev_/CapInt_/Total*/Yearly* column schema)."""
+    return os.path.join(get_costs_combo_dir(combo), 'construction_cost.csv')
+
 PLOT_DIRECTORY = r"plots"
 PLOT_SCENARIOS = r"plots/scenarios"
 

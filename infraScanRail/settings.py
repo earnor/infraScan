@@ -284,6 +284,11 @@ end_year_scenario = 2100
 start_valuation_year = 2050
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 8. VALUATION INPUTS
+# ═══════════════════════════════════════════════════════════════════════════════
+# Produces the per-svc-int CBA inputs: monetised travel-time savings per scenario x year (8A, rule of half on the 6C gc skims) and construction/maintenance/operating costs (8B); valuation years = start_valuation_year..end_year_scenario, monetary parameters from cost_parameters.py.
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # A1. PLOTS  (per-phase visualisation toggles — all phases)
 # ═══════════════════════════════════════════════════════════════════════════════
 # One toggle per phase; data/CSV outputs are always written regardless of these.
@@ -301,6 +306,8 @@ PLOT_MIXED_INTS = True   # per-svc-int capacity/service maps + CAP diff (Phase 5
 PLOT_INT_RECOMPUTE = True  # per-svc-int catchment/OD/routing delta plots (Phase 6A-6C)
 PLOT_FLOWS     = True    # infra-level passenger-flow maps + base-vs-dev diff (Phase 6D)
 PLOT_SCENARIOS = True    # population/modal/distance scenario fans (Phase 7)
+PLOT_TTS       = True    # per-svc-int benefit distribution across scenarios over years (Phase 8A)
+PLOT_COSTS     = True    # per-svc-int cost composition bars (Phase 8B)
 PLOT_RESULTS   = False   # final CBA/result visualisations (not yet wired into main_new)
 
 plot_passenger_flow = False   # legacy only (main.py / main_cap.py); ignored by main_new
@@ -311,18 +318,20 @@ plot_passenger_flow = False   # legacy only (main.py / main_cap.py); ignored by 
 # Set True to load pre-computed outputs from disk instead of recomputing.
 
 use_cache_network = False
-use_cache_pt_catchment = False
+use_cache_pt_catchment = True
 use_cache_developments = False
 use_cache_catchmentOD = False
 use_cache_stationsOD = False
 use_cache_railRouting = False         # Phase 4C — skip writing routing CSVs that already exist
-use_cache_infra_ints = False         # Phase 5A — keep existing cc registry, skip re-discovery
-use_cache_svc_ints = False           # Phase 5B — keep svc-int catalogue + materialised deltas
+use_cache_infra_ints = True          # Phase 5A — keep existing cc registry, skip re-discovery
+use_cache_svc_ints = True            # Phase 5B — keep svc-int catalogue + materialised deltas
 use_cache_svc_int_cap = False        # Phase 5C — keep svc-int CAP + merged-services workbooks
 use_cache_int_recompute = False      # Phase 6A-6C — skip svc-ints whose recompute outputs exist
 use_cache_flows = False              # Phase 6D — keep existing flow tables + maps
 use_cache_traveltime_graph = False
 use_cache_scenarios = False           # Phase 7 — skip factor-store builds whose outputs exist
+use_cache_tts = False                 # Phase 8A — load per-svc-int tts.parquet caches when present
+use_cache_costs = False               # Phase 8B — skip when construction_cost.csv covers all svc-ints
 use_cache_tts_calc = False
 
 # ═══════════════════════════════════════════════════════════════════════════════

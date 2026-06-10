@@ -120,9 +120,9 @@ def _get_active_transfer_penalty_sec(headway_min: float = None) -> float:
     """Return the active transfer penalty (seconds) for a single transfer edge.
 
     'calibrated' + 'fixed_value' → cp.PI_TRANSFER_MIN (12.1 min eq. IVT, pre-weighted)
-    'calibrated' + 'explicit'    → W_TRANSFER * (TRANSFER_WALK_MIN + t_wait(h)) minutes
+    'calibrated' + 'explicit'    → W_TRANSFER * max(TRANSFER_WALK_MIN, t_wait(h)) minutes
     'absolute'   + 'fixed_value' → cp.average_train_change_time (7.1 min, raw)
-    'absolute'   + 'explicit'    → 1.0 * (TRANSFER_WALK_MIN + t_wait(h)) minutes
+    'absolute'   + 'explicit'    → 1.0 * max(TRANSFER_WALK_MIN, t_wait(h)) minutes
 
     Args:
         headway_min: Connecting-service headway (minutes). Only used in 'explicit' model.
@@ -131,7 +131,7 @@ def _get_active_transfer_penalty_sec(headway_min: float = None) -> float:
     if settings.TRANSFER_COST_MODEL == 'explicit':
         h = headway_min if headway_min is not None else float('inf')
         w_transfer = 1.0 if is_abs else float(cp.W_TRANSFER)
-        return w_transfer * (cp.TRANSFER_WALK_MIN + cp.t_wait_min(h)) * 60.0
+        return w_transfer * max(cp.TRANSFER_WALK_MIN, cp.t_wait_min(h)) * 60.0
     if is_abs:
         return float(cp.average_train_change_time) * 60.0
     return float(cp.PI_TRANSFER_MIN) * 60.0
@@ -6858,7 +6858,7 @@ def _interactive_config():
     print("   Controls how the per-transfer penalty is computed on feeder-graph transfer edges.")
     print("   1) Fixed value — single PI_TRANSFER_MIN (calibrated) or "
           "average_train_change_time (absolute), independent of connecting headway")
-    print("   2) Explicit    — TRANSFER_WALK_MIN + t_wait_min(connecting_headway), "
+    print("   2) Explicit    — max(TRANSFER_WALK_MIN, t_wait_min(connecting_headway)), "
           "weighted by W_TRANSFER (calibrated) or 1.0 (absolute)")
     _settings_tcm2 = getattr(settings, 'TRANSFER_COST_MODEL', 'fixed_value')
     _default_tcm2  = '1' if _settings_tcm2 == 'fixed_value' else '2'

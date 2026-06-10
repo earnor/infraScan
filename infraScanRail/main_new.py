@@ -2235,6 +2235,69 @@ def phase_7_scenarios(runtimes: dict, svc_int_ids=None) -> None:
     runtimes["Phase 7: Scenarios"] = time.time() - st
 
 
+def phase_8_valuation_inputs(runtimes: dict, svc_int_ids=None) -> None:
+    """Phase 8 — valuation inputs: benefits (8A) + costs (8B) per svc-int.
+
+    Two independent sibling subphases (8B does not need 8A): 8A monetises
+    travel-time savings per svc-int x scenario x year (rule of half on the
+    baseline vs per-svc-int 6C gc skims, demand composed on demand from the
+    Phase 7 factor store, whole-day x 365 x VTTS); 8B assembles construction /
+    maintenance / operating costs (5A CC registry + 5C CAP attribution +
+    signed delta route-km). The per-svc-int loops live inside
+    valuation_benefits / valuation_costs with worker-safe bodies. Outputs land
+    under data/costs/Developments/<combo>/ in the legacy schemas Phase 9 reads.
+
+    Args:
+        runtimes:    dict tracking phase execution times.
+        svc_int_ids: optional subset of svc-int ids (None = all registered;
+                     mirrors phase_6_intervention_recompute).
+    """
+    print("\n" + "=" * 80)
+    print("PHASE 8: VALUATION INPUTS")
+    print("=" * 80 + "\n")
+    st = time.time()
+
+    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
+        print("  SVC_INT_MODE = NONE — no svc-ints to value; skipping Phase 8.")
+        runtimes["Phase 8: Valuation Inputs"] = time.time() - st
+        return
+
+    base_infra = _phase5_base_infra()
+    svc_version = PIPELINE_CONFIG.svc_version
+    if svc_version is None:
+        svc_version = settings.SVC_VERSION
+        if svc_version == 'Build_New':
+            svc_version = settings.SVC_BUILD_NEW_NAME
+    combo = f'{base_infra}__{svc_version}'
+    od_method = get_routing_od_method()
+    attribution = (settings.OD_ATTRIBUTION_MODE if od_method == 'pt_feeder'
+                   else 'municipal')
+    assignment_method = settings.ROUTING_ASSIGNMENT_METHOD
+    if assignment_method == 'both':
+        print("  WARNING: ROUTING_ASSIGNMENT_METHOD='both' is standalone-only — "
+              "using 'logit' for the pipeline run.")
+        assignment_method = 'logit'
+    print(f"  Combo               : {combo}")
+    print(f"  OD method / attrib. : {od_method} / {attribution}")
+    print(f"  Assignment method   : {assignment_method}")
+
+    import valuation_benefits as _vb
+    import valuation_costs as _vc
+
+    print("\n--- Phase 8A: Travel-Time Savings ---")
+    _vb.compute_travel_time_savings(
+        svc_int_ids, svc_version=svc_version, combo=combo, method=od_method,
+        attribution=attribution, assignment_method=assignment_method,
+        use_cache=settings.use_cache_tts, make_plots=settings.PLOT_TTS)
+
+    print("\n--- Phase 8B: Construction/Maintenance/Operating Costs ---")
+    _vc.compute_construction_costs(
+        svc_int_ids, combo=combo, base_infra=base_infra,
+        use_cache=settings.use_cache_costs, make_plots=settings.PLOT_COSTS)
+
+    runtimes["Phase 8: Valuation Inputs"] = time.time() - st
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main orchestrator
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2259,6 +2322,7 @@ def infrascanrail_new():
     phase_5c_capacity_on_matched(runtimes)
     phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes)
     phase_7_scenarios(runtimes)
+    phase_8_valuation_inputs(runtimes)
 
     _save_runtimes(runtimes, 'report_new.txt')
 

@@ -57,7 +57,7 @@ W_WAIT     = 1.5   # range 1.5–2.5. Wardman 2004; Axhausen 2008 (β_wait/β_IV
 W_WALK     = 2.0   # range 1.5–2.5. Wardman 2004 ≈2.0; Axhausen 2008 (β_walk/β_IVT≈2.0); Ortelli 2025 ≈1.78. Swiss: NPVM implicit, ARE 2022 uses buffers instead. Recommended: 2.0
 W_BIKE     = 1.5   # range 1.0–2.0. No Swiss-specific source; PDFH (UK) ≈1.4–1.6. Swiss: not in NPVM/ARE; SBB B+R not monetised. Recommended: 1.5 (author choice)
 # Transfer-specific weight (Axhausen 2014 SVI 2001/534): applies in the 'explicit' model
-# to the combined walk+wait component of a transfer (see formula in PI_TRANSFER_MIN block).
+# to the binding walk/wait component of a transfer (see formula in PI_TRANSFER_MIN block).
 W_TRANSFER = 2.0   # range 1.5–2.5. Wardman 2004; Axhausen 2008; Ortelli 2025 ≈1.98. Swiss: NPVM implicit >1, "gewichtet" vs "ungewichtet" Abb. 59 NPVM 2023. Recommended: 2.0
 
 # --- Speed and detour factors ---
@@ -71,7 +71,8 @@ CYCLE_MAX_RADIUS_M = 2500  # network distance cap (author choice)
 # --- Transfer penalty ---
 # Axhausen (2014): raw lump-sum 7.1 min × W_TRANSFER 1.7 = 12.1 min eq. IVT.
 # Used as-is in the 'fixed_value' model; in the 'explicit' model
-#   π_transfer = W_TRANSFER × (TRANSFER_WALK_MIN + t_wait(h_connecting)).
+#   π_transfer = W_TRANSFER × max(TRANSFER_WALK_MIN, t_wait(h_connecting))
+# (max, not sum — no extra wait on top of the binding component).
 PI_TRANSFER_MIN  = 12.1   # eq. IVT min, Axhausen model (already weighted at 1.7)
 TRANSFER_WALK_MIN = 4.0   # raw platform-walk time at transfer (min), explicit model only
 

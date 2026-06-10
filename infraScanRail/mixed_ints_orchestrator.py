@@ -132,6 +132,7 @@ def phase_5c_capacity_on_matched(
     # Step 2 — baseline (3C do-nothing) CAP cost per target, over the union of
     # modified segments, for attribution (candidate − baseline).
     baseline_cost: dict = {}
+    baseline_maint: dict = {}
     base_services = paths.get_projected_services_path(base_svc, base_infra)
     if Path(base_services).exists():
         baseline = cww.capacity_on_composed(
@@ -139,6 +140,7 @@ def phase_5c_capacity_on_matched(
             network_label=f"{base_svc}_baseline", modified_segment_ids=mod_union)
         for c in baseline:
             baseline_cost[_target_key(c)] = float(c.construction_cost_chf or 0.0)
+            baseline_maint[_target_key(c)] = float(c.maintenance_cost_annual_chf or 0.0)
         print(f"  [5C] baseline reference: {len(baseline)} do-nothing CAP over modified segments")
 
     # Step 3 — per-svc-int CAP on the merged composed network, register, compose, attribute.
@@ -169,6 +171,8 @@ def phase_5c_capacity_on_matched(
                 all_cap_ids.append(cid)
                 cand = float(c.construction_cost_chf or 0.0)
                 base_c = baseline_cost.get(_target_key(c), 0.0)
+                cand_m = float(c.maintenance_cost_annual_chf or 0.0)
+                base_m = baseline_maint.get(_target_key(c), 0.0)
                 attrib = {
                     'svc_int_id': p['id'], 'int_type': p['int_type'], 'cap_id': cid,
                     'cap_type': c.type, 'strategy': c.strategy or '',
@@ -176,6 +180,9 @@ def phase_5c_capacity_on_matched(
                     'node_id': c.node_id if c.node_id is not None else '',
                     'candidate_cost_chf': cand, 'baseline_cost_chf': base_c,
                     'attributable_cost_chf': max(0.0, cand - base_c),
+                    'candidate_maintenance_annual_chf': cand_m,
+                    'baseline_maintenance_annual_chf': base_m,
+                    'attributable_maintenance_annual_chf': max(0.0, cand_m - base_m),
                     'composed_version': composed_full,
                 }
                 attribution.append(attrib)
@@ -209,7 +216,9 @@ def phase_5c_capacity_on_matched(
     # distinguishing "ran, no CAP needed" from "never ran".
     attr_cols = ['svc_int_id', 'int_type', 'cap_id', 'cap_type', 'strategy',
                  'segment_id', 'node_id', 'candidate_cost_chf',
-                 'baseline_cost_chf', 'attributable_cost_chf', 'composed_version']
+                 'baseline_cost_chf', 'attributable_cost_chf',
+                 'candidate_maintenance_annual_chf', 'baseline_maintenance_annual_chf',
+                 'attributable_maintenance_annual_chf', 'composed_version']
     out = Path(paths.get_svc_int_cap_attribution_path(cap_network))
     out.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(attribution, columns=attr_cols).to_csv(out, index=False)
