@@ -43,6 +43,7 @@ import geopandas as gpd
 import fiona
 from shapely.geometry import LineString, Point
 
+import cache_manifest
 import paths
 import settings
 
@@ -349,7 +350,13 @@ def apply_svc_int(
     proj_dir = out_dir / base_infra_version
     projected_path = proj_dir / 'rail_segments.gpkg'
 
-    if use_cache and projected_path.exists():
+    if (use_cache and projected_path.exists()
+            and cache_manifest.check_manifest(
+                paths.get_svc_int_catalogue_dir(
+                    f'{base_infra_version}__{base_svc_version}'),
+                'svc_ints_5b',
+                {'infra_version': base_infra_version,
+                 'svc_version': base_svc_version})):
         print(f"  [apply] {svc_int_id}: cached delta at {projected_path} — reuse")
         return _apply_result(svc_int_id, unproj_dir, projected_path, base_infra_version, svc_int)
 
@@ -398,6 +405,215 @@ def apply_svc_int(
 
     return _apply_result(svc_int_id, unproj_dir, projected_path, base_infra_version,
                          svc_int, changed_routes, affected, composed_infra)
+
+
+def build_merged_unprojected(
+    svc_int: Dict,
+    base_svc_version: str,
+    base_infra_version: str,
+    *,
+    use_cache: Optional[bool] = None,
+) -> str:
+    """Write the base+delta merged routing network for one svc-int (Phase 6C input).
+
+    apply_svc_int materialises only the delta (changed/added lines), so routing a
+    svc-int needs base and delta merged back into one complete network folder:
+    <svc_int_id>_network/Merged/{rail_lines,rail_segments,rail_stops}.gpkg, the
+    same files the routing graph loads from a rail_base dir. Replacement is at
+    variant-key grain: base rows whose (route_id, direction_id, variant_rank)
+    appears in the delta are dropped and the delta rows added — an EXT replaces
+    exactly its extended variants (non-extended variants survive), an NDC is
+    purely additive. Segment rows come from the PROJECTED delta because the
+    Unprojected delta carries TT=NaN for new stop-pairs; the projected delta has
+    the real infra TT.
+
+    Args:
+        svc_int: a svc-int record dict (as from read_record).
+        base_svc_version: base service version WITHOUT the '_network' suffix.
+        base_infra_version: base infra version (e.g. 'AS_2026_ZH_enhanced').
+        use_cache: reuse an existing Merged/ folder (default settings.use_cache_svc_ints).
+
+    Returns:
+        Absolute path to the Merged/ directory, or '' when the delta is empty
+        (nothing to route — the svc-int network equals the base).
+
+    Both sides merge in the UNPROJECTED id-space: the projected delta re-keys
+    interchange stations to platform-group Betriebspunkte (e.g. Zürich HB →
+    Zürich HB Löwenstrasse 8516144), which would break station membership
+    against the base ids. Only the genuinely-new stop-pairs carry TT=NaN in the
+    unprojected delta (base-known pairs keep their GTFS TT); their real infra
+    TT is patched in from the projected delta, whose endpoint ids match for new
+    legs.
+    """
+    if use_cache is None:
+        use_cache = getattr(settings, 'use_cache_svc_ints', False)
+    svc_int_id = str(svc_int['int_id'])
+    out_dir = Path(paths.get_svc_int_network_dir(svc_int_id)) / 'Merged'
+    targets = {n: out_dir / f'{n}.gpkg'
+               for n in ('rail_lines', 'rail_segments', 'rail_stops')}
+    if (use_cache and all(p.exists() for p in targets.values())
+            and cache_manifest.check_manifest(
+                paths.get_svc_int_catalogue_dir(
+                    f'{base_infra_version}__{base_svc_version}'),
+                'svc_ints_5b',
+                {'infra_version': base_infra_version,
+                 'svc_version': base_svc_version})):
+        print(f"  [merge] {svc_int_id}: cached merged network at {out_dir} — reuse")
+        return str(out_dir)
+
+    base_dir = (Path(paths.MAIN) / paths.RAIL_LINES_DIR /
+                f"{base_svc_version}_network" / paths.SERVICES_UNPROJECTED_SUBDIR)
+    delta_dir = (Path(paths.get_svc_int_network_dir(svc_int_id)) /
+                 paths.SERVICES_UNPROJECTED_SUBDIR)
+    proj_delta = Path(paths.get_svc_int_projected_path(svc_int_id, base_infra_version))
+
+    def _norm(x) -> str:
+        try:
+            return str(int(float(x)))
+        except (TypeError, ValueError):
+            return str(x)
+
+    def _keys_of(df: pd.DataFrame, rid_col: str) -> pd.Series:
+        return pd.Series(
+            list(zip(df[rid_col].astype(str),
+                     df['direction_id'].map(_norm),
+                     df['variant_rank'].map(_norm))),
+            index=df.index)
+
+    # Variant keys present in the delta (from its line layers) — the replace set.
+    delta_lines_path = delta_dir / 'rail_lines.gpkg'
+    delta_keys: set = set()
+    if delta_lines_path.exists():
+        for layer in fiona.listlayers(str(delta_lines_path)):
+            g = gpd.read_file(delta_lines_path, layer=layer)
+            delta_keys |= set(_keys_of(g, 'route_id'))
+    if not delta_keys:
+        print(f"  [merge] {svc_int_id}: empty delta — nothing to merge")
+        return ''
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for p in targets.values():
+        if p.exists():
+            p.unlink()
+
+    def _merge_layered(base_path: Path, delta_path: Path, out_path: Path,
+                       rid_col: str, label: str) -> None:
+        base_layers = set(fiona.listlayers(str(base_path))) if base_path.exists() else set()
+        delta_layers = set(fiona.listlayers(str(delta_path))) if delta_path.exists() else set()
+        n_dropped = n_added = 0
+        for layer in sorted(base_layers | delta_layers):
+            frames = []
+            if layer in base_layers:
+                b = gpd.read_file(base_path, layer=layer)
+                if {rid_col, 'direction_id', 'variant_rank'}.issubset(b.columns):
+                    drop = _keys_of(b, rid_col).isin(delta_keys)
+                    n_dropped += int(drop.sum())
+                    b = b[~drop.values]
+                frames.append(b)
+            if layer in delta_layers:
+                d = gpd.read_file(delta_path, layer=layer)
+                n_added += len(d)
+                frames.append(d)
+            frames = [f for f in frames if f is not None and not f.empty]
+            if not frames:
+                continue
+            merged = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True),
+                                      crs=frames[0].crs)
+            merged.to_file(out_path, layer=layer, driver='GPKG')
+        print(f"  [merge] {svc_int_id}/{label}: -{n_dropped} base row(s) "
+              f"(replaced variants), +{n_added} delta row(s)")
+
+    _merge_layered(base_dir / 'rail_lines.gpkg', delta_lines_path,
+                   targets['rail_lines'], 'route_id', 'lines')
+
+    # TT patch lookup from the projected delta (real infra TT for new legs)
+    tt_lookup: Dict[tuple, float] = {}
+    if proj_delta.exists():
+        for layer in fiona.listlayers(str(proj_delta)):
+            g = gpd.read_file(proj_delta, layer=layer)
+            for r in g.itertuples(index=False):
+                tt = getattr(r, 'TT', None)
+                if tt is not None and pd.notna(tt):
+                    tt_lookup[(str(r.GTFS_ID), _norm(r.direction_id),
+                               _norm(r.variant_rank), _norm(r.from_stop_nr),
+                               _norm(r.to_stop_nr))] = float(tt)
+    else:
+        print(f"  [merge] WARNING {svc_int_id}: projected delta missing at "
+              f"{proj_delta} — new stop-pairs keep TT=NaN (routed as 0 min). "
+              f"Run apply_svc_int first.")
+
+    base_seg_path = base_dir / 'rail_segments.gpkg'
+    delta_seg_path = delta_dir / 'rail_segments.gpkg'
+    base_layers = set(fiona.listlayers(str(base_seg_path))) if base_seg_path.exists() else set()
+    delta_seg_layers = set(fiona.listlayers(str(delta_seg_path))) if delta_seg_path.exists() else set()
+    n_drop = n_add = n_patch = n_nan = 0
+    for layer in sorted(base_layers | delta_seg_layers):
+        frames = []
+        if layer in base_layers:
+            b = gpd.read_file(base_seg_path, layer=layer)
+            if {'GTFS_ID', 'direction_id', 'variant_rank'}.issubset(b.columns):
+                drop = _keys_of(b, 'GTFS_ID').isin(delta_keys)
+                n_drop += int(drop.sum())
+                b = b[~drop.values]
+            frames.append(b)
+        if layer in delta_seg_layers:
+            d = gpd.read_file(delta_seg_path, layer=layer)
+            if 'TT' in d.columns:
+                tt = pd.to_numeric(d['TT'], errors='coerce')
+                for i in d.index[tt.isna()]:
+                    r = d.loc[i]
+                    k = (str(r['GTFS_ID']), _norm(r['direction_id']),
+                         _norm(r['variant_rank']), _norm(r['from_stop_nr']),
+                         _norm(r['to_stop_nr']))
+                    if k in tt_lookup:
+                        d.at[i, 'TT'] = tt_lookup[k]
+                        n_patch += 1
+                    else:
+                        n_nan += 1
+            n_add += len(d)
+            frames.append(d)
+        frames = [f for f in frames if f is not None and not f.empty]
+        if not frames:
+            continue
+        merged = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True),
+                                  crs=frames[0].crs)
+        merged.to_file(targets['rail_segments'], layer=layer, driver='GPKG')
+    print(f"  [merge] {svc_int_id}/segments: -{n_drop} base row(s) "
+          f"(replaced variants), +{n_add} delta row(s); TT patched from the "
+          f"projected delta for {n_patch} new leg(s)"
+          + (f"; WARNING {n_nan} leg(s) keep TT=NaN" if n_nan else ""))
+
+    # Stops: base set + delta-only stop numbers (per layer; dedupe on Number).
+    base_stops_path = base_dir / 'rail_stops.gpkg'
+    delta_stops_path = delta_dir / 'rail_stops.gpkg'
+    out_frames: Dict[str, gpd.GeoDataFrame] = {}
+    base_nums: set = set()
+    if base_stops_path.exists():
+        for layer in fiona.listlayers(str(base_stops_path)):
+            g = gpd.read_file(base_stops_path, layer=layer)
+            out_frames[layer] = g
+            if 'Number' in g.columns:
+                base_nums |= set(g['Number'].astype(str))
+    n_new_stops = 0
+    if delta_stops_path.exists():
+        for layer in fiona.listlayers(str(delta_stops_path)):
+            g = gpd.read_file(delta_stops_path, layer=layer)
+            if 'Number' in g.columns:
+                g = g[~g['Number'].astype(str).isin(base_nums)]
+            if g.empty:
+                continue
+            n_new_stops += len(g)
+            if layer in out_frames:
+                out_frames[layer] = gpd.GeoDataFrame(
+                    pd.concat([out_frames[layer], g], ignore_index=True),
+                    crs=out_frames[layer].crs)
+            else:
+                out_frames[layer] = g
+    for layer, g in out_frames.items():
+        g.to_file(targets['rail_stops'], layer=layer, driver='GPKG')
+    print(f"  [merge] {svc_int_id}/stops: {n_new_stops} delta-only stop(s) added; "
+          f"merged network -> {out_dir}")
+    return str(out_dir)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -809,11 +1025,16 @@ def phase_5b_service_interventions(
     if not active:
         return result
 
+    cat_dir = paths.get_svc_int_catalogue_dir(combo)
+    manifest_ok = use_cache and cache_manifest.check_manifest(
+        cat_dir, 'svc_ints_5b',
+        {'infra_version': base_infra, 'svc_version': base_svc})
+
     ext_candidates: Optional[List[Dict]] = None
 
     # EXT — discover + register (lazy import breaks the cycle) -----------------
     if 'ext' in active:
-        if use_cache and list_svc_int_ids('ext', network=combo):
+        if manifest_ok and list_svc_int_ids('ext', network=combo):
             result['ext_ids'] = list_svc_int_ids('ext', network=combo)
             print(f"  [ext] use_cache: keeping {len(result['ext_ids'])} existing EXT record(s)")
         else:
@@ -826,7 +1047,7 @@ def phase_5b_service_interventions(
 
     # NDC — build from 5A candidates + register -------------------------------
     if 'ndc' in active:
-        if use_cache and list_svc_int_ids('ndc', network=combo):
+        if manifest_ok and list_svc_int_ids('ndc', network=combo):
             result['ndc_ids'] = list_svc_int_ids('ndc', network=combo)
             print(f"  [ndc] use_cache: keeping {len(result['ndc_ids'])} existing NDC record(s)")
         else:
@@ -859,6 +1080,9 @@ def phase_5b_service_interventions(
     # Data outputs — always written (independent of make_plots) ---------------
     _write_svc_int_csvs(base_infra, result, network=combo)
     _write_affected_set_csv(base_infra, base_svc, network=combo)
+    cache_manifest.write_manifest(cat_dir, 'svc_ints_5b',
+                                  {'infra_version': base_infra,
+                                   'svc_version': base_svc})
 
     # Candidate-overview + delta / overlay plots ------------------------------
     if make_plots:

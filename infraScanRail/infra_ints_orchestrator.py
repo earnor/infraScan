@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 import geopandas as gpd
 import pandas as pd
 
+import cache_manifest
 import paths
 import settings
 import infrabuild_network_builder as ic
@@ -82,8 +83,11 @@ def phase_5a_infra_interventions(
 
     # CC — auto-discover and register (unless cached) -------------------------
     if 'cc' in active:
+        cc_dir = os.path.dirname(paths.get_infra_int_registry('cc', combo))
         have_cc = bool(core.list_intervention_ids('cc', network=combo))
-        if use_cache and have_cc:
+        if use_cache and have_cc and cache_manifest.check_manifest(
+                cc_dir, 'infra_ints_5a',
+                {'infra_version': base_version, 'svc_version': svc_version}):
             print("  [cc] use_cache: keeping existing cc registry; skipping discovery")
             result['cc_ids'] = core.list_intervention_ids('cc', network=combo)
         else:
@@ -93,6 +97,9 @@ def phase_5a_infra_interventions(
                 sa_polygon=polygon, buffer_polygon=buffer_polygon, interactive=interactive)
             result['cc_ids'] = disc['cc_ids']
             result['ndc_candidates'] = disc['ndc_candidates']
+        cache_manifest.write_manifest(
+            cc_dir, 'infra_ints_5a',
+            {'infra_version': base_version, 'svc_version': svc_version})
 
     # Master tagged network (CC-only for 5A; 5C rebuilds it with CAP) ---------
     result['master'] = core.build_master_network(base_version)

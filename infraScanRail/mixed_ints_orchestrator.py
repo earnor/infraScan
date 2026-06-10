@@ -18,6 +18,7 @@ from typing import List, Optional
 import geopandas as gpd
 import pandas as pd
 
+import cache_manifest
 import paths
 import settings
 import ints_core as core
@@ -82,6 +83,20 @@ def phase_5c_capacity_on_matched(
     if not pairs:
         print("  no svc-ints registered — nothing to do")
         return {'cap_ids': [], 'attribution': [], 'plots': []}
+
+    # Cache hit: attribution sentinel present and manifest matches — skip the whole
+    # capacity computation. Safe to skip wholesale: Phase 6 re-materialises the
+    # svc-int deltas itself and 8B reads the attribution CSV from disk.
+    attr_path = Path(paths.get_svc_int_cap_attribution_path(cap_network))
+    if use_cache and attr_path.exists() and cache_manifest.check_manifest(
+            paths.get_svc_int_cap_dir(cap_network), 'svc_int_cap_5c',
+            {'infra_version': base_infra, 'svc_version': base_svc}):
+        attribution = pd.read_csv(attr_path).to_dict('records')
+        cap_ids = core.list_intervention_ids('cap', network=cap_network)
+        print(f"  [5C] use_cache_svc_int_cap: CAP registry + attribution present, "
+              f"manifest OK — skipping capacity computation "
+              f"({len(cap_ids)} CAP, {len(attribution)} attribution row(s))")
+        return {'cap_ids': sorted(cap_ids), 'attribution': attribution, 'plots': []}
 
     # 5C is the authoritative CAP generator — start from a clean cap registry.
     if not use_cache:
@@ -189,12 +204,16 @@ def phase_5c_capacity_on_matched(
         except Exception as exc:
             print(f"  [5C] {p['id']} per-svc-int artifacts failed: {exc}")
 
-    # Step 4 — attribution table (the 6C→8B / CBA hand-off input).
-    if attribution:
-        out = Path(paths.get_svc_int_cap_attribution_path(cap_network))
-        out.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(attribution).to_csv(out, index=False)
-        print(f"  [csv] wrote {out.name} ({len(attribution)} CAP attribution row(s))")
+    # Step 4 — attribution table (the 6C→8B / CBA hand-off input). Written even when
+    # empty (header-only): it doubles as the use_cache_svc_int_cap sentinel,
+    # distinguishing "ran, no CAP needed" from "never ran".
+    attr_cols = ['svc_int_id', 'int_type', 'cap_id', 'cap_type', 'strategy',
+                 'segment_id', 'node_id', 'candidate_cost_chf',
+                 'baseline_cost_chf', 'attributable_cost_chf', 'composed_version']
+    out = Path(paths.get_svc_int_cap_attribution_path(cap_network))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(attribution, columns=attr_cols).to_csv(out, index=False)
+    print(f"  [csv] wrote {out.name} ({len(attribution)} CAP attribution row(s))")
 
     # Step 5 — master refresh + CAP plots (per-svc-int maps from the loop + the aggregate diff).
     plots: List[str] = list(per_svc_plots)
@@ -215,6 +234,10 @@ def phase_5c_capacity_on_matched(
                 plots += _io._plot_all_changes(base_infra, svc_version=base_svc)
             except Exception as exc:
                 print(f"  [plot] combined all-ints diff failed: {exc}")
+
+    cache_manifest.write_manifest(
+        paths.get_svc_int_cap_dir(cap_network), 'svc_int_cap_5c',
+        {'infra_version': base_infra, 'svc_version': base_svc})
 
     print(f"=== Phase 5C done: {len(set(all_cap_ids))} CAP across "
           f"{len({a['svc_int_id'] for a in attribution})} svc-int(s) ===\n")
