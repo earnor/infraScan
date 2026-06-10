@@ -1,5 +1,5 @@
 """catchment_OD_rail_network.py
-Last modified: 2026-06-05
+Last modified: 2026-06-09
 
 Passenger routing for infraScanRail (Phase 4C). Takes the W3 station-pair OD
 matrices from catchment_OD_preparation and assigns demand onto rail services
@@ -20,8 +20,11 @@ settings.TRAVEL_COST_METHOD. A single assignment runs on the full_day network
 (the single source of truth) and trip-bearing outputs are τ-scaled to
 peak / off_peak / full_day.
 
-Public entry point: passenger_routing(svc_version, use_cache, od_method,
-                                      assignment_method) -> None
+Public entry points:
+  passenger_routing(svc_version, use_cache, od_method, assignment_method) -> None
+  route_svc_int(svc_int_id, base_svc_network, ...) -> dict   (Phase 6C: closure
+      re-route on a developed network, per-pair merge into the baseline
+      primitive, full Phase-4C output re-derivation per svc-int)
 
 Outputs under data/Traffic_Flow/Assignment/<svc_network>/<method>/ (workbooks have
 one sheet per service period: peak / off_peak / full_day, unless noted):
@@ -48,6 +51,7 @@ import numpy as np
 import pandas as pd
 import pyogrio
 
+import cache_manifest
 import paths
 import settings
 import cost_parameters as cp
@@ -376,6 +380,14 @@ def _empty_primitives() -> dict:
     return {'paths': [], 'segments': [], 'events': [], 'unresolved': []}
 
 
+def _prim_empty(rows) -> bool:
+    """True when a primitive table has no rows. Primitive tables are lists of
+    dicts on the assignment path and DataFrames after a Phase-6 merge (parquet
+    reload); plain truthiness raises on a DataFrame, so every consumer guards
+    through this helper."""
+    return rows is None or len(rows) == 0
+
+
 def _record_path(prim: dict, A: int, C: int, path_id: int, share: float,
                  od_trips: float, info: dict) -> None:
     """Append one chosen path's rows (paths/segments/events) at pre-τ trips."""
@@ -511,7 +523,9 @@ def _build_table_context(variant_seq: dict) -> dict:
     down, up = {}, {}
     for sk, vks in sv.items():
         dmap, umap = {}, {}
-        for vk in vks:
+        # sorted: vks is a set of variant-key strings whose iteration order
+        # varies with the process hash seed; dmap/umap insertion order must not.
+        for vk in sorted(vks):
             seq, pos = variant_seq[vk], vidx[vk][sk]
             for s2 in seq[pos + 1:]:
                 dmap.setdefault(s2, set()).add(vk)
@@ -555,17 +569,22 @@ def _table_infos(G: nx.DiGraph, A: int, C: int, sp_path: list, ctx: dict,
     downA, upC = down.get(A, {}), up.get(C, {})
     proposals = []
 
-    for vk in sv.get(A, set()):                                   # 0-transfer
+    # All set iterations below are sorted: variant keys are strings (and station
+    # keys mix int and 'x…' str), so raw set order varies with the per-process
+    # hash seed — which would change proposal order, the cap'd proposal SUBSET
+    # and equal-GC tie-breaks in _finalize_pair between processes.
+    for vk in sorted(sv.get(A, ())):                              # 0-transfer
         ia, ic = idx[vk].get(A), idx[vk].get(C)
         if ia is not None and ic is not None and ia < ic:
             proposals.append([(vk, A, C)])
 
-    interch1 = [T for T in (set(downA) & set(upC)) if T not in (A, C) and _in(f"exit_{T}")]
+    interch1 = [T for T in sorted(set(downA) & set(upC), key=str)
+                if T not in (A, C) and _in(f"exit_{T}")]
     for T in interch1:                                            # 1-transfer
-        for v1 in downA[T]:
+        for v1 in sorted(downA[T]):
             if not _in(f"sub_{T}_{v1}"):
                 continue
-            for v2 in upC[T]:
+            for v2 in sorted(upC[T]):
                 if v1 != v2:
                     proposals.append([(v1, A, T), (v2, T, C)])
         if len(proposals) >= cap:
@@ -573,18 +592,19 @@ def _table_infos(G: nx.DiGraph, A: int, C: int, sp_path: list, ctx: dict,
 
     if len(proposals) < cap:                                      # 2-transfer
         set_upC = set(upC)
-        for T1 in [t for t in downA if t not in (A, C) and _in(f"exit_{t}")]:
+        for T1 in sorted((t for t in downA
+                          if t not in (A, C) and _in(f"exit_{t}")), key=str):
             downT1 = down.get(T1, {})
-            for T2 in (set(downT1) & set_upC):
+            for T2 in sorted(set(downT1) & set_upC, key=str):
                 if T2 in (A, C, T1) or not _in(f"exit_{T2}"):
                     continue
-                for v1 in downA[T1]:
+                for v1 in sorted(downA[T1]):
                     if not _in(f"sub_{T1}_{v1}"):
                         continue
-                    for v2 in downT1[T2]:
+                    for v2 in sorted(downT1[T2]):
                         if v2 == v1 or not _in(f"sub_{T2}_{v2}"):
                             continue
-                        for v3 in upC[T2]:
+                        for v3 in sorted(upC[T2]):
                             if v3 != v2:
                                 proposals.append([(v1, A, T1), (v2, T1, T2), (v3, T2, C)])
                 if len(proposals) >= cap:
@@ -841,7 +861,7 @@ def _build_skims(prim: dict, vfreq_report: dict, direct_freq_report: dict) -> di
                   Reporting freq is the lowest positive period dep/h per variant.
     """
     empty = pd.DataFrame()
-    if not prim['paths']:
+    if _prim_empty(prim['paths']):
         return {'journey_time': empty, 'gc': empty, 'frequency': empty,
                 'transfers': empty}
     pdf = pd.DataFrame(prim['paths'])
@@ -888,7 +908,7 @@ def _prepare_trip_df(rows: list, name_lookup: dict, tau: float,
                      id_cols: list) -> pd.DataFrame:
     """τ-scale a trip-bearing primitive and enrich with station names, route_id and
     line_short_name. Returns an empty DataFrame (no columns) when there is no data."""
-    if not rows:
+    if _prim_empty(rows):
         return pd.DataFrame()
     df = pd.DataFrame(rows).copy()
     df['trips'] = df['trips'] * tau
@@ -915,7 +935,7 @@ def _write_trip_workbook(rows: list, name_lookup: dict, windows: list,
     Falls back to one CSV per period (beside out_path) when any period exceeds
     Excel's per-sheet row limit — large primitives (logit segments/events) can
     run to millions of rows, which openpyxl cannot hold."""
-    if not rows:
+    if _prim_empty(rows):
         print(f"    ({label}): no data — skipping {out_path}")
         return
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -969,7 +989,7 @@ def _write_skims_workbook(skims: dict, name_lookup: dict, out_path: str) -> None
 
 
 def _write_unresolved(rows: list, name_lookup: dict, out_path: str) -> None:
-    if not rows:
+    if _prim_empty(rows):
         return
     df = pd.DataFrame(rows)
     df['origin_name'] = df['origin_id'].map(lambda k: _name(name_lookup, k))
@@ -983,26 +1003,32 @@ def _write_unresolved(rows: list, name_lookup: dict, out_path: str) -> None:
 
 def _write_method_outputs(prim: dict, skims: dict, name_lookup: dict,
                           svc_network: str, method: str, windows: list,
-                          use_cache: bool) -> None:
+                          use_cache: bool, write_workbooks: bool = True) -> None:
     """Write all per-method workbooks: one trip-table workbook per primitive (a
-    sheet per service period), one skims workbook, and the unresolved-pairs file."""
+    sheet per service period), one skims workbook, and the unresolved-pairs file.
+    With write_workbooks=False the three large trip workbooks are skipped (machine
+    consumers read the parquet primitives); skims + unresolved always write."""
     out_dir = paths.get_assignment_method_dir(svc_network, method)
     os.makedirs(out_dir, exist_ok=True)
 
-    specs = [
-        (prim['paths'],    ['origin_id', 'dest_id'],
-         'path_assignment.xlsx', f'{method} paths'),
-        (prim['segments'], ['origin_id', 'dest_id', 'from_id', 'to_id'],
-         'segment_loads.xlsx',   f'{method} segments'),
-        (prim['events'],   ['origin_id', 'dest_id', 'station_id'],
-         'station_events.xlsx',  f'{method} events'),
-    ]
-    for rows, id_cols, fname, label in specs:
-        fpath = os.path.join(out_dir, fname)
-        if use_cache and Path(fpath).exists():
-            print(f"    cached: {fpath}")
-        else:
-            _write_trip_workbook(rows, name_lookup, windows, id_cols, fpath, label)
+    if not write_workbooks:
+        print("    WRITE_INT_WORKBOOKS = False — skipping path_assignment/"
+              "segment_loads/station_events.xlsx (parquet primitives carry the data)")
+    else:
+        specs = [
+            (prim['paths'],    ['origin_id', 'dest_id'],
+             'path_assignment.xlsx', f'{method} paths'),
+            (prim['segments'], ['origin_id', 'dest_id', 'from_id', 'to_id'],
+             'segment_loads.xlsx',   f'{method} segments'),
+            (prim['events'],   ['origin_id', 'dest_id', 'station_id'],
+             'station_events.xlsx',  f'{method} events'),
+        ]
+        for rows, id_cols, fname, label in specs:
+            fpath = os.path.join(out_dir, fname)
+            if use_cache and Path(fpath).exists():
+                print(f"    cached: {fpath}")
+            else:
+                _write_trip_workbook(rows, name_lookup, windows, id_cols, fpath, label)
 
     skims_path = os.path.join(out_dir, 'skims.xlsx')
     if use_cache and Path(skims_path).exists():
@@ -1105,7 +1131,7 @@ def _report_sa_top20(prim: dict, skims: dict, name_lookup: dict, svc_network: st
                      method: str, sa_ids, tau_full_day: float, top_n: int = 20) -> None:
     """Per SA origin station: top-N destinations by full-day trips, with travel
     time, frequency, transfers and a direct (Y/N) flag. One sheet per station."""
-    if not prim['paths']:
+    if _prim_empty(prim['paths']):
         print("    sa_top20: no paths — skipping SA top-N workbook")
         return
     pdf = pd.DataFrame(prim['paths'])
@@ -1176,7 +1202,7 @@ def _service_loads_dfs(prim: dict, qualifying_routes: set, name_lookup: dict,
     """Per-window (segment loads, station boardings/alightings) DataFrames for the
     services visiting >= 2 SA stations, τ-scaled. Returns (loads_df, boardings_df);
     either may be empty."""
-    if not prim['segments']:
+    if _prim_empty(prim['segments']):
         return pd.DataFrame(), pd.DataFrame()
     seg = pd.DataFrame(prim['segments']).copy()
     seg['route_id'] = seg['variant_key'].map(_route_of)
@@ -1219,7 +1245,7 @@ def _station_flows_df(prim: dict, name_lookup: dict, tau: float) -> pd.DataFrame
     methodology: passengers changing trains are counted twice (once alighting,
     once boarding); pass-through and non-rail passengers are excluded.
     """
-    if not prim['events']:
+    if _prim_empty(prim['events']):
         return pd.DataFrame()
     ev = pd.DataFrame(prim['events']).copy()
     ev['trips'] = ev['trips'] * tau
@@ -1390,7 +1416,7 @@ def _plot_sa_destination_matrices(prim: dict, skims: dict, name_lookup: dict,
                                   n_dest: int = 15) -> None:
     """Heatmap sets over (i) SA origins × global top-N destinations and (ii) SA
     origins × SA destinations (the corridor where interventions are studied)."""
-    if not prim['paths']:
+    if _prim_empty(prim['paths']):
         print("    heatmaps: no paths — skipping matrices")
         return
     pdf = pd.DataFrame(prim['paths'])
@@ -1411,7 +1437,7 @@ def _plot_corridor_service_sankeys(prim: dict, name_lookup: dict, svc_network: s
     """Per corridor: 3-column Sankey origin SA station -> line boarded at origin
     -> final destination (top-N + 'Other'), full-day trips."""
     import catchment_OD_preparation as cod
-    if not prim['paths'] or not prim['events']:
+    if _prim_empty(prim['paths']) or _prim_empty(prim['events']):
         print("    sankeys: no paths/events — skipping")
         return
     pdf = pd.DataFrame(prim['paths'])
@@ -1597,7 +1623,7 @@ def _plot_service_load_sequences(prim: dict, variant_seq: dict,
     sequence per direction (dir 0 left, dir 1 right) with peak and off-peak shown as
     separate sequences. Load factor = period segment pax / period dep_h; a service
     running in only one period gets only that period's columns."""
-    if not prim['segments']:
+    if _prim_empty(prim['segments']):
         print("    service load plots: no segments — skipped")
         return
     seg = pd.DataFrame(prim['segments']).copy()
@@ -1768,54 +1794,36 @@ def _load_gateway_connections(svc_version: str) -> pd.DataFrame:
     return df
 
 
-def _load_w3_od(od_path: str, rail_stations: gpd.GeoDataFrame,
-                name_lookup: dict, sheet_name='Specific') -> pd.DataFrame:
-    """Load a W3 per-window station-pair OD workbook; return long-format with
-    id_point keys.
-
-    The W3 workbooks use station names (possibly disambiguated) as both the row
-    index ('origin') and column headers ('destination'). This function reverses
-    the name_lookup to recover integer id_point values.
+def _load_routing_od(svc_network: str, od_method: str) -> pd.DataFrame:
+    """Whole-day routing OD from the Hook-3 long CSV (TAU_FULL_DAY_SHARE = 1.0:
+    the whole-day long table IS the full-day OD). Id-keyed, so no name->id
+    round-trip; the per-window xlsx remains a human export.
 
     Args:
-        od_path:      Absolute path to the W3 per-window OD workbook (.xlsx).
-        rail_stations: GDF with id_point and stop_name columns.
-        name_lookup:  dict[id_point_str -> readable_name] as built by
-                      catchment_OD_preparation._build_station_name_lookup.
-        sheet_name:   attribution sheet to read ('Specific' | 'Blended' for
-                      PT-Feeder; 'Municipal' for the municipal method).
+        svc_network: Service network folder name (with '_network').
+        od_method:   'pt_feeder' (attribution from settings.OD_ATTRIBUTION_MODE)
+                     | 'municipal'.
 
     Returns:
         DataFrame[origin_id (int), dest_id (int), trips (float)].
         Intrazonal and zero-trip rows excluded.
     """
-    if not os.path.exists(od_path):
+    attribution = (settings.OD_ATTRIBUTION_MODE.strip().lower()
+                   if od_method == 'pt_feeder' else 'municipal')
+    path = paths.get_station_od_long_csv(svc_network, od_method, attribution)
+    if not os.path.exists(path):
         raise FileNotFoundError(
-            f"W3 OD workbook not found: {od_path}. "
-            f"Run catchment_OD_preparation.prepare_all_od_matrices() first."
-        )
-
-    matrix = pd.read_excel(od_path, sheet_name=sheet_name, index_col=0)
-
-    # Reverse name_lookup: readable_name -> id_point (int)
-    reverse = {v: int(k) for k, v in name_lookup.items()}
-
-    long = (
-        matrix
-        .rename_axis(index='origin_name', columns='dest_name')
-        .stack()
-        .reset_index(name='trips')
-        .rename(columns={'origin_name': 'on', 'dest_name': 'dn'})
-    )
-    long['origin_id'] = long['on'].map(reverse)
-    long['dest_id']   = long['dn'].map(reverse)
-    long = long.dropna(subset=['origin_id', 'dest_id'])
-    long['origin_id'] = long['origin_id'].astype(int)
-    long['dest_id']   = long['dest_id'].astype(int)
-    long = long[long['origin_id'] != long['dest_id']]
-    long = long[long['trips'] > 0][['origin_id', 'dest_id', 'trips']].copy()
-    print(f"    W3 OD loaded: {len(long):,} non-zero inter-station pairs")
-    return long
+            f"Long-format OD CSV not found: {path}. "
+            f"Run catchment_OD_preparation.prepare_all_od_matrices() first.")
+    od = pd.read_csv(path).rename(columns={'origin_station_id': 'origin_id',
+                                           'dest_station_id': 'dest_id'})
+    od['origin_id'] = od['origin_id'].astype(int)
+    od['dest_id']   = od['dest_id'].astype(int)
+    od = od[od['origin_id'] != od['dest_id']]
+    od = od[od['trips'] > 0][['origin_id', 'dest_id', 'trips']].copy()
+    print(f"    routing OD loaded ({od_method}/{attribution}): {len(od):,} "
+          f"non-zero inter-station pairs")
+    return od
 
 
 # ===============================================================================
@@ -1859,11 +1867,11 @@ def _build_routing_graph(svc_version: str, od_method: str = 'pt_feeder',
     cod._extend_name_lookup_from_breakdown(name_lookup, od_method)
 
     # Gateway (boundary) stations sit outside the catchment, so the in-catchment
-    # rail_stations load above omits them. Without this, _load_w3_od cannot
-    # reverse-map the gateway-keyed OD rows (names absent from name_lookup -> the
-    # rows are silently dropped) and the graph has no integer-id portal for them.
-    # Recover both: add gateway names to name_lookup (plain, mirroring
-    # catchment_OD_preparation) and seed gateway rows into the graph's station set.
+    # rail_stations load above omits them. Without this the graph has no
+    # integer-id portal for the gateway-keyed OD rows and the outputs lack
+    # readable gateway names. Recover both: add gateway names to name_lookup
+    # (plain, mirroring catchment_OD_preparation) and seed gateway rows into the
+    # graph's station set.
     infra_version    = cod._resolve_infra_version(svc_version, infra_version)
     conv_map         = cod._load_convergence_map(
         paths.get_gateway_dir(svc_version),
@@ -1949,14 +1957,8 @@ def passenger_routing(svc_version: str = '',
     global _ROUTE_NAME
     _ROUTE_NAME = report_ctx['route_name']
 
-    od_path = paths.get_station_od_window_xlsx(svc_version, od_method, 'full_day')
-    if od_method == 'pt_feeder':
-        od_sheet = 'Blended' if settings.OD_ATTRIBUTION_MODE.strip().lower() == 'blended' \
-                   else 'Specific'
-    else:
-        od_sheet = 'Municipal'
-    print(f"\n[Step 1] Loading W3 full-day OD ({od_method}, sheet '{od_sheet}') ...")
-    od_long = _load_w3_od(od_path, rail_stations, name_lookup, sheet_name=od_sheet)
+    print(f"\n[Step 1] Loading W3 full-day OD ({od_method}) ...")
+    od_long = _load_routing_od(svc_version, od_method)
 
     od_normal, od_gw = _expand_gateway_od(od_long, gw_lookup, gw_ids)
     print(f"  Gateways wired: {len(gw_ids)} boundary gateways, "
@@ -2003,6 +2005,11 @@ def passenger_routing(svc_version: str = '',
         _write_reports(prim, skims, rail_segs_tt, rail_stations, name_lookup,
                        svc_network, method, windows, sa_ids, variant_seq,
                        report_ctx['variant_period_freq'], make_plots=make_plots)
+
+        cache_manifest.write_manifest(
+            paths.get_assignment_method_dir(svc_network, method),
+            'assignment_4c',
+            {'svc_network': svc_network, 'infra_version': infra_version})
 
     print("\n=== Phase 4C passenger routing done ===")
 
@@ -2078,6 +2085,316 @@ def route_subset(svc_version: str, od_subset: pd.DataFrame, method: str = '',
     if not od_gw.empty:
         _merge_primitives(prim, _assign_gateway(G, od_gw))
     return prim
+
+
+# ===============================================================================
+# PHASE 6C — SELECTIVE PER-SVC-INT ROUTING  (closure -> re-route -> merge -> re-aggregate)
+# ===============================================================================
+
+# Process-lifetime cache: (svc_network, method) -> baseline primitive dict. Every
+# svc-int in a Phase-6 run re-routes against the SAME baseline, so the ~1.18M-row
+# segments parquet is read once, not once per intervention. Consumers
+# (_closure_pairs, _replace_pairs) only READ it — the cached DataFrames are
+# shared and MUST NOT be mutated in place; each caller gets a shallow-copied dict
+# so reassigning a table stays local.
+_BASELINE_PRIM_CACHE: dict = {}
+
+
+def clear_baseline_primitive_cache() -> None:
+    """Drop the in-process baseline-primitive cache (call if Phase 4C re-runs in
+    the same process and the baseline changes underneath Phase 6)."""
+    _BASELINE_PRIM_CACHE.clear()
+
+
+def _load_baseline_primitive(svc_network: str, method: str,
+                             use_cache: bool = True) -> dict:
+    """Reload the persisted pre-τ baseline primitive as DataFrames.
+
+    Cached per (svc_network, method) for the process lifetime: a 30-svc-int run
+    reads the baseline once instead of 30×. The returned dict is a fresh shallow
+    copy (reassigning a table is local) but the DataFrames are shared and must
+    not be mutated in place. Pass use_cache=False to force a fresh read.
+
+    Raises FileNotFoundError when any table is missing — Phase 4C
+    (passenger_routing) must have produced the baseline for this method first.
+    """
+    key = (svc_network, method)
+    if use_cache and key in _BASELINE_PRIM_CACHE:
+        cached = _BASELINE_PRIM_CACHE[key]
+        print("    baseline primitive: reusing cached copy ("
+              + ", ".join(f"{t}={len(cached[t]):,}" for t in cached) + ")")
+        return dict(cached)
+    prim = {}
+    for table in ('paths', 'segments', 'events', 'unresolved'):
+        fpath = paths.get_routing_primitive_path(svc_network, method, table)
+        if not os.path.exists(fpath):
+            raise FileNotFoundError(
+                f"Baseline primitive missing: {fpath}. Run Phase 4C "
+                f"(passenger_routing) for '{svc_network}'/{method} first.")
+        prim[table] = pd.read_parquet(fpath)
+    print(f"    baseline primitive loaded: "
+          + ", ".join(f"{t}={len(prim[t]):,}" for t in prim))
+    if use_cache:
+        _BASELINE_PRIM_CACHE[key] = prim
+    return dict(prim)
+
+
+def _closure_pairs(base_prim: dict, od_long: pd.DataFrame, affected_stations,
+                   affected_services, od_changed_pairs=None) -> set:
+    """Service-anchored Phase-6C closure (architecture decision C).
+
+    A pair re-routes iff (a) its baseline path used any service that stops or
+    passes at an affected station — the affected-service set is the hook's
+    variant_keys expanded by every variant_key with a board/alight/pass event at
+    an affected station, catching substitution among co-located services — or
+    (b) either endpoint is an affected station, or (c) its OD value changed in
+    6B. The documented residual (a pair newly transferring through a brand-new
+    corridor without touching an affected station in baseline) escapes this set
+    and is caught only by the use_full_recompute_ints oracle.
+
+    Returns:
+        set[(origin_id, dest_id)] of pairs to re-route.
+    """
+    aff_int = {int(s) for s in (affected_stations or [])}
+    aff_str = {str(s) for s in aff_int}
+    vks = {str(v) for v in (affected_services or [])}
+
+    ev = base_prim['events']
+    if len(ev) and aff_str:
+        sid = ev['station_id'].astype(str).str.lstrip('x')
+        vks |= set(ev.loc[sid.isin(aff_str), 'variant_key'].astype(str).unique())
+
+    pairs: set = set()
+    seg = base_prim['segments']
+    if len(seg) and vks:
+        m = seg['variant_key'].astype(str).isin(vks)
+        pairs |= set(zip(seg.loc[m, 'origin_id'].astype(int),
+                         seg.loc[m, 'dest_id'].astype(int)))
+    n_service = len(pairs)
+    if len(od_long) and aff_int:
+        m2 = od_long['origin_id'].isin(aff_int) | od_long['dest_id'].isin(aff_int)
+        pairs |= set(zip(od_long.loc[m2, 'origin_id'].astype(int),
+                         od_long.loc[m2, 'dest_id'].astype(int)))
+    n_endpoint = len(pairs) - n_service
+    n_od = 0
+    if od_changed_pairs:
+        before = len(pairs)
+        pairs |= {(int(a), int(b)) for a, b in od_changed_pairs}
+        n_od = len(pairs) - before
+    print(f"    closure: {len(vks)} affected service(s) -> {len(pairs):,} pairs "
+          f"({n_service:,} via services, +{n_endpoint:,} endpoint, "
+          f"+{n_od:,} OD-changed)")
+    return pairs
+
+
+def _replace_pairs(base_prim: dict, prim_new: dict, pairs: set) -> dict:
+    """Per-pair replacement merge: drop every baseline row of the closure pairs
+    from all four tables and append the re-routed rows (routing is whole-pair).
+    Object columns of the new rows are cast to str to match the parquet dtypes."""
+    merged = {}
+    for table in ('paths', 'segments', 'events', 'unresolved'):
+        b = base_prim[table]
+        if len(b):
+            key = pd.Series(list(zip(b['origin_id'].astype(int),
+                                     b['dest_id'].astype(int))), index=b.index)
+            b = b[~key.isin(pairs).values]
+        n = pd.DataFrame(prim_new[table])
+        if len(n):
+            for c in n.columns:
+                if n[c].dtype == object:
+                    n[c] = n[c].astype(str)
+            merged[table] = pd.concat([b, n], ignore_index=True)
+        else:
+            merged[table] = b.reset_index(drop=True)
+    return merged
+
+
+def route_svc_int(svc_int_id: str, base_svc_network: str, affected_stations,
+                  affected_services, rail_base: str, infra_version: str = '',
+                  od_changed_pairs=None, od_long_dev: pd.DataFrame = None,
+                  method: str = '', od_method: str = 'pt_feeder',
+                  make_plots: bool = False,
+                  full_recompute: bool = False,
+                  write_workbooks: bool = None) -> dict:
+    """Phase-6C selective routing for one service intervention.
+
+    Computes the closure on the baseline primitive, re-routes exactly those OD
+    pairs on the developed (merged) network, replaces them in the baseline
+    primitive and re-derives every Phase-4C output — workbooks, skims, reports,
+    primitive parquet — under Assignment/<svc_int_id>_network/<method>/ (the
+    Phase-4 schema, keyed by svc-int). Unaffected pairs keep their baseline rows
+    byte-identically; the additive globals (service loads/boardings, station
+    flows) are re-aggregated from the merged primitive.
+
+    Args:
+        svc_int_id:        svc-int id (e.g. 'ext_100001').
+        base_svc_network:  baseline service network WITH the '_network' suffix.
+        affected_stations: iterable[int] affected id_points (Hook-1 CSV).
+        affected_services: iterable[str] affected variant_keys (Hook-1 CSV).
+        rail_base:         merged developed-network dir
+                           (svc_ints_orchestrator.build_merged_unprojected).
+        infra_version:     BASE infra version — gateway recovery (boundary
+                           stations, connections) reads the baseline network.
+        od_changed_pairs:  optional iterable[(origin_id, dest_id)] from 6B.
+        od_long_dev:       optional per-svc-int OD (6B merge); None routes the
+                           baseline OD (Municipal: OD is intervention-invariant).
+        method:            '' -> settings.ROUTING_ASSIGNMENT_METHOD; 'both' -> 'logit'.
+        od_method:         'pt_feeder' | 'municipal'.
+        make_plots:        render the Phase-4C report plots for the svc-int
+                           (workbooks/CSVs are always written).
+        full_recompute:    oracle mode (architecture decision C): route EVERY
+                           OD pair on the developed network — no baseline load,
+                           closure or merge — through the same loaders, so a
+                           parity check against the selective result isolates
+                           the closure, not the loaders.
+        write_workbooks:   write the three large trip workbooks (path_assignment/
+                           segment_loads/station_events.xlsx) for this svc-int;
+                           None -> settings.WRITE_INT_WORKBOOKS. The parquet
+                           primitives + skims are the machine contract and always
+                           write.
+
+    Returns:
+        dict(n_pairs_total, n_pairs_closure, routed_trips, unresolved_trips).
+    """
+    m = (method or settings.ROUTING_ASSIGNMENT_METHOD).strip().lower()
+    if m == 'both':
+        m = 'logit'
+    if m not in ('shortest_path', 'logit'):
+        raise ValueError(f"Unknown method '{m}' (expected shortest_path | logit).")
+    if write_workbooks is None:
+        write_workbooks = getattr(settings, 'WRITE_INT_WORKBOOKS', False)
+
+    svc_int_network = f"{svc_int_id}_network"
+    print("=" * 70)
+    print(f"PHASE 6C {'FULL-RECOMPUTE ORACLE' if full_recompute else 'SELECTIVE ROUTING'} "
+          f"— {svc_int_id}")
+    print(f"  Baseline network : {base_svc_network}")
+    print(f"  Developed network: {rail_base}")
+    print(f"  Method           : {m}  |  OD: {od_method}")
+    print("=" * 70)
+
+    base_prim = None if full_recompute else _load_baseline_primitive(
+        base_svc_network, m)
+
+    prev_rail_base = catchment_allocate._RAIL_BASE
+    try:
+        ctx = _build_routing_graph(base_svc_network, od_method, infra_version,
+                                   rail_base=rail_base)
+        global _ROUTE_NAME
+        _ROUTE_NAME = ctx['report_ctx']['route_name']
+
+        if od_long_dev is not None:
+            od_long = od_long_dev[['origin_id', 'dest_id', 'trips']].copy()
+            print(f"    using 6B per-svc-int OD: {len(od_long):,} pairs")
+        else:
+            od_long = _load_routing_od(base_svc_network, od_method)
+
+        if full_recompute:
+            pairs = set(zip(od_long['origin_id'].astype(int),
+                            od_long['dest_id'].astype(int)))
+        else:
+            pairs = _closure_pairs(base_prim, od_long, affected_stations,
+                                   affected_services, od_changed_pairs)
+        if not pairs:
+            print("    empty closure — svc-int touches no routed pair; "
+                  "baseline outputs would be identical. Skipping.")
+            return {'n_pairs_total': len(od_long), 'n_pairs_closure': 0,
+                    'routed_trips': 0.0, 'unresolved_trips': 0.0}
+
+        # Closure keys absent from the OD: with a 6B per-svc-int OD these are
+        # legitimate removals (the pair's demand went to zero in the delta —
+        # baseline rows are deleted, nothing re-routed). Routing the BASELINE
+        # OD they signal a structural od_method mismatch between primitive and
+        # OD, which would silently lose trips — refuse.
+        od_keys = set(zip(od_long['origin_id'].astype(int),
+                          od_long['dest_id'].astype(int)))
+        missing = len(pairs - od_keys)
+        if full_recompute:
+            pass                               # pairs == od_keys by construction
+        elif od_long_dev is not None:
+            if missing:
+                print(f"    {missing:,} closure pair(s) have no OD row in the "
+                      f"6B OD (demand removed by the delta) — baseline rows "
+                      f"deleted, not re-routed.")
+        elif missing > max(10, 0.01 * len(pairs)):
+            raise ValueError(
+                f"{missing:,} of {len(pairs):,} closure pairs are absent from "
+                f"the OD — the baseline primitive under '{base_svc_network}'/"
+                f"{m} was built from a different od_method than '{od_method}'. "
+                f"Re-run Phase 4C with the matching method first.")
+
+        keys = np.fromiter(
+            (k in pairs for k in zip(od_long['origin_id'].astype(int),
+                                     od_long['dest_id'].astype(int))),
+            dtype=bool, count=len(od_long))
+        od_sub = od_long[keys].copy()
+        print(f"    re-routing {len(od_sub):,} of {len(od_long):,} OD pairs "
+              f"({od_sub['trips'].sum():,.1f} of {od_long['trips'].sum():,.1f} trips)")
+
+        od_normal, od_gw = _expand_gateway_od(od_sub, ctx['gw_lookup'],
+                                              ctx['gw_ids'])
+        if m == 'shortest_path':
+            prim_new = _assign_shortest_path(ctx['G'], od_normal)
+        else:
+            prim_new = _assign_logit(
+                ctx['G'], od_normal,
+                engine=getattr(settings, 'ROUTING_LOGIT_ENGINE', 'table'),
+                variant_seq=ctx['variant_seq'],
+                k=settings.ROUTING_K_PATHS,
+                window_min=settings.ROUTING_COST_WINDOW_MIN,
+                window_pct=settings.ROUTING_COST_WINDOW_PCT,
+                max_transfers=settings.ROUTING_MAX_TRANSFERS,
+                max_examine=settings.ROUTING_MAX_EXAMINE,
+                theta=cp.LOGIT_ROUTE_THETA)
+        if not od_gw.empty:
+            _merge_primitives(prim_new, _assign_gateway(ctx['G'], od_gw))
+
+        if full_recompute:
+            cols = {'paths': ['origin_id', 'dest_id', 'path_id', 'n_transfers',
+                              'lines_used', 'journey_time_min', 'gc_min',
+                              'share', 'trips'],
+                    'segments': ['origin_id', 'dest_id', 'path_id', 'from_id',
+                                 'to_id', 'variant_key', 'trips'],
+                    'events': ['origin_id', 'dest_id', 'path_id', 'station_id',
+                               'event', 'variant_key', 'trips'],
+                    'unresolved': ['origin_id', 'dest_id', 'trips']}
+            merged = {k: (pd.DataFrame(v) if v else pd.DataFrame(columns=cols[k]))
+                      for k, v in prim_new.items()}
+        else:
+            merged = _replace_pairs(base_prim, prim_new, pairs)
+        skims = _build_skims(merged, ctx['report_ctx']['vfreq_report'],
+                             ctx['report_ctx']['direct_freq_report'])
+
+        windows = [(cp.TAU_PEAK_SHARE, 'peak'),
+                   (cp.TAU_OFFPEAK_SHARE, 'off_peak'),
+                   (cp.TAU_FULL_DAY_SHARE, 'full_day')]
+        print(f"\n    writing per-svc-int outputs -> "
+              f"{paths.get_assignment_method_dir(svc_int_network, m)}")
+        _write_method_outputs(merged, skims, ctx['name_lookup'],
+                              svc_int_network, m, windows, use_cache=False,
+                              write_workbooks=write_workbooks)
+        _persist_primitive(merged, svc_int_network, m, use_cache=False)
+        _write_reports(merged, skims, ctx['rail_segs_tt'], ctx['rail_stations'],
+                       ctx['name_lookup'], svc_int_network, m, windows,
+                       _sa_station_ids(), ctx['variant_seq'],
+                       ctx['report_ctx']['variant_period_freq'],
+                       make_plots=make_plots)
+
+        cache_manifest.write_manifest(
+            paths.get_assignment_method_dir(svc_int_network, m),
+            'assignment_4c',
+            {'svc_network': base_svc_network, 'infra_version': infra_version,
+             'svc_int_id': svc_int_id})
+
+        routed = float(merged['paths']['trips'].sum()) if len(merged['paths']) else 0.0
+        unres = float(merged['unresolved']['trips'].sum()) if len(merged['unresolved']) else 0.0
+        print(f"    Conservation [{svc_int_id}/{m}]: routed {routed:,.1f} + "
+              f"unresolved {unres:,.1f} = {routed + unres:,.1f}  "
+              f"(OD total {od_long['trips'].sum():,.1f})")
+        return {'n_pairs_total': len(od_long), 'n_pairs_closure': len(pairs),
+                'routed_trips': routed, 'unresolved_trips': unres}
+    finally:
+        catchment_allocate._RAIL_BASE = prev_rail_base
 
 
 # ===============================================================================
@@ -2157,12 +2474,66 @@ if __name__ == '__main__':
             break
         print("  Invalid — enter y or n.")
 
+    print("\nRun mode:")
+    print("  1) full Phase-4C routing (baseline)")
+    print("  2) Phase-6C svc-int selective re-routing")
+    while True:
+        _r = input("Select run mode [1]: ").strip() or '1'
+        if _r in ('1', '2'):
+            break
+        print("  Enter 1 or 2.")
+
     _svc_arg = (_svc + '_network'
                 if _svc and not _svc.endswith('_network') else _svc)
-    for _od_method in _od_methods:
-        passenger_routing(
-            svc_version=_svc_arg,
-            use_cache=getattr(settings, 'use_cache_railRouting', False),
-            od_method=_od_method,
-            assignment_method=_assignment,
-            make_plots=_make_plots)
+
+    if _r == '1':
+        for _od_method in _od_methods:
+            passenger_routing(
+                svc_version=_svc_arg,
+                use_cache=getattr(settings, 'use_cache_railRouting', False),
+                od_method=_od_method,
+                assignment_method=_assignment,
+                make_plots=_make_plots)
+    else:
+        import svc_ints_orchestrator as _so
+        _base_svc = _svc_arg.replace('_network', '')
+        _iids = (_so.list_svc_int_ids('ext') + _so.list_svc_int_ids('ndc'))
+        if not _iids:
+            raise SystemExit("No svc-ints registered — run Phase 5B first.")
+        print("\nRegistered svc-ints: " + ", ".join(_iids))
+        while True:
+            _iid = input(f"Svc-int id [{_iids[0]}]: ").strip() or _iids[0]
+            if _iid in _iids:
+                break
+            print("  Unknown id.")
+        _infra = input(f"Base infra version [{settings.INFRA_VERSION}]: ").strip() \
+            or settings.INFRA_VERSION
+        _itype = 'ext' if _iid.startswith('ext') else 'ndc'
+        _rec = _so.read_record(_itype, _iid)
+        _aff_path = os.path.join(
+            paths.get_svc_int_catalogue_dir(_so._svc_network(None)),
+            f'svc_int_affected_set_{_infra}.csv')
+        _stations, _services = [], []
+        if os.path.exists(_aff_path):
+            _adf = pd.read_csv(_aff_path, encoding='utf-8-sig')
+            _row = _adf[_adf['int_id'].astype(str) == _iid]
+            if not _row.empty:
+                _raw_st = _row.iloc[0].get('affected_stations')
+                _raw_sv = _row.iloc[0].get('affected_services')
+                _stations = [int(float(t)) for t in str(_raw_st or '').split(',')
+                             if t.strip() and str(_raw_st) != 'nan']
+                _services = [t.strip() for t in str(_raw_sv or '').split(',')
+                             if t.strip() and str(_raw_sv) != 'nan']
+        else:
+            print(f"WARNING: no affected-set CSV at {_aff_path} — closure will "
+                  f"use endpoint pairs only.")
+        _so.apply_svc_int(_rec, _base_svc, _infra, use_cache=True)
+        _merged = _so.build_merged_unprojected(_rec, _base_svc, _infra,
+                                               use_cache=True)
+        if not _merged:
+            raise SystemExit(f"{_iid}: empty delta — nothing to route.")
+        for _od_method in _od_methods:
+            route_svc_int(_iid, _svc_arg, _stations, _services,
+                          rail_base=_merged, infra_version=_infra,
+                          method=_assignment, od_method=_od_method,
+                          make_plots=_make_plots)

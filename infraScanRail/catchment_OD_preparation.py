@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 from pyogrio import list_layers
 
+import cache_manifest
 import paths
 import settings
 import scoring
@@ -227,6 +228,12 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
         print(f"    cached: {communal_path}")
     else:
         branch_od.to_csv(communal_path, index=False, encoding='utf-8-sig')
+    # Gateway recompute inputs (Phase 6B): communal_od_branch.csv concatenates
+    # internal + gateway rows unsplittably (gateway station ids can collide with
+    # BFS codes), so 6B rebuilds the developed communal OD from the pre-expansion
+    # external OD (zone codes intact) + internal OD + in-boundary BFS set.
+    _persist_gateway_inputs(svc_version, internal_od, external_od, in_bnd_bfs,
+                            use_cache)
     print(f"    long OD + weights + communal OD under "
           f"{paths.get_od_version_dir(svc_version)}")
 
@@ -257,6 +264,10 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
             _plot_od_diagnostics(pt_long, muni_long, rail_stations, boundary,
                                   name_lookup)
 
+    cache_manifest.write_manifest(paths.get_od_version_dir(svc_version),
+                                  'station_od_4b',
+                                  {'svc_network': svc_version,
+                                   'infra_version': infra_version})
     print("\n=== W3 OD matrices done ===")
 
 
@@ -2087,14 +2098,299 @@ def reaggregate_subset(communal_od: pd.DataFrame, orig_weights: pd.DataFrame,
     """Delta entry point: station OD for only the pairs whose origin OR destination
     commune is in `communes` (the affected set).
 
-    The caller merges the returned long_df into the cached base station OD,
-    replacing the affected pairs. Reuses _reaggregate_to_stations on the filtered
-    communal OD, so the maths matches a full run exactly.
+    The caller merges the returned long_df into the cached base station OD.
+    NOTE: a station pair mixes contributions from affected and unaffected
+    communes, so the exact merge is the DELTA `base − reagg(base, S) +
+    reagg(dev, S)` (see prepare_svc_int_od / _merge_od_delta), not a per-pair
+    replacement. Reuses _reaggregate_to_stations on the filtered communal OD, so
+    the maths matches a full run exactly.
     """
     cset = {int(c) for c in communes}
     sub = communal_od[communal_od['quelle_code'].isin(cset)
                       | communal_od['ziel_code'].isin(cset)]
     return _reaggregate_to_stations(sub, orig_weights, dest_weights)
+
+
+# ===============================================================================
+# PHASE 6B — PER-SVC-INT OD DELTA MERGE
+# ===============================================================================
+
+# Base gateway state cache: (base_svc_network, infra_version) -> _prepare_gateways
+# dict. Built once per run from the saved assignment files (non-interactive).
+_PHASE6_GATEWAY_BASE: dict = {}
+
+
+def prepare_svc_int_od(svc_int_id, base_svc_network, infra_version,
+                       affected_communes, attribution='',
+                       full_recompute=False) -> dict:
+    """Phase-6B: per-svc-int station OD via the exact delta merge.
+
+    Affected set S = communes whose cells re-allocated in 6A ∪ gateways whose
+    zone demand split changed on the developed network (multi-gateway zones
+    split by crossing-service volume; the zone→gateway assignment itself is
+    static). The merge is `long_dev = long_base − reagg(base, S) + reagg(dev, S)`
+    — exact because the station attribution is linear in the communal rows.
+    Outputs are written in the Phase-4B schema under
+    Traffic_Flow/OD/<svc_int_id>_network/PT_Feeder/ (long CSV, weight CSVs,
+    full_day workbook); Phase 7 consumes the long CSV unchanged.
+
+    Args:
+        svc_int_id:        svc-int id (e.g. 'ext_100001').
+        base_svc_network:  baseline service network WITH the '_network' suffix.
+        infra_version:     base infra version (locates the svc-int's merged
+                           projected segments for the gateway-volume recompute).
+        affected_communes: iterable[int] BFS codes from 6A.
+        attribution:       '' -> settings.OD_ATTRIBUTION_MODE.
+        full_recompute:    oracle mode (plan Phase 4): full reaggregation of the
+                           developed communal OD with the dev weights — no delta
+                           merge — through the same functions, so a parity check
+                           against the selective result isolates the affected set.
+
+    Returns:
+        dict(od_long_dev, od_routing [origin_id, dest_id, trips],
+             changed_pairs, changed_gateways, affected_set).
+    """
+    attribution = (attribution or settings.OD_ATTRIBUTION_MODE).strip().lower()
+    branch = 'pt_feeder'
+    sheet_label = 'Blended' if attribution == 'blended' else 'Specific'
+    mode = 'ORACLE full reaggregation' if full_recompute else 'OD delta merge'
+    print(f"\n--- Phase 6B [{svc_int_id}]: {mode} ({attribution}) ---")
+
+    # Baseline artifacts (Hook 3)
+    long_base = pd.read_csv(paths.get_station_od_long_csv(
+        base_svc_network, branch, attribution), encoding='utf-8-sig')
+    ow_base = pd.read_csv(paths.get_attribution_weights_csv(
+        base_svc_network, branch, attribution, 'orig'), encoding='utf-8-sig')
+    dw_base = pd.read_csv(paths.get_attribution_weights_csv(
+        base_svc_network, branch, attribution, 'dest'), encoding='utf-8-sig')
+    communal_base = pd.read_csv(paths.get_communal_od_csv(base_svc_network),
+                                encoding='utf-8-sig')
+    internal_od, external_od, in_bnd_bfs = _load_gateway_inputs(base_svc_network)
+
+    # Base gateway state (cached once per run; saved assignment, no prompts)
+    gws = _base_gateway_state(base_svc_network, infra_version, external_od,
+                              in_bnd_bfs)
+    gw_weights_base = gws['gw_weights']
+    gw_ids = gws['gateway_station_ids']
+    assignment = {code: [int(s) for s, _w in lst]
+                  for code, lst in gw_weights_base.items()}
+
+    # Developed-network gateway volumes -> dev demand split. Volumes come from
+    # the 5C merged projected segments (the delta-only projection would see only
+    # the changed services); frequencies = base lookup overridden by the delta's
+    # (replaced EXT variants share their key, NDC adds new ones).
+    seg_merged = str(Path(paths.get_svc_int_projected_path(
+        svc_int_id, infra_version)).with_name('rail_segments_merged.gpkg'))
+    if not os.path.exists(seg_merged):
+        raise FileNotFoundError(
+            f"Merged projected segments missing at {seg_merged}. Run Phase 5C "
+            f"(merged services) for {svc_int_id} first.")
+    freq_dev = dict(_load_line_freq_per_h_window(base_svc_network, infra_version))
+    freq_dev.update(_load_line_freq_per_h_window(f'{svc_int_id}_network',
+                                                 infra_version))
+    all_assigned = {int(s) for stns in assignment.values() for s in stns}
+    vols_dev = _gateway_volumes(seg_merged, all_assigned, freq_dev)
+    gw_weights_dev = _build_gateway_weights(assignment, vols_dev)
+
+    changed_gateways: set = set()
+    for code, base_lst in gw_weights_base.items():
+        if len(base_lst) < 2:
+            continue                      # single-gateway zones: share 1.0 always
+        base_shares = {int(s): float(w) for s, w in base_lst}
+        dev_shares = {int(s): float(w) for s, w in gw_weights_dev.get(code, [])}
+        if any(abs(base_shares[s] - dev_shares.get(s, 0.0)) > 1e-9
+               for s in base_shares):
+            changed_gateways |= set(base_shares)
+    print(f"    gateway split: {len(changed_gateways)} gateway(s) with a "
+          f"changed multi-gateway zone share")
+
+    S = {int(c) for c in (affected_communes or set())} | changed_gateways
+
+    # Dev weights from the 6A breakdown (written under <svc_int_id>_network)
+    catchment_base.setup_versioned_dirs(f'{svc_int_id}_network')
+    try:
+        breakdown_dev = _load_station_breakdown('pt_feeder')
+    finally:
+        catchment_base.setup_versioned_dirs(base_svc_network)
+    ow_dev, dw_dev = _attribution_weight_tables(breakdown_dev, attribution,
+                                                gw_ids)
+
+    if full_recompute:
+        gateway_od_dev = _build_gateway_od(external_od, gw_weights_dev,
+                                           in_bnd_bfs)
+        communal_dev = pd.concat([internal_od, gateway_od_dev],
+                                 ignore_index=True)
+        long_dev = _reaggregate_to_stations(communal_dev, ow_dev, dw_dev)
+        key = ['origin_station_id', 'dest_station_id']
+        cmp = (long_base.groupby(key)['trips'].sum().rename('b').to_frame()
+               .join(long_dev.groupby(key)['trips'].sum().rename('d'),
+                     how='outer').fillna(0.0))
+        changed_pairs = {(int(o), int(dd)) for (o, dd) in
+                         cmp[(cmp['b'] - cmp['d']).abs() > 1e-9].index}
+    elif not S:
+        print("    affected set empty — OD equals the baseline.")
+        long_dev, changed_pairs = long_base.copy(), set()
+    else:
+        gateway_od_dev = _build_gateway_od(external_od, gw_weights_dev,
+                                           in_bnd_bfs)
+        communal_dev = pd.concat([internal_od, gateway_od_dev],
+                                 ignore_index=True)
+        base_sub = reaggregate_subset(communal_base, ow_base, dw_base, S)
+        dev_sub = reaggregate_subset(communal_dev, ow_dev, dw_dev, S)
+        long_dev, changed_pairs = _merge_od_delta(long_base, base_sub, dev_sub)
+    print(f"    affected set: {len(S)} commune/gateway code(s) -> "
+          f"{len(changed_pairs):,} changed station pair(s); OD total "
+          f"{long_dev['trips'].sum():,.1f} (base {long_base['trips'].sum():,.1f})")
+
+    # Persist per-svc-int OD (Phase-4B schema, keyed <svc_int_id>_network)
+    int_network = f'{svc_int_id}_network'
+    long_path = paths.get_station_od_long_csv(int_network, branch, attribution)
+    Path(long_path).parent.mkdir(parents=True, exist_ok=True)
+    long_dev.to_csv(long_path, index=False, encoding='utf-8-sig')
+    ow_dev.to_csv(paths.get_attribution_weights_csv(
+        int_network, branch, attribution, 'orig'),
+        index=False, encoding='utf-8-sig')
+    dw_dev.to_csv(paths.get_attribution_weights_csv(
+        int_network, branch, attribution, 'dest'),
+        index=False, encoding='utf-8-sig')
+    name_lookup = _phase6_name_lookup(base_svc_network, gws['bs_index'])
+    _write_window_xlsx({sheet_label: long_dev}, cp.TAU_FULL_DAY_SHARE,
+                       name_lookup,
+                       paths.get_station_od_window_xlsx(int_network, branch,
+                                                        'full_day'),
+                       label=f'{svc_int_id} full_day')
+
+    # Routing-ready frame (TAU_FULL_DAY_SHARE = 1.0: the whole-day long table IS
+    # the routed full-day OD; mirror _load_routing_od's intrazonal/zero filter).
+    od_routing = long_dev.rename(columns={'origin_station_id': 'origin_id',
+                                          'dest_station_id': 'dest_id'})
+    od_routing = od_routing[(od_routing['origin_id'] != od_routing['dest_id'])
+                            & (od_routing['trips'] > 0)]
+    od_routing = od_routing[['origin_id', 'dest_id', 'trips']].copy()
+
+    return {'od_long_dev': long_dev, 'od_routing': od_routing,
+            'changed_pairs': changed_pairs,
+            'changed_gateways': changed_gateways, 'affected_set': S}
+
+
+def _persist_gateway_inputs(svc_network: str, internal_od, external_od,
+                            in_bnd_bfs, use_cache: bool) -> None:
+    """Write the Phase-6B gateway recompute inputs into the Gateway dir."""
+    gdir = paths.get_gateway_dir(svc_network)
+    os.makedirs(gdir, exist_ok=True)
+    for fname, df_ in (('od_internal.csv', internal_od),
+                       ('od_external.csv', external_od)):
+        fp = os.path.join(gdir, fname)
+        if use_cache and Path(fp).exists():
+            print(f"    cached: {fp}")
+        else:
+            df_.to_csv(fp, index=False, encoding='utf-8-sig')
+    bfs_fp = os.path.join(gdir, 'in_boundary_bfs.csv')
+    if not (use_cache and Path(bfs_fp).exists()):
+        pd.DataFrame({'BFS_NR': sorted(int(b) for b in in_bnd_bfs)}).to_csv(
+            bfs_fp, index=False, encoding='utf-8-sig')
+
+
+def _load_gateway_inputs(base_svc_network: str) -> tuple:
+    """Load (internal_od, external_od, in_bnd_bfs) for 6B; reconstruct and
+    persist them when a pre-rework 4B run did not write the files (same
+    functions as prepare_all_od_matrices, so the result is identical)."""
+    gdir = paths.get_gateway_dir(base_svc_network)
+    fps = {n: os.path.join(gdir, f'{n}.csv')
+           for n in ('od_internal', 'od_external', 'in_boundary_bfs')}
+    if all(os.path.exists(p) for p in fps.values()):
+        internal_od = pd.read_csv(fps['od_internal'], encoding='utf-8-sig')
+        external_od = pd.read_csv(fps['od_external'], encoding='utf-8-sig')
+        in_bnd = set(pd.read_csv(fps['in_boundary_bfs'])['BFS_NR'].astype(int))
+        return internal_od, external_od, in_bnd
+    print("    gateway inputs missing — reconstructing from the communal OD "
+          "(one-time backfill of a pre-rework 4B run) ...")
+    boundary = catchment_base._load_catchment_boundary()
+    commune_gdf, bfs_col = _load_commune_boundaries()
+    in_bnd = _get_in_catchment_bfs(boundary, commune_gdf, bfs_col)
+    communal_od = od_communal(year=settings.start_year_scenario)
+    internal_od, external_od = _classify_od(communal_od, in_bnd)
+    _persist_gateway_inputs(base_svc_network, internal_od, external_od, in_bnd,
+                            use_cache=False)
+    return internal_od, external_od, in_bnd
+
+
+def _base_gateway_state(base_svc_network: str, infra_version: str,
+                        external_od, in_bnd_bfs) -> dict:
+    """Cached _prepare_gateways result for the baseline network. All assignment
+    files exist from the 4B run, so the call is non-interactive; it re-writes
+    the (identical) base gateway workbooks as a side effect."""
+    key = (base_svc_network, infra_version)
+    if key not in _PHASE6_GATEWAY_BASE:
+        commune_gdf, bfs_col = _load_commune_boundaries()
+        _PHASE6_GATEWAY_BASE[key] = _prepare_gateways(
+            external_od, commune_gdf, bfs_col, in_bnd_bfs,
+            base_svc_network, infra_version)
+    return _PHASE6_GATEWAY_BASE[key]
+
+
+def _gateway_volumes(seg_path: str, gateway_ids, freq_lookup: dict) -> dict:
+    """Crossing-service volume (whole-day freq_per_h_window) per gateway over
+    all route-type layers — the network-dependent input of the demand split."""
+    vols: dict = {}
+    for lyr in list(_LOCAL_LAYERS) + list(_LDIRT_LAYERS):
+        for gid, f in _freq_by_route_at_gateways(seg_path, lyr, gateway_ids,
+                                                 freq_lookup).items():
+            vols[gid] = vols.get(gid, 0.0) + float(f)
+    return vols
+
+
+def _merge_od_delta(long_base: pd.DataFrame, base_sub: pd.DataFrame,
+                    dev_sub: pd.DataFrame) -> tuple:
+    """Exact delta merge: new = base − reagg(base, S) + reagg(dev, S).
+
+    Linear in the communal rows, so contributions of unaffected communes to a
+    mixed station pair survive. Float-noise negatives are clipped at 0; genuine
+    negatives (> 1e-6) are reported. Returns (long_dev, changed_pairs).
+    """
+    key = ['origin_station_id', 'dest_station_id']
+
+    def _series(df):
+        if df is None or not len(df):
+            return pd.Series(dtype=float)
+        return df.groupby(key)['trips'].sum()
+
+    delta = pd.concat([_series(long_base).rename('base'),
+                       _series(base_sub).rename('sub_base'),
+                       _series(dev_sub).rename('sub_dev')], axis=1).fillna(0.0)
+    delta['new'] = delta['base'] - delta['sub_base'] + delta['sub_dev']
+    n_neg = int((delta['new'] < -1e-6).sum())
+    if n_neg:
+        print(f"    WARNING: {n_neg} station pair(s) went negative in the "
+              f"delta merge (max {-delta['new'].min():.4f}) — clipped to 0.")
+    delta['new'] = delta['new'].clip(lower=0.0)
+
+    changed = delta[(delta['new'] - delta['base']).abs() > 1e-9]
+    changed_pairs = {(int(o), int(d)) for o, d in changed.index}
+
+    out = (delta.loc[delta['new'] > 1e-12, 'new'].rename('trips')
+           .reset_index())
+    out['origin_station_id'] = out['origin_station_id'].astype(int)
+    out['dest_station_id'] = out['dest_station_id'].astype(int)
+    return out, changed_pairs
+
+
+def _phase6_name_lookup(base_svc_network: str, bs_index: dict) -> dict:
+    """Station name lookup (incl. gateway names) for the per-svc-int workbook,
+    built on the baseline station set (svc-ints add no stations)."""
+    prev = catchment_allocate._RAIL_BASE
+    catchment_allocate._RAIL_BASE = os.path.join(
+        paths.RAIL_LINES_DIR, base_svc_network, paths.SERVICES_UNPROJECTED_SUBDIR)
+    try:
+        boundary = catchment_base._load_catchment_boundary()
+        rail_stations = catchment_allocate._load_rail_stations(
+            boundary, 'full_day', buffer=0)
+    finally:
+        catchment_allocate._RAIL_BASE = prev
+    name_lookup = _build_station_name_lookup(rail_stations)
+    for gid, (gname, _geom) in (bs_index or {}).items():
+        name_lookup.setdefault(str(int(gid)), str(gname))
+    return name_lookup
 
 
 # ===============================================================================

@@ -33,6 +33,7 @@ from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
+import cache_manifest
 import paths
 import settings
 import cost_parameters as cp
@@ -3247,39 +3248,56 @@ def _build_visualisation(allocation, grid, rail_stations, boundary, method_label
 # ===============================================================================
 
 def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
-                     pop_grid, empl_grid, rail_stations, boundary):
-    """Cell-level comparison plot: Municipal vs PT-Feeder station assignment.
+                     pop_grid, empl_grid, rail_stations, boundary,
+                     labels=('Municipal', 'PT-Feeder'), out_path=None,
+                     base_assignment=None):
+    """Cell-level comparison plot: station assignment of two allocations.
 
+    Default use compares Municipal vs PT-Feeder; Phase 6A reuses it for
+    base-vs-developed PT-Feeder by passing the base catchment in the first slot,
+    the svc-int catchment + allocation in the second, and `labels`/`out_path`.
     Only cells with population and/or employment are coloured.  Colours:
       - Same station in both methods       → light grey
       - Different station in both methods   → orange (reassigned)
-      - Municipal only (no PT-Feeder)       → red
-      - PT-Feeder only (no Municipal)       → blue
+      - First method only                   → red
+      - Second method only                  → blue
 
     Combined station catchment boundaries from both methods are overlaid.
 
     Parameters
     ----------
     muni_catchment : gpd.GeoDataFrame
-        Municipal catchment with columns [id_point, geometry], dissolved per station.
+        First catchment with columns [id_point, geometry], dissolved per station.
     pt_catchment : gpd.GeoDataFrame
-        PT-Feeder catchment GPKG with columns [train_station, id, geometry].
+        Second catchment GPKG with columns [train_station, id, geometry].
     pt_allocation : pd.DataFrame
-        PT-Feeder cell allocation with columns [RELI, id_point, E_KOORD, N_KOORD].
+        Second method's cell allocation with [RELI, id_point, E_KOORD, N_KOORD].
     pop_grid, empl_grid : gpd.GeoDataFrame
         Population / employment grids with RELI column.
     rail_stations : gpd.GeoDataFrame
     boundary : shapely.Polygon
+    labels : tuple(str, str)
+        Display names of the (first, second) allocation in title/legend/table.
+    out_path : str, optional
+        Output PDF path; default keeps the Municipal-vs-PT-Feeder location.
     """
     if muni_catchment is None or pt_catchment is None:
         print("  Skipping diff plot - one method did not produce catchment geometry")
         return
 
-    print("  Building Municipal vs PT-Feeder diff plot (cell-level) ...")
+    lbl_a, lbl_b = labels
+    print(f"  Building {lbl_a} vs {lbl_b} diff plot (cell-level) ...")
 
-    # --- Cell-level municipal assignment via spatial join ---
-    muni_cells = _assign_cells_to_municipal_catchment(
-        pop_grid, empl_grid, muni_catchment)
+    # --- Cell-level first-slot assignment ---
+    # Exact per-cell assignment when the caller has it (Phase 6A passes the
+    # baseline allocation); spatial join to the catchment polygons otherwise
+    # (fuzzy at polygon borders — fine for the Municipal-vs-PT-Feeder use).
+    if base_assignment is not None:
+        muni_cells = base_assignment[['RELI', 'id_point']].copy()
+        muni_cells = muni_cells[muni_cells['id_point'] != NO_PT_ID]
+    else:
+        muni_cells = _assign_cells_to_municipal_catchment(
+            pop_grid, empl_grid, muni_catchment)
     muni_cells = muni_cells.rename(columns={'id_point': 'muni_station'})
     muni_cells['muni_station'] = pd.to_numeric(
         muni_cells['muni_station'], errors='coerce')
@@ -3381,8 +3399,8 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
     cat_cfg = [
         ('same',      CLR_SAME,      'Same station'),
         ('different', CLR_DIFFERENT, 'Different station (reassigned)'),
-        ('muni_only', CLR_MUNI_ONLY, 'Municipal only'),
-        ('pt_only',   CLR_PT_ONLY,   'PT-Feeder only'),
+        ('muni_only', CLR_MUNI_ONLY, f'{lbl_a} only'),
+        ('pt_only',   CLR_PT_ONLY,   f'{lbl_b} only'),
     ]
     legend_handles = []
     for cat, colour, label in cat_cfg:
@@ -3415,9 +3433,9 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
 
     legend_handles += [
         Line2D([0], [0], color='#d6604d', linewidth=1, linestyle='--',
-               label='Municipal catchment boundary'),
+               label=f'{lbl_a} catchment boundary'),
         Line2D([0], [0], color='#4393c3', linewidth=1, linestyle='-',
-               label='PT-Feeder catchment boundary'),
+               label=f'{lbl_b} catchment boundary'),
     ]
 
     # --- Station markers: white fill + black outline for all; green fill for
@@ -3442,7 +3460,7 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
     muni_ids   = _station_id_set(muni_c)
     pt_ids     = _station_id_set(pt_c)
     pt_new_ids = pt_ids - muni_ids
-    print(f"    Stations gaining a catchment in PT-Feeder (green): {len(pt_new_ids)}")
+    print(f"    Stations gaining a catchment in {lbl_b} (green): {len(pt_new_ids)}")
 
     sta_all    = stations_in_bnd
     sta_pt_new = stations_in_bnd[
@@ -3464,7 +3482,7 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
                label='Rail station (both methods)'),
         Line2D([0], [0], marker='o', color='w', markerfacecolor='#2ca02c',
                markeredgecolor='black', markersize=8,
-               label='Rail station (PT-Feeder only)'),
+               label=f'Rail station ({lbl_b} only)'),
     ]
 
     # Study area boundary
@@ -3479,7 +3497,7 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
     ax.set_xlim(bx_min - pad, bx_max + pad)
     ax.set_ylim(by_min - pad, by_max + pad)
 
-    ax.set_title('Catchment Comparison: Municipal vs PT-Feeder', fontsize=14)
+    ax.set_title(f'Catchment Comparison: {lbl_a} vs {lbl_b}', fontsize=14)
     ax.set_xlabel('E [m]')
     ax.set_ylabel('N [m]')
     ax.set_aspect('equal')
@@ -3489,14 +3507,14 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
 
     # --- Summary table ---
     col_w = 9
-    tbl  = "Population & employment shift: Municipal → PT-Feeder\n"
+    tbl  = f"Population & employment shift: {lbl_a} → {lbl_b}\n"
     tbl += f"{'Category':<28}{'Pop (%)':>{col_w}}{'FTE (%)':>{col_w}}\n"
     tbl += "─" * (28 + 2 * col_w) + "\n"
     rows = [
-        ('Same station',              pct_same),
-        ('Changed station',           pct_diff),
-        ('Lost access (Mun. only)',   pct_muni),
-        ('Gained access (PT only)',   pct_pt),
+        ('Same station',                   pct_same),
+        ('Changed station',                pct_diff),
+        (f'Lost access ({lbl_a} only)',    pct_muni),
+        (f'Gained access ({lbl_b} only)',  pct_pt),
     ]
     for label, (pp, ep) in rows:
         tbl += f"{label:<28}{pp:>{col_w-1}.1f}%{ep:>{col_w-1}.1f}%\n"
@@ -3511,8 +3529,10 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
              fontsize=9, fontfamily='monospace',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.85))
 
-    out_path = os.path.join(os.path.dirname(PT_FEEDER_PLOT_DIR),
-                            'catchment_diff_municipal_vs_pt_feeder.pdf')
+    if out_path is None:
+        out_path = os.path.join(os.path.dirname(PT_FEEDER_PLOT_DIR),
+                                'catchment_diff_municipal_vs_pt_feeder.pdf')
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
     print(f"    Saved -> {out_path}")
@@ -3930,7 +3950,10 @@ def _reconstruct_stop_sequence(variant_segments):
         return []
     pairs = [(str(r['from_stop_id']), str(r['to_stop_id']))
              for _, r in variant_segments.iterrows()]
-    pairs = list(set(pairs))   # dedupe in case the same segment appears twice
+    # Dedupe SORTED: set order varies with the per-process string-hash seed, and
+    # on a branching variant succ keeps the last pair seen per from-stop — the
+    # successor pick (and thus the whole chain) must not depend on the process.
+    pairs = sorted(set(pairs))
     succ = {a: b for a, b in pairs}
     targets = set(succ.values())
     starts = [s for s in succ.keys() if s not in targets]
@@ -4893,6 +4916,239 @@ def _allocate_pt_feeder_core(cells, svc_network):
     return alloc, walk, cycle, feeder
 
 
+# Phase-6A base-network bundle cache: (feeder_base, rail_base) -> svc_network
+# dict. The feeder side (stops, graph times, transfer-free headways) is network-
+# independent across svc-ints, so it is built once per run and reused.
+_PHASE6_BUNDLE_CACHE: dict = {}
+
+
+def reallocate_for_svc_int(svc_int_id, affected_stations, base_svc_network,
+                           dev_rail_base, make_plots=False,
+                           full_recompute=False) -> dict:
+    """Phase-6A: PT-Feeder subset reallocation for one service intervention.
+
+    Affected cells = cells whose candidate-station set (cell_station_candidates
+    CSV, top-5) contains an affected station. Only those cells are re-allocated,
+    on the developed network's frequencies: EXT/NDC add no stations and never
+    touch the feeder network, so of the svc_network bundle only the
+    station_freq_penalty (rail line/segment frequencies) is rebuilt from
+    `dev_rail_base`; the feeder-side members are reused from the base bundle.
+    The result is merged per-cell into the baseline allocation, the breakdown is
+    recomputed in full from the merged allocation, and the per-svc-int catchment
+    outputs are written under data/Catchment_Area/<svc_int_id>_network/PT_Feeder/.
+
+    Args:
+        svc_int_id:        svc-int id (e.g. 'ext_100001').
+        affected_stations: iterable[int] affected id_points (Hook-1 CSV).
+        base_svc_network:  baseline service network WITH the '_network' suffix.
+        dev_rail_base:     merged developed rail network dir
+                           (svc_ints_orchestrator.build_merged_unprojected).
+        make_plots:        base-vs-developed diff plot + catchment/network map.
+        full_recompute:    oracle mode (plan Phase 4): re-allocate EVERY cell on
+                           the developed network — no per-cell merge — through
+                           the same bundle, so a parity check against the
+                           selective result isolates the affected-cell rule.
+
+    Returns:
+        dict(allocation, affected_communes, breakdown, n_cells_affected).
+    """
+    global _FEEDER_BASE, _RAIL_BASE
+    os.chdir(paths.MAIN)
+    base_feeder = os.path.join(paths.FEEDER_LINES_DIR, base_svc_network,
+                               paths.SERVICES_UNPROJECTED_SUBDIR)
+    base_rail = os.path.join(paths.RAIL_LINES_DIR, base_svc_network,
+                             paths.SERVICES_UNPROJECTED_SUBDIR)
+    prev_bases = (_FEEDER_BASE, _RAIL_BASE)
+
+    catchment_base.setup_versioned_dirs(base_svc_network)
+    base_pt_dir = catchment_base.PT_FEEDER_DATA_DIR
+    alloc_path = os.path.join(base_pt_dir, 'allocation_pt_feeder.parquet')
+    cand_path = os.path.join(base_pt_dir, 'cell_station_candidates.csv')
+    if not os.path.exists(cand_path):
+        raise FileNotFoundError(
+            f"cell-station candidates CSV missing at {cand_path}. Re-run "
+            f"Phase 4A (catchment_allocate.get_catchment, PT_Feeder) first.")
+
+    print(f"\n--- Phase 6A [{svc_int_id}]: PT-Feeder subset reallocation ---")
+    cand = pd.read_csv(cand_path, encoding='utf-8-sig')
+    id_cols = [c for c in (f'Station_{i}_ID'
+                           for i in range(1, MAX_CANDIDATE_STATIONS + 1))
+               if c in cand.columns]
+    aff = {int(s) for s in (affected_stations or [])}
+    hit = cand[id_cols].isin(aff).any(axis=1)
+    relis = set(cand.loc[hit, 'RELI'].astype(np.int64))
+    print(f"    affected cells: {len(relis):,} of {len(cand):,} "
+          f"(candidate set ∩ {len(aff)} affected station(s))")
+
+    boundary = _load_catchment_boundary()
+    pop_grid = load_population_grid_cached()
+    empl_grid = load_employment_grid_cached()
+    base_alloc = None   # loaded (or backfilled) once the base bundle exists
+
+    try:
+        _FEEDER_BASE, _RAIL_BASE = base_feeder, base_rail
+        bundle = _build_svc_network_bundle(boundary)
+
+        if not os.path.exists(alloc_path):
+            # One-time backfill of a pre-rework 4A run: same bundle + core as the
+            # full run, so the persisted baseline is identical to what 4A now writes.
+            print("    baseline allocation parquet missing — backfilling once "
+                  "from the base bundle (all cells) ...")
+            _backfill_base_allocation(pop_grid, empl_grid, bundle, alloc_path)
+        base_alloc = pd.read_parquet(alloc_path)
+
+        if not relis and not full_recompute:
+            print("    no affected cells — allocation, breakdown and catchment "
+                  "equal the baseline; copying outputs.")
+            merged, alloc_sub, communes = base_alloc.copy(), None, set()
+        else:
+            # Developed-network frequency pieces (the only rail-dependent members)
+            _RAIL_BASE = dev_rail_base
+            rail_lines_dev = _load_rail_line_freqs()
+            rail_segs_dev = _load_rail_segments_table()
+            pen_dev = _compute_station_freq_penalties(
+                rail_lines_dev, rail_segs_dev, bundle['rail_stations'])
+            svc_net_dev = dict(bundle)
+            svc_net_dev['station_freq_penalty'] = pen_dev
+
+            pop_relis = set(pop_grid['RELI'].values)
+            if full_recompute:
+                print("    ORACLE: full re-allocation of every cell on the "
+                      "developed network ...")
+                cells_pop = pop_grid
+                cells_empl = empl_grid[~empl_grid['RELI'].isin(pop_relis)]
+            else:
+                cells_pop = pop_grid[pop_grid['RELI'].isin(relis)]
+                cells_empl = empl_grid[empl_grid['RELI'].isin(relis)
+                                       & ~empl_grid['RELI'].isin(pop_relis)]
+            parts, communes = [], set()
+            for cells in (cells_pop, cells_empl):
+                if cells.empty:
+                    continue
+                a, c = allocate_cells_subset(cells.copy(), svc_net_dev)
+                parts.append(a)
+                communes |= c
+            alloc_sub = pd.concat(parts, ignore_index=True)
+            if full_recompute:
+                merged = alloc_sub
+            else:
+                merged = pd.concat(
+                    [base_alloc[~base_alloc['RELI'].isin(relis)], alloc_sub],
+                    ignore_index=True)
+            n_changed = _count_changed_cells(base_alloc, alloc_sub)
+            print(f"    re-allocated {len(alloc_sub):,} cell(s); "
+                  f"{n_changed:,} changed station; "
+                  f"{len(communes)} affected commune(s)")
+
+        breakdown = _compute_station_commune_breakdown_pt_feeder(
+            merged, pop_grid, empl_grid, bundle['rail_stations'])
+
+        # Per-svc-int outputs (Phase-4A schema, keyed <svc_int_id>_network)
+        catchment_base.setup_versioned_dirs(f'{svc_int_id}_network')
+        out_dir = catchment_base.PT_FEEDER_DATA_DIR
+        os.makedirs(out_dir, exist_ok=True)
+        merged.to_parquet(os.path.join(out_dir, 'allocation_pt_feeder.parquet'),
+                          index=False)
+        breakdown.to_csv(os.path.join(out_dir, 'station_commune_breakdown.csv'),
+                         index=False, encoding='utf-8-sig')
+        pop_relis = set(pop_grid['RELI'].values)
+        merged_pop = merged[merged['RELI'].isin(pop_relis)]
+        dev_catchment, _ = _build_catchment_gpkg(
+            merged_pop, pop_grid, empl_grid, bundle['rail_stations'], out_dir,
+            breakdown=breakdown)
+        print(f"    per-svc-int catchment outputs -> {out_dir}")
+
+        if make_plots:
+            base_catchment = gpd.read_file(
+                os.path.join(base_pt_dir, 'catchment.gpkg'))
+            # the catchment GPKG carries 'id'; _assign_cells_to_municipal_
+            # catchment (diff plot, first slot) joins on 'id_point'
+            if 'id_point' not in base_catchment.columns:
+                base_catchment = base_catchment.rename(columns={'id': 'id_point'})
+            plot_rs = _get_plot_rail_stations(bundle['rail_stations'], scope='ca')
+            plot_dir = catchment_base.PT_FEEDER_PLOT_DIR
+            _build_diff_plot(
+                base_catchment, dev_catchment, merged, pop_grid, empl_grid,
+                plot_rs, boundary, labels=('Base', svc_int_id),
+                out_path=os.path.join(plot_dir,
+                                      f'catchment_diff_base_vs_{svc_int_id}.pdf'),
+                base_assignment=base_alloc)
+            _plot_catchments_with_network(
+                dev_catchment, plot_rs, boundary, output_dir=plot_dir,
+                method_label=f'PT-Feeder {svc_int_id}')
+
+        return {'allocation': merged, 'affected_communes': communes,
+                'breakdown': breakdown, 'n_cells_affected': len(relis)}
+    finally:
+        _FEEDER_BASE, _RAIL_BASE = prev_bases
+        catchment_base.setup_versioned_dirs(base_svc_network)
+
+
+def _build_svc_network_bundle(boundary, temporal='full_day'):
+    """Build the Hook-2 svc_network dict for the active _FEEDER_BASE/_RAIL_BASE
+    without writing any Phase-4A outputs (no Güteklassen gpkgs, buffers or
+    plots). Cached per (feeder_base, rail_base) — Phase 6A reuses the base
+    bundle across svc-ints and swaps only the rail-frequency pieces."""
+    key = (_FEEDER_BASE, _RAIL_BASE)
+    if key in _PHASE6_BUNDLE_CACHE:
+        return _PHASE6_BUNDLE_CACHE[key]
+    print("    building base svc-network bundle (once per run) ...")
+    feeder_stops = _load_feeder_stops(boundary, temporal)
+    rail_stations = _load_rail_stations(boundary, temporal, buffer=0)
+    feeder_segments = _load_feeder_segments(temporal)
+    feeder_stops, rail_stations = _compute_stop_gueteklassen(
+        feeder_stops, rail_stations)
+    fs_times, fs_components, _graph = _build_feeder_graph(
+        feeder_stops, feeder_segments, rail_stations)
+    feeder_lines = _load_feeder_line_freqs()
+    rail_lines = _load_rail_line_freqs()
+    rail_segments = _load_rail_segments_table()
+    transfer_free_headway = _compute_transfer_free_headways(
+        feeder_segments, feeder_lines, feeder_stops, rail_stations)
+    station_freq_penalty = _compute_station_freq_penalties(
+        rail_lines, rail_segments, rail_stations)
+    bundle = {
+        'rail_stations': rail_stations,
+        'feeder_stops': feeder_stops,
+        'feeder_stop_to_rail_times': fs_times,
+        'feeder_stop_to_rail_components': fs_components,
+        'transfer_free_headway': transfer_free_headway,
+        'station_freq_penalty': station_freq_penalty,
+    }
+    _PHASE6_BUNDLE_CACHE[key] = bundle
+    return bundle
+
+
+def _backfill_base_allocation(pop_grid, empl_grid, bundle, alloc_path) -> None:
+    """Compute and persist the baseline allocation for a pre-rework 4A run.
+
+    Same _allocate_pt_feeder_core + pop/empl-only split as _run_pt_feeder_method,
+    so the parquet equals what 4A now persists; no other 4A outputs are touched.
+    """
+    alloc_pop, _w, _c, _f = _allocate_pt_feeder_core(pop_grid, bundle)
+    pop_relis = set(pop_grid['RELI'].values)
+    empl_only = empl_grid[~empl_grid['RELI'].isin(pop_relis)].copy()
+    if not empl_only.empty:
+        alloc_empl, _w, _c, _f = _allocate_pt_feeder_core(empl_only, bundle)
+        alloc_combined = pd.concat([alloc_pop, alloc_empl], ignore_index=True)
+    else:
+        alloc_combined = alloc_pop
+    alloc_combined.to_parquet(alloc_path, index=False)
+    print(f"    baseline allocation ({len(alloc_combined):,} cells) "
+          f"backfilled -> {alloc_path}")
+
+
+def _count_changed_cells(base_alloc, alloc_sub) -> int:
+    """Cells whose chosen station differs between baseline and the re-allocated
+    subset (diagnostic for the Phase-6A log)."""
+    if alloc_sub is None or not len(alloc_sub):
+        return 0
+    b = base_alloc[['RELI', 'id_point']].rename(columns={'id_point': 'base_id'})
+    d = alloc_sub[['RELI', 'id_point']].merge(b, on='RELI', how='left')
+    return int((pd.to_numeric(d['id_point'], errors='coerce')
+                != pd.to_numeric(d['base_id'], errors='coerce')).sum())
+
+
 def _communes_of_cells(cells) -> set:
     """Set of BFS_NR the given grid cells fall in (spatial join to municipal
     boundaries; same boundary load + BFS detection as the PT-feeder breakdown)."""
@@ -5014,6 +5270,13 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
     # catchment_OD_preparation.py read the unified file).
     _build_candidates_csv(walk_all, cycle_all, feeder_all,
                           pop_grid, empl_grid, rail_stations, PT_FEEDER_DATA_DIR)
+
+    # Persist the per-cell allocation (Phase 6A hook): the candidates CSV is
+    # sorted WITHOUT the frequency penalty, so the chosen station is not
+    # reconstructible from it — 6A merges unaffected cells from this parquet.
+    _alloc_path = os.path.join(PT_FEEDER_DATA_DIR, 'allocation_pt_feeder.parquet')
+    alloc_combined.to_parquet(_alloc_path, index=False)
+    print(f"    Allocation ({len(alloc_combined):,} cells) saved -> {_alloc_path}")
 
     st = time.time()
 
@@ -6760,6 +7023,14 @@ def get_catchment(use_cache: bool, method: str = 'both',
         plot_rs = _get_plot_rail_stations(rail_stations, scope='ca')
         _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
                          pop_grid, empl_grid, plot_rs, boundary)
+
+    if _ref:
+        if method in ('municipal', 'both'):
+            cache_manifest.write_manifest(MUNICIPAL_DATA_DIR, 'catchment_4a',
+                                          {'svc_network': svc_version})
+        if method in ('pt_feeder', 'both'):
+            cache_manifest.write_manifest(PT_FEEDER_DATA_DIR, 'catchment_4a',
+                                          {'svc_network': svc_version})
 
     elapsed = time.time() - total_start
     print(f"\nCatchment allocation complete - {elapsed:.1f}s total")
