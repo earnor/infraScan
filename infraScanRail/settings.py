@@ -217,14 +217,16 @@ INFRA_INT_MODE = 'CC'
 
 # SVC_INT_MODE — svc-int type(s) generated this session.
 # 'NONE' — baseline, no service interventions
-# 'ALL'  — extended lines + new direct connections
+# 'ALL'  — extended lines + new direct connections + frequency changes
 # 'EXT'  — extended lines only: route extensions over existing infra (no new infra)
 # 'NDC'  — new direct connections only: through-services that may require a CC (Phase 5A), pulled in via 'requires_infra'
+# 'FRQ'  — frequency changes only: corridor homogenisation (all-stop extensions) + whole-line frequency doubling
 SVC_INT_MODE = 'ALL'
 
 # Per-type ID start blocks; svc-ints numbered sequentially from these (e.g. ext_100001, ndc_103001). Mirrors the old main_cap convention.
 DEV_ID_START_EXT = 100000              # extended-line interventions
 DEV_ID_START_NDC = 103000              # new-direct-connection interventions
+DEV_ID_START_FRQ = 104000              # frequency-change interventions
 
 # NDC through-services run at a standardised frequency; total_dep = dep/h × 14 over the whole-day window (GK_WINDOW_MIN = 840 min).
 NDC_FREQ_DEP_PER_H = 2                 # standardised NDC frequency [departures/hour]
@@ -249,6 +251,11 @@ EXT_MIN_FREQ_DEP_PER_H = 2            # min directional whole-day frequency to e
 # (angle < CC_BACKTRACK_ANGLE_DEG at a passed node) reject the candidate; a reversal at the old terminus is allowed but penalised.
 EXT_MAX_DETOUR_FACTOR = 3.0           # max routed-path length / beeline distance to the target [-]
 EXT_TERMINUS_REVERSAL_PENALTY_MIN = 2.0  # IVWT added to the extension hop when the service reverses at its old terminus [min]
+
+# FRQ corridor homogenisation: a constant-frequency run (≥2 stations, all inside the SA) fires when a neighbouring run is
+# busier than ratio × its own whole-day dep/h; remedy = all-stop extension of a service terminating at a corridor end (no reversals).
+FRQ_CORRIDOR_NEIGHBOUR_RATIO = 1.0    # corridor fires when max neighbouring-run freq > ratio × corridor freq [-, 1.0 = strictly lower]
+FRQ_DOUBLE_MAX_FREQ_PER_H = 4.0       # doubling generated only when the DOUBLED whole-day freq ≤ this [dep/h; ladder 1→2→4]
 
 # Svc-int-added hops (NDC lines, EXT extension hops) carry a default station dwell as IVWT, matching the base GTFS convention
 # (dwell at the hop's from-stop; a direction's first hop = 0) so generated lines hold no GC advantage over base services.

@@ -135,7 +135,8 @@ def svc_int_label(svc_int_id: str) -> str:
     try:
         int_type, num = sid.split('_', 1)
         start = {'ext': settings.DEV_ID_START_EXT,
-                 'ndc': settings.DEV_ID_START_NDC}[int_type]
+                 'ndc': settings.DEV_ID_START_NDC,
+                 'frq': settings.DEV_ID_START_FRQ}[int_type]
         return f"{int_type.upper()}{int(num) - start}"
     except (KeyError, ValueError):
         return sid
@@ -269,7 +270,7 @@ def _endpoints_label(record) -> str:
     stations = record.get('affected_stations') or []
     if len(stations) < 2:
         return ''
-    if record.get('int_type') == 'ext':
+    if record.get('int_type') in ('ext', 'frq'):
         return f"{stations[0]} → {stations[-1]}"
     return f"{stations[0]} – {stations[-1]}"
 
@@ -490,11 +491,18 @@ def _make_result_plots(raw: pd.DataFrame, cb_disc: pd.DataFrame, records: dict,
 
     ext = data[data['development'].map(_svc_int_type) == 'ext']
     ndc = data[data['development'].map(_svc_int_type) == 'ndc']
+    frq = data[data['development'].map(_svc_int_type) == 'frq']
 
     if not ext.empty:
         print("  [plot] EXT chart family + ranked/combined...")
         _plot_basic_charts(ext, 'EXT', benefits_dir)
         _charts_map_combined(ext, 'ranked_group_ext', ranked_dir,
+                             ranked_combined_dir)
+
+    if not frq.empty:
+        print("  [plot] FRQ chart family + ranked/combined...")
+        _plot_basic_charts(frq, 'FRQ', benefits_dir)
+        _charts_map_combined(frq, 'ranked_group_frq', ranked_dir,
                              ranked_combined_dir)
 
     if not ndc.empty:
@@ -509,7 +517,8 @@ def _make_result_plots(raw: pd.DataFrame, cb_disc: pd.DataFrame, records: dict,
                                  ranked_combined_dir)
 
     print("  [plot] overview network maps...")
-    for sub, name in ((ext, 'developments_ext'), (ndc, 'developments_ndc')):
+    for sub, name in ((ext, 'developments_ext'), (ndc, 'developments_ndc'),
+                      (frq, 'developments_frq')):
         if sub.empty:
             continue
         labels = sub['line_name'].unique().tolist()

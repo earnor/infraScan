@@ -1546,7 +1546,7 @@ if __name__ == '__main__':
         if _ov:
             import svc_ints_orchestrator as _so
             _combo = f'{_infra}__{_svc}'
-            _records = [r for t in ('ext', 'ndc')
+            _records = [r for t in _so.SUPPORTED_SVC_INT_TYPES
                         for r in _so.read_records(t, network=_combo)]
             if not _records:
                 print(f"  No svc-ints registered for combo '{_combo}'.")

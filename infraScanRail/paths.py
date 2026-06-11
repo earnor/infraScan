@@ -119,8 +119,8 @@ def get_svc_int_registry(int_type: str, combo: str) -> str:
     """Return absolute path to the svc-int registry xlsx for a type + combo.
 
     Args:
-        int_type: short code — 'ext' (extended lines) or 'ndc' (new direct connections).
-            Stored under Developments/<combo>/<int_type>/.
+        int_type: short code — 'ext' (extended lines), 'ndc' (new direct connections)
+            or 'frq' (frequency changes). Stored under Developments/<combo>/<int_type>/.
         combo: the '<infra>__<svc>' workspace key.
     """
     return os.path.join(MAIN, DEVELOPMENTS_DIR, combo, int_type,
@@ -172,7 +172,7 @@ def get_developments_plot_dir(combo: str, subtype: str = None) -> str:
 
     Args:
         combo: the '<infra>__<svc>' workspace key.
-        subtype: optional leaf (e.g. 'cc', 'cap', 'ext', 'ndc').
+        subtype: optional leaf (e.g. 'cc', 'cap', 'ext', 'ndc', 'frq').
     """
     parts = [MAIN, DEVELOPMENTS_PLOTS_DIR, combo]
     if subtype:

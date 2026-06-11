@@ -11,6 +11,7 @@ tunnel_maintenance_cost = tunnel_cost_per_meter * yearly_maintenance_to_construc
 bridge_maintenance_cost = bridge_cost_per_meter * yearly_maintenance_to_construction_cost_factor # CHF/m/a
 
 operating_cost_s_bahn_per_meter = 879   #Estimation from S14 HB - Hinwil 2024 from the Abgeltungen and KDG data of BAV, based on real line length
+operating_cost_ref_daily_dep = 28       # daily departures/direction behind the 879 CHF/m/a rate (S14 2024 calibration: 2 dep/h x 14 h GK window); 8B scales delta train-metres by dep/this
 detour_factor_tracks = 1.1  # Factor to account for detours in track length in comparison to a straight line between stations
 general_KDG = 0.623
 

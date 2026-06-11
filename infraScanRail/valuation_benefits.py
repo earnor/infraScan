@@ -65,8 +65,8 @@ def compute_travel_time_savings(svc_int_ids=None, *, svc_version: str,
     """
     t0 = time.time()
     if svc_int_ids is None:
-        svc_int_ids = (so.list_svc_int_ids('ext', network=combo)
-                       + so.list_svc_int_ids('ndc', network=combo))
+        svc_int_ids = [i for t in so.SUPPORTED_SVC_INT_TYPES
+                       for i in so.list_svc_int_ids(t, network=combo)]
     svc_int_ids = [str(i) for i in svc_int_ids]
     scenarios = list(scenarios if scenarios is not None
                      else range(1, int(settings.amount_of_scenarios) + 1))

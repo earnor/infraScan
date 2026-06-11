@@ -73,8 +73,8 @@ def phase_5c_capacity_on_matched(
 
     # Resolve the svc-int set as (int_type, int_id) pairs.
     if svc_int_ids is None:
-        pairs = ([('ext', i) for i in so.list_svc_int_ids('ext', network=cap_network)] +
-                 [('ndc', i) for i in so.list_svc_int_ids('ndc', network=cap_network)])
+        pairs = [(t, i) for t in so.SUPPORTED_SVC_INT_TYPES
+                 for i in so.list_svc_int_ids(t, network=cap_network)]
     else:
         pairs = [(_svc_int_type(i), str(i)) for i in svc_int_ids]
 
@@ -263,15 +263,17 @@ def phase_5c_capacity_on_matched(
 
 def _svc_int_type(int_id: str) -> str:
     """Infer the svc-int registry type from its id prefix."""
-    return 'ndc' if str(int_id).startswith('ndc') else 'ext'
+    prefix = str(int_id).split('_')[0]
+    return prefix if prefix in ('ext', 'ndc', 'frq') else 'ext'
 
 
 def _build_merged_services(rec, base_infra, base_svc, delta_path, use_cache) -> str:
     """Write base+delta merged projected services for one svc-int (its own network).
 
-    Base projected rail_segments + the svc-int delta, per layer; for an EXT the base
-    rows of the parent route_id are dropped (the delta carries the extended line). NDC
-    is additive. Result drives the 5C capacity supply (total load on modified segments).
+    Base projected rail_segments + the svc-int delta, per layer; for an EXT or FRQ
+    the base rows of the parent route_id are dropped (the delta carries the modified
+    line — extended, or with scaled frequency). NDC is additive. Result drives the
+    5C capacity supply (total load on modified segments).
     """
     import fiona
 
@@ -280,7 +282,8 @@ def _build_merged_services(rec, base_infra, base_svc, delta_path, use_cache) -> 
         return str(out_path)
 
     base_path = paths.get_projected_services_path(base_svc, base_infra)
-    remove = {str(rec.get('route_id'))} if rec.get('int_type') == 'ext' else set()
+    remove = ({str(rec.get('route_id'))}
+              if rec.get('int_type') in ('ext', 'frq') else set())
 
     base_layers = set(fiona.listlayers(base_path)) if Path(base_path).exists() else set()
     delta_layers = set(fiona.listlayers(str(delta_path)))

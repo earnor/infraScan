@@ -2514,7 +2514,8 @@ if __name__ == '__main__':
     else:
         import svc_ints_orchestrator as _so
         _base_svc = _svc_arg.replace('_network', '')
-        _iids = (_so.list_svc_int_ids('ext') + _so.list_svc_int_ids('ndc'))
+        _iids = [i for t in _so.SUPPORTED_SVC_INT_TYPES
+                 for i in _so.list_svc_int_ids(t)]
         if not _iids:
             raise SystemExit("No svc-ints registered — run Phase 5B first.")
         print("\nRegistered svc-ints: " + ", ".join(_iids))
@@ -2525,7 +2526,7 @@ if __name__ == '__main__':
             print("  Unknown id.")
         _infra = input(f"Base infra version [{settings.INFRA_VERSION}]: ").strip() \
             or settings.INFRA_VERSION
-        _itype = 'ext' if _iid.startswith('ext') else 'ndc'
+        _itype = _iid.split('_')[0]
         _rec = _so.read_record(_itype, _iid)
         _aff_path = os.path.join(
             paths.get_svc_int_catalogue_dir(_so._svc_network(None)),

@@ -1771,7 +1771,7 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str,
     parent prints each svc-int's log as one ordered block.
 
     Args:
-        int_type:   'ext' | 'ndc'.
+        int_type:   'ext' | 'ndc' | 'frq'.
         rec:        svc-int record (read_records row).
         merged_dir: merged developed-network dir from the serial pre-pass.
         composed_infra: the svc-int's CC-only composed infra version from the
@@ -1858,6 +1858,57 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str,
             error = f"{exc}\n{traceback.format_exc()}"
     return {'iid': iid, 'int_type': int_type, 'status': status,
             'error': error, 'log': buf.getvalue() if capture_log else ''}
+
+
+def _reuse_twin_outputs(iid: str, twin_id: str, combo: str, ctx: dict) -> bool:
+    """Copy an op-identical twin's Phase-6 output trees onto this svc-int.
+
+    FRQ corridor extensions that duplicate a registered EXT (record `twin_of`,
+    user decision 2026-06-11) reuse the twin's finished 6A-6D outputs instead
+    of recomputing: the Catchment_Area / OD / Assignment(+flows) trees are
+    copied under this id's network name and the assignment manifest rewritten
+    for this id, so Phases 7/8/9 read per-id paths unchanged. The copied
+    tables keep the twin's line labels (e.g. 'E_EXT2'); the numbers are
+    identical by construction (same route, same op list).
+
+    Returns False (compute normally) when the twin's routing outputs or
+    manifest are incomplete.
+    """
+    import shutil
+
+    twin_network = paths.svc_int_network_name(twin_id, combo)
+    method = ctx['assignment_method']
+    probe = [paths.get_routing_primitive_path(twin_network, method, t)
+             for t in ('paths', 'segments', 'events', 'unresolved')]
+    if not (all(os.path.exists(p) for p in probe)
+            and cache_manifest.check_manifest(
+                paths.get_assignment_method_dir(twin_network, method),
+                'assignment_4c',
+                {'svc_network': ctx['svc_network'],
+                 'infra_version': ctx['base_infra'],
+                 'svc_int_id': twin_id})):
+        return False
+    dst_network = paths.svc_int_network_name(iid, combo)
+    n_copied = 0
+    for root in (paths.CATCHMENT_AREA_DIR, paths.TRAFFIC_FLOW_OD_DIR,
+                 paths.TRAFFIC_FLOW_ASSIGNMENT_DIR):
+        src = Path(paths.MAIN) / root / twin_network
+        if not src.is_dir():
+            continue
+        dst = Path(paths.MAIN) / root / dst_network
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        n_copied += 1
+    if not n_copied:
+        return False
+    cache_manifest.write_manifest(
+        paths.get_assignment_method_dir(dst_network, method), 'assignment_4c',
+        {'svc_network': ctx['svc_network'], 'infra_version': ctx['base_infra'],
+         'svc_int_id': iid})
+    print(f"  [twin] {iid}: reused {twin_id} outputs ({n_copied} tree(s) "
+          f"copied; tables keep the twin's line labels)")
+    return True
 
 
 def _phase6_run_oracle(iid: str, merged_dir: str, composed_infra: str,
@@ -1970,7 +2021,7 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
               "using 'logit' for the pipeline run.")
         assignment_method = 'logit'
 
-    records = [(t, r) for t in ('ext', 'ndc')
+    records = [(t, r) for t in _so.SUPPORTED_SVC_INT_TYPES
                for r in _so.read_records(t, network=combo)]
     if svc_int_ids is not None:
         want = {str(i) for i in svc_int_ids}
@@ -2025,7 +2076,7 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
     # compose into the SHARED Developments/Derived/<hash8>/ dirs (two svc-ints
     # requiring the same CC collide), so they never run concurrently; after
     # 5B/5C they are cache-hits.
-    n_done = n_skip = n_fail = 0
+    n_done = n_skip = n_fail = n_twin = 0
     todo: list = []
     for int_type, rec in records:
         iid = str(rec['int_id'])
@@ -2047,6 +2098,14 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
                       f"skipping {iid}.")
                 n_skip += 1
                 continue
+
+            twin = str(rec.get('twin_of') or '')
+            if twin:
+                if _reuse_twin_outputs(iid, twin, combo, ctx):
+                    n_twin += 1
+                    continue
+                print(f"  [twin] {iid}: twin {twin} outputs incomplete — "
+                      f"computing normally.")
 
             _so.apply_svc_int(rec, svc_version, base_infra, use_cache=True)
             merged_dir = _so.build_merged_unprojected(rec, svc_version,
@@ -2114,7 +2173,7 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
                 n_fail += 1
 
     print(f"\n  Phase 6 summary: {n_done} recomputed, {n_skip} skipped, "
-          f"{n_fail} failed (of {len(records)}).")
+          f"{n_twin} twin-reused, {n_fail} failed (of {len(records)}).")
     if parity_results:
         tables = []
         for summary in parity_results.values():
@@ -2204,7 +2263,7 @@ def phase_7_scenarios(runtimes: dict, svc_int_ids=None) -> None:
 
     import svc_ints_orchestrator as _so
     combo = f'{base_infra}__{svc_version}'
-    records = [(t, r) for t in ('ext', 'ndc')
+    records = [(t, r) for t in _so.SUPPORTED_SVC_INT_TYPES
                for r in _so.read_records(t, network=combo)]
     if svc_int_ids is not None:
         want = {str(i) for i in svc_int_ids}

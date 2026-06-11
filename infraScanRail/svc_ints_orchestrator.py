@@ -1,6 +1,6 @@
 """
 svc_ints_orchestrator — Phase 5B engine + entry point + standalone CLI.
-Last modified: 2026-06-07
+Last modified: 2026-06-11
 
 Single home for the service-intervention stack (mirrors infra_ints_orchestrator):
 
@@ -15,8 +15,9 @@ function) to avoid an import cycle.
 Registry (declarative source of truth)
 --------------------------------------
 One logical record per service intervention (extended line 'ext' / new direct
-connection 'ndc'), identified by ``int_id`` and stored as a row of the ``extensions``
-sheet of a per-type xlsx (``ext_interventions.xlsx`` / ``ndc_interventions.xlsx``).
+connection 'ndc' / frequency change 'frq'), identified by ``int_id`` and stored as a
+row of the ``extensions`` sheet of a per-type xlsx (``ext_interventions.xlsx`` /
+``ndc_interventions.xlsx`` / ``frq_interventions.xlsx``).
 A record stores the *declarative operation list* (the service delta), keyed by the
 in-run ``(route_id, direction_id, variant_rank)`` of the line it targets — valid
 because svc-ints are generated against the active version each run.
@@ -56,26 +57,30 @@ import settings
 # infra_ints_orchestrator.enumerate_active_infra_ints (reads sheet 'extensions').
 SHEET = 'extensions'
 
-SUPPORTED_SVC_INT_TYPES = ('ext', 'ndc')
+SUPPORTED_SVC_INT_TYPES = ('ext', 'ndc', 'frq')
 
 # Column order of the catalogue row (the declarative svc-int record).
+# twin_of: id of an op-identical svc-int of another type ('' when unset) — set by FRQ
+# discovery when a corridor extension duplicates a registered EXT; Phase 6 reuses the
+# twin's outputs instead of recomputing.
 RECORD_COLS: tuple = (
     'int_id', 'int_type', 'base_authored', 'svc_version',
     'route_id', 'direction_id', 'variant_rank',
     'operations', 'total_dep', 'line_type', 'mode_class', 'line_short_name',
-    'requires_infra', 'affected_stations', 'affected_services',
+    'requires_infra', 'affected_stations', 'affected_services', 'twin_of',
 )
 
 # Comma-joined list fields (stored as strings in the xlsx cell).
 _LIST_FIELDS: tuple = ('requires_infra', 'affected_stations', 'affected_services')
 
-# int_id prefix per type (e.g. ext_100001, ndc_103001).
-_TYPE_CODE: Dict[str, str] = {'ext': 'ext', 'ndc': 'ndc'}
+# int_id prefix per type (e.g. ext_100001, ndc_103001, frq_104001).
+_TYPE_CODE: Dict[str, str] = {'ext': 'ext', 'ndc': 'ndc', 'frq': 'frq'}
 
 # Per-type id start block (mirrors the infra-int DEV_ID_START_* convention).
 _TYPE_START: Dict[str, str] = {
     'ext': 'DEV_ID_START_EXT',
     'ndc': 'DEV_ID_START_NDC',
+    'frq': 'DEV_ID_START_FRQ',
 }
 
 
@@ -270,7 +275,7 @@ def _purge_svc_int_outputs(int_ids: List[str], combo: str) -> None:
             if d.is_dir():
                 shutil.rmtree(d, ignore_errors=True)
                 n_dirs += 1
-        for subtype in ('ext', 'ndc'):
+        for subtype in SUPPORTED_SVC_INT_TYPES:
             pdir = Path(paths.get_developments_plot_dir(combo, subtype))
             if pdir.is_dir():
                 for p in pdir.glob(f'svc_int_{iid}_*.pdf'):
@@ -331,6 +336,10 @@ def _row_to_record(row) -> Dict:
             val = deserialize_ops(val)
         elif col in _LIST_FIELDS:
             val = deserialize_list(val)
+        elif col == 'twin_of':
+            # empty xlsx cells read as NaN (truthy float) — normalise to ''
+            val = '' if val is None or (isinstance(val, float) and pd.isna(val)) \
+                else str(val).strip()
         rec[col] = val
     return rec
 
@@ -728,16 +737,26 @@ def _build_delta(svc_int, base_lines, base_segs, resolve):
                     continue
                 base_seq = _reconstruct_sequence(line_seg_df)
                 # dir-1 sequence is reversed, so extend the opposite logical end
+                # AND reverse the stop list (stored order is the dir-0 apply
+                # order — single-stop EXT is order-invariant, multi-stop FRQ not)
                 fe = from_end if dir_id == '0' else _flip[from_end]
+                stops_d = (list(params.get('stops', [])) if dir_id == '0'
+                           else list(reversed(params.get('stops', []))))
                 dir_ops = [{'op': 'extend',
-                            'params': {'from_end': fe, 'stops': params.get('stops', [])}}
+                            'params': {'from_end': fe, 'stops': stops_d}}
                            if o.get('op') == 'extend' else o for o in ops]
                 seq, total_dep_override = _apply_ops_to_seq(base_seq, dir_ops, resolve)
                 seq = [s for s in seq if s is not None]
                 if len(seq) < 2:
                     continue
-                total_dep = int(total_dep_override if total_dep_override is not None
-                                else line_row.get('total_dep', 0))
+                base_dep = int(line_row.get('total_dep', 0) or 0)
+                if isinstance(total_dep_override, tuple):       # ('factor', f)
+                    factor = float(total_dep_override[1])
+                    total_dep = int(round(base_dep * factor))
+                else:
+                    factor = None
+                    total_dep = int(total_dep_override if total_dep_override is not None
+                                    else base_dep)
                 base_tt = {(int(r['from_stop_nr']), int(r['to_stop_nr'])): r
                            for _, r in line_seg_df.iterrows()}
                 # modified line keeps its base name + suffix ('S14_EXT5')
@@ -748,6 +767,17 @@ def _build_delta(svc_int, base_lines, base_segs, resolve):
                         'line_type': int(line_row.get('line_type', 109)),
                         'mode_label': line_row.get('mode_label', 'rail'),
                         'variant_rank': var}
+                if svc_int.get('int_type') == 'frq':
+                    # FRQ contract (CAP-round F8): deltas carry REAL per-period
+                    # rates — base rates scaled by the frequency factor, period
+                    # label preserved (peak_only doubles to 4/4/0, not flat).
+                    f = factor if factor is not None else 1.0
+                    meta['service_period'] = str(line_row.get('service_period')
+                                                 or 'all_day')
+                    meta['period_rates'] = tuple(
+                        round(float(line_row.get(col, 0) or 0) * f, 3)
+                        for col in ('freq_am_peak_dep_hr', 'freq_pm_peak_dep_hr',
+                                    'freq_offpeak_dep_hr'))
                 _emit_line(delta_lines, delta_segs, layer, meta, dir_id, seq, total_dep, base_tt)
                 stop_nrs.update(s['nr'] for s in seq)
                 affected.update(s['name'] for s in seq)
@@ -784,8 +814,16 @@ def _route_variants(base_lines, route_id) -> List[int]:
 
 
 def _emit_line(delta_lines, delta_segs, layer, meta, dir_id, seq, total_dep, base_tt):
-    """Append one direction's line row + its stop-pair segment rows to the delta."""
+    """Append one direction's line row + its stop-pair segment rows to the delta.
+
+    Default (EXT/NDC): per-period columns carry the flat whole-day rate and
+    service_period 'all_day' (homogeneous all-day services — F8 closure). FRQ
+    passes meta['period_rates'] / meta['service_period'] so period-split variants
+    keep their real scaled rates and canonical period label.
+    """
     freq_hr = round(total_dep / (getattr(settings, 'GK_WINDOW_MIN', 840) / 60.0), 3)
+    rate_am, rate_pm, rate_off = meta.get('period_rates') or (freq_hr, freq_hr, freq_hr)
+    period = meta.get('service_period') or 'all_day'
     line_geom = LineString([(s['E'], s['N']) for s in seq])
     delta_lines.setdefault(layer, []).append({
         'route_id': meta['route_id'], 'direction_id': dir_id,
@@ -796,9 +834,9 @@ def _emit_line(delta_lines, delta_segs, layer, meta, dir_id, seq, total_dep, bas
         'line_type': meta['line_type'], 'mode_label': meta['mode_label'],
         'mode_class': 'rail', 'agency_id': meta.get('agency_id', ''),
         'is_circular': seq[0]['nr'] == seq[-1]['nr'],
-        'n_stops': len(seq), 'service_period': 'all_day',
-        'freq_am_peak_dep_hr': freq_hr, 'freq_pm_peak_dep_hr': freq_hr,
-        'freq_offpeak_dep_hr': freq_hr, 'total_dep': total_dep,
+        'n_stops': len(seq), 'service_period': period,
+        'freq_am_peak_dep_hr': rate_am, 'freq_pm_peak_dep_hr': rate_pm,
+        'freq_offpeak_dep_hr': rate_off, 'total_dep': total_dep,
         'freq_directional': False, 'tt_source': 'projected', 'geometry': line_geom,
     })
     rows = delta_segs.setdefault(layer, [])
@@ -824,9 +862,9 @@ def _emit_line(delta_lines, delta_segs, layer, meta, dir_id, seq, total_dep, bas
             'TT': float(prev['TT']) if keep_tt else np.nan,
             'tt_source': 'gtfs' if keep_tt else 'formula',
             'IVWT': ivwt,
-            'service_period': 'all_day',
-            'freq_am_peak_dep_hr': freq_hr, 'freq_pm_peak_dep_hr': freq_hr,
-            'freq_offpeak_dep_hr': freq_hr,
+            'service_period': period,
+            'freq_am_peak_dep_hr': rate_am, 'freq_pm_peak_dep_hr': rate_pm,
+            'freq_offpeak_dep_hr': rate_off,
             '_source_layer': layer,
             'geometry': LineString([(a['E'], a['N']), (b['E'], b['N'])]),
         })
@@ -858,7 +896,12 @@ def _apply_ops_to_seq(seq, ops, resolve):
             repl = list(p.get('replace', []))
             seq = _splice_reroute(seq, repl, via)
         elif kind == 'set_frequency':
-            total_dep_override = int(p['total_dep'])
+            # absolute total_dep, or ('factor', f) — the caller scales each
+            # variant's OWN base total_dep, so period-split variants stay split
+            if 'total_dep' in p:
+                total_dep_override = int(p['total_dep'])
+            else:
+                total_dep_override = ('factor', float(p['factor']))
         elif kind == 'new_line':
             seq = [resolve(n) for n in p.get('stops', [])]
             seq = [s for s in seq if s is not None]
@@ -1182,7 +1225,8 @@ def phase_5b_service_interventions(
     print(f"\n=== Phase 5B — Service Interventions (mode={mode}) ===")
     print(f"  base infra: {base_infra} | services: {base_svc} | combo: {combo} | active: {active or 'none'}")
 
-    result: Dict = {'ext_ids': [], 'ndc_ids': [], 'materialised': [], 'plots': []}
+    result: Dict = {'ext_ids': [], 'ndc_ids': [], 'frq_ids': [],
+                    'materialised': [], 'plots': []}
     if not active:
         return result
 
@@ -1228,9 +1272,26 @@ def phase_5b_service_interventions(
                 base_infra, base_svc, ndc_candidates, sa_polygon=sa_polygon, network=combo)
             result['ndc_ids'] = disc['ndc_ids']
 
+    # FRQ — corridor homogenisation + doubling (after EXT: twin detection reads
+    # the freshly registered ext catalogue) ------------------------------------
+    frq_disc: Optional[Dict] = None
+    if 'frq' in active:
+        if manifest_ok and list_svc_int_ids('frq', network=combo):
+            result['frq_ids'] = list_svc_int_ids('frq', network=combo)
+            print(f"  [frq] use_cache: keeping {len(result['frq_ids'])} existing FRQ record(s)")
+        else:
+            _old_frq = list_svc_int_ids('frq', network=combo)
+            delete_records('frq', _old_frq, network=combo)
+            _purge_svc_int_outputs(_old_frq, combo)
+            import svc_ints_frequency as frqmod
+            frq_disc = frqmod.discover_and_register(
+                base_infra, base_svc, sa_polygon, buffer_polygon, network=combo)
+            result['frq_ids'] = frq_disc['frq_ids']
+
     # Materialise each registered svc-int (delta network, real infra TT) -------
     todo = ([('ext', i) for i in result['ext_ids']] +
-            [('ndc', i) for i in result['ndc_ids']])
+            [('ndc', i) for i in result['ndc_ids']] +
+            [('frq', i) for i in result['frq_ids']])
     print(f"  [apply] materialising {len(todo)} svc-int delta network(s)…")
     for int_type, iid in todo:
         rec = read_record(int_type, iid, network=combo)
@@ -1260,12 +1321,20 @@ def phase_5b_service_interventions(
                 p = plot_ndc_candidates(base_infra, base_svc, ndc_candidates, sa_polygon)
                 if p:
                     result['plots'].append(p)
+            if frq_disc and frq_disc.get('corridors'):
+                import svc_ints_frequency as frqmod
+                p = frqmod.plot_frq_candidates(
+                    base_infra, base_svc, frq_disc['corridors'],
+                    frq_disc['corridor_candidates'], sa_polygon)
+                if p:
+                    result['plots'].append(p)
             result['plots'] += plot_svc_interventions(base_infra, base_svc, result, sa_polygon)
         except Exception as exc:
             print(f"  [plot] WARNING: svc-int plots failed: {exc}")
 
     print(f"=== Phase 5B done: {len(result['ext_ids'])} EXT, "
-          f"{len(result['ndc_ids'])} NDC, {len(result['materialised'])} materialised ===\n")
+          f"{len(result['ndc_ids'])} NDC, {len(result['frq_ids'])} FRQ, "
+          f"{len(result['materialised'])} materialised ===\n")
     return result
 
 
@@ -1276,7 +1345,7 @@ def _active_svc_int_types(mode: str) -> List[str]:
         return []
     if m == 'ALL':
         return list(SUPPORTED_SVC_INT_TYPES)
-    if m in ('EXT', 'NDC'):
+    if m in ('EXT', 'NDC', 'FRQ'):
         return [m.lower()]
     print(f"  [svc-int] unknown SVC_INT_MODE='{mode}' — treating as 'NONE'")
     return []
@@ -1295,7 +1364,7 @@ def _write_svc_int_csvs(base_infra: str, result: Dict,
 
     cat_rows: List[Dict] = []
     aff_rows: List[Dict] = []
-    for int_type in ('ext', 'ndc'):
+    for int_type in SUPPORTED_SVC_INT_TYPES:
         for rec in read_records(int_type, network=network):
             iid = str(rec['int_id'])
             # affected_stations summarises the change span: [endpoint, target] for an
@@ -1366,7 +1435,7 @@ def _write_affected_set_csv(base_infra: str, base_svc: str,
     """Write the canonical per-svc-int affected_set (id_point stations + concrete
     variant_keys) — additive Phase-6 hook. Leaves the legacy
     svc_int_affected_sets_<base_infra>.csv untouched."""
-    recs = [r for it in ('ext', 'ndc') for r in read_records(it, network=network)]
+    recs = [r for it in SUPPORTED_SVC_INT_TYPES for r in read_records(it, network=network)]
     if not recs:
         return
     base_lines, base_segs, _ = _load_base_unprojected(base_svc)
@@ -1389,6 +1458,10 @@ _EXT_COLOR     = '#1f9e4f'   # dark green: the new (extended) segment
 _EXT_COLOR_OLD = '#a6dcb8'   # light green: the pre-existing run of the line
 _NDC_COLOR     = '#e8730c'   # orange: NDC (an entirely new line)
 _NDC_COLOR_OLD = '#f4c9a0'   # light orange (NDC has no existing part — unused in practice)
+_FRQ_COLOR     = '#7b2d8e'   # violet: FRQ (corridor extension hop / doubled line)
+_FRQ_COLOR_OLD = '#cfa8dc'   # light violet: the pre-existing run of the line
+_TYPE_COLOR     = {'ext': _EXT_COLOR, 'ndc': _NDC_COLOR, 'frq': _FRQ_COLOR}
+_TYPE_COLOR_OLD = {'ext': _EXT_COLOR_OLD, 'ndc': _NDC_COLOR_OLD, 'frq': _FRQ_COLOR_OLD}
 _BACKDROP      = '#d4d4d4'   # unused infrastructure
 _LAKE_FC       = '#c8e8f5'
 _LAKE_EC       = '#99c4d8'
@@ -1418,12 +1491,15 @@ def plot_svc_interventions(base_infra: str, base_svc: str, result: Dict,
     written: List[str] = []
     combo = f"{base_infra}__{base_svc}"   # plots tree partition (decision H)
 
-    by_type: Dict[str, List] = {'ext': [], 'ndc': []}
+    by_type: Dict[str, List] = {t: [] for t in SUPPORTED_SVC_INT_TYPES}
     for m in materialised:
         seg = _load_delta_segments(m.get('projected_path'))
         if seg is None or seg.empty:
             continue
-        t = str(m.get('int_type') or ('ndc' if str(m['svc_int_id']).startswith('ndc') else 'ext'))
+        t = str(m.get('int_type') or '')
+        if t not in SUPPORTED_SVC_INT_TYPES:
+            prefix = str(m['svc_int_id']).split('_')[0]
+            t = prefix if prefix in SUPPORTED_SVC_INT_TYPES else 'ext'
         info = _svc_int_plot_info(m, seg, t, ctx)
         by_type.setdefault(t, []).append(info)
         out_t = core.plot_out_dir(combo, t)
@@ -1439,11 +1515,13 @@ def plot_svc_interventions(base_infra: str, base_svc: str, result: Dict,
         if _render_svc_fig(items, ctx, p, f"All {t.upper()} svc-ints ({len(items)})", offset=True):
             written.append(str(p))
 
-    allp = by_type.get('ext', []) + by_type.get('ndc', [])
+    allp = [info for t in SUPPORTED_SVC_INT_TYPES for info in by_type.get(t, [])]
     if allp:
         out_all = core.plot_out_dir(combo, None)
         p = out_all / f"svc_int_ALL_PRODUCED_{base_infra}.pdf"
-        if _render_svc_fig(allp, ctx, p, "All svc-ints (EXT green, NDC orange)", offset=True):
+        if _render_svc_fig(allp, ctx, p,
+                           "All svc-ints (EXT green, NDC orange, FRQ violet)",
+                           offset=True):
             written.append(str(p))
     return written
 
@@ -1671,14 +1749,14 @@ def _render_svc_fig(infos: List[Dict], ctx: Dict, out_path, title: str,
         drawn_st: set = set()
         for i, info in enumerate(infos):
             dist = ((i - (n - 1) / 2.0) * _OFFSET_M) if (offset and n > 1) else 0.0
-            dark = _NDC_COLOR if info['type'] == 'ndc' else _EXT_COLOR
-            light = _NDC_COLOR_OLD if info['type'] == 'ndc' else _EXT_COLOR_OLD
+            dark = _TYPE_COLOR.get(info['type'], _EXT_COLOR)
+            light = _TYPE_COLOR_OLD.get(info['type'], _EXT_COLOR_OLD)
             _plot_segs(ax, info['old'], light, 1.8, dist)
             _plot_segs(ax, info['new'], dark, 2.8, dist)
         for info in infos:
             _plot_stations(ax, info['stations'], drawn_st)
         for info in infos:
-            color = _NDC_COLOR if info['type'] == 'ndc' else _EXT_COLOR
+            color = _TYPE_COLOR.get(info['type'], _EXT_COLOR)
             _plot_termini_labels(ax, info, color)
 
         if ctx['extent'] is not None:
@@ -1692,6 +1770,9 @@ def _render_svc_fig(infos: List[Dict], ctx: Dict, out_path, title: str,
                         Line2D([0], [0], color=_EXT_COLOR, lw=2.5, label='Extension (new)')]
         if 'ndc' in types:
             handles += [Line2D([0], [0], color=_NDC_COLOR, lw=2.5, label='New direct connection')]
+        if 'frq' in types:
+            handles += [Line2D([0], [0], color=_FRQ_COLOR_OLD, lw=2, label='Existing line (FRQ)'),
+                        Line2D([0], [0], color=_FRQ_COLOR, lw=2.5, label='Frequency change')]
         handles += [Line2D([0], [0], color=_BACKDROP, lw=1.5, label='Unused infrastructure'),
                     Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
                            markeredgecolor='black', markersize=6, label='Service stop')]
@@ -1899,20 +1980,22 @@ def materialise_and_plot(
     *,
     ext_ids: Optional[List[str]] = None,
     ndc_ids: Optional[List[str]] = None,
+    frq_ids: Optional[List[str]] = None,
     make_plots: bool = True,
     use_cache: bool = False,
     sa_polygon=None,
 ) -> Dict:
     """Materialise the given svc-int ids (delta networks) and optionally plot them.
 
-    Standalone-CLI convenience giving the per-type EXT/NDC files the same discover →
+    Standalone-CLI convenience giving the per-type EXT/NDC/FRQ files the same discover →
     materialise → plot flow as the cc CLI, without re-running discovery. Plots need the
     materialised projected deltas, so they are produced together behind one toggle.
     """
     result: Dict = {'ext_ids': list(ext_ids or []), 'ndc_ids': list(ndc_ids or []),
-                    'materialised': [], 'plots': []}
+                    'frq_ids': list(frq_ids or []), 'materialised': [], 'plots': []}
     todo = ([('ext', i) for i in result['ext_ids']] +
-            [('ndc', i) for i in result['ndc_ids']])
+            [('ndc', i) for i in result['ndc_ids']] +
+            [('frq', i) for i in result['frq_ids']])
     print(f"  [apply] materialising {len(todo)} svc-int delta network(s)…")
     for int_type, iid in todo:
         rec = read_record(int_type, iid)

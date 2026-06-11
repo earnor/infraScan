@@ -1,6 +1,6 @@
 """
 valuation_costs — Phase 8B: construction / maintenance / operating cost per svc-int.
-Last modified: 2026-06-10
+Last modified: 2026-06-11
 
 NEW cost track only (the legacy OLD 12-trains/track methodology was dropped,
 decision 2026-06-10). Sources:
@@ -9,10 +9,13 @@ decision 2026-06-10). Sources:
     no splitting). Replaces the costs_connection_curves.xlsx lookup.
   - CAP construction/maintenance: the 5C attribution table
     (svc_int_cap_attribution.csv, candidate - baseline deltas).
-  - Uncovered operating cost: signed per-direction delta route-metres of the
-    changed/added line variants (projected delta vs base projection, real
-    routed geometry — no detour factor; truncations come out negative)
-    x operating_cost_s_bahn_per_meter x (1 - general_KDG).
+  - Uncovered operating cost: signed per-direction delta TRAIN-metres of the
+    changed/added line variants (Option A, decision 2026-06-11): per variant
+    dev_route_m x dev_total_dep - base_route_m x base_total_dep, normalised by
+    operating_cost_ref_daily_dep (28 = the S14 service level behind the
+    879 CHF/m/a rate), x operating_cost_s_bahn_per_meter x (1 - general_KDG).
+    At total_dep 28 this reproduces the previous delta-route-m rule exactly;
+    a pure frequency doubling now pays L x base_dep/28 x rate instead of 0.
 
 Output keeps the legacy construction_cost.csv column schema
 (Dev_/CapInt_/Total*/Yearly*) keyed by svc-int id, so the Phase 9
@@ -60,8 +63,8 @@ def compute_construction_costs(svc_int_ids=None, *, combo: str,
     base_infra = base_infra or combo.split('__')[0]
     svc_version = combo.split('__', 1)[1]
     if svc_int_ids is None:
-        svc_int_ids = (so.list_svc_int_ids('ext', network=combo)
-                       + so.list_svc_int_ids('ndc', network=combo))
+        svc_int_ids = [i for t in so.SUPPORTED_SVC_INT_TYPES
+                       for i in so.list_svc_int_ids(t, network=combo)]
     svc_int_ids = [str(i) for i in svc_int_ids]
     out_dir = paths.get_costs_combo_dir(combo)
     csv_path = paths.get_construction_cost_csv(combo)
@@ -71,7 +74,8 @@ def compute_construction_costs(svc_int_ids=None, *, combo: str,
           f"({len(svc_int_ids)} svc-int(s)) ===")
     print(f"  combo: {combo} | duration: {cp.duration}y | op rate: "
           f"{cp.operating_cost_s_bahn_per_meter} CHF/m/a x "
-          f"(1 - KDG {cp.general_KDG})")
+          f"(1 - KDG {cp.general_KDG}) x dep/"
+          f"{cp.operating_cost_ref_daily_dep} (delta train-m)")
     if not svc_int_ids:
         print("  no svc-ints registered — nothing to do")
         return pd.DataFrame(columns=_OUT_COLS)
@@ -88,6 +92,9 @@ def compute_construction_costs(svc_int_ids=None, *, combo: str,
     attribution = _load_attribution(combo)
     base_lengths = _route_lengths(
         paths.get_projected_services_path(svc_version, base_infra))
+    base_deps = _route_deps(os.path.join(
+        paths.MAIN, paths.RAIL_LINES_DIR, svc_version + '_network',
+        paths.SERVICES_UNPROJECTED_SUBDIR, 'rail_lines.gpkg'))
 
     rows = []
     for iid in svc_int_ids:
@@ -96,7 +103,7 @@ def compute_construction_costs(svc_int_ids=None, *, combo: str,
             print(f"  [8B] {iid}: not in the registry — skipped")
             continue
         rows.append(_costs_for_svc_int(iid, rec, combo, base_infra,
-                                       attribution, base_lengths))
+                                       attribution, base_lengths, base_deps))
     result = pd.DataFrame(rows, columns=_OUT_COLS)
 
     os.makedirs(out_dir, exist_ok=True)
@@ -166,27 +173,60 @@ def _route_lengths(gpkg_path: str) -> pd.Series:
     return pd.concat(parts).groupby(_VARIANT_KEY)['length_m'].sum()
 
 
-def _delta_route_m(svc_int_id: str, combo: str, base_infra: str,
-                   base_lengths: pd.Series) -> float:
-    """Signed mean-over-directions delta route-metres of the svc-int's
-    changed/added variants (dev minus base; absent in base = new line).
-    set_frequency-only deltas come out 0 (geometry unchanged, frequency-blind
-    operating cost — train-km scaling is the deferred refinement)."""
+def _route_deps(lines_gpkg_path: str) -> dict:
+    """total_dep per line variant from a rail_lines.gpkg, summed over layers.
+    Keys (route_id, direction_id, variant_rank) typed to match _route_lengths
+    (str, int, int). Missing file → {} (caller falls back, warned)."""
+    if not os.path.exists(lines_gpkg_path):
+        print(f"  [8B] WARNING: no rail_lines.gpkg at {lines_gpkg_path} — "
+              f"train-m scaling falls back to route-m for these variants")
+        return {}
+    out: dict = {}
+    for layer in fiona.listlayers(lines_gpkg_path):
+        gdf = gpd.read_file(lines_gpkg_path, layer=layer)
+        if gdf.empty or 'total_dep' not in gdf.columns:
+            continue
+        for _, r in gdf.iterrows():
+            key = (str(r['route_id']), int(float(r['direction_id'])),
+                   int(float(r['variant_rank'])))
+            out[key] = out.get(key, 0.0) + float(r.get('total_dep', 0) or 0)
+    return out
+
+
+def _delta_train_m(svc_int_id: str, combo: str, base_infra: str,
+                   base_lengths: pd.Series, base_deps: dict) -> float:
+    """Signed mean-over-directions delta train-metres at the calibration
+    reference (Option A, 2026-06-11): per changed/added variant
+    dev_len x dev_dep - base_len x base_dep, divided by
+    operating_cost_ref_daily_dep. Variants absent from the delta are unchanged
+    and contribute 0; at total_dep 28 (every EXT/NDC) this equals the previous
+    delta route-metres exactly; a pure doubling yields L x base_dep/ref."""
     delta_path = paths.get_svc_int_projected_path(svc_int_id, base_infra, combo)
     dev = _route_lengths(delta_path)
     if dev.empty:
         return 0.0
+    dev_deps = _route_deps(os.path.join(
+        paths.get_svc_int_network_dir(svc_int_id, combo),
+        paths.SERVICES_UNPROJECTED_SUBDIR, 'rail_lines.gpkg'))
+    ref = float(cp.operating_cost_ref_daily_dep)
     per_direction: dict = {}
     for (gtfs_id, direction, rank), dev_len in dev.items():
-        base_len = float(base_lengths.get((gtfs_id, direction, rank), 0.0))
+        key = (gtfs_id, direction, rank)
+        base_len = float(base_lengths.get(key, 0.0))
+        base_dep = float(base_deps.get(key, 0.0))
+        dev_dep = dev_deps.get(key)
+        if dev_dep is None:
+            # delta lines row missing — degrade to the old length-only rule
+            dev_dep = base_dep if base_dep > 0 else ref
         per_direction[direction] = (per_direction.get(direction, 0.0)
-                                    + float(dev_len) - base_len)
-    return sum(per_direction.values()) / len(per_direction)
+                                    + float(dev_len) * float(dev_dep)
+                                    - base_len * base_dep)
+    return sum(per_direction.values()) / len(per_direction) / ref
 
 
 def _costs_for_svc_int(svc_int_id: str, rec: dict, combo: str, base_infra: str,
                        attribution: pd.DataFrame,
-                       base_lengths: pd.Series) -> dict:
+                       base_lengths: pd.Series, base_deps: dict) -> dict:
     """One construction_cost.csv row (worker-safe: no settings reads)."""
     # CC (Dev_*): full registry cost of every required CC (8B decision 4).
     dev_constr = dev_maint_annual = 0.0
@@ -204,9 +244,11 @@ def _costs_for_svc_int(svc_int_id: str, rec: dict, combo: str, base_infra: str,
     cap_constr = float(mine['attributable_cost_chf'].sum())
     cap_maint_annual = float(mine['attributable_maintenance_annual_chf'].sum())
 
-    # Operating: signed delta route-metres x rate x uncovered share.
+    # Operating: signed delta train-metres (at the 28-dep reference) x rate
+    # x uncovered share.
     try:
-        delta_m = _delta_route_m(svc_int_id, combo, base_infra, base_lengths)
+        delta_m = _delta_train_m(svc_int_id, combo, base_infra,
+                                 base_lengths, base_deps)
     except FileNotFoundError as exc:
         print(f"  [8B] {svc_int_id}: {exc} — operating cost reads as 0")
         delta_m = 0.0
@@ -219,7 +261,8 @@ def _costs_for_svc_int(svc_int_id: str, rec: dict, combo: str, base_infra: str,
     total_maint = dev_maint + cap_maint
     print(f"  [8B] {svc_int_id}: CC {dev_constr / 1e6:,.1f}M + CAP "
           f"{cap_constr / 1e6:,.1f}M constr | maint {total_maint / 1e6:,.1f}M/"
-          f"{cp.duration}y | delta {delta_m / 1000.0:+,.2f} km/dir -> op "
+          f"{cp.duration}y | delta train-km {delta_m / 1000.0:+,.2f} km/dir "
+          f"@{cp.operating_cost_ref_daily_dep}dep -> op "
           f"{op_cost / 1e6:,.2f}M/a")
     return {'Development': svc_int_id,
             'Dev_ConstructionCost': dev_constr,
