@@ -1,6 +1,6 @@
 """
 svc_ints_new_direct_connections — Phase 5B: build new-direct-connection (NDC) svc-ints.
-Last modified: 2026-06-07
+Last modified: 2026-06-11
 
 Turns the connecting-curve candidates handed over by Phase 5A
 (``infra_ints_connecting_curve.discover_and_register`` → ``ndc_candidates``) into NDC
@@ -10,15 +10,22 @@ terminus. The modern replacement for the legacy
 ``generate_infrastructure.generate_new_railway_lines`` path-to-termini prototype, run on
 the **composed** (base + CC) rail graph with no hardcoded corridors / AK2035 reads.
 
-Frequency: the through-service can only run as often as its scarcer leg, so its
-``total_dep`` is a rule (``settings.NDC_FREQ_RULE``: min/max/mean) over the two
-constituent services. Real travel time comes later from ``apply_svc_int``'s projection.
+Frequency: standardised at ``settings.NDC_FREQ_DEP_PER_H`` (2 dep/h whole-day) for
+every NDC — the constituent services do not set it. Real travel time comes later from
+``apply_svc_int``'s projection.
 
-Scope (decision 9): rail-only constituents; the NDC must keep ≥2 stops inside the
-study-area boundary (5A's curve scope gate already rail-restricts the candidates).
+Scope (decision 9, relaxed 2026-06-08): rail-only constituents; the NDC must keep ≥1
+stop inside the study-area boundary (5A's curve scope gate already rail-restricts the
+candidates).
+
+Arm refill (decision 2026-06-11): an enumerated terminus whose every combination is
+rejected (backtrack/overlap/scope) is replaced by the next-ranked end station within
+``settings.NDC_ARM_REFILL_MAX_M`` — e.g. cc_0001's dead Kloten arm refills to
+Winterthur (12.1 km via the Brütten tunnel), yielding the Uster/Wetzikon–Winterthur
+NDCs.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 import pandas as pd
@@ -91,12 +98,35 @@ def build_ndc_records(
         if ba not in G or bb not in G:
             continue
         try:
-            core = nx.shortest_path(G, ba, bb, weight='length_m')   # crosses the curve
+            core_path = nx.shortest_path(G, ba, bb, weight='length_m')  # crosses the curve
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             continue
-        fcore = set(core)
-        arms_a = _termini_options(G, ba, fcore, end_stations, cap)
-        arms_b = _termini_options(G, bb, fcore, end_stations, cap)
+        fcore = set(core_path)
+
+        def _valid_pair(pa, pb):
+            """Mirror the acceptance gates of the combination loop (minus dedup)."""
+            if set(pa) & set(pb):
+                return False
+            ns = list(reversed(pa))[:-1] + core_path + pb[1:]
+            if cc._detect_backtrack(ns, seg_lookup) is not None:
+                return False
+            seq = _served_seq(ns, stop_index)
+            if len(seq) < 2:
+                return False
+            if sa_polygon is not None and \
+                    sum(1 for n in seq if _in_sa(n, stop_index, sa_polygon)) < 1:
+                return False
+            return True
+
+        # Refill validity is judged against the OTHER side's raw nearest-cap arms
+        # (deterministic, order-independent — avoids mutual dependence of the sides).
+        max_refill = float(getattr(settings, 'NDC_ARM_REFILL_MAX_M', 15000.0))
+        raw_a = _termini_options(G, ba, fcore, end_stations, cap)
+        raw_b = _termini_options(G, bb, fcore, end_stations, cap)
+        arms_a = _termini_options(G, ba, fcore, end_stations, cap, max_refill,
+                                  lambda p: any(_valid_pair(p, q) for q in raw_b))
+        arms_b = _termini_options(G, bb, fcore, end_stations, cap, max_refill,
+                                  lambda p: any(_valid_pair(q, p) for q in raw_a))
         svc_a, svc_b = _service_through(ba, line_seqs), _service_through(bb, line_seqs)
         line_type = int((svc_a or svc_b or {}).get('line_type', 109))
         constituents = [s for s in ((svc_a or {}).get('route_id'),
@@ -106,7 +136,7 @@ def build_ndc_records(
             for pb in arms_b:
                 if set(pa) & set(pb):                       # arms must not overlap
                     continue
-                nodes_seq = list(reversed(pa))[:-1] + core + pb[1:]
+                nodes_seq = list(reversed(pa))[:-1] + core_path + pb[1:]
                 # reject if the full routed path backtracks anywhere OTHER than the
                 # placed curve — that reversal would itself require an un-placed CC
                 # (e.g. Dietlikon→Bassersdorf, Kemptthal→Winterthur Töss).
@@ -133,7 +163,8 @@ def build_ndc_records(
               f"{n_curve} line(s) ({n_reject} rejected: route needs another curve)")
 
     print(f"  [ndc] {len(curves)} curve(s) → {len(records)} NDC svc-int(s) "
-          f"(infra-only, ≤{cap} termini/end, no extra-curve reversals, ≥1 SA stop)")
+          f"(infra-only, ≤{cap} termini/end with refill, no extra-curve reversals, "
+          f"≥1 SA stop)")
     return records
 
 
@@ -177,6 +208,7 @@ def _ndc_to_record(int_id, seq_names, total_dep, line_type, req, base_infra,
                         'params': {'stops': seq_names, 'total_dep': total_dep,
                                    'line_type': line_type, 'requires_infra': req}}],
         'total_dep': total_dep, 'line_type': line_type, 'mode_class': 'rail',
+        'line_short_name': si.svc_int_line_name({'int_id': int_id, 'int_type': 'ndc'}),
         'requires_infra': req, 'affected_stations': seq_names,
         'affected_services': constituents,
     }
@@ -186,13 +218,21 @@ def _ndc_to_record(int_id, seq_names, total_dep, line_type, req, base_infra,
 # Through-sequence on the composed rail graph (path-to-termini)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _termini_options(G, start, forbidden, end_stations, cap) -> List[List[str]]:
+def _termini_options(G, start, forbidden, end_stations, cap,
+                     max_refill_m: float = 0.0, is_valid=None) -> List[List[str]]:
     """Up to `cap` outward paths [start, …, terminus] to the nearest distinct end stations.
 
     Reproduces the legacy generate_new_railway_lines enumeration: instead of a single
     nearest terminus, return the `cap` nearest end stations reachable from `start`
     without entering `forbidden` (the curve/core region). Returns [[start]] when start
     is itself a terminus or none are reachable.
+
+    Refill on rejection (decision 2026-06-11): with an `is_valid(path)` callback, a
+    terminus whose every combination is rejected (backtrack/overlap/scope) is REPLACED
+    by the next-ranked end station, admitted only while the arm stays within
+    `max_refill_m` (the nearest-`cap` termini themselves are distance-uncapped, as
+    before). No valid arm at all → fall back to the raw nearest-`cap` set, which keeps
+    today's no-record outcome.
     """
     if start in end_stations:
         return [[start]]
@@ -204,13 +244,28 @@ def _termini_options(G, start, forbidden, end_stations, cap) -> List[List[str]]:
         return [[start]]
     reachable = sorted((d, n) for n, d in dist.items()
                        if n in end_stations and n != start and n not in forbidden)
-    paths: List[List[str]] = []
-    for _, term in reachable[:cap]:
+    selected: List[List[str]] = []
+    raw: List[List[str]] = []
+    for rank, (d, term) in enumerate(reachable):
+        if len(selected) >= cap:
+            break
+        if rank >= cap and (is_valid is None or d > max_refill_m):
+            break  # distance-ranked: nothing further qualifies as a refill
         try:
-            paths.append(nx.shortest_path(H, start, term, weight='length_m'))
+            path = nx.shortest_path(H, start, term, weight='length_m')
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             continue
-    return paths or [[start]]
+        if rank < cap:
+            raw.append(path)
+        if is_valid is None or is_valid(path):
+            selected.append(path)
+            if rank >= cap:
+                print(f"  [ndc]   refill: {start} -> {term} ({d / 1000:.1f} km) "
+                      f"replaces a rejected terminus")
+        elif rank < cap:
+            print(f"  [ndc]   {start} -> {term}: every combination rejected — "
+                  f"trying the next end station (refill ≤ {max_refill_m / 1000:.0f} km)")
+    return selected or raw or [[start]]
 
 
 def _served_seq(nodes_seq, stop_index) -> List[str]:

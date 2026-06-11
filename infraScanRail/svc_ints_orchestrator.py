@@ -62,7 +62,7 @@ SUPPORTED_SVC_INT_TYPES = ('ext', 'ndc')
 RECORD_COLS: tuple = (
     'int_id', 'int_type', 'base_authored', 'svc_version',
     'route_id', 'direction_id', 'variant_rank',
-    'operations', 'total_dep', 'line_type', 'mode_class',
+    'operations', 'total_dep', 'line_type', 'mode_class', 'line_short_name',
     'requires_infra', 'affected_stations', 'affected_services',
 )
 
@@ -440,7 +440,17 @@ def apply_svc_int(
         auto_mode=True, include_plots=False,
     )
     proj_dir.mkdir(parents=True, exist_ok=True)
-    enriched = ssp.project_lines(seg_gdf, config, run_zvv=run_zvv)
+    # Flagged terminus reversals (EXT, reversal_at_endpoint) are allowed by design
+    # (penalised via IVWT) — exempt them from the inter-leg backtracking reroute.
+    exempt = {str(o.get('params', {}).get('endpoint', '')).strip()
+              for o in (svc_int.get('operations') or [])
+              if o.get('op') == 'extend' and o.get('params', {}).get('reversal_at_endpoint')}
+    exempt.discard('')
+    enriched = ssp.project_lines(
+        seg_gdf, config, run_zvv=run_zvv,
+        base_projection_lookup=_build_base_projection_cache(
+            base_svc_version, base_infra_version),
+        reversal_exempt_stops=exempt or None)
     ssp._write_rail_outputs(enriched, config)
     print(f"  [apply] {svc_int_id}: projected {len(enriched)} segment(s) → {projected_path}")
 
@@ -680,7 +690,7 @@ def _build_delta(svc_int, base_lines, base_segs, resolve):
         line_type = int(nl.get('line_type', svc_int.get('line_type', 109)))
         total_dep = int(nl.get('total_dep', svc_int.get('total_dep', 0)))
         layer = _layer_for_line_type(line_type)
-        short = svc_int.get('line_short_name') or svc_int_id_short(svc_int)
+        short = svc_int.get('line_short_name') or svc_int_line_name(svc_int)
         for dir_id in ('0', '1'):
             names = nl['stops'] if dir_id == '0' else list(reversed(nl['stops']))
             seq = [resolve(n) for n in names]
@@ -730,14 +740,35 @@ def _build_delta(svc_int, base_lines, base_segs, resolve):
                                 else line_row.get('total_dep', 0))
                 base_tt = {(int(r['from_stop_nr']), int(r['to_stop_nr'])): r
                            for _, r in line_seg_df.iterrows()}
-                meta = {'route_id': route_id, 'short': line_row.get('line_short_name'),
-                        'line_type': int(line_row.get('line_type', 106)),
+                # modified line keeps its base name + suffix ('S14_EXT5')
+                short = (svc_int.get('line_short_name')
+                         or svc_int_line_name(svc_int,
+                                              base_short=line_row.get('line_short_name')))
+                meta = {'route_id': route_id, 'short': short,
+                        'line_type': int(line_row.get('line_type', 109)),
                         'mode_label': line_row.get('mode_label', 'rail'),
                         'variant_rank': var}
                 _emit_line(delta_lines, delta_segs, layer, meta, dir_id, seq, total_dep, base_tt)
                 stop_nrs.update(s['nr'] for s in seq)
                 affected.update(s['name'] for s in seq)
                 changed_routes.add(route_id)
+
+        # Flagged terminus reversal: the extension hop carries the direction-change
+        # dwell as IVWT (both direction rows; GC-effective once routing reads IVWT).
+        pen = float(getattr(settings, 'EXT_TERMINUS_REVERSAL_PENALTY_MIN', 2.0))
+        first = (params.get('stops') or [None])[0]
+        if pen > 0 and first and params.get('reversal_at_endpoint'):
+            hop = frozenset((str(endpoint), str(first)))
+            n_pen = 0
+            for rows in delta_segs.values():
+                for row in rows:
+                    if frozenset((str(row['from_stop_name']),
+                                  str(row['to_stop_name']))) == hop:
+                        row['IVWT'] = float(row.get('IVWT', 0.0) or 0.0) + pen
+                        n_pen += 1
+            if n_pen:
+                print(f"  [apply] terminus reversal at {endpoint}: +{pen:.0f} min IVWT "
+                      f"on {n_pen} extension-hop row(s)")
 
     return delta_lines, delta_segs, stop_nrs, changed_routes, affected
 
@@ -763,16 +794,25 @@ def _emit_line(delta_lines, delta_segs, layer, meta, dir_id, seq, total_dep, bas
         'destination': seq[-1]['name'],
         'line_long_name': f"{meta['short']}: {seq[0]['name']} - {seq[-1]['name']}",
         'line_type': meta['line_type'], 'mode_label': meta['mode_label'],
-        'mode_class': 'rail', 'agency_id': '', 'is_circular': seq[0]['nr'] == seq[-1]['nr'],
+        'mode_class': 'rail', 'agency_id': meta.get('agency_id', ''),
+        'is_circular': seq[0]['nr'] == seq[-1]['nr'],
         'n_stops': len(seq), 'service_period': 'all_day',
         'freq_am_peak_dep_hr': freq_hr, 'freq_pm_peak_dep_hr': freq_hr,
         'freq_offpeak_dep_hr': freq_hr, 'total_dep': total_dep,
         'freq_directional': False, 'tt_source': 'projected', 'geometry': line_geom,
     })
     rows = delta_segs.setdefault(layer, [])
-    for a, b in zip(seq[:-1], seq[1:]):
+    default_ivwt = float(getattr(settings, 'SVC_INT_DEFAULT_IVWT_MIN', 0.5))
+    for idx, (a, b) in enumerate(zip(seq[:-1], seq[1:])):
         prev = base_tt.get((a['nr'], b['nr']))
         keep_tt = prev is not None and pd.notna(prev.get('TT'))
+        # IVWT = dwell at the from-stop (base GTFS convention): base-reused hops keep
+        # their base dwell; added hops get the standard default, except a direction's
+        # first hop (the train originates there, dwell 0).
+        if keep_tt:
+            ivwt = float(prev['IVWT']) if pd.notna(prev.get('IVWT')) else 0.0
+        else:
+            ivwt = 0.0 if idx == 0 else default_ivwt
         rows.append({
             'GTFS_ID': meta['route_id'], 'Service': meta['short'],
             'direction_id': dir_id, 'variant_rank': meta['variant_rank'],
@@ -783,7 +823,7 @@ def _emit_line(delta_lines, delta_segs, layer, meta, dir_id, seq, total_dep, bas
             'to_stop_E': b['E'], 'to_stop_N': b['N'],
             'TT': float(prev['TT']) if keep_tt else np.nan,
             'tt_source': 'gtfs' if keep_tt else 'formula',
-            'IVWT': float(prev['IVWT']) if keep_tt and pd.notna(prev.get('IVWT')) else 0.0,
+            'IVWT': ivwt,
             'service_period': 'all_day',
             'freq_am_peak_dep_hr': freq_hr, 'freq_pm_peak_dep_hr': freq_hr,
             'freq_offpeak_dep_hr': freq_hr,
@@ -879,6 +919,63 @@ def _find_target(base_lines, base_segs, route_id, dir_id, variant_rank):
 # ─────────────────────────────────────────────────────────────────────────────
 # Base loading + stop resolution
 # ─────────────────────────────────────────────────────────────────────────────
+
+_BASE_PROJ_REUSE: Dict[Tuple[str, str], Dict] = {}
+
+
+def _build_base_projection_cache(base_svc_version, base_infra_version) -> Dict:
+    """base_reuse_key → base-projected enrichment payload, for unchanged stop-pairs.
+
+    Passed to services_service_projection.project_lines so a delta's unchanged
+    stop-pairs (tt_source='gtfs') keep the base-projected path instead of being
+    re-routed — equal-weight Dijkstra ties must never flip an unchanged hop between
+    per-svc-int networks (determinism fix, 2026-06-11). Memoised per (svc, infra).
+    """
+    import services_service_projection as ssp
+
+    mkey = (str(base_svc_version), str(base_infra_version))
+    if mkey in _BASE_PROJ_REUSE:
+        return _BASE_PROJ_REUSE[mkey]
+    cache: Dict = {}
+    _BASE_PROJ_REUSE[mkey] = cache
+    proj = paths.get_projected_services_path(base_svc_version, base_infra_version)
+    if not Path(proj).exists():
+        print(f"  [apply] base projected services missing at {proj} — "
+              f"unchanged-pair reuse disabled")
+        return cache
+
+    def _flag(v) -> bool:
+        return bool(v) if pd.notna(v) else False
+
+    for layer in fiona.listlayers(proj):
+        g = gpd.read_file(proj, layer=layer)
+        if g.empty:
+            continue
+        for _, r in g.iterrows():
+            key = ssp.base_reuse_key(
+                r.get('GTFS_ID', ''), r.get('direction_id', ''),
+                r.get('variant_rank', ''),
+                r.get('from_stop_name', ''), r.get('to_stop_name', ''))
+            if key in cache:
+                continue
+            cache[key] = {
+                'node_id_from': r.get('node_id_from'), 'node_id_to': r.get('node_id_to'),
+                'match_method_from': r.get('match_method_from', 'base_reuse'),
+                'match_method_to': r.get('match_method_to', 'base_reuse'),
+                'from_code': r.get('from_code', ''), 'to_code': r.get('to_code', ''),
+                'Via_Nodes': r.get('Via_Nodes', ''), 'Via_Segment': r.get('Via_Segment', ''),
+                'Via_Station': '', 'Via_Junction': '',
+                'path_nodes': r.get('path_nodes', ''),
+                'path_length_m': r.get('path_length_m'),
+                '_path_tt_min': 0.0,
+                'needs_correction': _flag(r.get('needs_correction')),
+                'elec_mismatch': _flag(r.get('elec_mismatch')),
+                'geometry': r.geometry,
+                'FromCode': r.get('from_stop_nr'), 'ToCode': r.get('to_stop_nr'),
+            }
+    print(f"  [apply] base-projection reuse cache: {len(cache)} stop-pair row(s)")
+    return cache
+
 
 def _load_base_unprojected(base_svc_version):
     """Load base Unprojected (lines_by_layer, segments_by_layer, stops)."""
@@ -991,8 +1088,30 @@ def _layer_for_line_type(line_type) -> str:
         return 'regional_rail'
 
 
+def svc_int_line_name(svc_int, base_short: Optional[str] = None) -> str:
+    """Readable line short name for a svc-int (binding naming scheme 2026-06-10).
+
+    Suffix = type abbreviation + the int's global per-type sequence number
+    (1:1 with the registry id: n = id number − DEV_ID_START_<TYPE>). New lines
+    → 'NDC2'; modified lines keep their base short name → 'S14_EXT5'.
+
+    Args:
+        svc_int: record dict (int_id, int_type).
+        base_short: the modified line's existing short name (None for new lines).
+    """
+    int_id = str(svc_int.get('int_id', ''))
+    int_type = str(svc_int.get('int_type', '') or int_id.split('_')[0]).lower()
+    try:
+        num = int(int_id.split('_')[1])
+    except (IndexError, ValueError):
+        return base_short or int_id
+    start = int(getattr(settings, _TYPE_START.get(int_type, ''), num))
+    code = f"{int_type.upper()}{num - start}"
+    return f"{base_short}_{code}" if base_short else code
+
+
 def svc_int_id_short(svc_int) -> str:
-    """A short service label for an NDC line lacking an explicit line_short_name."""
+    """Legacy fallback label for records predating line_short_name in the registry."""
     return str(svc_int.get('int_id', 'NDC')).replace('ndc_', 'NDC')
 
 

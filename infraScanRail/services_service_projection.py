@@ -2225,6 +2225,21 @@ _OUTPUT_DROP: List[str] = [
 ]
 
 
+def base_reuse_key(service, direction, variant_rank, from_name, to_name) -> tuple:
+    """Lookup key for reusing a base-projected row on an unchanged delta stop-pair.
+
+    Shared by the per-svc-int delta projection (enrich_rail_links bypass) and the
+    cache builder in svc_ints_orchestrator so both sides normalise identically.
+    """
+    def _n(v):
+        try:
+            return str(int(float(v)))
+        except (TypeError, ValueError):
+            return str(v).strip()
+    return (str(service).strip(), _n(direction), _n(variant_rank),
+            str(from_name).strip(), str(to_name).strip())
+
+
 def _make_via_cols(path_nodes_str: str) -> tuple:
     """Derive Via_Nodes and Via_Segment from a semicolon-separated path string.
 
@@ -3064,6 +3079,7 @@ def _postprocess_inter_leg_backtracking(
     node_attrs: Dict,
     hub_topology: Dict,
     gauge_graphs: Optional[Dict] = None,
+    reversal_exempt_stops: Optional[set] = None,
 ) -> gpd.GeoDataFrame:
     """Fix 1 post-pass: veto inter-leg same-edge re-use (symmetric).
 
@@ -3139,6 +3155,12 @@ def _postprocess_inter_leg_backtracking(
                 if _is_boundary_terminal(boundary, hub_topology):
                     skipped_exempt += 1
                     continue  # legit reversal — keep original
+                # Flagged extension terminus (reversal_at_endpoint): the reversal is
+                # allowed by design and penalised via IVWT — never rerouted away.
+                if reversal_exempt_stops and \
+                        str(getattr(row_a, "ToStation", "")).strip() in reversal_exempt_stops:
+                    skipped_exempt += 1
+                    continue
 
                 forbidden = (p1[-2], p1[-1])
                 len_a_orig = float(enriched.at[row_a.Index, "path_length_m"] or 0.0)
@@ -3200,10 +3222,21 @@ def enrich_rail_links(
     infra_version_dir: Optional[Path],
     hub_topology: Optional[Dict] = None,
     gauge_graphs: Optional[Dict] = None,
+    base_projection_lookup: Optional[Dict] = None,
+    reversal_exempt_stops: Optional[set] = None,
 ) -> gpd.GeoDataFrame:
     """
     Enrich edges_in_corridor.gpkg with real infrastructure geometry.
     Returns the input GeoDataFrame with new columns appended and geometry replaced.
+
+    base_projection_lookup (per-svc-int delta projection only): rows whose
+    tt_source is 'gtfs' (unchanged stop-pairs carried over from the base) take
+    their enrichment verbatim from this base-projected cache instead of being
+    re-routed — equal-weight Dijkstra ties must never flip an unchanged hop
+    between delta networks (determinism fix, 2026-06-11).
+    reversal_exempt_stops: station names where a same-edge inter-leg reversal is
+    allowed by design (flagged extension termini) — passed to the backtracking
+    post-pass so it never reroutes the approach leg away from them.
     """
     stop_overrides_by_service = _preselect_rail_stop_nodes(
         edges, G, lookups, nodes, hub_topology or {}
@@ -3212,8 +3245,21 @@ def enrich_rail_links(
     enriched_rows = []
     match_cache: Dict[str, MatchResult] = {}
     _has_variant = "variant_rank" in edges.columns
+    n_reused = 0
 
     for idx, row in edges.iterrows():
+        if base_projection_lookup and \
+                str(row.get('tt_source', '')).strip().lower() == 'gtfs':
+            cached = base_projection_lookup.get(base_reuse_key(
+                row.get('Service', ''), row.get('Direction', ''),
+                row.get('variant_rank', ''),
+                row.get('FromStation', ''), row.get('ToStation', '')))
+            if cached is not None:
+                new_row = row.to_dict()
+                new_row.update(cached)
+                enriched_rows.append(new_row)
+                n_reused += 1
+                continue
         if _has_variant:
             svc_key = (
                 str(row.get("Service", "")),
@@ -3248,9 +3294,13 @@ def enrich_rail_links(
                 new_row['tt_source']  = 'formula'
         enriched_rows.append(new_row)
 
+    if n_reused:
+        print(f"  [project] {n_reused}/{len(edges)} unchanged stop-pair(s) reuse the "
+              f"base projection")
     result = gpd.GeoDataFrame(enriched_rows, crs=SWISS_CRS)
     result = _postprocess_inter_leg_backtracking(
         result, G, seg_lookup, node_attrs, hub_topology or {}, gauge_graphs,
+        reversal_exempt_stops=reversal_exempt_stops,
     )
     return result
 
@@ -4563,6 +4613,8 @@ def project_lines(
     infra_segments: Optional[gpd.GeoDataFrame] = None,
     run_zvv: bool = True,
     context: Optional[ProjectionContext] = None,
+    base_projection_lookup: Optional[Dict] = None,
+    reversal_exempt_stops: Optional[set] = None,
 ) -> gpd.GeoDataFrame:
     """Project a subset of rail lines onto the (possibly composed) infra graph.
 
@@ -4579,6 +4631,10 @@ def project_lines(
         infra_nodes/infra_segments: in-memory composed infra (else load config.infra_dir).
         run_zvv: apply the ZVV geometry post-pass (matches the full pipeline default).
         context: reuse a pre-built ProjectionContext instead of rebuilding it.
+        base_projection_lookup: base-projected rows keyed by ``base_reuse_key`` —
+            unchanged stop-pairs (tt_source='gtfs') reuse them instead of re-routing.
+        reversal_exempt_stops: station names where a flagged terminus reversal is
+            allowed — the inter-leg backtracking post-pass keeps it.
 
     Returns:
         The enriched (projected) segments GeoDataFrame.
@@ -4597,6 +4653,8 @@ def project_lines(
         rail_edges, ctx.nodes, ctx.bav_segments, ctx.G, ctx.seg_lookup, ctx.node_attrs,
         ctx.lookups, ctx.buffer_geom, ctx.raw_nodes, ctx.raw_segs, config.infra_dir,
         hub_topology=ctx.hub_topology, gauge_graphs=ctx.gauge_graphs,
+        base_projection_lookup=base_projection_lookup,
+        reversal_exempt_stops=reversal_exempt_stops,
     )
     if run_zvv and ctx.zvv_available:
         rail_enriched = _apply_zvv_postpass(

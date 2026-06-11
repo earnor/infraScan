@@ -101,5 +101,5 @@ def t_wait_min(headway_min: float) -> float:
 # (Topic 1, 2026-05). Kept as fallback / backward compatibility only.
 # New Tier-1 cap-intervention cost = L_siding × track_cost_per_meter.
 segment_siding_costs = 33250000  # Track siding costs (1000m): SBB Kostentool "11500000" / Old approach "33250000"  [LEGACY]
-station_siding_costs = 33250000   # Station siding costs (1000m): SBB Kostentool "9950000" / Old approach "18300000"  [LEGACY, bumped 550→1000m for consistency]
-platform_cost_per_unit = 0  # Platform costs per unit: SBB Kostentool "6930000" / Old approach "0" station adjustments in the station siding costs
+station_siding_costs = 33250000   # Station track lump sum PER TRACK ADDED (= 1000m × track_cost_per_meter): SBB Kostentool "9950000" / Old approach "18300000"
+platform_cost_per_unit = 0  # Platform costs per unit: deliberately 0 — platforms are costed as included in the station track lump sum (SBB Kostentool would be "6930000")

@@ -1524,6 +1524,10 @@ def phase_5a_infrastructure_interventions(sa_boundary, runtimes: dict) -> None:
             base_version=_phase5_base_infra(),
             svc_version=PIPELINE_CONFIG.svc_version or _io._resolve_svc_version(),
             polygon=sa_boundary,
+            # CC composition is real-world data that cannot be parameterised: prompt
+            # whenever the combo's composition cache lacks a discovered curve, so the
+            # cost never silently falls back to normal-only (F4, decision 2026-06-11).
+            interactive=True,
         ) or {}
     except Exception as exc:
         print(f"  WARNING: Phase 5A failed: {exc}")

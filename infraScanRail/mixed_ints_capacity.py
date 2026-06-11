@@ -143,7 +143,8 @@ def _record_station_track(itv, int_id, nodes_base, requires=None):
     if not mask.any():
         raise KeyError(f"station node {itv.node_id} not found in base")
     node = nodes_base[mask].copy()
-    node['Track_Count'] = pd.to_numeric(node['Track_Count'], errors='coerce').fillna(0) + 1
+    node['Track_Count'] = (pd.to_numeric(node['Track_Count'], errors='coerce').fillna(0)
+                           + max(1.0, float(getattr(itv, 'tracks_added', 1.0) or 1.0)))
     if getattr(itv, 'platforms_added', None):
         node['Platform_Count'] = (pd.to_numeric(node['Platform_Count'], errors='coerce').fillna(0)
                                   + itv.platforms_added)

@@ -334,12 +334,53 @@ def _target_key(intervention: 'CapacityIntervention'):
     return ('segment', frozenset((int(fn), int(tn))))
 
 
+def _connected_equivalent(station_nr: int, segments_df: pd.DataFrame) -> float:
+    """Track requirement a station's adjacent line topology implies.
+
+    Mirrors the capacity infrastructure plot (`_station_colour`): one adjacent
+    segment → its track count (terminus); two → their mean (through station);
+    three+ → their sum (junction). No usable adjacency → 1.0.
+    """
+    tcol = 'tracks' if 'tracks' in segments_df.columns else 'Num_Tracks'
+    fn = pd.to_numeric(segments_df['from_node'], errors='coerce')
+    tn = pd.to_numeric(segments_df['to_node'], errors='coerce')
+    adj = segments_df[(fn == float(station_nr)) | (tn == float(station_nr))]
+    vals = pd.to_numeric(adj[tcol], errors='coerce').dropna()
+    vals = [float(v) for v in vals if v > 0]
+    if not vals:
+        return 1.0
+    if len(vals) == 1:
+        return vals[0]
+    if len(vals) == 2:
+        return sum(vals) / 2.0
+    return sum(vals)
+
+
+def _required_station_tracks(connected_equivalent: float, terminating: bool,
+                             mixed: bool) -> int:
+    """Station tracks needed for its role: line equivalent + turnback + overtaking.
+
+    `terminating` adds the turnback track (a terminating train must clear the
+    through track); `mixed` adds the overtaking track for sections carrying both
+    stopping and passing services. Floor of 2: crossing is impossible on a single
+    track even when it matches the line (the plot's matched-at-1 = red rule).
+    """
+    import math
+    need = math.ceil(connected_equivalent - 1e-9)
+    if terminating:
+        need += 1
+    if mixed:
+        need += 1
+    return max(2, need)
+
+
 def design_section_intervention(
     section: pd.Series,
     segments_df: pd.DataFrame,
     stations_df: pd.DataFrame,
     intervention_counter: int,
-    iteration: int = 1
+    iteration: int = 1,
+    termini_nodes: Optional[set] = None,
 ) -> CapacityIntervention:
     """
     Design appropriate intervention for a capacity-constrained section.
@@ -393,13 +434,26 @@ def design_section_intervention(
             else:
                 platforms_added = None
 
+        # F5: add what the crossing/overtaking logic requires, not a blanket +1.
+        equiv = _connected_equivalent(middle_station_id, segments_df)
+
+        def _svc_str(v):
+            s = str(v if v is not None else '').strip()
+            return '' if s.lower() == 'nan' else s
+
+        mixed = bool(_svc_str(section.get('stopping_services'))) and \
+            bool(_svc_str(section.get('passing_services')))
+        terminating = bool(termini_nodes and int(middle_station_id) in termini_nodes)
+        required = _required_station_tracks(equiv, terminating, mixed)
+        tracks_added = float(max(1, required - int(current_tracks)))
+
         intervention = CapacityIntervention(
             intervention_id=f"INT_ST_{intervention_counter:04d}",
             section_id=str(section_id),
             type='station_track',
             node_id=middle_station_id,
             segment_id=None,
-            tracks_added=1.0,
+            tracks_added=tracks_added,
             affected_segments=segments,
             construction_cost_chf=0.0,  # Filled by calculate_intervention_cost()
             maintenance_cost_annual_chf=0.0,
@@ -480,38 +534,49 @@ def design_section_intervention(
     return intervention
 
 
+def _piece_rate(structure: str) -> float:
+    """Per-meter construction rate for a composition piece (shared with the CC pricing)."""
+    from infra_ints_connecting_curve import _STRUCT_RATE_ATTR
+    attr = _STRUCT_RATE_ATTR.get(str(structure).strip().lower())
+    base = float(getattr(cost_parameters, 'track_cost_per_meter', 33250.0))
+    return float(getattr(cost_parameters, attr, base)) if attr else base
+
+
 def calculate_intervention_cost(
     intervention: CapacityIntervention,
-    maintenance_rate: float = None
+    maintenance_rate: float = None,
+    composition: Optional[Dict] = None,
 ) -> CapacityIntervention:
-    """Calculate construction and maintenance costs (pure per-meter).
+    """Calculate construction and maintenance costs.
 
     Cost formulas
     -------------
     station_track:
-        cost = cost_parameters.station_siding_costs · floor(current_tracks)
+        cost = cost_parameters.station_siding_costs · tracks_added
         (+ platform_cost_per_unit · platforms_added, if any).
 
-    segment_passing_siding:
-        strategy='extra_track'           → cost = L_section · track_cost_per_meter
-        strategy='siding_with_junctions' → cost = L_siding  · track_cost_per_meter
+    segment_passing_siding (composition-aware when `composition` carries the host):
+        strategy='extra_track'           → Σ composition pieces · per-structure rate
+        strategy='siding_with_junctions' → pieces overlapped by the centered siding
+                                           window · per-structure rate
+        host missing from `composition`  → flat length · track_cost_per_meter + warning.
 
     Maintenance: construction_cost · maintenance_rate.
 
     Args:
-        intervention: Intervention object with current_tracks/length_m populated.
+        intervention: Intervention object with tracks_added/length_m populated.
         maintenance_rate: annual fraction. Defaults to
             cost_parameters.yearly_maintenance_to_construction_cost_factor.
+        composition: {frozenset(from_nr, to_nr): [(structure, length, start_m, end_m),
+            …]} chainage-ordered pieces of the host segments (tunnel/bridge priced at
+            their own rates, mirroring the CC F4 fix).
     """
-    import math
-
     if maintenance_rate is None:
         maintenance_rate = cost_parameters.yearly_maintenance_to_construction_cost_factor
 
-    base_tracks = math.floor(intervention.current_tracks)
-
     if intervention.type == 'station_track':
-        construction_cost = cost_parameters.station_siding_costs * base_tracks
+        tracks_added = max(1.0, float(intervention.tracks_added or 1.0))
+        construction_cost = cost_parameters.station_siding_costs * tracks_added
         if intervention.platforms_added and intervention.platforms_added > 0:
             platform_cost = (
                 cost_parameters.platform_cost_per_unit *
@@ -522,7 +587,26 @@ def calculate_intervention_cost(
 
     elif intervention.type == 'segment_passing_siding':
         track_length_m = float(intervention.length_m or 0.0)
-        construction_cost = track_length_m * cost_parameters.track_cost_per_meter
+        pieces = None
+        if composition and intervention.segment_id:
+            fn, tn = str(intervention.segment_id).split('-')
+            pieces = composition.get(frozenset((int(fn), int(tn))))
+        if pieces:
+            if intervention.strategy == 'extra_track':
+                construction_cost = sum(plen * _piece_rate(s)
+                                        for s, plen, _a, _b in pieces)
+            else:
+                total = max(p[3] for p in pieces)
+                l_sid = min(float(intervention.siding_length_m or track_length_m), total)
+                kp_a, kp_b = (total - l_sid) / 2.0, (total + l_sid) / 2.0
+                construction_cost = sum(
+                    max(0.0, min(b, kp_b) - max(a, kp_a)) * _piece_rate(s)
+                    for s, _plen, a, b in pieces)
+        else:
+            if composition is not None:
+                print(f"  [cap-cost] {intervention.segment_id}: no composition for the "
+                      f"host segment — flat per-meter rate used")
+            construction_cost = track_length_m * cost_parameters.track_cost_per_meter
 
     else:
         raise ValueError(f"Unknown intervention type: {intervention.type}")

@@ -229,10 +229,14 @@ def _build_rail_graph(rail_segments: pd.DataFrame,
             n_variants_skip += 1
             continue
 
+        # In-vehicle time per hop = TT + IVWT (dwell at intermediate timetable
+        # holds is elapsed in-vehicle time; also carries the EXT terminus-reversal
+        # penalty). Decided 2026-06-11.
         tt_map = {}
         for _, row in var_segs.iterrows():
+            ivwt = float(row['ivwt_min']) if 'ivwt_min' in var_segs.columns else 0.0
             tt_map[(str(row['from_stop_id']), str(row['to_stop_id']))] = \
-                float(row['travel_time_min'])
+                float(row['travel_time_min']) + ivwt
 
         variant_key = f"{rid}_{did}_{vrnk}"
         vfreq[variant_key] = float(freq)
@@ -1725,7 +1729,9 @@ def _load_rail_segments_with_tt() -> pd.DataFrame:
 
     Returns:
         DataFrame[from_stop_id, to_stop_id, route_id, direction_id,
-                  variant_rank, travel_time_min], deduped on the 5-column key.
+                  variant_rank, travel_time_min, ivwt_min], deduped on the
+        5-column key. ivwt_min (from IVWT, in-vehicle dwell at intermediate
+        holds) is 0.0 when the column is absent (older gpkgs).
     """
     path = os.path.join(catchment_allocate._RAIL_BASE, 'rail_segments.gpkg')
     if not os.path.exists(path):
@@ -1738,9 +1744,12 @@ def _load_rail_segments_with_tt() -> pd.DataFrame:
             'to_stop_nr':   'to_stop_id',
             'GTFS_ID':      'route_id',
             'TT':           'travel_time_min',
+            'IVWT':         'ivwt_min',
         })
+        if 'ivwt_min' not in gdf.columns:
+            gdf['ivwt_min'] = 0.0
         keep = ['from_stop_id', 'to_stop_id', 'route_id',
-                'direction_id', 'variant_rank', 'travel_time_min']
+                'direction_id', 'variant_rank', 'travel_time_min', 'ivwt_min']
         keep = [c for c in keep if c in gdf.columns]
         frames.append(gdf[keep].copy())
 
@@ -1750,6 +1759,8 @@ def _load_rail_segments_with_tt() -> pd.DataFrame:
     combined = pd.concat(frames, ignore_index=True)
     combined['travel_time_min'] = pd.to_numeric(
         combined['travel_time_min'], errors='coerce').fillna(0.0)
+    combined['ivwt_min'] = pd.to_numeric(
+        combined['ivwt_min'], errors='coerce').fillna(0.0)
     return combined.drop_duplicates(
         subset=['from_stop_id', 'to_stop_id',
                 'route_id', 'direction_id', 'variant_rank'])

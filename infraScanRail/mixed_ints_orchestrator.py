@@ -131,6 +131,11 @@ def phase_5c_capacity_on_matched(
 
     # Step 2 — baseline (3C do-nothing) CAP cost per target, over the union of
     # modified segments, for attribution (candidate − baseline).
+    # Do-nothing baseline pass — DIAGNOSTIC only (baseline_cost_chf column): attribution
+    # is usage-based and full (decision 2026-06-11): a CAP fires exactly when the svc-int
+    # adds load to the constrained section (modified-segment scoping), and the int then
+    # carries the full cost even when the bottleneck pre-existed — like the CC cost rule.
+    # Ints that do not use the section never see it.
     baseline_cost: dict = {}
     baseline_maint: dict = {}
     base_services = paths.get_projected_services_path(base_svc, base_infra)
@@ -173,16 +178,19 @@ def phase_5c_capacity_on_matched(
                 base_c = baseline_cost.get(_target_key(c), 0.0)
                 cand_m = float(c.maintenance_cost_annual_chf or 0.0)
                 base_m = baseline_maint.get(_target_key(c), 0.0)
+                # Full usage-based attribution (2026-06-11): the int pays the whole CAP
+                # it triggers, pre-existing or not; baseline_* stays as a diagnostic
+                # ("do-nothing would have needed this too").
                 attrib = {
                     'svc_int_id': p['id'], 'int_type': p['int_type'], 'cap_id': cid,
                     'cap_type': c.type, 'strategy': c.strategy or '',
                     'segment_id': c.segment_id or '',
                     'node_id': c.node_id if c.node_id is not None else '',
                     'candidate_cost_chf': cand, 'baseline_cost_chf': base_c,
-                    'attributable_cost_chf': max(0.0, cand - base_c),
+                    'attributable_cost_chf': cand,
                     'candidate_maintenance_annual_chf': cand_m,
                     'baseline_maintenance_annual_chf': base_m,
-                    'attributable_maintenance_annual_chf': max(0.0, cand_m - base_m),
+                    'attributable_maintenance_annual_chf': cand_m,
                     'composed_version': composed_full,
                 }
                 attribution.append(attrib)

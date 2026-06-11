@@ -1756,12 +1756,15 @@ def _build_sections_dataframe(
                     node_valid,
                 )
                 if edge_records:
-                    refined_sections = _split_section_by_service_patterns(
-                        path_nodes,
-                        edge_records,
-                        node_stop_services,
-                        node_pass_services,
-                    )
+                    refined_sections = []
+                    for load_nodes, load_edges in _split_section_by_edge_load(
+                            path_nodes, edge_records):
+                        refined_sections.extend(_split_section_by_service_patterns(
+                            load_nodes,
+                            load_edges,
+                            node_stop_services,
+                            node_pass_services,
+                        ))
                     for refined_nodes, refined_edges in refined_sections:
                         _sec_compute_cap = (
                             all(n in sa_node_set for n in refined_nodes)
@@ -2090,6 +2093,40 @@ def _patterns_are_compatible(
     compatible = len(changed_services) == 0
 
     return compatible, changed_services
+
+
+def _split_section_by_edge_load(
+    path_nodes: List[int],
+    edge_records: List[Tuple[int, int, Dict[str, float]]],
+) -> List[Tuple[List[int], List[Tuple[int, int, Dict[str, float]]]]]:
+    """Split a traversed path where consecutive edges differ in service presence or load.
+
+    A service entering or terminating mid-section (e.g. a line turning back at an
+    intermediate halt) changes the carried service set / total_tphpd between adjacent
+    edges; the section must split there so each piece is load-homogeneous. The pattern
+    splitter cannot catch this: its ALL-STOP→PARTIAL transition is traversal-direction-
+    dependent and blind on 3-node sections (first classification window covers them
+    whole). This split is edge-based, deterministic and direction-independent.
+    """
+    if len(edge_records) <= 1:
+        return [(path_nodes, edge_records)]
+
+    def _signature(info: Dict) -> tuple:
+        stop_tokens = tuple(sorted(info.get("stopping_service_tokens") or ()))
+        pass_tokens = tuple(sorted(info.get("passing_service_tokens") or ()))
+        load = info.get("total_tphpd")
+        load = None if load is None or (isinstance(load, float) and math.isnan(load)) \
+            else round(float(load), 6)
+        return (stop_tokens, pass_tokens, load)
+
+    pieces: List[Tuple[List[int], List[Tuple[int, int, Dict[str, float]]]]] = []
+    start = 0
+    for i in range(1, len(edge_records)):
+        if _signature(edge_records[i][2]) != _signature(edge_records[i - 1][2]):
+            pieces.append((path_nodes[start:i + 1], edge_records[start:i]))
+            start = i
+    pieces.append((path_nodes[start:], edge_records[start:]))
+    return pieces
 
 
 def _split_section_by_service_patterns(

@@ -341,8 +341,11 @@ def _materialize_record(rv: Dict, int_id: str, base_version: str, interactive: b
     v = float(getattr(settings, 'CC_DESIGN_SPEED_KMH', 80.0))
     tt_stop, tt_pass = ic.auto_tt(arc_len, v, 0)  # junctions pass-through (n_sta=0)
 
+    r_comp = _curve_composition(int_id, j1, j2, arc, arc_len,
+                                rv['branch_in'], rv['branch_out'], base_version, interactive)
+
     import cost_parameters
-    cost = arc_len * float(getattr(cost_parameters, 'track_cost_per_meter', 33250.0))
+    cost = _composition_cost(r_comp)
     maint = cost * float(getattr(cost_parameters, 'yearly_maintenance_to_construction_cost_factor', 0.03))
 
     meta = {
@@ -387,12 +390,25 @@ def _materialize_record(rv: Dict, int_id: str, base_version: str, interactive: b
         'geometry': [arc],
     }, crs=core.SWISS_CRS)
 
-    r_comp = _curve_composition(int_id, j1, j2, arc, arc_len,
-                                rv['branch_in'], rv['branch_out'], base_version, interactive)
-
     return (core.attach_metadata(r_nodes, meta),
             core.attach_metadata(r_segs, meta),
             core.attach_metadata(r_comp, meta))
+
+
+# tunnel/bridge priced at their own rates (F4); unknown structures fall back to track.
+_STRUCT_RATE_ATTR = {'tunnel': 'tunnel_cost_per_meter', 'bridge': 'bridge_cost_per_meter'}
+
+
+def _composition_cost(comp) -> float:
+    """Construction cost from the composition rows: Σ piece length × structure rate."""
+    import cost_parameters
+    base_rate = float(getattr(cost_parameters, 'track_cost_per_meter', 33250.0))
+    total = 0.0
+    for _, r in comp.iterrows():
+        attr = _STRUCT_RATE_ATTR.get(str(r['Engineering_Structure']).strip().lower())
+        rate = float(getattr(cost_parameters, attr, base_rate)) if attr else base_rate
+        total += float(r['Piece_Length']) * rate
+    return total
 
 
 # ─────────────────────────────────────────────────────────────────────────────

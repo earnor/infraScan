@@ -412,6 +412,13 @@ def capacity_on_composed(
     passing-siding to full duplication if still over). ``recalculate_enhanced_capacity``
     is never called, so the global non-convergence is structurally avoided.
 
+    Coverage: sections are built over the FULL composed network with UIC capacity
+    everywhere (SA and CA alike) — independent of the 3C CAPACITY_MODE_SA/CA toggles;
+    only the modified-segment restriction scopes the evaluation. (A 3C Set_Value CA
+    convention is NOT mirrored here.) Besides line sections, every terminus of the
+    evaluated supply within scope gets a station turnback check (a terminating train
+    needs a track clear of the through traffic).
+
     Args:
         base_infra: base infra version (where the svc-int delta was projected).
         composed_infra: composed infra version (base, or a Derived 'base__<hash>' name).
@@ -449,9 +456,15 @@ def capacity_on_composed(
     seg_off = tables['seg_off']
     junction_numbers = tables['junction_numbers']
     sections_df = tables['sections_df']
+    service_links = tables['service_links']
     if sections_df.empty:
         print("  [cap-composed] no sections built")
         return []
+
+    composition = _build_composition_lookup(base_infra, composed_infra)
+    mod_nodes = (None if not modified_segment_ids else
+                 {n for s in modified_segment_ids for n in _seg_key(s)})
+    termini = _termini_nodes(service_links)
 
     # 4. Restrict to sections overlapping the modified segments.
     if modified_segment_ids:
@@ -483,10 +496,23 @@ def capacity_on_composed(
     interventions: list = []
     treated: set = set()
     counter = 1
+    # Station turnback CAPs first (requirement-based, no local resolve); their targets
+    # enter the dedup set so a line-triggered station CAP at the same node is skipped.
+    for interv in _turnback_candidates(termini, sta_peak, seg_peak, mod_nodes, counter):
+        key = _target_key(interv)
+        if key in treated:
+            continue
+        treated.add(key)
+        calculate_intervention_cost(interv, composition=composition)
+        interventions.append(interv)
+        counter += 1
+    if interventions:
+        print(f"  [cap-composed] {len(interventions)} station turnback CAP(s)")
     for _, section in constrained.iterrows():
         interv = _resolve_section_locally(
             section, seg_aliased, sta_aliased, sta_peak, seg_peak, seg_off,
-            junction_numbers, counter, grouping_strategy, threshold_tphpd)
+            junction_numbers, counter, grouping_strategy, threshold_tphpd,
+            termini_nodes=termini)
         if interv is None:
             continue
         key = _target_key(interv)
@@ -494,7 +520,7 @@ def capacity_on_composed(
             print(f"    skip section {section.get('section_id')}: target {key} already treated")
             continue
         treated.add(key)
-        calculate_intervention_cost(interv)
+        calculate_intervention_cost(interv, composition=composition)
         interventions.append(interv)
         counter += 1
 
@@ -541,7 +567,8 @@ def _composed_sections(base_infra, composed_infra, projected_services_path, *,
         segments_offpeak_df=seg_off, compute_capacity=True,
         grouping_strategy=grouping_strategy)
     return {'sta_peak': sta_peak, 'seg_peak': seg_peak, 'seg_off': seg_off,
-            'junction_numbers': junction_numbers, 'sections_df': sections_df}
+            'junction_numbers': junction_numbers, 'sections_df': sections_df,
+            'service_links': service_links_df}
 
 
 def _expand_unmatched_hops(service_links_df: pd.DataFrame,
@@ -660,9 +687,152 @@ def write_sa_composed_capacity_workbook(base_infra, composed_infra, projected_se
     return str(out_path)
 
 
+def _termini_nodes(service_links: pd.DataFrame) -> set:
+    """BAV node Numbers where any service of the supply terminates/originates."""
+    if service_links is None or service_links.empty:
+        return set()
+    out: set = set()
+    if 'is_origin' in service_links.columns:
+        m = service_links['is_origin'].astype(bool)
+        out |= set(pd.to_numeric(service_links.loc[m, 'from_stop_nr'],
+                                 errors='coerce').dropna().astype(int))
+    if 'is_destination' in service_links.columns:
+        m = service_links['is_destination'].astype(bool)
+        out |= set(pd.to_numeric(service_links.loc[m, 'to_stop_nr'],
+                                 errors='coerce').dropna().astype(int))
+    return out
+
+
+def _turnback_candidates(termini: set, sta_peak: pd.DataFrame, seg_peak: pd.DataFrame,
+                         mod_nodes, counter: int) -> list:
+    """Station turnback CAPs: a terminating train needs a track clear of through traffic.
+
+    For every terminus station within the modified scope:
+    required = _required_station_tracks(connected_equivalent, terminating=True) —
+    i.e. equiv + 1, the turnback track; no overtaking stacking (user decision
+    2026-06-11). Track_Count short of that → station_track CAP with the shortfall as
+    tracks_added. Line sections cannot see this constraint (a turnback at a station
+    inside a high-capacity block moves no section load), so it is checked at the node.
+    """
+    from capacity_interventions import (
+        CapacityIntervention, _connected_equivalent, _required_station_tracks)
+
+    out: list = []
+    for nr in sorted(termini):
+        if mod_nodes is not None and nr not in mod_nodes:
+            continue
+        row = sta_peak[pd.to_numeric(sta_peak['NR'], errors='coerce') == float(nr)]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+        current = pd.to_numeric(pd.Series([row.get('Track_Count')]),
+                                errors='coerce').iloc[0]
+        if pd.isna(current):
+            continue
+        required = _required_station_tracks(
+            _connected_equivalent(nr, seg_peak), terminating=True, mixed=False)
+        add = required - int(current)
+        if add < 1:
+            continue
+        platforms = pd.to_numeric(pd.Series([row.get('Platform_Count')]),
+                                  errors='coerce').iloc[0]
+        out.append(CapacityIntervention(
+            intervention_id=f"INT_TB_{counter + len(out):04d}",
+            section_id=f"turnback@{nr}",
+            type='station_track',
+            node_id=int(nr),
+            segment_id=None,
+            tracks_added=float(add),
+            affected_segments=[],
+            construction_cost_chf=0.0,
+            maintenance_cost_annual_chf=0.0,
+            length_m=None,
+            current_tracks=float(current),
+            iteration=1,
+            current_platforms=None if pd.isna(platforms) else float(platforms),
+            platforms_added=(1.0 if not pd.isna(platforms) and platforms < 2 else None),
+        ))
+        name = row.get('Name', nr)
+        print(f"    turnback at {name} ({nr}): {int(current)} track(s) < required "
+              f"{required} -> +{add} track(s)")
+    return out
+
+
+_COMPOSITION_LOOKUP_CACHE: dict = {}
+
+
+def _build_composition_lookup(base_infra: str, composed_infra: str) -> dict:
+    """Chainage-ordered composition pieces per segment node-pair of the host network.
+
+    Returns {frozenset(from_nr, to_nr): [(structure, length_m, start_m, end_m), …]} for
+    composition-aware CAP pricing (tunnel/bridge at their own rates, mirroring CC F4).
+    Missing composition gpkg → empty dict (callers fall back to flat per-meter rates).
+    """
+    if composed_infra in _COMPOSITION_LOOKUP_CACHE:
+        return _COMPOSITION_LOOKUP_CACHE[composed_infra]
+    import geopandas as gpd
+    from shapely.ops import linemerge
+
+    if composed_infra != base_infra and paths.derived_version_exists(composed_infra):
+        host_dir = Path(paths.get_derived_infra_version_dir(composed_infra))
+    else:
+        host_dir = Path(paths.get_infra_version_dir(base_infra))
+    lookup: dict = {}
+    comp_path = host_dir / 'segments_composition.gpkg'
+    try:
+        nodes = gpd.read_file(host_dir / 'nodes.gpkg')
+        segs = gpd.read_file(host_dir / 'segments.gpkg')
+        comp = gpd.read_file(comp_path)
+    except Exception as exc:
+        print(f"  [cap-cost] composition unavailable ({comp_path.name}: {exc}) — "
+              f"flat per-meter CAP rates")
+        _COMPOSITION_LOOKUP_CACHE[composed_infra] = lookup
+        return lookup
+
+    name_to_nr = {}
+    for _, n in nodes.iterrows():
+        name_to_nr.setdefault(str(n['Name']), pd.to_numeric(
+            pd.Series([n['Number']]), errors='coerce').iloc[0])
+    comp_by_sid = dict(tuple(comp.groupby(comp['Segment_ID'].astype(str))))
+
+    for _, s in segs.iterrows():
+        a = name_to_nr.get(str(s['From_Name']))
+        b = name_to_nr.get(str(s['To_Name']))
+        if a is None or b is None or pd.isna(a) or pd.isna(b):
+            continue
+        rows = comp_by_sid.get(str(s['Segment_ID']))
+        if rows is None or rows.empty:
+            continue
+        geom = s.geometry
+        line = linemerge(geom) if geom is not None and \
+            geom.geom_type == 'MultiLineString' else geom
+        pieces = []
+        for _, p in rows.iterrows():
+            plen = float(pd.to_numeric(pd.Series([p.get('Piece_Length')]),
+                                       errors='coerce').fillna(0.0).iloc[0])
+            if plen <= 0:
+                continue
+            try:
+                chain = float(line.project(p.geometry.centroid))
+            except Exception:
+                chain = float(len(pieces))
+            pieces.append((str(p.get('Engineering_Structure', 'normal')), plen, chain))
+        pieces.sort(key=lambda t: t[2])
+        ordered, cum = [], 0.0
+        for struct, plen, _chain in pieces:
+            ordered.append((struct, plen, cum, cum + plen))
+            cum += plen
+        if ordered:
+            lookup[frozenset((int(a), int(b)))] = ordered
+
+    print(f"  [cap-cost] composition lookup: {len(lookup)} segment(s) with pieces")
+    _COMPOSITION_LOOKUP_CACHE[composed_infra] = lookup
+    return lookup
+
+
 def _resolve_section_locally(section, seg_aliased, sta_aliased, sta_peak, seg_peak,
                              seg_off, junction_numbers, counter, grouping_strategy,
-                             threshold_tphpd):
+                             threshold_tphpd, termini_nodes=None):
     """Design one section's CAP and locally verify it clears the over-capacity.
 
     Applies the designed track delta on a working copy of the aggregate peak tables,
@@ -673,7 +843,8 @@ def _resolve_section_locally(section, seg_aliased, sta_aliased, sta_peak, seg_pe
     from capacity_interventions import (
         design_section_intervention, identify_capacity_constrained_sections, _seg_mask)
 
-    interv = design_section_intervention(section, seg_aliased, sta_aliased, counter)
+    interv = design_section_intervention(section, seg_aliased, sta_aliased, counter,
+                                         termini_nodes=termini_nodes)
     target_keys = _section_seg_keys(section['segment_sequence'])
 
     def _still_over() -> bool:
@@ -682,7 +853,8 @@ def _resolve_section_locally(section, seg_aliased, sta_aliased, sta_peak, seg_pe
         if interv.type == 'station_track':
             m = work_sta['NR'].astype('Int64') == int(interv.node_id)
             work_sta.loc[m, 'Track_Count'] = (
-                pd.to_numeric(work_sta.loc[m, 'Track_Count'], errors='coerce') + 1.0)
+                pd.to_numeric(work_sta.loc[m, 'Track_Count'], errors='coerce')
+                + max(1.0, float(interv.tracks_added or 1.0)))
         else:
             fn, tn = map(int, str(interv.segment_id).split('-'))
             m = _seg_mask(work_seg, fn, tn)
