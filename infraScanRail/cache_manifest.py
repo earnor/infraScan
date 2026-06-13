@@ -45,6 +45,15 @@ TREE_KEYS = {
     'scenarios_7':   ('amount_of_scenarios', 'start_year_scenario',
                       'end_year_scenario', 'OD_ATTRIBUTION_MODE',
                       'CATCHMENT_METHOD'),
+    # V-track snapshots (validation_core.snapshot_baseline): the full GC-relevant
+    # fingerprint, so every archived baseline/combo records what produced it.
+    'validation_snapshot': ('CATCHMENT_METHOD', 'ROUTING_ASSIGNMENT_METHOD',
+                            'TRAVEL_COST_METHOD', 'TRANSFER_COST_MODEL',
+                            'OD_ATTRIBUTION_MODE', 'OD_BLEND_POP_RATE',
+                            'OD_BLEND_EMPL_RATE', 'start_year_scenario',
+                            'ROUTING_K_PATHS', 'ROUTING_COST_WINDOW_MIN',
+                            'ROUTING_COST_WINDOW_PCT', 'ROUTING_MAX_TRANSFERS',
+                            'ROUTING_LOGIT_ENGINE'),
 }
 
 

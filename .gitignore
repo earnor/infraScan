@@ -8,6 +8,7 @@
 infraScanRail/__pycache__
 infraScanRail/_unused_files
 infraScanRail/_helper_files
+/infraScanRail/validation
 /infraScanRail/markdowns
 /infraScanRail/report
 /.claude

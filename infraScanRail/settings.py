@@ -318,6 +318,31 @@ start_valuation_year = 2050
 # Produces the discounted CBA per svc-int: costs-and-benefits (scenario x year), aggregated totals, summary and the core result plots; discount rate from cost_parameters.py, PV base year = start_valuation_year (factor 1.0).
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# V. VALIDATION TRACK  (standalone validation_* CLIs — not a main_new phase)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Compares model outputs against observed SBB/NPVM data (V1 stations, V2 link flows) and tests GC-settings sensitivity (V3); outputs under validation/.
+
+# Reference baseline of the V-track (binding 2026-06-12) — independent of the pipeline's INFRA_VERSION/SVC_VERSION above.
+VALIDATION_BASELINE_INFRA = 'AS_2026_ZH_enhanced'
+VALIDATION_BASELINE_SVC   = 'AK_2026_S18'
+
+VALIDATION_SBB_YEAR  = 2018    # V1 observed reference year (= start_year_scenario demand anchor; AK_2026-service-vs-2018-counts mismatch noted, not corrected) [decided 2026-06-12]
+VALIDATION_NPVM_YEAR = 2017    # V2 observed reference year (NPVM 2017 base state, ARE release Stand 30.06.2023; model-assigned loads, not counts)
+V1_EXCLUDE_CLIPPED   = True    # exclude observed DWV==49 stations from fit metrics (SBB clips volumes <50 to a fixed 49); kept in tables either way
+
+V2_MATCH_BUFFER_M     = 30.0   # belastung-link <-> model-segment matching buffer [m; geometries verified to align within ~1 m]
+V2_MATCH_MIN_COVERAGE = 0.5    # min share of model-segment length covered to accept a belastung feature [-]
+
+VALIDATION_SQV_F_DAILY = 10000.0   # SQV scaling factor f for daily volumes [SQV = 1/(1+sqrt((m-o)^2/(f*o))); f=10000 = daily-volume convention]
+
+# V3 GC-settings combos — '<TRAVEL_COST_METHOD>__<TRANSFER_COST_MODEL>' archive labels (calibrated__explicit = current defaults).
+V3_COMBOS = ['calibrated__explicit', 'calibrated__fixed',
+             'absolute__explicit', 'absolute__fixed']
+# V3 svc-int CBA subset — spans types + BCR range (strong/clear/marginal positive, negative); + 1 FRQ appended once the regenerated 2026 catalogue exists [decided 2026-06-12].
+V3_SVC_INT_SUBSET = ['ext_100001', 'ext_100003', 'ext_100010',
+                     'ndc_103007', 'ndc_103009']
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # A1. PLOTS  (per-phase visualisation toggles — all phases)
 # ═══════════════════════════════════════════════════════════════════════════════
 # One toggle per phase; data/CSV outputs are always written regardless of these.
@@ -338,6 +363,7 @@ PLOT_SCENARIOS = True    # population/modal/distance scenario fans (Phase 7)
 PLOT_TTS       = True    # per-svc-int benefit distribution across scenarios over years (Phase 8A)
 PLOT_COSTS     = True    # per-svc-int cost composition bars (Phase 8B)
 PLOT_RESULTS   = False   # core CBA result set — savings/net-benefit/BCR charts, waterfalls, network maps (Phase 9)
+PLOT_VALIDATION = True   # V-track comparison plots — scatters, rank/share charts, corridor profiles, tau check (V1-V3)
 
 plot_passenger_flow = False   # legacy only (main.py / main_cap.py); ignored by main_new
 

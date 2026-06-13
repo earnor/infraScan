@@ -776,3 +776,77 @@ def get_rail_services_path(version: str) -> str:
         f"Rail services path for '{version}' must be resolved via "
         f"get_projected_services_path(svc_version, infra_version)."
     )
+
+
+# --- Validation track (V-track) ---
+# Standalone analysis track (not a main_new phase): validation_* modules read
+# pipeline outputs and write under infraScanRail/validation/ (sibling of data/
+# and plots/; plots nest INSIDE each check dir per the 2026-06-12 decision).
+VALIDATION_DIR = r"validation"
+_VALIDATION_CHECKS = ('v1_station_numbers', 'v2_link_flows', 'v3_sensitivity')
+
+# Observed reference datasets (V1 SBB Ein-/Aussteigende; V2 NPVM link loads)
+SBB_STATION_NUMBERS_XLSX = r"data/Spatial_Data/Transit_Network/SBB_Station_Flows/SBB_Station_Numbers.xlsx"
+BELASTUNG_RAIL_GPKG      = r"data/Spatial_Data/Transit_Network/Belastung-Personenverkehr-Bahn/belastung-personenverkehr-bahn_2056.gpkg"
+
+
+def get_validation_dir() -> str:
+    """Return absolute path to the V-track root (infraScanRail/validation/)."""
+    return os.path.join(MAIN, VALIDATION_DIR)
+
+
+def get_validation_check_dir(check: str) -> str:
+    """Return absolute path to a validation check's output dir.
+
+    Args:
+        check: 'v1_station_numbers' | 'v2_link_flows' | 'v3_sensitivity'.
+    """
+    if check not in _VALIDATION_CHECKS:
+        raise ValueError(f"Unknown validation check '{check}' — expected one of {_VALIDATION_CHECKS}.")
+    return os.path.join(get_validation_dir(), check)
+
+
+def get_validation_plot_dir(check: str) -> str:
+    """Return absolute path to a check's plot dir (validation/<check>/plots/)."""
+    return os.path.join(get_validation_check_dir(check), 'plots')
+
+
+def get_validation_config_path(name: str) -> str:
+    """Return absolute path to a V-track config CSV (validation/config/<name>).
+
+    Configs are manual inputs (UIC alias map, V2 match exceptions) — modules
+    create header templates when missing and never overwrite them.
+    """
+    return os.path.join(get_validation_dir(), 'config', name)
+
+
+def get_validation_baseline_dir(alloc: str, routing: str) -> str:
+    """Return absolute path to a snapshotted baseline variant
+    (validation/_baselines/<alloc>__<routing>/).
+
+    Allocation variants OVERWRITE each other in the 4C/6D trees (the Assignment
+    tree keys routing method only), so every variant run is snapshotted here
+    before settings change.
+
+    Args:
+        alloc:   'Municipal' | 'PT_Feeder'.
+        routing: 'shortest_path' | 'logit'.
+    """
+    return os.path.join(get_validation_dir(), '_baselines', f'{alloc}__{routing}')
+
+
+def get_v3_combo_dir(combo_label: str) -> str:
+    """Return absolute path to a V3 GC-settings combo archive
+    (validation/v3_sensitivity/<combo-label>/).
+
+    Args:
+        combo_label: '<TRAVEL_COST_METHOD>__<TRANSFER_COST_MODEL>',
+            e.g. 'calibrated__explicit'.
+    """
+    return os.path.join(get_validation_check_dir('v3_sensitivity'), combo_label)
+
+
+def get_v3_comparison_dir() -> str:
+    """Return absolute path to the V3 cross-combo comparison dir
+    (validation/v3_sensitivity/_comparison/)."""
+    return os.path.join(get_validation_check_dir('v3_sensitivity'), '_comparison')
