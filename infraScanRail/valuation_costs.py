@@ -81,7 +81,7 @@ def compute_construction_costs(svc_int_ids=None, *, combo: str,
         return pd.DataFrame(columns=_OUT_COLS)
 
     if use_cache and os.path.exists(csv_path) and cache_manifest.check_manifest(
-            out_dir, 'costs_8b', versions):
+            out_dir, 'costs_8b', versions, name='_settings_manifest_costs_8b.json'):
         cached = pd.read_csv(csv_path)
         if set(svc_int_ids) <= set(cached['Development'].astype(str)):
             print(f"  [8B] use_cache_costs: {csv_path} covers all "
@@ -108,7 +108,8 @@ def compute_construction_costs(svc_int_ids=None, *, combo: str,
 
     os.makedirs(out_dir, exist_ok=True)
     result.to_csv(csv_path, index=False)
-    cache_manifest.write_manifest(out_dir, 'costs_8b', versions)
+    cache_manifest.write_manifest(out_dir, 'costs_8b', versions,
+                                  name='_settings_manifest_costs_8b.json')
     print(f"  [csv] wrote {csv_path} ({len(result)} svc-int row(s))")
 
     if make_plots:
@@ -200,7 +201,16 @@ def _delta_train_m(svc_int_id: str, combo: str, base_infra: str,
     dev_len x dev_dep - base_len x base_dep, divided by
     operating_cost_ref_daily_dep. Variants absent from the delta are unchanged
     and contribute 0; at total_dep 28 (every EXT/NDC) this equals the previous
-    delta route-metres exactly; a pure doubling yields L x base_dep/ref."""
+    delta route-metres exactly; a pure doubling yields L x base_dep/ref.
+
+    STP (stopping-pattern change) keeps both the route length and the departures,
+    so this reads ~0 for it. The fleet step a longer cycle time (added stops) or a
+    doubled headway implies is NOT modelled here — a vehicle-count / rolling-stock
+    operating cost is a deferred, permanent limitation (decision F4, 2026-06-13:
+    needs cycle-time/turnaround data and a consistent global re-cost of EXT/NDC/FRQ).
+    STP is NOT benefit-only regardless: the user-time effects of re-stopping (a
+    longer ride from an added stop; a longer wait/access from a dropped call) are
+    captured as travel-time-savings deltas in Phase 8A, where they carry real cost."""
     delta_path = paths.get_svc_int_projected_path(svc_int_id, base_infra, combo)
     dev = _route_lengths(delta_path)
     if dev.empty:

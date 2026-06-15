@@ -1511,7 +1511,8 @@ def phase_5a_infrastructure_interventions(sa_boundary, runtimes: dict) -> None:
         sa_boundary: study-area polygon, used to restrict CC discovery centres.
         runtimes:    dict tracking phase execution times.
     """
-    if str(getattr(settings, 'INFRA_INT_MODE', 'NONE')).upper() == 'NONE':
+    import infra_ints_orchestrator as _io
+    if not _io.infra_int_active():
         return {}
     print("\n" + "=" * 80)
     print("PHASE 5A: INFRASTRUCTURE INTERVENTIONS")
@@ -1551,7 +1552,8 @@ def phase_5b_service_interventions(sa_boundary, sa_buffer, runtimes: dict,
         runtimes:    dict tracking phase execution times.
         ndc_candidates: 5A connecting-curve candidates (branch_a/b, requires_infra).
     """
-    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
+    import svc_ints_orchestrator as _so
+    if not _so.svc_int_active():
         return {}
     print("\n" + "=" * 80)
     print("PHASE 5B: SERVICE INTERVENTIONS")
@@ -1589,7 +1591,8 @@ def phase_5c_capacity_on_matched(runtimes: dict, svc_int_ids=None) -> dict:
             use_cache_svc_int_cap=False rewrites the attribution CSV with the
             subset's rows only.
     """
-    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
+    import svc_ints_orchestrator as _so
+    if not _so.svc_int_active():
         return {}
     if str(getattr(settings, 'CAPACITY_MODE', 'None')) == 'None':
         return {}
@@ -1771,7 +1774,7 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str,
     parent prints each svc-int's log as one ordered block.
 
     Args:
-        int_type:   'ext' | 'ndc' | 'frq'.
+        int_type:   'ext' | 'ndc' | 'frq' | 'stp'.
         rec:        svc-int record (read_records row).
         merged_dir: merged developed-network dir from the serial pre-pass.
         composed_infra: the svc-int's CC-only composed infra version from the
@@ -1995,7 +1998,8 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
         svc_int_ids: optional subset of svc-int ids to process (None = all
                      registered; mirrors phase_5c_capacity_on_matched).
     """
-    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
+    import svc_ints_orchestrator as _so
+    if not _so.svc_int_active():
         return
     print("\n" + "=" * 80)
     print("PHASE 6: INTERVENTION RECOMPUTE")
@@ -2251,8 +2255,9 @@ def phase_7_scenarios(runtimes: dict, svc_int_ids=None) -> None:
         make_plots=settings.PLOT_SCENARIOS,
         use_cache=settings.use_cache_scenarios)
 
-    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
-        print("\n  SVC_INT_MODE = NONE — baseline factor store only.")
+    import svc_ints_orchestrator as _so
+    if not _so.svc_int_active():
+        print("\n  SVC_INT_MODE resolves to no svc-ints — baseline factor store only.")
         runtimes["Phase 7: Scenarios"] = time.time() - st
         return
     if od_method != 'pt_feeder':
@@ -2320,8 +2325,9 @@ def phase_8_valuation_inputs(runtimes: dict, svc_int_ids=None) -> None:
     print("=" * 80 + "\n")
     st = time.time()
 
-    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
-        print("  SVC_INT_MODE = NONE — no svc-ints to value; skipping Phase 8.")
+    import svc_ints_orchestrator as _so
+    if not _so.svc_int_active():
+        print("  SVC_INT_MODE resolves to no svc-ints — skipping Phase 8.")
         runtimes["Phase 8: Valuation Inputs"] = time.time() - st
         return
 
@@ -2381,8 +2387,9 @@ def phase_9_cba(runtimes: dict, svc_int_ids=None) -> None:
     print("=" * 80 + "\n")
     st = time.time()
 
-    if str(getattr(settings, 'SVC_INT_MODE', 'NONE')).upper() == 'NONE':
-        print("  SVC_INT_MODE = NONE — no svc-ints to evaluate; skipping Phase 9.")
+    import svc_ints_orchestrator as _so
+    if not _so.svc_int_active():
+        print("  SVC_INT_MODE resolves to no svc-ints — skipping Phase 9.")
         runtimes["Phase 9: CBA"] = time.time() - st
         return
 

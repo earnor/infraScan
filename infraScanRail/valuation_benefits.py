@@ -87,7 +87,7 @@ def compute_travel_time_savings(svc_int_ids=None, *, svc_version: str,
         return pd.DataFrame(columns=_OUT_COLS)
 
     manifest_ok = bool(use_cache) and cache_manifest.check_manifest(
-        out_dir, 'costs_8a', versions)
+        out_dir, 'costs_8a', versions, name='_settings_manifest_costs_8a.json')
 
     gc_base = _load_gc_skim(svc_network, assignment_method)
     print(f"  baseline gc skim: {len(gc_base):,} pairs")
@@ -113,7 +113,8 @@ def compute_travel_time_savings(svc_int_ids=None, *, svc_version: str,
     os.makedirs(out_dir, exist_ok=True)
     csv_path = paths.get_tts_csv(combo)
     result.to_csv(csv_path, index=False)
-    cache_manifest.write_manifest(out_dir, 'costs_8a', versions)
+    cache_manifest.write_manifest(out_dir, 'costs_8a', versions,
+                                  name='_settings_manifest_costs_8a.json')
     print(f"  [csv] wrote {csv_path} ({len(result):,} rows)")
 
     if make_plots:

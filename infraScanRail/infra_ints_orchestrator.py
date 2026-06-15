@@ -81,6 +81,19 @@ def phase_5a_infra_interventions(
     result: Dict = {'cc_ids': [], 'ndc_candidates': [], 'master': None}
     combo = f"{base_version}__{svc_version}"   # registry partition key (decision H)
 
+    # Auto-clear inactive types: the master network composes every registered
+    # infra int, so a type kept from a previous run (e.g. CC) would compose into
+    # the master even when deselected now. Drop the registry rows of any
+    # supported infra type NOT selected this run.
+    for _t in SUPPORTED_INFRA_INT_TYPES:
+        if _t in active:
+            continue
+        _stale = core.list_intervention_ids(_t, network=combo)
+        if _stale:
+            print(f"  [{_t}] clearing {len(_stale)} stale infra-int record(s) — "
+                  f"type not selected this run")
+            core.delete_records(_t, _stale, network=combo)
+
     # CC — auto-discover and register (unless cached) -------------------------
     if 'cc' in active:
         cc_dir = os.path.dirname(paths.get_infra_int_registry('cc', combo))
@@ -138,8 +151,14 @@ def plot_infra_interventions(base_version: str, sa_polygon=None) -> List[str]:
 # Active-type resolution
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _active_infra_types(mode: str) -> List[str]:
-    """Map INFRA_INT_MODE to the infra-int registry types to generate/collect (CC only)."""
+def _active_infra_types(mode) -> List[str]:
+    """Map INFRA_INT_MODE to the infra-int registry types to generate/collect (CC only).
+
+    Accepts the legacy string forms ('NONE' | 'ALL' | 'CC' | 'CAP') or an
+    explicit list/tuple of type codes (e.g. ['CC']).
+    """
+    if isinstance(mode, (list, tuple, set)):
+        return core.normalise_int_types(mode, SUPPORTED_INFRA_INT_TYPES, 'INFRA_INT_MODE')
     m = str(mode).upper()
     if m == 'NONE':
         return []
@@ -153,9 +172,23 @@ def _active_infra_types(mode: str) -> List[str]:
     return []
 
 
+def infra_int_active(mode=None) -> bool:
+    """True when INFRA_INT_MODE resolves to at least one infra-int type.
+
+    Replaces the ``str(INFRA_INT_MODE).upper() == 'NONE'`` gate, which misreads a
+    list value (and an empty list) as active.
+    """
+    if mode is None:
+        mode = getattr(settings, 'INFRA_INT_MODE', 'NONE')
+    return bool(_active_infra_types(mode))
+
+
 def resolve_active_svc_int_types() -> List[str]:
     """Resolve which svc-int types are active under settings.INFRA_INT_MODE."""
-    mode = str(getattr(settings, 'INFRA_INT_MODE', 'NONE')).upper()
+    raw = getattr(settings, 'INFRA_INT_MODE', 'NONE')
+    if isinstance(raw, (list, tuple, set)):
+        return core.normalise_int_types(raw, SVC_INT_TYPES, 'INFRA_INT_MODE')
+    mode = str(raw).upper()
     if mode == 'NONE':
         return []
     if mode == 'ALL':

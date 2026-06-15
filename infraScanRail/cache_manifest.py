@@ -45,6 +45,16 @@ TREE_KEYS = {
     'scenarios_7':   ('amount_of_scenarios', 'start_year_scenario',
                       'end_year_scenario', 'OD_ATTRIBUTION_MODE',
                       'CATCHMENT_METHOD'),
+    # Phase 8 benefits/costs share one combo dir; each writes its own manifest
+    # filename (see write_manifest `name`). cost_parameters.py constants (VTTS,
+    # per-metre op cost, KDG, ref daily dep) are NOT settings attrs → uncaptured.
+    'costs_8a':      ('TRAVEL_COST_METHOD', 'TRANSFER_COST_MODEL',
+                      'OD_ATTRIBUTION_MODE', 'CATCHMENT_METHOD',
+                      'ROUTING_ASSIGNMENT_METHOD', 'amount_of_scenarios',
+                      'start_year_scenario', 'end_year_scenario',
+                      'start_valuation_year'),
+    'costs_8b':      ('SVC_INT_MODE', 'SVC_INT_CAP_THRESHOLD_TPHPD',
+                      'CAPACITY_MODE', 'CAPACITY_GROUPING_STRATEGY'),
     # V-track snapshots (validation_core.snapshot_baseline): the full GC-relevant
     # fingerprint, so every archived baseline/combo records what produced it.
     'validation_snapshot': ('CATCHMENT_METHOD', 'ROUTING_ASSIGNMENT_METHOD',
@@ -57,7 +67,8 @@ TREE_KEYS = {
 }
 
 
-def write_manifest(tree_dir, tree_key: str, versions: dict) -> None:
+def write_manifest(tree_dir, tree_key: str, versions: dict,
+                   name: str = MANIFEST_NAME) -> None:
     """Write the settings manifest for a cached output tree (atomic replace).
 
     Args:
@@ -65,16 +76,19 @@ def write_manifest(tree_dir, tree_key: str, versions: dict) -> None:
         tree_key: TREE_KEYS entry naming the settings that shape this tree.
         versions: Runtime-resolved identifiers the tree depends on
             (e.g. {'infra_version': ..., 'svc_network': ...}).
+        name: Manifest filename — override when two trees share a directory
+            (e.g. Phase 8 benefits/costs) so neither overwrites the other.
     """
     os.makedirs(str(tree_dir), exist_ok=True)
-    path = os.path.join(str(tree_dir), MANIFEST_NAME)
+    path = os.path.join(str(tree_dir), name)
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(_snapshot(tree_key, versions), f, indent=2, default=str)
     os.replace(tmp, path)
 
 
-def check_manifest(tree_dir, tree_key: str, versions: dict) -> bool:
+def check_manifest(tree_dir, tree_key: str, versions: dict,
+                   name: str = MANIFEST_NAME) -> bool:
     """True when the tree's manifest matches the current settings + versions.
 
     A missing, unreadable or mismatching manifest prints a warning naming the
@@ -85,10 +99,12 @@ def check_manifest(tree_dir, tree_key: str, versions: dict) -> bool:
         tree_dir: Directory the cached outputs live in.
         tree_key: TREE_KEYS entry naming the settings that shape this tree.
         versions: Runtime-resolved identifiers, same shape as at write time.
+        name: Manifest filename — must match the write_manifest call for this
+            tree (see Phase 8 benefits/costs sharing one directory).
     """
-    path = os.path.join(str(tree_dir), MANIFEST_NAME)
+    path = os.path.join(str(tree_dir), name)
     if not os.path.exists(path):
-        print(f"  [manifest] no {MANIFEST_NAME} in {tree_dir} — "
+        print(f"  [manifest] no {name} in {tree_dir} — "
               f"treating cache as stale")
         return False
     try:
@@ -116,8 +132,20 @@ def check_manifest(tree_dir, tree_key: str, versions: dict) -> bool:
     return True
 
 
+def _norm_setting(v):
+    """Normalise a settings value for cache comparison.
+
+    List-like values (e.g. SVC_INT_MODE = ['EXT', 'NDC']) become a sorted,
+    lowercased list so element order and case never spuriously invalidate a
+    cached tree. Scalars pass through unchanged.
+    """
+    if isinstance(v, (list, tuple, set)):
+        return sorted(str(x).strip().lower() for x in v)
+    return v
+
+
 def _snapshot(tree_key: str, versions: dict) -> dict:
     return {'tree': tree_key,
             'versions': {k: str(v) for k, v in (versions or {}).items()},
-            'settings': {k: getattr(settings, k, None)
+            'settings': {k: _norm_setting(getattr(settings, k, None))
                          for k in TREE_KEYS[tree_key]}}

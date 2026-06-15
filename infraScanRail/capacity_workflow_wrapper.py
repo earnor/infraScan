@@ -398,6 +398,7 @@ def capacity_on_composed(
     *,
     network_label: str,
     modified_segment_ids: Optional[set] = None,
+    modified_termini: Optional[set] = None,
     grouping_strategy: Optional[str] = None,
     threshold_tphpd: Optional[float] = None,
 ) -> list:
@@ -424,8 +425,16 @@ def capacity_on_composed(
         composed_infra: composed infra version (base, or a Derived 'base__<hash>' name).
         projected_services_path: the svc-int delta's projected rail_segments.gpkg.
         network_label: label for logs / id provenance.
-        modified_segment_ids: 'from-to' ids to restrict sections to (CC-edited segments ∪
-            segments the delta services traverse). None → evaluate all composed sections.
+        modified_segment_ids: 'from-to' ids to restrict line-section CAP to (CC-edited
+            segments ∪ segments where the delta RAISED load). None → evaluate all composed
+            sections; an explicit EMPTY set → evaluate NO section (e.g. a stop-pattern change
+            that alters no segment load → no siding/section CAP).
+        modified_termini: explicit BAV node set to scope the station-turnback check to —
+            the stations whose terminating-train count the svc-int genuinely raised (used for
+            STP, whose split/merge changes termini without changing segment load). None →
+            the turnback scope falls back to the nodes of ``modified_segment_ids`` (the
+            EXT/FRQ/NDC path, unchanged). When provided, the turnback check runs even if no
+            line section is constrained, so a genuine new terminus is still resolved.
 
     Returns:
         list[CapacityIntervention] — costed resolving interventions ([] if none needed).
@@ -462,12 +471,22 @@ def capacity_on_composed(
         return []
 
     composition = _build_composition_lookup(base_infra, composed_infra)
-    mod_nodes = (None if not modified_segment_ids else
-                 {n for s in modified_segment_ids for n in _seg_key(s)})
     termini = _termini_nodes(service_links)
+    # Turnback scope: an explicit terminus set (STP — stations whose terminating-train
+    # count rose, computed by the caller) overrides; otherwise the EXT/FRQ/NDC path —
+    # the nodes of the modified segments (None → all, for a standalone evaluate-everything
+    # call). An EMPTY modified-segment set scopes the turnback to NOTHING (not all).
+    if modified_termini is not None:
+        mod_nodes = set(modified_termini)
+    elif modified_segment_ids is None:
+        mod_nodes = None
+    else:
+        mod_nodes = {n for s in modified_segment_ids for n in _seg_key(s)}
 
-    # 4. Restrict to sections overlapping the modified segments.
-    if modified_segment_ids:
+    # 4. Restrict to sections overlapping the modified segments. An explicit EMPTY set
+    #    restricts to NO section (a stop-pattern change raises no segment load → no siding);
+    #    only None means "evaluate every composed section".
+    if modified_segment_ids is not None:
         mod = {_seg_key(s) for s in modified_segment_ids}
         keep = sections_df["segment_sequence"].apply(
             lambda seq: bool(_section_seg_keys(seq) & mod))
@@ -478,26 +497,12 @@ def capacity_on_composed(
     else:
         print(f"  [cap-composed] evaluating all {len(sections_df)} composed section(s)")
 
-    # 5. Capacity-constrained sections (available_capacity < threshold; reactive margin,
-    #    default ~1.0 tphpd — one-train recovery buffer; catches sections at/near saturation).
-    constrained = identify_capacity_constrained_sections(
-        sections_df, threshold_tphpd=threshold_tphpd)
-    if constrained.empty:
-        print("  [cap-composed] no capacity-constrained sections — no CAP needed")
-        return []
-    print(f"  [cap-composed] {len(constrained)} over-capacity section(s) to resolve")
-
-    # design_section_intervention reads tracks/length_m/speed/platforms — alias the
-    # aggregate peak tables (non-destructive; Track_Count/Num_Tracks kept for rebuilds).
-    sta_aliased = _alias_cols(sta_peak, {'tracks': 'Track_Count', 'platforms': 'Platform_Count'})
-    seg_aliased = _alias_cols(seg_peak, {'length_m': 'Length', 'tracks': 'Num_Tracks',
-                                         'speed': 'Average_Speed'})
-
     interventions: list = []
     treated: set = set()
     counter = 1
-    # Station turnback CAPs first (requirement-based, no local resolve); their targets
-    # enter the dedup set so a line-triggered station CAP at the same node is skipped.
+    # Station turnback CAPs first (requirement-based, no local resolve, independent of
+    # whether any line section is constrained); their targets enter the dedup set so a
+    # line-triggered station CAP at the same node is skipped.
     for interv in _turnback_candidates(termini, sta_peak, seg_peak, mod_nodes, counter):
         key = _target_key(interv)
         if key in treated:
@@ -508,6 +513,29 @@ def capacity_on_composed(
         counter += 1
     if interventions:
         print(f"  [cap-composed] {len(interventions)} station turnback CAP(s)")
+
+    # 5. Capacity-constrained sections (available_capacity < threshold; reactive margin,
+    #    default ~1.0 tphpd — one-train recovery buffer; catches sections at/near saturation).
+    constrained = identify_capacity_constrained_sections(
+        sections_df, threshold_tphpd=threshold_tphpd)
+    if constrained.empty:
+        # No constrained line section. Fall through with turnback-only CAP when the caller
+        # scoped explicit termini (STP: a split's new endpoint needs a turnback track even
+        # where no section is over capacity). Otherwise (EXT/FRQ/NDC) preserve the original
+        # behaviour: no section + nothing else → no CAP.
+        if not (modified_termini is not None and interventions):
+            print("  [cap-composed] no capacity-constrained sections — no CAP needed")
+            return []
+        print(f"  [cap-composed] designed {len(interventions)} resolving CAP intervention(s)")
+        return interventions
+    print(f"  [cap-composed] {len(constrained)} over-capacity section(s) to resolve")
+
+    # design_section_intervention reads tracks/length_m/speed/platforms — alias the
+    # aggregate peak tables (non-destructive; Track_Count/Num_Tracks kept for rebuilds).
+    sta_aliased = _alias_cols(sta_peak, {'tracks': 'Track_Count', 'platforms': 'Platform_Count'})
+    seg_aliased = _alias_cols(seg_peak, {'length_m': 'Length', 'tracks': 'Num_Tracks',
+                                         'speed': 'Average_Speed'})
+
     for _, section in constrained.iterrows():
         interv = _resolve_section_locally(
             section, seg_aliased, sta_aliased, sta_peak, seg_peak, seg_off,

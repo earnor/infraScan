@@ -128,7 +128,7 @@ CAPACITY_SET_VALUE = 6             # trains/hour/direction — used when CAPACIT
 # 0.0 — strictly-over only (sections at exactly 0 headroom never fire)
 # 1.0 — one-train recovery buffer: sections AT capacity fire (default)
 # 2.0 — conservative two-path margin
-capacity_threshold = 1.0           # also the legacy Dynamic-workflow threshold and the 3C constrained-sections diagnostic margin
+capacity_threshold = 0.0           # also the legacy Dynamic-workflow threshold and the 3C constrained-sections diagnostic margin
 max_enhancement_iterations = 10    # max Phase 4 enhancement iterations — Dynamic only
 
 # Internal — set dynamically in main (do not edit)
@@ -207,6 +207,7 @@ ROUTING_LOGIT_ENGINE    = 'table'
 # INFRA_INT_MODE — infra-int type(s) generated this session.
 # 'NONE' — baseline, no infra interventions
 # 'CC'   — connecting curves: new links enabling new through-routings (auto-discovered; an NDC pulls in its CC via the 'requires_infra' column of its svc-int xlsx)
+# A list selects a subset, e.g. ['CC'] (codes case/order-insensitive); [] = NONE.
 INFRA_INT_MODE = 'CC'
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -217,16 +218,19 @@ INFRA_INT_MODE = 'CC'
 
 # SVC_INT_MODE — svc-int type(s) generated this session.
 # 'NONE' — baseline, no service interventions
-# 'ALL'  — extended lines + new direct connections + frequency changes
+# 'ALL'  — extended lines + new direct connections + frequency changes + stopping-pattern changes
 # 'EXT'  — extended lines only: route extensions over existing infra (no new infra)
 # 'NDC'  — new direct connections only: through-services that may require a CC (Phase 5A), pulled in via 'requires_infra'
 # 'FRQ'  — frequency changes only: corridor homogenisation (all-stop extensions) + whole-line frequency doubling
+# 'STP'  — stopping-pattern changes only: make passing services stop (homogenisation) + drop intermediate calls (express)
+# A list selects a subset, e.g. ['EXT', 'NDC'] (codes case/order-insensitive); [] = NONE.
 SVC_INT_MODE = 'ALL'
 
 # Per-type ID start blocks; svc-ints numbered sequentially from these (e.g. ext_100001, ndc_103001). Mirrors the old main_cap convention.
 DEV_ID_START_EXT = 100000              # extended-line interventions
 DEV_ID_START_NDC = 103000              # new-direct-connection interventions
 DEV_ID_START_FRQ = 104000              # frequency-change interventions
+DEV_ID_START_STP = 105000              # stopping-pattern-change interventions
 
 # NDC through-services run at a standardised frequency; total_dep = dep/h × 14 over the whole-day window (GK_WINDOW_MIN = 840 min).
 NDC_FREQ_DEP_PER_H = 2                 # standardised NDC frequency [departures/hour]
@@ -256,6 +260,15 @@ EXT_TERMINUS_REVERSAL_PENALTY_MIN = 2.0  # IVWT added to the extension hop when 
 # busier than ratio × its own whole-day dep/h; remedy = all-stop extension of a service terminating at a corridor end (no reversals).
 FRQ_CORRIDOR_NEIGHBOUR_RATIO = 1.0    # corridor fires when max neighbouring-run freq > ratio × corridor freq [-, 1.0 = strictly lower]
 FRQ_DOUBLE_MAX_FREQ_PER_H = 4.0       # doubling generated only when the DOUBLED whole-day freq ≤ this [dep/h; ladder 1→2→4]
+
+# STP stopping-pattern changes: (a) make passing services stop at SA stations another service already serves (homogenisation);
+# (b) drop intermediate calls that have a co-stopper. A call is protected from dropping when it is a terminus of any service
+# (transfer protection) or sole-served. Detection is structural (co-stopper / terminus / sole-server reads) — no numeric gate.
+STP_PROTECT_CROSS_SERVICE_TERMINI = True  # mode (b): never drop a call at a station that is a terminus of any service [policy]
+# Stop run-time penalty (decel + accel, excluding the IVWT dwell) used by the STP applier when no real GTFS stopping/passing
+# time can be borrowed from a co-stopper/co-passer: an added stop adds this to the split hop, a dropped stop subtracts it from
+# the merged hop. Real GTFS times are preferred where they exist on the corridor (decision F1).
+STP_STOP_RUNTIME_PENALTY_MIN = 1.0    # modelled stopping-vs-passing run-time delta per intermediate stop [min]
 
 # Svc-int-added hops (NDC lines, EXT extension hops) carry a default station dwell as IVWT, matching the base GTFS convention
 # (dwell at the hop's from-stop; a direction's first hop = 0) so generated lines hold no GC advantage over base services.
@@ -317,6 +330,17 @@ start_valuation_year = 2050
 # ═══════════════════════════════════════════════════════════════════════════════
 # Produces the discounted CBA per svc-int: costs-and-benefits (scenario x year), aggregated totals, summary and the core result plots; discount rate from cost_parameters.py, PV base year = start_valuation_year (factor 1.0).
 
+RESULTS_TOP_N = [5, 10]   # cross-type 'best interventions' overviews: rank ALL svc-ints by mean net benefit, plot the top-N for each N.
+
+# FRQ/STP corridor grouping: each affected line joins the corridor it shares the most
+# study-area spine-stops with; ties default to the FIRST listed corridor. Values = the
+# corridor's distinctive BAV node Numbers (Wetzikon, the shared terminus, is omitted so it
+# never discriminates). Keyed by node number (encoding-safe); names are the inline comment.
+RESULTS_CORRIDOR_SPINES = {
+    'Dübendorf–Wetzikon':  [8503128, 8503127, 8503126, 8503125, 8503124],  # Dübendorf, Schwerzenbach ZH, Nänikon-Greifensee, Uster, Aathal
+    'Effretikon–Wetzikon': [8503305, 8503303, 8503302, 8503301],           # Effretikon, Illnau, Fehraltorf, Pfäffikon ZH
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # V. VALIDATION TRACK  (standalone validation_* CLIs — not a main_new phase)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -362,7 +386,7 @@ PLOT_FLOWS     = True    # infra-level passenger-flow maps + base-vs-dev diff (P
 PLOT_SCENARIOS = True    # population/modal/distance scenario fans (Phase 7)
 PLOT_TTS       = True    # per-svc-int benefit distribution across scenarios over years (Phase 8A)
 PLOT_COSTS     = True    # per-svc-int cost composition bars (Phase 8B)
-PLOT_RESULTS   = False   # core CBA result set — savings/net-benefit/BCR charts, waterfalls, network maps (Phase 9)
+PLOT_RESULTS   = True   # core CBA result set — savings/net-benefit/BCR charts, waterfalls, network maps (Phase 9)
 PLOT_VALIDATION = True   # V-track comparison plots — scatters, rank/share charts, corridor profiles, tau check (V1-V3)
 
 plot_passenger_flow = False   # legacy only (main.py / main_cap.py); ignored by main_new
@@ -372,22 +396,22 @@ plot_passenger_flow = False   # legacy only (main.py / main_cap.py); ignored by 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Set True to load pre-computed outputs from disk instead of recomputing.
 
-use_cache_network = False
+use_cache_network = True
 use_cache_pt_catchment = True
-use_cache_developments = False
-use_cache_catchmentOD = False
-use_cache_stationsOD = False
-use_cache_railRouting = False         # Phase 4C — skip writing routing CSVs that already exist
+use_cache_developments = True
+use_cache_catchmentOD = True
+use_cache_stationsOD = True
+use_cache_railRouting = True         # Phase 4C — skip writing routing CSVs that already exist
 use_cache_infra_ints = True          # Phase 5A — keep existing cc registry, skip re-discovery
 use_cache_svc_ints = True            # Phase 5B — keep svc-int catalogue + materialised deltas
-use_cache_svc_int_cap = False        # Phase 5C — keep svc-int CAP + merged-services workbooks
-use_cache_int_recompute = False      # Phase 6A-6C — skip svc-ints whose recompute outputs exist
-use_cache_flows = False              # Phase 6D — keep existing flow tables + maps
-use_cache_traveltime_graph = False
-use_cache_scenarios = False           # Phase 7 — skip factor-store builds whose outputs exist
-use_cache_tts = False                 # Phase 8A — load per-svc-int tts.parquet caches when present
-use_cache_costs = False               # Phase 8B — skip when construction_cost.csv covers all svc-ints
-use_cache_tts_calc = False
+use_cache_svc_int_cap = True        # Phase 5C — keep svc-int CAP + merged-services workbooks
+use_cache_int_recompute = True      # Phase 6A-6C — skip svc-ints whose recompute outputs exist
+use_cache_flows = True              # Phase 6D — keep existing flow tables + maps
+use_cache_traveltime_graph = True
+use_cache_scenarios = True           # Phase 7 — skip factor-store builds whose outputs exist
+use_cache_tts = True                 # Phase 8A — load per-svc-int tts.parquet caches when present
+use_cache_costs = True               # Phase 8B — skip when construction_cost.csv covers all svc-ints
+use_cache_tts_calc = True
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # A3. PHYSICAL ATTRIBUTES  (physics & design constants)

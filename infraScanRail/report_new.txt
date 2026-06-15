@@ -85,47 +85,25 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
     BUFFER_BUS_M  = 500 m
 ================================================================================
 
-
-================================================================================
-  STATION OD MATRIX (Phase 4B)
-================================================================================
-  Method               : pt_feeder
-  Attribution mode     : blended
-  Service version      : AK_2035_S18_network
-  Population base year  : 2018
-  Temporal window      : full_day
-  OD output dir        : data/Traffic_Flow/OD/AK_2035_S18_network/
-================================================================================
-
-
-================================================================================
-  NETWORK ASSIGNMENT (Phase 4C)
-================================================================================
-  OD method            : pt_feeder
-  Assignment method    : logit
-  Service version      : AK_2035_S18_network
-  Cost model           : calibrated / explicit
-  Logit (K/maxT/theta) : 5 / 3 / 0.2
-  Output dir           : data/Traffic_Flow/Assignment/AK_2035_S18_network/
-================================================================================
-
 PHASE RUNTIMES
 ================================================================================
 
-Phase 1: Initialisation..................................... 0m 0s (0.63s)
-Phase 2: Data Preparation................................... 1m 3s (63.26s)
-Phase 3A: Infrastructure Network Build...................... 0m 6s (6.90s)
-Phase 3B: Services Network Build............................ 1m 33s (93.71s)
-Phase 3C: Capacity Analysis................................. 0m 5s (5.18s)
-Phase 4A: Catchment Allocation.............................. 0m 0s (0.52s)
-Phase 4B: Station OD Matrix................................. 0m 53s (53.21s)
-Phase 4C: Passenger Routing................................. 6m 30s (390.18s)
-Phase 5A: Infrastructure Interventions...................... 0m 15s (15.36s)
-Phase 5B: Service Interventions............................. 0m 19s (19.82s)
-Phase 5C: Capacity on Matched Network....................... 4m 39s (279.72s)
-Phase 6: Intervention Recompute............................. 116m 49s (7009.82s)
-Phase 7: Scenarios.......................................... 0m 10s (10.72s)
+Phase 1: Initialisation..................................... 0m 0s (0.66s)
+Phase 2: Data Preparation................................... 0m 52s (52.30s)
+Phase 3A: Infrastructure Network Build...................... 0m 6s (6.46s)
+Phase 3B: Services Network Build............................ 1m 4s (64.36s)
+Phase 3C: Capacity Analysis................................. 0m 4s (4.96s)
+Phase 4A: Catchment Allocation.............................. 0m 0s (0.55s)
+Phase 4B: Station OD Matrix................................. 0m 0s (0.00s)
+Phase 4C: Passenger Routing................................. 0m 0s (0.00s)
+Phase 5A: Infrastructure Interventions...................... 0m 15s (15.99s)
+Phase 5B: Service Interventions............................. 0m 22s (22.24s)
+Phase 5C: Capacity on Matched Network....................... 0m 0s (0.06s)
+Phase 6: Intervention Recompute............................. 0m 0s (0.21s)
+Phase 7: Scenarios.......................................... 0m 0s (0.31s)
+Phase 8: Valuation Inputs................................... 0m 1s (1.43s)
+Phase 9: CBA................................................ 3m 50s (230.35s)
 
 ================================================================================
-TOTAL TIME.................................................. 132m 29s (7949.05s)
+TOTAL TIME.................................................. 6m 39s (399.87s)
 ================================================================================

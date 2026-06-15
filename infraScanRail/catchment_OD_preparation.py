@@ -21,6 +21,7 @@ Pipeline (W3):
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import geopandas as gpd
@@ -45,6 +46,14 @@ _CODEBASE_CRS = 'EPSG:2056'
 # Interactive flag — standalone __main__ leaves it True (prompts for gateway
 # assignment); main_new.py sets it False so saved assignments load silently.
 _INTERACTIVE_MODE = True
+
+
+def _can_prompt() -> bool:
+    """True when an interactive terminal is attached (stdin is a real TTY)."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        return False
 
 # Diagnostic plots — updated to the versioned path by prepare_all_od_matrices()
 # when catchment_base.setup_versioned_dirs() has been called beforehand.
@@ -564,7 +573,7 @@ def _assign_external_zones(zone_codes, boundary_ids, bs_index, zone_names,
                 print(f"  Upgraded gateway zone assignment to readable format")
             print(f"  Loaded gateway zone assignment ({len(saved)} zones)")
             return {z: saved[z] for z in zone_codes}
-        if not _INTERACTIVE_MODE:
+        if not (_INTERACTIVE_MODE and _can_prompt()):
             missing = [z for z in zone_codes if z not in saved]
             raise FileNotFoundError(
                 f"Gateway zone assignment at {json_path} is missing zones "
@@ -573,10 +582,11 @@ def _assign_external_zones(zone_codes, boundary_ids, bs_index, zone_names,
         print(f"  Existing gateway zone assignment incomplete — prompting for "
               f"missing zones only.")
 
-    if not _INTERACTIVE_MODE:
+    if not (_INTERACTIVE_MODE and _can_prompt()):
         raise FileNotFoundError(
-            f"No gateway zone assignment at {json_path} and not in interactive "
-            f"mode. Run catchment_OD_preparation standalone first.")
+            f"No gateway zone assignment at {json_path} and no interactive "
+            f"terminal to create one. Run catchment_OD_preparation standalone "
+            f"first.")
 
     mapping = dict(saved) if saved else {}
     ordered_ids = sorted(boundary_ids)
@@ -1227,7 +1237,7 @@ def _guard_dead_gateways(assignment: dict, dead_set: set, served_ids: set,
     if not problem:
         return assignment
     conv_json = os.path.join(gateway_dir, 'gateway_convergence_map.json')
-    if not _INTERACTIVE_MODE:
+    if not (_INTERACTIVE_MODE and _can_prompt()):
         raise FileNotFoundError(
             f"Gateway zones {sorted(problem)} route only through dead (no-service) "
             f"boundary stations: "

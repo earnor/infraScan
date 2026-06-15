@@ -136,7 +136,8 @@ def svc_int_label(svc_int_id: str) -> str:
         int_type, num = sid.split('_', 1)
         start = {'ext': settings.DEV_ID_START_EXT,
                  'ndc': settings.DEV_ID_START_NDC,
-                 'frq': settings.DEV_ID_START_FRQ}[int_type]
+                 'frq': settings.DEV_ID_START_FRQ,
+                 'stp': settings.DEV_ID_START_STP}[int_type]
         return f"{int_type.upper()}{int(num) - start}"
     except (KeyError, ValueError):
         return sid
@@ -237,7 +238,11 @@ def _aggregate(cb_disc: pd.DataFrame) -> pd.DataFrame:
     raw['total_costs'] = (raw['construction_cost'] + raw['maintenance_cost']
                           + raw['uncovered_op_cost'])
     raw['total_net_benefit'] = raw['monetized_savings_total'] - raw['total_costs']
-    raw['cba_ratio'] = raw['monetized_savings_total'] / raw['total_costs']
+    # total_costs includes the SIGNED uncovered operating cost, so it can be 0
+    # (STP, no CAP) or negative (EXT truncations) — the ratio is then meaningless
+    # (inf or a misleading negative BCR). Guard to NaN; net_benefit stays the ranker.
+    raw['cba_ratio'] = (raw['monetized_savings_total']
+                        / raw['total_costs'].where(raw['total_costs'] > 0))
     return raw
 
 
@@ -270,7 +275,7 @@ def _endpoints_label(record) -> str:
     stations = record.get('affected_stations') or []
     if len(stations) < 2:
         return ''
-    if record.get('int_type') in ('ext', 'frq'):
+    if record.get('int_type') in ('ext', 'frq', 'stp'):
         return f"{stations[0]} → {stations[-1]}"
     return f"{stations[0]} – {stations[-1]}"
 
@@ -300,7 +305,9 @@ def _reshape_wide(raw: pd.DataFrame, records: dict) -> pd.DataFrame:
     for col in savings_cols:
         s = col.rsplit('_', 1)[-1]
         derived[f"Net_Benefit_scenario_{s}"] = wide[col] - wide['total_costs']
-        derived[f"cba_ratio_scenario_{s}"] = wide[col] / wide['total_costs']
+        # Guard zero/negative total_costs (signed operating cost) -> NaN, not inf.
+        derived[f"cba_ratio_scenario_{s}"] = (
+            wide[col] / wide['total_costs'].where(wide['total_costs'] > 0))
     derived['Construction Cost [in Mio. CHF]'] = wide['construction_cost'] / 1e6
     derived['Maintenance Costs [in Mio. CHF]'] = wide['maintenance_cost'] / 1e6
     derived['Uncovered Operating Costs [in Mio. CHF]'] = (
@@ -344,8 +351,10 @@ def _summary(wide: pd.DataFrame, records: dict) -> pd.DataFrame:
     out['Net Benefit [in Mio. CHF]'] = (
         out['Monetized Savings Mean [in Mio. CHF]']
         - out['Total Costs [in Mio. CHF]'])
+    # Guard zero/negative total_costs (signed operating cost) -> NaN, not inf.
+    _tc_mio = out['Total Costs [in Mio. CHF]']
     out['CBA Ratio'] = (out['Monetized Savings Mean [in Mio. CHF]']
-                        / out['Total Costs [in Mio. CHF]'])
+                        / _tc_mio.where(_tc_mio > 0))
     num_cols = [c for c in out.columns if '[in Mio. CHF]' in c] + ['CBA Ratio']
     out[num_cols] = out[num_cols].round(2)
     return out
@@ -439,22 +448,54 @@ def _sanitize(name: str) -> str:
     return re.sub(r'[^\w\-]+', '_', str(name)).strip('_')
 
 
-def _chunked_by_benefit(data: pd.DataFrame, size: int = 6):
-    """Yield data subsets of <= size developments, ordered by mean net benefit
-    descending (legacy 6-per-plot grouping)."""
-    ranked = (data.groupby('development')['total_net_benefit'].mean()
-              .sort_values(ascending=False).index.tolist())
-    for i in range(0, len(ranked), size):
-        yield i // size + 1, data[data['development'].isin(ranked[i:i + size])]
+def _frq_flavour(record) -> str:
+    """FRQ flavour: 'double' (a set_frequency op) vs 'homogenise' (corridor extend)."""
+    ops = [o.get('op') for o in ((record or {}).get('operations') or [])]
+    return 'double' if 'set_frequency' in ops else 'homogenise'
+
+
+def _sa_stops_by_route(base_infra: str, svc_version: str) -> dict:
+    """{route_id: frozenset(study-area calling-stop node Numbers)} from the base supply
+    — the corridor signature for FRQ/STP grouping."""
+    from capacity_calculator import _extract_sa_node_set, load_projected_services
+    sa = _extract_sa_node_set(base_infra)
+    links = load_projected_services(svc_version, base_infra)
+    out = {}
+    for svc, g in links.groupby(links['service'].astype(str)):
+        stops = (set(g['from_stop_nr'].astype(int))
+                 | set(g['to_stop_nr'].astype(int))) & sa
+        out[str(svc)] = frozenset(stops)
+    return out
+
+
+def _assign_corridor(record, sa_stops_by_route: dict) -> str:
+    """Corridor label for a FRQ/STP line: the settings.RESULTS_CORRIDOR_SPINES entry it
+    shares the most SA stops with; ties resolve to the first-listed corridor (dict order).
+    '' when no spine overlaps (caller buckets these as 'other')."""
+    spines = getattr(settings, 'RESULTS_CORRIDOR_SPINES', {}) or {}
+    if not record or not spines:
+        return ''
+    route = str(record.get('route_id')
+                or (record.get('affected_services') or [''])[0])
+    stops = sa_stops_by_route.get(route, frozenset())
+    best, best_n = '', 0
+    for label, spine in spines.items():
+        n = len(stops & set(spine))
+        if n > best_n:
+            best, best_n = label, n
+    return best
 
 
 def _make_result_plots(raw: pd.DataFrame, cb_disc: pd.DataFrame, records: dict,
                        geo, combo: str, base_infra: str,
                        svc_version: str) -> None:
-    """The PLOT_RESULTS core set: EXT/NDC chart families (plain, grouped by
-    connection, ranked), overview + per-group network maps, combined
-    chart+map images, overall cumulative distribution, per-svc-int
-    discounted waterfalls."""
+    """The PLOT_RESULTS core set, uniform across all four svc-int types: per-type
+    semantic chart families (EXT by parent line + by candidate; NDC by connecting
+    curve; FRQ by flavour x corridor; STP by corridor), per-type ranked families,
+    a cross-type top-N 'best interventions' overview, overview + per-group network
+    maps, combined chart+map images, overall cumulative distribution, and per-svc-int
+    discounted waterfalls. Corridors/top-N from settings.RESULTS_CORRIDOR_SPINES /
+    RESULTS_TOP_N."""
     import matplotlib
     matplotlib.use('Agg')
     _seaborn_pandas_compat()
@@ -472,8 +513,6 @@ def _make_result_plots(raw: pd.DataFrame, cb_disc: pd.DataFrame, records: dict,
 
     data = raw.copy()
     data['line_name'] = data['development'].map(svc_int_label)
-    data['connection'] = data['development'].map(
-        lambda iid: _connection_label(records.get(iid)))
     geom_by_label = {svc_int_label(iid): g
                      for iid, g in zip(geo['development'], geo.geometry)}
     map_ctx = _load_map_context(base_infra, svc_version)
@@ -492,33 +531,59 @@ def _make_result_plots(raw: pd.DataFrame, cb_disc: pd.DataFrame, records: dict,
     ext = data[data['development'].map(_svc_int_type) == 'ext']
     ndc = data[data['development'].map(_svc_int_type) == 'ndc']
     frq = data[data['development'].map(_svc_int_type) == 'frq']
+    stp = data[data['development'].map(_svc_int_type) == 'stp']
 
-    if not ext.empty:
-        print("  [plot] EXT chart family + ranked/combined...")
-        _plot_basic_charts(ext, 'EXT', benefits_dir)
-        _charts_map_combined(ext, 'ranked_group_ext', ranked_dir,
-                             ranked_combined_dir)
+    sa_stops = _sa_stops_by_route(base_infra, svc_version)
 
-    if not frq.empty:
-        print("  [plot] FRQ chart family + ranked/combined...")
-        _plot_basic_charts(frq, 'FRQ', benefits_dir)
-        _charts_map_combined(frq, 'ranked_group_frq', ranked_dir,
-                             ranked_combined_dir)
+    def _devs(sub):
+        return list(dict.fromkeys(sub['development']))
 
-    if not ndc.empty:
-        print("  [plot] NDC chart families (grouped by connection + ranked)...")
-        for conn in [c for c in ndc['connection'].unique() if c]:
-            sub = ndc[ndc['connection'] == conn]
-            for i, selected in _chunked_by_benefit(sub):
-                _charts_map_combined(selected, f"{_sanitize(conn)}_group_{i}",
-                                     benefits_dir, combined_dir)
-        for i, selected in _chunked_by_benefit(ndc):
-            _charts_map_combined(selected, f"ranked_group_{i}", ranked_dir,
+    # Semantic grouped chart families (Benefits/ charts + Benefits_Combined/ chart+map),
+    # one prefix per group. EXT carries two grouping dimensions (parent line + candidate).
+    families: dict = {}
+    for dev in _devs(ext):
+        rec = records.get(dev) or {}
+        line = str(rec.get('route_id') or '?')
+        cand = _sanitize((rec.get('affected_stations') or ['?'])[-1])
+        families.setdefault(f"EXT_line_{line}", []).append(dev)
+        families.setdefault(f"EXT_to_{cand}", []).append(dev)
+    for dev in _devs(ndc):
+        cc = str(((records.get(dev) or {}).get('requires_infra') or ['none'])[0])
+        families.setdefault(f"NDC_{cc}", []).append(dev)
+    for dev in _devs(frq):
+        rec = records.get(dev) or {}
+        corr = _sanitize(_assign_corridor(rec, sa_stops) or 'other')
+        families.setdefault(f"FRQ_{_frq_flavour(rec)}_{corr}", []).append(dev)
+    for dev in _devs(stp):
+        corr = _sanitize(_assign_corridor(records.get(dev), sa_stops) or 'other')
+        families.setdefault(f"STP_{corr}", []).append(dev)
+
+    print(f"  [plot] {len(families)} grouped chart families "
+          f"(Benefits/ + Benefits_Combined/)...")
+    for prefix, devs in families.items():
+        sub = data[data['development'].isin(devs)]
+        if not sub.empty:
+            _charts_map_combined(sub, prefix, benefits_dir, combined_dir)
+
+    # Uniform per-type ranked family — every type, same set (Benefits_Ranked/).
+    print("  [plot] per-type ranked families (Benefits_Ranked/)...")
+    for sub, tag in ((ext, 'ext'), (ndc, 'ndc'), (frq, 'frq'), (stp, 'stp')):
+        if not sub.empty:
+            _charts_map_combined(sub, f"ranked_group_{tag}", ranked_dir,
                                  ranked_combined_dir)
+
+    # Cross-type 'best interventions' overview — top-N by mean net benefit, any type.
+    ranked_all = (data.groupby('development')['total_net_benefit'].mean()
+                  .sort_values(ascending=False).index.tolist())
+    for n in getattr(settings, 'RESULTS_TOP_N', [5, 10]):
+        top = data[data['development'].isin(ranked_all[:n])]
+        if not top.empty:
+            print(f"  [plot] cross-type top-{n} overview...")
+            _charts_map_combined(top, f"top_{n}", ranked_dir, ranked_combined_dir)
 
     print("  [plot] overview network maps...")
     for sub, name in ((ext, 'developments_ext'), (ndc, 'developments_ndc'),
-                      (frq, 'developments_frq')):
+                      (frq, 'developments_frq'), (stp, 'developments_stp')):
         if sub.empty:
             continue
         labels = sub['line_name'].unique().tolist()

@@ -121,9 +121,17 @@ def phase_5c_capacity_on_matched(
             continue
         merged_path = _build_merged_services(rec, base_infra, base_svc, delta_path, use_cache)
         mod = _changed_load_segments(base_svc, base_infra, composed, merged_path)
+        # STP changes which stations a line calls at / where it turns back, not segment
+        # load — its genuine capacity trigger is a new terminus, not a busier section. Scope
+        # its turnback check to the stations whose terminating-train count actually rose
+        # (the load-segment scope is empty for a pure stop-pattern change). EXT/FRQ/NDC keep
+        # the segment-derived turnback scope (mod_term=None) so their attribution is unchanged.
+        mod_term = (_changed_termini_nodes(base_svc, base_infra, composed, merged_path)
+                    if int_type == 'stp' else None)
         mod_union |= mod
         prepped.append({'int_type': int_type, 'id': iid, 'rec': rec, 'req': req,
-                        'composed': composed, 'merged': merged_path, 'mod': mod})
+                        'composed': composed, 'merged': merged_path, 'mod': mod,
+                        'mod_term': mod_term})
 
     if not prepped:
         print("  [5C] no svc-int deltas available — nothing to do")
@@ -155,7 +163,8 @@ def phase_5c_capacity_on_matched(
     for p in prepped:
         caps = cww.capacity_on_composed(
             base_infra, p['composed'], p['merged'],
-            network_label=p['id'], modified_segment_ids=p['mod'])
+            network_label=p['id'], modified_segment_ids=p['mod'],
+            modified_termini=p.get('mod_term'))
         # Default (no CAP): the svc-int's "full" network is just base + its CC.
         cap_ids: set = set()
         composed_full = p['composed']
@@ -264,16 +273,17 @@ def phase_5c_capacity_on_matched(
 def _svc_int_type(int_id: str) -> str:
     """Infer the svc-int registry type from its id prefix."""
     prefix = str(int_id).split('_')[0]
-    return prefix if prefix in ('ext', 'ndc', 'frq') else 'ext'
+    return prefix if prefix in ('ext', 'ndc', 'frq', 'stp') else 'ext'
 
 
 def _build_merged_services(rec, base_infra, base_svc, delta_path, use_cache) -> str:
     """Write base+delta merged projected services for one svc-int (its own network).
 
-    Base projected rail_segments + the svc-int delta, per layer; for an EXT or FRQ
-    the base rows of the parent route_id are dropped (the delta carries the modified
-    line — extended, or with scaled frequency). NDC is additive. Result drives the
-    5C capacity supply (total load on modified segments).
+    Base projected rail_segments + the svc-int delta, per layer; for an EXT, FRQ or
+    STP the base rows of the modified route(s) are dropped (the delta carries the
+    changed line — extended, frequency-scaled, or re-stopped). A multi-route STP
+    (the combined homogenisation int) drops every route in affected_services. NDC is
+    additive. Result drives the 5C capacity supply (total load on modified segments).
     """
     import fiona
 
@@ -282,8 +292,14 @@ def _build_merged_services(rec, base_infra, base_svc, delta_path, use_cache) -> 
         return str(out_path)
 
     base_path = paths.get_projected_services_path(base_svc, base_infra)
-    remove = ({str(rec.get('route_id'))}
-              if rec.get('int_type') in ('ext', 'frq') else set())
+    itype = rec.get('int_type')
+    if itype in ('ext', 'frq'):
+        remove = {str(rec.get('route_id'))}
+    elif itype == 'stp':
+        routes = rec.get('affected_services') or [rec.get('route_id')]
+        remove = {str(r) for r in routes if r}
+    else:
+        remove = set()
 
     base_layers = set(fiona.listlayers(base_path)) if Path(base_path).exists() else set()
     delta_layers = set(fiona.listlayers(str(delta_path)))
@@ -357,6 +373,37 @@ def _changed_load_segments(base_svc, base_infra, composed_infra, merged_path) ->
         f"{base_svc}_merged", composed_infra, gpkg_path=str(merged_path)))
     eps = 1e-6
     return {seg for seg, load in merged.items() if load > base.get(seg, 0.0) + eps}
+
+
+def _changed_termini_nodes(base_svc, base_infra, composed_infra, merged_path) -> set:
+    """BAV nodes where the svc-int RAISED the terminating-train (turnback) load vs base.
+
+    The node analogue of _changed_load_segments, for stop-pattern changes: a split makes a
+    station a new line endpoint, so it originates/terminates more peak trains than in the
+    base supply and needs a turnback track clear of through traffic. A merge (fewer termini)
+    or a pure skip/add stop raises no terminating load → empty set → no turnback CAP. The
+    deficit (current Track_Count < equiv+1) is decided downstream in _turnback_candidates;
+    this only scopes WHICH stations are checked.
+    """
+    from capacity_calculator import load_projected_services
+
+    def _term_by_node(links) -> dict:
+        if links is None or links.empty:
+            return {}
+        out: dict = {}
+        org = links[links['is_origin'].astype(bool)]
+        dst = links[links['is_destination'].astype(bool)]
+        for nr, f in org.groupby(org['from_stop_nr'].astype(int))['freq_peak'].sum().items():
+            out[int(nr)] = out.get(int(nr), 0.0) + float(f)
+        for nr, f in dst.groupby(dst['to_stop_nr'].astype(int))['freq_peak'].sum().items():
+            out[int(nr)] = out.get(int(nr), 0.0) + float(f)
+        return out
+
+    base = _term_by_node(load_projected_services(base_svc, base_infra))
+    merged = _term_by_node(load_projected_services(
+        f"{base_svc}_merged", composed_infra, gpkg_path=str(merged_path)))
+    eps = 1e-6
+    return {nr for nr, load in merged.items() if load > base.get(nr, 0.0) + eps}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

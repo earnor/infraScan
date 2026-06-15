@@ -15,6 +15,7 @@
 #                    plots/Catchment_Area/PT_Feeder/  (PT-feeder method)
 
 import os
+import sys
 import time
 
 import geopandas as gpd
@@ -153,6 +154,14 @@ _INFRA_PROJECTION: str = None
 # the standalone CLI prompts for ambiguous choices). False when called from
 # another orchestrator (e.g. main_new.py), in which case cached defaults win.
 _INTERACTIVE_MODE: bool = False
+
+
+def _can_prompt() -> bool:
+    """True when an interactive terminal is attached (stdin is a real TTY)."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        return False
 
 # Temporal variant → subfolder + filename-suffix mapping for the unprojected
 # rail/feeder GeoPackages. Keys:
@@ -314,6 +323,13 @@ def _assign_stations_to_municipalities(muni_gdf, rail_stations, bfs_col, name_co
                 print(f"    [{i + 1}] {sn} "
                       f"({st['_dist']:.0f}m from centroid)")
 
+            if not _can_prompt():
+                raise FileNotFoundError(
+                    f"Municipality '{muni_name}' has {len(sorted_st)} candidate "
+                    f"stations and no cached station_assignment.csv to resolve the "
+                    f"choice, but no interactive terminal is available. Run "
+                    f"catchment_allocate standalone "
+                    f"(python catchment_allocate.py) to build the assignment first.")
             while True:
                 choice = input(f"  Select station for '{muni_name}' "
                                f"[1-{len(sorted_st)}]: ")
