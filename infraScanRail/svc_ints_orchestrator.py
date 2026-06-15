@@ -35,6 +35,7 @@ per-svc-int path the existing catchment/OD/routing readers consume unchanged.
 """
 
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -44,6 +45,7 @@ import pandas as pd
 import geopandas as gpd
 import fiona
 from shapely.geometry import LineString, Point
+from shapely.ops import linemerge, substring
 
 import cache_manifest
 import paths
@@ -57,7 +59,7 @@ import settings
 # infra_ints_orchestrator.enumerate_active_infra_ints (reads sheet 'extensions').
 SHEET = 'extensions'
 
-SUPPORTED_SVC_INT_TYPES = ('ext', 'ndc', 'frq')
+SUPPORTED_SVC_INT_TYPES = ('ext', 'ndc', 'frq', 'stp')
 
 # Column order of the catalogue row (the declarative svc-int record).
 # twin_of: id of an op-identical svc-int of another type ('' when unset) — set by FRQ
@@ -73,14 +75,15 @@ RECORD_COLS: tuple = (
 # Comma-joined list fields (stored as strings in the xlsx cell).
 _LIST_FIELDS: tuple = ('requires_infra', 'affected_stations', 'affected_services')
 
-# int_id prefix per type (e.g. ext_100001, ndc_103001, frq_104001).
-_TYPE_CODE: Dict[str, str] = {'ext': 'ext', 'ndc': 'ndc', 'frq': 'frq'}
+# int_id prefix per type (e.g. ext_100001, ndc_103001, frq_104001, stp_105001).
+_TYPE_CODE: Dict[str, str] = {'ext': 'ext', 'ndc': 'ndc', 'frq': 'frq', 'stp': 'stp'}
 
 # Per-type id start block (mirrors the infra-int DEV_ID_START_* convention).
 _TYPE_START: Dict[str, str] = {
     'ext': 'DEV_ID_START_EXT',
     'ndc': 'DEV_ID_START_NDC',
     'frq': 'DEV_ID_START_FRQ',
+    'stp': 'DEV_ID_START_STP',
 }
 
 
@@ -336,8 +339,10 @@ def _row_to_record(row) -> Dict:
             val = deserialize_ops(val)
         elif col in _LIST_FIELDS:
             val = deserialize_list(val)
-        elif col == 'twin_of':
+        elif col in ('twin_of', 'route_id'):
             # empty xlsx cells read as NaN (truthy float) — normalise to ''
+            # (route_id is '' for the multi-route STP combined int, which keys
+            # its routes off affected_services instead).
             val = '' if val is None or (isinstance(val, float) and pd.isna(val)) \
                 else str(val).strip()
         rec[col] = val
@@ -420,8 +425,9 @@ def apply_svc_int(
     infra_nodes = gpd.read_file(composed_dir / 'nodes.gpkg')
     resolve = _make_stop_resolver(stop_index, infra_nodes)
 
-    delta_lines, delta_segs, delta_stop_nrs, changed_routes, affected = _build_delta(
-        svc_int, base_lines, base_segs, resolve)
+    delta_lines, delta_segs, delta_stop_nrs, changed_routes, affected, stp_proj_cache = \
+        _build_delta(svc_int, base_lines, base_segs, resolve,
+                     base_svc_version, base_infra_version)
     if not delta_segs:
         print(f"  [apply] {svc_int_id}: produced no segments — skipped")
         return _apply_result(svc_int_id, unproj_dir, projected_path, base_infra_version, svc_int)
@@ -455,10 +461,16 @@ def apply_svc_int(
               for o in (svc_int.get('operations') or [])
               if o.get('op') == 'extend' and o.get('params', {}).get('reversal_at_endpoint')}
     exempt.discard('')
+    # STP injects split/merge sub-hops into the reuse cache so their geometry is a
+    # verbatim slice of the base path (never re-routed); they override/extend the
+    # base unchanged-pair cache.
+    reuse_lookup = dict(_build_base_projection_cache(
+        base_svc_version, base_infra_version))
+    if stp_proj_cache:
+        reuse_lookup.update(stp_proj_cache)
     enriched = ssp.project_lines(
         seg_gdf, config, run_zvv=run_zvv,
-        base_projection_lookup=_build_base_projection_cache(
-            base_svc_version, base_infra_version),
+        base_projection_lookup=reuse_lookup,
         reversal_exempt_stops=exempt or None)
     ssp._write_rail_outputs(enriched, config)
     print(f"  [apply] {svc_int_id}: projected {len(enriched)} segment(s) → {projected_path}")
@@ -681,12 +693,22 @@ def build_merged_unprojected(
 # Delta construction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_delta(svc_int, base_lines, base_segs, resolve):
-    """Apply the op list → per-layer delta lines/segments + touched stops."""
+def _build_delta(svc_int, base_lines, base_segs, resolve,
+                 base_svc=None, base_infra=None):
+    """Apply the op list → per-layer delta lines/segments + touched stops.
+
+    Returns (delta_lines, delta_segs, stop_nrs, changed_routes, affected,
+    stp_proj_cache). stp_proj_cache is the supplementary base-projection-reuse
+    cache for STP's split/merge sub-hops (empty {} for ext/ndc/frq).
+    """
     ops = svc_int.get('operations') or []
     route_id = str(svc_int.get('route_id', ''))
     variant_rank = svc_int.get('variant_rank', 1)
     is_new = (svc_int.get('int_type') == 'ndc') or any(o.get('op') == 'new_line' for o in ops)
+
+    if any(o.get('op') in ('add_stop', 'drop_stop') for o in ops):
+        return _build_stp_delta(svc_int, base_lines, base_segs, resolve,
+                                base_svc, base_infra)
 
     delta_lines: Dict[str, List[Dict]] = {}
     delta_segs: Dict[str, List[Dict]] = {}
@@ -800,7 +822,358 @@ def _build_delta(svc_int, base_lines, base_segs, resolve):
                 print(f"  [apply] terminus reversal at {endpoint}: +{pen:.0f} min IVWT "
                       f"on {n_pen} extension-hop row(s)")
 
-    return delta_lines, delta_segs, stop_nrs, changed_routes, affected
+    return delta_lines, delta_segs, stop_nrs, changed_routes, affected, {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STP — stopping-pattern delta (add_stop / drop_stop)
+#
+# Edits the CALLING PATTERN (which traversed stations a service stops at) while
+# keeping the ROUTED PATH identical. Affected hops are SPLIT (add) or MERGED
+# (drop) slices of the base projected path, so geometry / Via_Segment / path_nodes
+# stay a verbatim part of the base corridor; they are injected into the
+# projection reuse cache (keyed like _build_base_projection_cache) so project_lines
+# reuses them instead of re-routing. Sub-hop TT is borrowed from a co-stopper /
+# co-passer real GTFS time where one exists on the corridor, else modelled with the
+# kinematic stop penalty (settings.STP_STOP_RUNTIME_PENALTY_MIN). Decision F1.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STP_BASE_HOPS: Dict[Tuple[str, str], Tuple[Dict, Dict]] = {}
+
+
+def _stp_base_hops(base_svc, base_infra):
+    """Memoised base projected hops for STP.
+
+    Returns (hops_by_variant, borrow_index):
+      hops_by_variant : (GTFS_ID, direction_id, variant_rank) -> ordered chain of
+                        hop dicts (path_nodes list, geometry, Via_*, length, TT,
+                        IVWT, node/code cols).
+      borrow_index    : (from_name, to_name) -> hop dict, over GTFS-timed hops of
+                        ANY service (the real stopping/passing time source).
+    """
+    mkey = (str(base_svc), str(base_infra))
+    if mkey in _STP_BASE_HOPS:
+        return _STP_BASE_HOPS[mkey]
+    hops_by_variant: Dict[Tuple, List[Dict]] = {}
+    borrow: Dict[Tuple[str, str], Dict] = {}
+    proj = paths.get_projected_services_path(base_svc, base_infra) if base_svc else None
+    if not proj or not Path(proj).exists():
+        print(f"  [apply] STP: base projected services missing at {proj}")
+        _STP_BASE_HOPS[mkey] = (hops_by_variant, borrow)
+        return hops_by_variant, borrow
+
+    def _pn(s):
+        out = []
+        for tok in str(s or '').split(';'):
+            tok = tok.strip()
+            if tok:
+                try:
+                    out.append(int(float(tok)))
+                except ValueError:
+                    pass
+        return out
+
+    grouped: Dict[Tuple, List[Dict]] = {}
+    for layer in fiona.listlayers(proj):
+        g = gpd.read_file(proj, layer=layer)
+        for _, r in g.iterrows():
+            if pd.isna(r.get('from_stop_nr')) or pd.isna(r.get('to_stop_nr')):
+                continue
+            hop = {
+                'from_nr': int(float(r['from_stop_nr'])),
+                'to_nr': int(float(r['to_stop_nr'])),
+                'from_name': str(r.get('from_stop_name', '')),
+                'to_name': str(r.get('to_stop_name', '')),
+                'path_nodes': _pn(r.get('path_nodes')),
+                'geometry': r.geometry,
+                'path_length_m': r.get('path_length_m'),
+                'TT': float(r['TT']) if pd.notna(r.get('TT')) else np.nan,
+                'IVWT': float(r['IVWT']) if pd.notna(r.get('IVWT')) else 0.0,
+                'tt_source': str(r.get('tt_source', '')),
+                'from_code': r.get('from_code', ''), 'to_code': r.get('to_code', ''),
+            }
+            key = (str(r.get('GTFS_ID', '')), str(r.get('direction_id', '')),
+                   int(float(r.get('variant_rank', 1) or 1)))
+            grouped.setdefault(key, []).append(hop)
+            if hop['tt_source'].lower() == 'gtfs':
+                borrow.setdefault((hop['from_name'], hop['to_name']), hop)
+
+    for key, hl in grouped.items():
+        by_from = {h['from_nr']: h for h in hl}
+        starts = {h['from_nr'] for h in hl} - {h['to_nr'] for h in hl}
+        cur = sorted(starts)[0] if starts else hl[0]['from_nr']
+        chain, seen = [], set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            h = by_from.get(cur)
+            if h is None:
+                break
+            chain.append(h)
+            cur = h['to_nr']
+        hops_by_variant[key] = chain if chain else hl
+    _STP_BASE_HOPS[mkey] = (hops_by_variant, borrow)
+    return hops_by_variant, borrow
+
+
+def _stp_route_ops(svc_int):
+    """(route_id, op) pairs — single-route uses the record route_id; the combined
+    multi-route int carries route_id per add_stop/drop_stop op."""
+    rec_route = str(svc_int.get('route_id', '') or '')
+    out = []
+    for o in svc_int.get('operations') or []:
+        if o.get('op') not in ('add_stop', 'drop_stop'):
+            continue
+        rid = str(o.get('params', {}).get('route_id', '') or rec_route)
+        out.append((rid, o))
+    return out
+
+
+def _stp_cache_payload(geom, path_nodes_list, length, from_nr, to_nr,
+                       from_code, to_code, method):
+    """Supplementary projection-reuse payload (shape of _build_base_projection_cache)."""
+    import services_service_projection as ssp
+    pn_str = ";".join(str(n) for n in path_nodes_list)
+    via_nodes, via_seg = ssp._make_via_cols(pn_str)
+    return {
+        'node_id_from': from_nr, 'node_id_to': to_nr,
+        'match_method_from': method, 'match_method_to': method,
+        'from_code': from_code or '', 'to_code': to_code or '',
+        'Via_Nodes': via_nodes, 'Via_Segment': via_seg,
+        'Via_Station': '', 'Via_Junction': '',
+        'path_nodes': pn_str, 'path_length_m': length,
+        '_path_tt_min': 0.0, 'needs_correction': False, 'elec_mismatch': False,
+        'geometry': geom, 'FromCode': from_nr, 'ToCode': to_nr,
+    }
+
+
+def _as_linestring(geom):
+    """Coerce a (possibly Multi)LineString to a single LineString for substring."""
+    if geom is None:
+        return None
+    if geom.geom_type == 'LineString':
+        return geom
+    merged = linemerge(geom)
+    return merged if merged.geom_type == 'LineString' else None
+
+
+def _build_stp_delta(svc_int, base_lines, base_segs, resolve, base_svc, base_infra):
+    """STP delta: split (add_stop) / merge (drop_stop) the calling pattern.
+
+    Returns the 6-tuple (delta_lines, delta_segs, stop_nrs, changed_routes,
+    affected, stp_proj_cache). Geometry of the affected sub-hops comes verbatim
+    from the base projected path; nothing on the route is re-routed.
+    """
+    import services_service_projection as ssp
+
+    penalty = float(getattr(settings, 'STP_STOP_RUNTIME_PENALTY_MIN', 1.0))
+    default_ivwt = float(getattr(settings, 'SVC_INT_DEFAULT_IVWT_MIN', 0.5))
+    hops_by_variant, borrow = _stp_base_hops(base_svc, base_infra)
+
+    delta_lines: Dict[str, List[Dict]] = {}
+    delta_segs: Dict[str, List[Dict]] = {}
+    stop_nrs: set = set()
+    changed_routes: set = set()
+    affected: set = set()
+    stp_proj_cache: Dict[Tuple, Dict] = {}
+
+    for rid, op in _stp_route_ops(svc_int):
+        kind = op.get('op')
+        names = list(op.get('params', {}).get('stops', []))
+        # iterate the route's PROJECTED chains (the variants that actually project —
+        # base_lines may carry degenerate variants with no projected service)
+        chain_keys = sorted(k for k in hops_by_variant if k[0] == rid)
+        if not chain_keys:
+            print(f"  [apply]   STP {rid}: no projected chain — skipped")
+            continue
+        for (_rid, dir_id, var) in chain_keys:
+            layer, line_row, _ = _find_target(base_lines, base_segs, rid, dir_id, var)
+            if line_row is None:
+                continue
+            chain = hops_by_variant[(rid, dir_id, var)]
+            short = (svc_int.get('line_short_name')
+                     or svc_int_line_name(svc_int,
+                                          base_short=line_row.get('line_short_name')))
+            meta = {'route_id': rid, 'short': short,
+                    'line_type': int(line_row.get('line_type', 109)),
+                    'mode_label': line_row.get('mode_label', 'rail'),
+                    'variant_rank': var}
+            total_dep = int(line_row.get('total_dep', 0) or 0)
+
+            if kind == 'drop_stop':
+                new_seq, synth_tt, cache = _stp_apply_drop(
+                    chain, set(names), rid, dir_id, var, resolve, borrow,
+                    penalty, ssp)
+            else:
+                new_seq, synth_tt, cache = _stp_apply_add(
+                    chain, names, rid, dir_id, var, resolve, borrow,
+                    penalty, default_ivwt, ssp)
+            if len(new_seq) < 2:
+                continue
+            stp_proj_cache.update(cache)
+            _emit_line(delta_lines, delta_segs, layer, meta, dir_id,
+                       new_seq, total_dep, synth_tt)
+            stop_nrs.update(s['nr'] for s in new_seq)
+            affected.update(s['name'] for s in new_seq)
+            changed_routes.add(rid)
+
+    return delta_lines, delta_segs, stop_nrs, changed_routes, affected, stp_proj_cache
+
+
+def _stp_stop_dict(name, nr, resolve):
+    """{nr,name,E,N} for a chain endpoint name (resolve gives base coords)."""
+    s = resolve(name)
+    if s is not None:
+        return s
+    return {'nr': int(nr), 'name': str(name), 'E': 0.0, 'N': 0.0}
+
+
+def _stp_apply_drop(chain, dropped, rid, dir_id, var, resolve, borrow, penalty, ssp):
+    """Merge base hops around each dropped intermediate stop (run-time saving)."""
+    base_names = [chain[0]['from_name']] + [h['to_name'] for h in chain]
+    base_nrs = [chain[0]['from_nr']] + [h['to_nr'] for h in chain]
+    keep = [i for i, nm in enumerate(base_names)
+            if not (nm in dropped and 0 < i < len(base_names) - 1)]
+
+    new_seq = [_stp_stop_dict(base_names[i], base_nrs[i], resolve) for i in keep]
+    synth_tt: Dict[Tuple[int, int], Dict] = {}
+    cache: Dict[Tuple, Dict] = {}
+
+    for j in range(len(keep) - 1):
+        i0, i1 = keep[j], keep[j + 1]
+        consumed = chain[i0:i1]
+        a_nr, b_nr = base_nrs[i0], base_nrs[i1]
+        a_nm, b_nm = base_names[i0], base_names[i1]
+        ivwt = float(consumed[0]['IVWT'] or 0.0)
+        if len(consumed) == 1:                      # unchanged hop — base reuse
+            synth_tt[(a_nr, b_nr)] = {'TT': consumed[0]['TT'], 'IVWT': ivwt}
+            continue
+        # merge: concat path_nodes (drop the seam duplicates), linemerge geometry
+        pn: List[int] = list(consumed[0]['path_nodes'])
+        for h in consumed[1:]:
+            pn += h['path_nodes'][1:]
+        geom = _as_linestring(_safe_union([h['geometry'] for h in consumed]))
+        length = sum(float(h.get('path_length_m') or 0) for h in consumed)
+        b = borrow.get((a_nm, b_nm))
+        if b is not None and pd.notna(b['TT']):     # a real co-passer time exists
+            # Borrow the co-passer's run TIME only — the dropped-stop line still runs the
+            # verbatim concatenated path (a co-passer's A->C express hop is a shorter
+            # geometry; overriding here mis-measured the line's length -> negative train-km).
+            tt = float(b['TT'])
+        else:
+            n_dropped = len(consumed) - 1
+            tt = sum(float(h['TT'] or 0) for h in consumed) - penalty * n_dropped
+            tt = max(tt, 0.1)
+        synth_tt[(a_nr, b_nr)] = {'TT': tt, 'IVWT': ivwt}
+        key = ssp.base_reuse_key(rid, dir_id, var, a_nm, b_nm)
+        cache[key] = _stp_cache_payload(geom, pn, length, a_nr, b_nr,
+                                        consumed[0]['from_code'],
+                                        consumed[-1]['to_code'], 'stp_merge')
+    return new_seq, synth_tt, cache
+
+
+def _stp_apply_add(chain, names, rid, dir_id, var, resolve, borrow,
+                   penalty, default_ivwt, ssp):
+    """Split each host base hop at the added stops it traverses (run-time penalty)."""
+    # map each added station to its host hop + path index
+    added_by_hop: Dict[int, List[Tuple]] = {}
+    for nm in names:
+        s = resolve(nm)
+        if s is None:
+            continue
+        node = s['nr']
+        placed = False
+        for k, h in enumerate(chain):
+            if node in h['path_nodes'][1:-1]:
+                added_by_hop.setdefault(k, []).append(
+                    (h['path_nodes'].index(node), nm, s))
+                placed = True
+                break
+        if not placed:
+            print(f"  [apply]   STP add {rid}: '{nm}' not traversed by dir {dir_id} "
+                  f"var {var} — not a stop-pattern change, skipped")
+
+    new_seq: List[Dict] = []
+    synth_tt: Dict[Tuple[int, int], Dict] = {}
+    cache: Dict[Tuple, Dict] = {}
+    for k, h in enumerate(chain):
+        a = _stp_stop_dict(h['from_name'], h['from_nr'], resolve)
+        b = _stp_stop_dict(h['to_name'], h['to_nr'], resolve)
+        if not new_seq:
+            new_seq.append(a)
+        adds = sorted(added_by_hop.get(k, []))
+        if not adds:                                # unchanged hop — base reuse
+            synth_tt[(a['nr'], b['nr'])] = {'TT': h['TT'],
+                                            'IVWT': float(h['IVWT'] or 0.0)}
+            new_seq.append(b)
+            continue
+        # ordered stops across this host hop: from + added(by path order) + to
+        mids = [s for (_idx, _nm, s) in adds]
+        seq_pts = [a] + mids + [b]
+        line = _as_linestring(h['geometry'])
+        total_len = float(h.get('path_length_m') or (line.length if line else 0.0))
+        pn = h['path_nodes']
+        node_seq = [a['nr']] + [s['nr'] for s in mids] + [b['nr']]
+        node_idx = [pn.index(n) if n in pn else None for n in node_seq]
+        for si in range(len(seq_pts) - 1):
+            sa, sb = seq_pts[si], seq_pts[si + 1]
+            # IVWT = dwell at the sub-hop's from-stop: the first sub-hop keeps the
+            # host hop's from-stop dwell; each sub-hop leaving an ADDED stop carries
+            # the default dwell.
+            ivwt = float(h['IVWT'] or 0.0) if si == 0 else default_ivwt
+            i0, i1 = node_idx[si], node_idx[si + 1]
+            sub_pn = (pn[i0:i1 + 1] if i0 is not None and i1 is not None and i0 <= i1
+                      else [sa['nr'], sb['nr']])
+            bor = borrow.get((sa['name'], sb['name']))
+            borrowed = bor is not None and pd.notna(bor['TT'])
+            # Geometry/length always come from the host-hop substring (and sub_pn from the
+            # host path slice above): borrowing affects run TIME only, not the physical path.
+            # Overriding with a co-passer's express hop mis-measured train-km (negative).
+            geom = _stp_substring(line, seq_pts, si)
+            length = geom.length if geom is not None else 0.0
+            if borrowed:                                    # real stopping time — TT only
+                tt = float(bor['TT'])
+            else:
+                base_tt = float(h['TT'] or 0.0)
+                tt = base_tt * (length / total_len) if total_len > 0 else base_tt
+                # each added stop adds the modelled run-time (decel into it)
+                if si < len(mids):
+                    tt += penalty
+            synth_tt[(sa['nr'], sb['nr'])] = {'TT': round(tt, 3), 'IVWT': ivwt}
+            key = ssp.base_reuse_key(rid, dir_id, var, sa['name'], sb['name'])
+            method = 'stp_borrow' if borrowed else 'stp_split'
+            cache[key] = _stp_cache_payload(
+                geom, sub_pn, length, sa['nr'], sb['nr'], '', '', method)
+            new_seq.append(sb)
+    return new_seq, synth_tt, cache
+
+
+def _stp_substring(line, seq_pts, si):
+    """Substring of the host hop geometry between consecutive seq points."""
+    if line is None:
+        return None
+    da = line.project(Point(seq_pts[si]['E'], seq_pts[si]['N']))
+    db = line.project(Point(seq_pts[si + 1]['E'], seq_pts[si + 1]['N']))
+    if db < da:
+        da, db = db, da
+    try:
+        return substring(line, da, db)
+    except Exception:
+        return line
+
+
+def _safe_union(geoms):
+    """linemerge a list of (Multi)LineStrings into a single geometry."""
+    parts = []
+    for g in geoms:
+        if g is None:
+            continue
+        if g.geom_type == 'LineString':
+            parts.append(g)
+        elif hasattr(g, 'geoms'):
+            parts.extend([p for p in g.geoms if p.geom_type == 'LineString'])
+    if not parts:
+        return None
+    return linemerge(parts) if len(parts) > 1 else parts[0]
 
 
 def _route_variants(base_lines, route_id) -> List[int]:
@@ -902,6 +1275,33 @@ def _apply_ops_to_seq(seq, ops, resolve):
                 total_dep_override = int(p['total_dep'])
             else:
                 total_dep_override = ('factor', float(p['factor']))
+        elif kind == 'add_stop':
+            # STP: insert each named intermediate stop at its geographic position
+            # (the existing consecutive pair it lies between — min added detour).
+            # Direction-safe: operates on the current sequence's coordinates, so
+            # dir-0/dir-1 each place the stop in their own order (no stored offset
+            # → the FRQ multi-stop reversal gotcha cannot occur). The STP delta
+            # branch re-derives placement from path_nodes for the geometry/TT; this
+            # is the sequence-level primitive.
+            for name in p.get('stops', []):
+                s = resolve(name)
+                if s is None or any(x['nr'] == s['nr'] for x in seq):
+                    continue
+                best_i, best_cost = None, None
+                for i in range(len(seq) - 1):
+                    a, b = seq[i], seq[i + 1]
+                    detour = (math.hypot(a['E'] - s['E'], a['N'] - s['N'])
+                              + math.hypot(s['E'] - b['E'], s['N'] - b['N'])
+                              - math.hypot(a['E'] - b['E'], a['N'] - b['N']))
+                    if best_cost is None or detour < best_cost:
+                        best_cost, best_i = detour, i + 1
+                if best_i is not None:
+                    seq = seq[:best_i] + [s] + seq[best_i:]
+        elif kind == 'drop_stop':
+            # STP: remove each named intermediate call (never a terminus).
+            drop = set(p.get('stops', []))
+            seq = [s for i, s in enumerate(seq)
+                   if not (s['name'] in drop and 0 < i < len(seq) - 1)]
         elif kind == 'new_line':
             seq = [resolve(n) for n in p.get('stops', [])]
             seq = [s for s in seq if s is not None]
@@ -1225,8 +1625,23 @@ def phase_5b_service_interventions(
     print(f"\n=== Phase 5B — Service Interventions (mode={mode}) ===")
     print(f"  base infra: {base_infra} | services: {base_svc} | combo: {combo} | active: {active or 'none'}")
 
-    result: Dict = {'ext_ids': [], 'ndc_ids': [], 'frq_ids': [],
+    result: Dict = {'ext_ids': [], 'ndc_ids': [], 'frq_ids': [], 'stp_ids': [],
                     'materialised': [], 'plots': []}
+
+    # Auto-clear inactive types: downstream phases read ALL registry types, so a
+    # type generated by a previous run (e.g. NDC under SVC_INT_MODE='ALL') would
+    # leak into a later subset run. Drop the registry rows + per-id outputs of
+    # every supported type NOT selected this run so disk mirrors the live set.
+    for _t in SUPPORTED_SVC_INT_TYPES:
+        if _t in active:
+            continue
+        _stale = list_svc_int_ids(_t, network=combo)
+        if _stale:
+            print(f"  [{_t}] clearing {len(_stale)} stale record(s) — type not "
+                  f"selected this run")
+            delete_records(_t, _stale, network=combo)
+            _purge_svc_int_outputs(_stale, combo)
+
     if not active:
         return result
 
@@ -1288,10 +1703,26 @@ def phase_5b_service_interventions(
                 base_infra, base_svc, sa_polygon, buffer_polygon, network=combo)
             result['frq_ids'] = frq_disc['frq_ids']
 
+    # STP — stopping-pattern changes (passing-service homogenisation + express) --
+    stp_disc: Optional[Dict] = None
+    if 'stp' in active:
+        if manifest_ok and list_svc_int_ids('stp', network=combo):
+            result['stp_ids'] = list_svc_int_ids('stp', network=combo)
+            print(f"  [stp] use_cache: keeping {len(result['stp_ids'])} existing STP record(s)")
+        else:
+            _old_stp = list_svc_int_ids('stp', network=combo)
+            delete_records('stp', _old_stp, network=combo)
+            _purge_svc_int_outputs(_old_stp, combo)
+            import svc_ints_stop_patterns as stpmod
+            stp_disc = stpmod.discover_and_register(
+                base_infra, base_svc, sa_polygon, buffer_polygon, network=combo)
+            result['stp_ids'] = stp_disc['stp_ids']
+
     # Materialise each registered svc-int (delta network, real infra TT) -------
     todo = ([('ext', i) for i in result['ext_ids']] +
             [('ndc', i) for i in result['ndc_ids']] +
-            [('frq', i) for i in result['frq_ids']])
+            [('frq', i) for i in result['frq_ids']] +
+            [('stp', i) for i in result['stp_ids']])
     print(f"  [apply] materialising {len(todo)} svc-int delta network(s)…")
     for int_type, iid in todo:
         rec = read_record(int_type, iid, network=combo)
@@ -1328,27 +1759,52 @@ def phase_5b_service_interventions(
                     frq_disc['corridor_candidates'], sa_polygon)
                 if p:
                     result['plots'].append(p)
+            if stp_disc and (stp_disc.get('mode_a') or stp_disc.get('mode_b')):
+                import svc_ints_stop_patterns as stpmod
+                p = stpmod.plot_stp_candidates(base_infra, base_svc, stp_disc, sa_polygon)
+                if p:
+                    result['plots'].append(p)
             result['plots'] += plot_svc_interventions(base_infra, base_svc, result, sa_polygon)
         except Exception as exc:
             print(f"  [plot] WARNING: svc-int plots failed: {exc}")
 
     print(f"=== Phase 5B done: {len(result['ext_ids'])} EXT, "
           f"{len(result['ndc_ids'])} NDC, {len(result['frq_ids'])} FRQ, "
+          f"{len(result['stp_ids'])} STP, "
           f"{len(result['materialised'])} materialised ===\n")
     return result
 
 
-def _active_svc_int_types(mode: str) -> List[str]:
-    """Map SVC_INT_MODE to the svc-int registry types to generate."""
+def _active_svc_int_types(mode) -> List[str]:
+    """Map SVC_INT_MODE to the svc-int registry types to generate.
+
+    Accepts the legacy string forms ('NONE' | 'ALL' | a single type) or an
+    explicit list/tuple of type codes (e.g. ['EXT', 'NDC']) — list entries are
+    lowercased, validated and returned in canonical SUPPORTED_SVC_INT_TYPES order.
+    """
+    if isinstance(mode, (list, tuple, set)):
+        import ints_core as core
+        return core.normalise_int_types(mode, SUPPORTED_SVC_INT_TYPES, 'SVC_INT_MODE')
     m = str(mode).upper()
     if m == 'NONE':
         return []
     if m == 'ALL':
         return list(SUPPORTED_SVC_INT_TYPES)
-    if m in ('EXT', 'NDC', 'FRQ'):
+    if m in ('EXT', 'NDC', 'FRQ', 'STP'):
         return [m.lower()]
     print(f"  [svc-int] unknown SVC_INT_MODE='{mode}' — treating as 'NONE'")
     return []
+
+
+def svc_int_active(mode=None) -> bool:
+    """True when SVC_INT_MODE resolves to at least one svc-int type.
+
+    Replaces the scattered ``str(SVC_INT_MODE).upper() == 'NONE'`` gates, which
+    misread a list value (and an empty list) as active.
+    """
+    if mode is None:
+        mode = getattr(settings, 'SVC_INT_MODE', 'NONE')
+    return bool(_active_svc_int_types(mode))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1400,10 +1856,12 @@ def _resolve_affected_sets(records: List[Dict], base_lines: Dict,
     """Resolve each svc-int's affected_set to the keys Phase 6's closure consumes.
 
     services → concrete variant_keys (``route_id_direction_rank``, the 4C routing
-    key): for an EXT, every (direction_id, variant_rank) of the route in the base
-    network; for an NDC, the new line's synthetic keys (int_id, both directions,
-    its variant_rank). stations → id_point (== from_stop_nr), resolved from the
-    stored station names. Names that don't resolve are dropped (no crash)."""
+    key): for an EXT/FRQ, every (direction_id, variant_rank) of the route in the
+    base network; for an NDC, the new line's synthetic keys (int_id, both
+    directions, its variant_rank); for an STP, the union over its modified route(s)
+    — affected_services, which is the route list (the combined homogenisation int
+    modifies three routes). stations → id_point (== from_stop_nr), resolved from
+    the stored station names. Names that don't resolve are dropped (no crash)."""
     # route_id -> {(direction_id, variant_rank)} from the base line layers
     route_variants: Dict[str, set] = {}
     for ldf in base_lines.values():
@@ -1419,6 +1877,11 @@ def _resolve_affected_sets(records: List[Dict], base_lines: Dict,
         if itype == 'ndc':
             rank = int(rec.get('variant_rank', 1) or 1)
             vks = [f"{rid}_{d}_{rank}" for d in ('0', '1')]
+        elif itype == 'stp':
+            routes = [str(r) for r in (rec.get('affected_services') or [rid]) if r]
+            vks = sorted(f"{r}_{d}_{v}"
+                         for r in routes
+                         for (d, v) in route_variants.get(r, set()))
         else:
             vks = sorted(f"{rid}_{d}_{v}"
                          for (d, v) in route_variants.get(rid, set()))
@@ -1460,8 +1923,11 @@ _NDC_COLOR     = '#e8730c'   # orange: NDC (an entirely new line)
 _NDC_COLOR_OLD = '#f4c9a0'   # light orange (NDC has no existing part — unused in practice)
 _FRQ_COLOR     = '#7b2d8e'   # violet: FRQ (corridor extension hop / doubled line)
 _FRQ_COLOR_OLD = '#cfa8dc'   # light violet: the pre-existing run of the line
-_TYPE_COLOR     = {'ext': _EXT_COLOR, 'ndc': _NDC_COLOR, 'frq': _FRQ_COLOR}
-_TYPE_COLOR_OLD = {'ext': _EXT_COLOR_OLD, 'ndc': _NDC_COLOR_OLD, 'frq': _FRQ_COLOR_OLD}
+_STP_COLOR     = '#0f7b6c'   # teal: STP (the re-stopped / re-routed-pattern line)
+_STP_COLOR_OLD = '#7fc8bd'   # light teal: the pre-existing run of the line
+_TYPE_COLOR     = {'ext': _EXT_COLOR, 'ndc': _NDC_COLOR, 'frq': _FRQ_COLOR, 'stp': _STP_COLOR}
+_TYPE_COLOR_OLD = {'ext': _EXT_COLOR_OLD, 'ndc': _NDC_COLOR_OLD, 'frq': _FRQ_COLOR_OLD,
+                   'stp': _STP_COLOR_OLD}
 _BACKDROP      = '#d4d4d4'   # unused infrastructure
 _LAKE_FC       = '#c8e8f5'
 _LAKE_EC       = '#99c4d8'
@@ -1773,6 +2239,9 @@ def _render_svc_fig(infos: List[Dict], ctx: Dict, out_path, title: str,
         if 'frq' in types:
             handles += [Line2D([0], [0], color=_FRQ_COLOR_OLD, lw=2, label='Existing line (FRQ)'),
                         Line2D([0], [0], color=_FRQ_COLOR, lw=2.5, label='Frequency change')]
+        if 'stp' in types:
+            handles += [Line2D([0], [0], color=_STP_COLOR_OLD, lw=2, label='Existing line (STP)'),
+                        Line2D([0], [0], color=_STP_COLOR, lw=2.5, label='Stopping-pattern change')]
         handles += [Line2D([0], [0], color=_BACKDROP, lw=1.5, label='Unused infrastructure'),
                     Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
                            markeredgecolor='black', markersize=6, label='Service stop')]
@@ -1981,21 +2450,24 @@ def materialise_and_plot(
     ext_ids: Optional[List[str]] = None,
     ndc_ids: Optional[List[str]] = None,
     frq_ids: Optional[List[str]] = None,
+    stp_ids: Optional[List[str]] = None,
     make_plots: bool = True,
     use_cache: bool = False,
     sa_polygon=None,
 ) -> Dict:
     """Materialise the given svc-int ids (delta networks) and optionally plot them.
 
-    Standalone-CLI convenience giving the per-type EXT/NDC/FRQ files the same discover →
+    Standalone-CLI convenience giving the per-type EXT/NDC/FRQ/STP files the same discover →
     materialise → plot flow as the cc CLI, without re-running discovery. Plots need the
     materialised projected deltas, so they are produced together behind one toggle.
     """
     result: Dict = {'ext_ids': list(ext_ids or []), 'ndc_ids': list(ndc_ids or []),
-                    'frq_ids': list(frq_ids or []), 'materialised': [], 'plots': []}
+                    'frq_ids': list(frq_ids or []), 'stp_ids': list(stp_ids or []),
+                    'materialised': [], 'plots': []}
     todo = ([('ext', i) for i in result['ext_ids']] +
             [('ndc', i) for i in result['ndc_ids']] +
-            [('frq', i) for i in result['frq_ids']])
+            [('frq', i) for i in result['frq_ids']] +
+            [('stp', i) for i in result['stp_ids']])
     print(f"  [apply] materialising {len(todo)} svc-int delta network(s)…")
     for int_type, iid in todo:
         rec = read_record(int_type, iid)

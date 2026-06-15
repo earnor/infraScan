@@ -111,6 +111,22 @@ def deserialize_list(raw) -> List[str]:
     return [tok.strip() for tok in s.split(',') if tok.strip()]
 
 
+def normalise_int_types(values, supported: Tuple[str, ...], label: str) -> List[str]:
+    """Resolve an explicit list/tuple of intervention-type codes to a canonical list.
+
+    Lowercases each entry, validates against ``supported``, de-duplicates and
+    returns the survivors in ``supported`` order. Unknown codes are warned about
+    and dropped. Used by the orchestrators when SVC_INT_MODE / INFRA_INT_MODE is
+    given as a list rather than the legacy 'NONE'/'ALL'/single-type string.
+    """
+    wanted = {str(v).strip().lower() for v in (values or []) if str(v).strip()}
+    unknown = sorted(wanted - set(supported))
+    if unknown:
+        print(f"  [{label}] ignoring unknown type(s) {unknown} — "
+              f"supported: {list(supported)}")
+    return [t for t in supported if t in wanted]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # REGISTRY — read
 # ─────────────────────────────────────────────────────────────────────────────

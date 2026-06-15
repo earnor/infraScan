@@ -52,6 +52,15 @@ import settings
 
 SWISS_CRS = "EPSG:2056"
 
+
+def _can_prompt() -> bool:
+    """True when an interactive terminal is attached (stdin is a real TTY)."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        return False
+
+
 NAME_MATCH_THRESHOLD = 0.85
 SPATIAL_MATCH_THRESHOLD = 200  # metres
 
@@ -1811,6 +1820,13 @@ def _tier4_raw_bav_fallback(
     print(f"    Name:   {raw_row.get('Name', '?')}")
     print(f"    Code:   {raw_row.get('Code', '?')}")
     print(f"    Match:  {raw_result.method}  (confidence {raw_result.confidence:.2f})")
+
+    # No interactive terminal (e.g. a background main_new run): take the default
+    # ('n' → skip add, use straight-line geometry) rather than EOFError.
+    if not _can_prompt():
+        print(f"  [Tier 4] No interactive terminal — skipping add for "
+              f"'{stop_name}'; will use straight-line geometry.")
+        return None, working_nodes, working_segments
 
     ans = input(
         f"  Add this node and its connecting segments to the working version? (y/n) [n]: "
@@ -5075,8 +5091,20 @@ def _run_phase1_5(
     existing_bs = _load_boundary_stations(bs_path)
     if existing_bs is not None:
         print(f"\n  Loaded {len(existing_bs)} boundary station(s) from {bs_path.name}.")
-        ans = input("  Re-detect and re-confirm? (y/n) [n]: ").strip().lower() or "n"
-        confirmed_bs: Optional[List[int]] = existing_bs if ans != "y" else None
+        confirmed_bs: Optional[List[int]] = existing_bs
+        # main_new path (auto_mode) or a non-interactive run inherits the
+        # persisted choice silently — never re-prompt per svc-int. Only a
+        # standalone TTY run offers a re-detect.
+        if not config.auto_mode and _can_prompt():
+            ans = input("  Re-detect and re-confirm? (y/n) [n]: ").strip().lower() or "n"
+            if ans == "y":
+                confirmed_bs = None
+    elif not _can_prompt():
+        raise FileNotFoundError(
+            f"No boundary station list at {bs_path} and no interactive terminal "
+            f"to create one. Run services_service_projection standalone "
+            f"(python services_service_projection.py) to detect and confirm "
+            f"boundary stations first.")
     else:
         confirmed_bs = None
 
@@ -5105,14 +5133,22 @@ def _run_phase1_5(
     existing_bm = _load_boundary_mapping(bm_path)
     if existing_bm is not None:
         print(f"  Loaded {len(existing_bm)} mapping(s) from {bm_path.name}.")
-        ans = input("  Edit existing mapping? (y/n) [n]: ").strip().lower() or "n"
-        if ans == "y":
-            boundary_mapping = _run_destination_mapping_cli(
-                outside_stops, confirmed_bs, node_attrs,
-                existing_mapping=existing_bm,
-            )
-        else:
-            boundary_mapping = existing_bm
+        boundary_mapping = existing_bm
+        # As with the boundary list: silent inherit on the main_new path / no TTY;
+        # only a standalone TTY run offers an edit.
+        if not config.auto_mode and _can_prompt():
+            ans = input("  Edit existing mapping? (y/n) [n]: ").strip().lower() or "n"
+            if ans == "y":
+                boundary_mapping = _run_destination_mapping_cli(
+                    outside_stops, confirmed_bs, node_attrs,
+                    existing_mapping=existing_bm,
+                )
+    elif not _can_prompt():
+        raise FileNotFoundError(
+            f"No boundary mapping at {bm_path} and no interactive terminal to "
+            f"create one. Run services_service_projection standalone "
+            f"(python services_service_projection.py) to map outside stops to "
+            f"boundary stations first.")
     else:
         boundary_mapping = _run_destination_mapping_cli(
             outside_stops, confirmed_bs, node_attrs,
