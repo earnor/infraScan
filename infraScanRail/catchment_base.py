@@ -1,5 +1,5 @@
 """catchment_base.py
-Last modified: 2026-05-15
+Last modified: 2026-06-19
 
 Shared foundation for the catchment allocation pipeline.
 
@@ -66,11 +66,11 @@ CATCHMENT_AREA_DIR        = os.path.join(CATCHMENT_DATA_DIR, 'Boundaries')
 STUDY_AREA_DIR            = os.path.join(CATCHMENT_DATA_DIR, 'Boundaries')
 POP_EMPL_DATA_DIR         = os.path.join(CATCHMENT_DATA_DIR, 'Pop_Empl_Data')
 POP_EMPL_PLOT_DIR         = os.path.join(CATCHMENT_PLOT_DIR, 'Pop_Empl_Data')
+SPATIAL_DATA_PLOT_DIR     = os.path.join('plots', 'Spatial_Data')   # plots/Spatial_Data (lakes etc.)
 STUDY_AREA_DEFAULT_BUFFER_M     = 3000
 CATCHMENT_AREA_DEFAULT_BUFFER_M = 5000
 
-# Module-level buffers for the Bezirk scaling report; populated by _scale_cells_to_year,
-# reset and consumed by main().
+# Module-level buffers for the Bezirk scaling report; populated by _scale_cells_to_year, reset and consumed by main().
 _SCALE_REPORT_LINES: list = []
 _BEZIRK_SCALES: dict = {}   # label -> bezirk_scale Series
 _TOTALS: dict = {}          # label -> {'base': float, 'target': float}
@@ -115,9 +115,8 @@ def hamilton_round(fractional: np.ndarray, total: int) -> np.ndarray:
         floors[bump] += 1
         return floors
 
-    # remainder < 0: floors already overshoot total (only possible when
-    # `total` is less than sum(floor) — rare, but handle gracefully by
-    # subtracting one unit from indices with smallest fractional parts first).
+    # remainder < 0: floors already overshoot total (only possible when `total` is less than sum(floor) — rare, but handle gracefully by
+    # subtracting one unit from indices with smallest fractional parts first.
     take = -remainder
     fractions = arr - floors
     order = np.argsort(fractions, kind='stable')
@@ -488,9 +487,9 @@ def _configure_study_area():
     Returns:
         (polygon, buffered_polygon, admin_level, primary_names, buffer_m)
     """
-    print("\n" + "─" * 68)
+    print("\n" + "─" * 160)
     print("[Phase 1]  Study area")
-    print("─" * 68)
+    print("─" * 160)
 
     print("\n[1.1]  Definition method")
     print("   1) Polygon coordinates from settings.py   [default]")
@@ -534,9 +533,9 @@ def _configure_catchment_area(study_area_boundary):
     Returns:
         (polygon, buffered_polygon, admin_level, primary_names, buffer_m)
     """
-    print("\n" + "─" * 68)
+    print("\n" + "─" * 160)
     print("[Phase 2]  Catchment area")
-    print("─" * 68)
+    print("─" * 160)
 
     admin_level, primary_names, subdivision_names = _select_admin_boundary(
         q_level='2.1', q_entity='2.2', q_subdiv='2.3',
@@ -564,9 +563,9 @@ def initialise():
     """
     os.chdir(paths.MAIN)
 
-    print("=" * 68)
+    print("=" * 160)
     print("infraScanRail — Initialisation")
-    print("=" * 68)
+    print("=" * 160)
     print("Defines the study area and catchment area and exports them as")
     print("GeoPackages for use by downstream pipeline modules.")
 
@@ -594,14 +593,14 @@ def initialise():
     _export_gpkg(ca_boundary, 'catchment_area_boundary', ca_admin, ca_names, 0,      ca_boundary_path)
     _export_gpkg(ca_buffer,   'catchment_area_buffer',   ca_admin, ca_names, ca_buf, ca_buffer_path)
 
-    print("\n" + "=" * 68)
+    print("\n" + "=" * 160)
     print("Summary")
-    print("=" * 68)
+    print("=" * 160)
     print(f"  Study area boundary   : {sa_boundary_path}")
     print(f"  Study area buffer     : {sa_buffer_path}  (+{sa_buf:.0f} m)")
     print(f"  Catchment boundary    : {ca_boundary_path}")
     print(f"  Catchment buffer      : {ca_buffer_path}  (+{ca_buf:.0f} m)")
-    print("=" * 68 + "\n")
+    print("=" * 160 + "\n")
 
 
 def setup_versioned_dirs(svc_version: str) -> None:
@@ -710,6 +709,22 @@ def _load_catchment_boundary():
     return boundary
 
 
+def _load_study_area_boundary():
+    """Load the study area boundary polygon (EPSG:2056) from its GPKG.
+
+    Returns
+    -------
+    shapely.Polygon
+        Study area boundary in EPSG:2056.
+    """
+    boundary_path = paths.STUDY_AREA_BOUNDARY_GPKG
+    print(f"  Loading study area boundary from {boundary_path} ...")
+    gdf = gpd.read_file(boundary_path).to_crs(CODEBASE_CRS)
+    boundary = gdf.geometry.unary_union
+    print(f"  Boundary loaded - area = {boundary.area / 1e6:.1f} km2")
+    return boundary
+
+
 def _load_population_grid(boundary, year: int = None):
     """Load the Swiss population CSV, filter to study area, scale to year."""
     print("  Loading population grid ...")
@@ -782,8 +797,7 @@ def _load_grid(df, boundary, label, year: int = None):
 
     print(f"    {label}: {len(gdf):,} cells within study area (>=50 % overlap)")
 
-    # Scale 2023 cell values to target year when year != 2023.
-    # Cell-level values stay float; integer rounding is reserved for
+    # Scale 2023 cell values to target year when year != 2023. Cell-level values stay float; integer rounding is reserved for
     # aggregate boundaries (commune totals, per-(commune, station) splits).
     if year != 2023:
         gdf = _scale_cells_to_year(gdf, year, label, boundary)
@@ -873,8 +887,7 @@ def _cumulate_per_municipality(pop_grid, empl_grid, boundary, year: int = None):
                             on=bfs_col, how='outer')
     summary = summary.fillna(0)
 
-    # Enforce integer types on per-municipality totals (cells already integer;
-    # this is defensive against any floating-point summation drift)
+    # Enforce integer types on per-municipality totals (cells already integer; this is defensive against any floating-point summation drift)
     summary['total_population'] = summary['total_population'].round().astype(int)
     summary['total_employment'] = summary['total_employment'].round().astype(int)
 
@@ -899,8 +912,7 @@ def _cumulate_per_municipality(pop_grid, empl_grid, boundary, year: int = None):
     summary[csv_cols].to_csv(csv_path, index=False, encoding='utf-8-sig')
     print(f"    Saved -> {csv_path}")
 
-    # Also write an unsuffixed copy so legacy consumers
-    # (e.g. catchment_allocate.py searching for 'municipal_pop_empl_summary.csv')
+    # Also write an unsuffixed copy so legacy consumers (e.g. catchment_allocate.py searching for 'municipal_pop_empl_summary.csv')
     # continue to work without a year-tag-aware path.
     legacy_path = os.path.join(POP_EMPL_DATA_DIR, 'municipal_pop_empl_summary.csv')
     summary[csv_cols].to_csv(legacy_path, index=False, encoding='utf-8-sig')
@@ -911,13 +923,19 @@ def _cumulate_per_municipality(pop_grid, empl_grid, boundary, year: int = None):
     return summary
 
 
-def _plot_municipal_distributions(summary_df, boundary, year: int = None):
+def _plot_municipal_distributions(summary_df, boundary, year: int = None, *,
+                                  extent_tag='ca', clip_lakes=True,
+                                  boundary_label='Catchment area boundary'):
     """Produce choropleth maps for population and employment per municipality.
 
     Uses the same discrete FSO class breaks as the raster plots so that the
     municipal and raster maps share a common visual language.
-    Saved to plots/Catchment_Area/.
-    For MultiPolygon boundaries a separate plot is produced per component.
+    Saved to plots/Catchment_Area/Pop_Empl_Data/ as
+    {population,employment}_by_municipality_{year}_{extent_tag}.pdf.
+    `boundary` sets the extent and data clip; lakes are clipped to it when
+    `clip_lakes` is True (catchment extent) and drawn unclipped otherwise
+    (study-area extent). For MultiPolygon boundaries a separate plot is
+    produced per component.
     """
     if year is None:
         year = settings.start_year_scenario
@@ -984,11 +1002,12 @@ def _plot_municipal_distributions(summary_df, boundary, year: int = None):
                                            edgecolor='grey', linewidth=0.4,
                                            zorder=1)
 
-            # Lakes above fill, below boundary line
+            # Lakes above fill, below boundary line (clipped for CA, unclipped for SA)
             if lakes is not None and not lakes.empty:
-                lakes_clip = gpd.clip(lakes, component)
-                if not lakes_clip.empty:
-                    lakes_clip.plot(ax=ax, color='#A8D8EA', edgecolor='none',
+                lakes_draw = (gpd.clip(lakes, component) if clip_lakes
+                              else lakes[lakes.geometry.intersects(component)])
+                if not lakes_draw.empty:
+                    lakes_draw.plot(ax=ax, color='#A8D8EA', edgecolor='none',
                                     zorder=4)
 
             # Catchment area boundary
@@ -1009,7 +1028,7 @@ def _plot_municipal_distributions(summary_df, boundary, year: int = None):
                     Patch(facecolor=color, edgecolor='none', label=lbl))
             legend_handles.append(
                 Line2D([0], [0], color='black', linewidth=1.8,
-                       linestyle='--', label='Catchment area boundary'))
+                       linestyle='--', label=boundary_label))
 
             ax.legend(handles=legend_handles,
                       title=cfg['col_header'],
@@ -1023,14 +1042,17 @@ def _plot_municipal_distributions(summary_df, boundary, year: int = None):
             ax.set_ylabel('N [m]')
             ax.set_aspect('equal')
 
-            fname = f'plot_{title_word.lower()}_by_municipality_{year}{part_suffix}.pdf'
+            fname = (f'{title_word.lower()}_by_municipality_'
+                     f'{year}_{extent_tag}{part_suffix}.pdf')
             out_path = os.path.join(POP_EMPL_PLOT_DIR, fname)
             fig.savefig(out_path, bbox_inches='tight', dpi=150)
             plt.close(fig)
             print(f"    Saved -> {out_path}")
 
 
-def _plot_raster_map(gdf, label, boundary, year: int = None):
+def _plot_raster_map(gdf, label, boundary, year: int = None, *,
+                     extent_tag='ca', clip_lakes=True,
+                     boundary_label='Catchment area boundary'):
     """Render a population or employment grid as a coloured raster map,
     styled to match the corresponding map.geo.admin FSO layer.
 
@@ -1120,11 +1142,12 @@ def _plot_raster_map(gdf, label, boundary, year: int = None):
             ~muni_lines.geom_type.isin(['Point', 'MultiPoint'])]
         muni_lines.plot(ax=ax, color='#404040', linewidth=0.3, zorder=3)
 
-        # Lakes above municipal lines, below catchment boundary
+        # Lakes above municipal lines, below boundary (clipped for CA, unclipped for SA)
         if lakes is not None and not lakes.empty:
-            lakes_clip = gpd.clip(lakes, component)
-            if not lakes_clip.empty:
-                lakes_clip.plot(ax=ax, color='#A8D8EA', edgecolor='none',
+            lakes_draw = (gpd.clip(lakes, component) if clip_lakes
+                          else lakes[lakes.geometry.intersects(component)])
+            if not lakes_draw.empty:
+                lakes_draw.plot(ax=ax, color='#A8D8EA', edgecolor='none',
                                 zorder=4)
 
         # Catchment boundary
@@ -1140,7 +1163,7 @@ def _plot_raster_map(gdf, label, boundary, year: int = None):
                    label='Municipal boundary'))
         legend_handles.append(
             Line2D([0], [0], color='black', linewidth=1.8,
-                   linestyle='--', label='Catchment area boundary'))
+                   linestyle='--', label=boundary_label))
 
         leg = ax.legend(handles=legend_handles,
                         title=col_header,
@@ -1164,11 +1187,79 @@ def _plot_raster_map(gdf, label, boundary, year: int = None):
         ax.set_ylabel('N [m]')
         ax.set_aspect('equal')
 
-        out_path = os.path.join(POP_EMPL_PLOT_DIR,
-                                f'plot_{label}_raster_{year}{part_suffix}.pdf')
+        out_path = os.path.join(
+            POP_EMPL_PLOT_DIR,
+            f'{label}_raster_{year}_{extent_tag}{part_suffix}.pdf')
         fig.savefig(out_path, bbox_inches='tight', dpi=150)
         plt.close(fig)
     print(f"    Saved -> {out_path}")
+
+
+def _plot_lakes(boundary, *, extent_tag='ca', clip_lakes=True,
+                boundary_label='Catchment area boundary'):
+    """Render the lakes spatial-data layer for one extent (study or catchment area).
+
+    Same cartographic style as the pop/empl maps (grey exterior, white interior,
+    dashed boundary, north arrow + scale bar). Lakes are clipped to the boundary
+    when `clip_lakes` is True (catchment extent) and drawn unclipped otherwise
+    (study-area extent). Saved to plots/Spatial_Data/lakes_{extent_tag}.pdf.
+    For MultiPolygon boundaries a separate plot is produced per component.
+    """
+    print(f"  Plotting lakes ({extent_tag}) ...")
+
+    lakes = None
+    if os.path.exists(paths.LAKES_SHP):
+        lakes = gpd.read_file(paths.LAKES_SHP).to_crs(CODEBASE_CRS)
+        lakes = lakes[lakes.geometry.intersects(boundary)].copy()
+
+    components = (list(boundary.geoms)
+                  if boundary.geom_type == 'MultiPolygon' else [boundary])
+
+    out_path = None
+    for part_idx, component in enumerate(components):
+        part_suffix = f'_part{part_idx + 1}' if len(components) > 1 else ''
+
+        fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+        ax.set_facecolor('#E8E8E8')   # grey outside the area
+
+        comp_gdf = gpd.GeoDataFrame(geometry=[component], crs=CODEBASE_CRS)
+        comp_gdf.plot(ax=ax, color='white', edgecolor='none', zorder=0)
+
+        if lakes is not None and not lakes.empty:
+            lakes_draw = (gpd.clip(lakes, component) if clip_lakes
+                          else lakes[lakes.geometry.intersects(component)])
+            if not lakes_draw.empty:
+                lakes_draw.plot(ax=ax, color='#A8D8EA', edgecolor='none', zorder=4)
+
+        comp_gdf.boundary.plot(ax=ax, color='black', linewidth=1.8,
+                               linestyle='--', zorder=5)
+
+        bx_min, by_min, bx_max, by_max = component.bounds
+        pad = 200
+        ax.set_xlim(bx_min - pad, bx_max + pad)
+        ax.set_ylim(by_min - pad, by_max + pad)
+
+        _add_map_elements(ax)
+
+        legend_handles = [
+            Patch(facecolor='#A8D8EA', edgecolor='none', label='Lake'),
+            Line2D([0], [0], color='black', linewidth=1.8, linestyle='--',
+                   label=boundary_label),
+        ]
+        ax.legend(handles=legend_handles, fontsize=7, loc='upper right',
+                  framealpha=0.9)
+
+        ax.set_title('Lakes', fontsize=13)
+        ax.set_xlabel('E [m]')
+        ax.set_ylabel('N [m]')
+        ax.set_aspect('equal')
+
+        out_path = os.path.join(SPATIAL_DATA_PLOT_DIR,
+                                f'lakes_{extent_tag}{part_suffix}.pdf')
+        fig.savefig(out_path, bbox_inches='tight', dpi=150)
+        plt.close(fig)
+    if out_path:
+        print(f"    Saved -> {out_path}")
 
 
 # ===============================================================================
@@ -1245,10 +1336,8 @@ def _scale_cells_to_year(gdf: gpd.GeoDataFrame, year: int, label: str,
     joined[bfs_col] = pd.to_numeric(joined[bfs_col], errors='coerce')
     cell_scales = joined[bfs_col].map(commune_scale).fillna(1.0)
 
-    # Apply per-cell Bezirk scaling. Cells are kept as floats — integer
-    # rounding happens only at aggregation boundaries (commune totals in
-    # `_cumulate_per_municipality`; per-(commune, station) splits in
-    # catchment_allocate's Phase 4 Hamilton step).
+    # Apply per-cell Bezirk scaling. Cells are kept as floats — integer rounding happens only at aggregation boundaries (commune totals in
+    # `_cumulate_per_municipality`; per-(commune, station) splits in catchment_allocate's Phase 4 Hamilton step).
     result = gdf.copy()
     result['NUMMER'] = (result['NUMMER'].values * cell_scales.values).clip(min=0.0).round(2)
 
@@ -1273,16 +1362,12 @@ def _scale_cells_to_year(gdf: gpd.GeoDataFrame, year: int, label: str,
 # CACHE READERS — for downstream modules that consume Step 1 outputs
 # ===============================================================================
 #
-# Step 1 (boundary, filtered grids, per-municipality summary, plots) is run by
-# `python catchment_base.py`. Downstream modules (catchment_allocate.py and
-# catchment_OD_preparation.py) read the cached outputs via these helpers and
-# do NOT re-run Step 1 themselves.
+# Step 1 (boundary, filtered grids, per-municipality summary, plots) is run by `python catchment_base.py`. Downstream modules
+# (catchment_allocate.py and catchment_OD_preparation.py) read the cached outputs via these helpers and do NOT re-run Step 1 themselves.
 #
-# Stale-cache caveat: the cache files are tagged by canton (settings.CATCHMENT_CANTON),
-# not by boundary geometry. If you change the catchment boundary, change the
-# raw POPULATION_CSV_2023 / EMPLOYMENT_CSV_2023 source data, or change which
-# 50%-overlap rule applies to edge cells, you must rerun catchment_base.py
-# manually to refresh the cache.
+# Stale-cache caveat: the cache files are tagged by canton (settings.CATCHMENT_CANTON), not by boundary geometry. If you change the
+# catchment boundary, change the raw POPULATION_CSV_2023 / EMPLOYMENT_CSV_2023 source data, or change which 50%-overlap rule applies to
+# edge cells, you must rerun catchment_base.py manually to refresh the cache.
 
 def _cache_csv_path(label: str, year: int = None) -> str:
     """Path of the boundary-filtered, year-scaled grid CSV.
@@ -1386,8 +1471,7 @@ def load_summary_cached() -> gpd.GeoDataFrame:
 #   2051–2100 (pop)                     : Eurostat extension with per-bezirk scaling
 #   2024+     (empl)                    : Option A — scale 2023 FTE by pop(year)/pop(2023)
 #
-# All functions return a Series indexed by integer BFS-NR.
-# Callers must have set os.chdir(paths.MAIN) or use absolute paths.
+# All functions return a Series indexed by integer BFS-NR. Callers must have set os.chdir(paths.MAIN) or use absolute paths.
 
 
 def _load_pop_xlsx_gemeinden() -> pd.DataFrame:
@@ -1685,10 +1769,9 @@ def main(year: int = None, do_plots: bool = True) -> str:
       - data/Catchment_Area/Pop_Empl_Data/employment_{year}_<canton>.csv
       - data/Catchment_Area/Pop_Empl_Data/municipal_pop_empl_summary_{year}.csv
       - data/Catchment_Area/Pop_Empl_Data/municipal_pop_empl_summary.csv   (unsuffixed legacy alias)
-      - plots/Catchment_Area/Pop_Empl_Data/plot_population_by_municipality_{year}.pdf  (if do_plots)
-      - plots/Catchment_Area/Pop_Empl_Data/plot_employment_by_municipality_{year}.pdf  (if do_plots)
-      - plots/Catchment_Area/Pop_Empl_Data/plot_population_raster_{year}.pdf           (if do_plots)
-      - plots/Catchment_Area/Pop_Empl_Data/plot_employment_raster_{year}.pdf           (if do_plots)
+      - plots/Catchment_Area/Pop_Empl_Data/{population,employment}_by_municipality_{year}_{ca,sa}.pdf  (if do_plots)
+      - plots/Catchment_Area/Pop_Empl_Data/{population,employment}_raster_{year}_{ca,sa}.pdf           (if do_plots)
+      - plots/Spatial_Data/lakes_{ca,sa}.pdf                                                           (if do_plots)
 
     All Pop/FTE values written to disk (cell-level NUMMER and per-municipality
     totals) are integers. Per-commune cell sums equal the per-municipality
@@ -1702,12 +1785,13 @@ def main(year: int = None, do_plots: bool = True) -> str:
     if year is None:
         year = settings.start_year_scenario
 
-    print(f"\n=== catchment_base: Step 2 (year={year}) ===")
+    print(f"\n=== catchment_base: Step 2.2 (year={year}) ===")
     os.chdir(paths.MAIN)
     os.makedirs(CATCHMENT_DATA_DIR, exist_ok=True)
     os.makedirs(POP_EMPL_DATA_DIR, exist_ok=True)
     os.makedirs(CATCHMENT_PLOT_DIR, exist_ok=True)
     os.makedirs(POP_EMPL_PLOT_DIR, exist_ok=True)
+    os.makedirs(SPATIAL_DATA_PLOT_DIR, exist_ok=True)
 
     boundary  = _load_catchment_boundary()
     pop_grid  = _load_population_grid(boundary, year)
@@ -1717,9 +1801,21 @@ def main(year: int = None, do_plots: bool = True) -> str:
     summary   = _cumulate_per_municipality(pop_grid, empl_grid, boundary, year)
 
     if do_plots:
-        _plot_municipal_distributions(summary, boundary, year)
-        _plot_raster_map(pop_grid,  'population', boundary, year)
-        _plot_raster_map(empl_grid, 'employment', boundary, year)
+        # Each map family is produced for both the catchment area (clipped lakes) and the study area (unclipped lakes); SA is the contained sub-extent.
+        sa_boundary = _load_study_area_boundary()
+        extents = [
+            (boundary,    'ca', True,  'Catchment area boundary'),
+            (sa_boundary, 'sa', False, 'Study area boundary'),
+        ]
+        for bnd, tag, clip_lk, bnd_lbl in extents:
+            _plot_municipal_distributions(summary, bnd, year, extent_tag=tag,
+                                          clip_lakes=clip_lk, boundary_label=bnd_lbl)
+            _plot_raster_map(pop_grid,  'population', bnd, year, extent_tag=tag,
+                             clip_lakes=clip_lk, boundary_label=bnd_lbl)
+            _plot_raster_map(empl_grid, 'employment', bnd, year, extent_tag=tag,
+                             clip_lakes=clip_lk, boundary_label=bnd_lbl)
+            _plot_lakes(bnd, extent_tag=tag, clip_lakes=clip_lk,
+                        boundary_label=bnd_lbl)
 
     print(f"\n=== catchment_base done (year={year}) ===")
     return '\n'.join(_SCALE_REPORT_LINES)
@@ -1727,11 +1823,11 @@ def main(year: int = None, do_plots: bool = True) -> str:
 
 def _run_step2_cli():
     """Interactive standalone entry for Step 2 — prompts for year then calls main()."""
-    print("\n" + "─" * 68)
-    print("[Phase 3]  Population / employment grid")
-    print("─" * 68)
+    print("\n" + "─" * 160)
+    print("[Step 2.2]  Population / employment grid")
+    print("─" * 160)
 
-    print(f"\n[3.1]  Target year")
+    print(f"\n  Target year")
     print(f"       Coverage: 1962–2025 (actual), 2026–2050 (bezirk projection), 2051–2100 (Eurostat)")
     print(f"       Default: {settings.start_year_scenario} (settings.py)")
     while True:
@@ -1744,7 +1840,7 @@ def _run_step2_cli():
         except ValueError:
             print("   Please enter a valid year.")
 
-    do_plots_str = input("\n[3.2]  Generate plots? (y/n) "
+    do_plots_str = input("\n  Generate plots? (y/n) "
                          f"[{'y' if settings.PLOT_DATA else 'n'}]: ").strip().lower()
     if do_plots_str == '':
         do_plots = settings.PLOT_DATA

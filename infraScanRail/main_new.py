@@ -1,9 +1,23 @@
 """
 infraScanRail - New Main Pipeline
-Last modified: 2026-05-23
+Last modified: 2026-06-19
 
-Orchestrates the full pipeline: Phase 1 (Initialisation), Phase 2 (Data Preparation),
-Phase 3A (Infrastructure), Phase 3B (Services), Phase 3C (Capacity).
+Orchestrates the full cost-benefit pipeline end-to-end (baseline once, then per-svc-int delta):
+  Phase 1  Initialisation                - study/catchment areas, version resolution, run config
+  Phase 2  Data Preparation              - lakes, pop/empl grids, BAV + GTFS filtering
+  Phase 3A Infrastructure Build          - versioned rail infrastructure network
+  Phase 3B Services Build                - rail_lines/segments + pt_feeder (full_day union); projection; enhancement
+  Phase 3C Capacity Analysis             - base capacity per section
+  Phase 4A Catchment Allocation          - Municipal + PT_Feeder catchments
+  Phase 4B Station OD Matrix             - station OD + gateway routing metadata
+  Phase 4C Passenger Routing             - network assignment, segment/service loads, skims
+  Phase 5A Infrastructure Interventions  - connecting curves (CC)
+  Phase 5B Service Interventions         - EXT / NDC / FRQ / STP catalogue
+  Phase 5C Capacity on Matched Network   - reactive capacity sidings (CAP) + attribution
+  Phase 6  Intervention Recompute        - per svc-int: 6A catchment, 6B OD, 6C routing, 6D flows
+  Phase 7  Scenarios                     - demand-growth factor store + on-demand OD composition
+  Phase 8  Valuation Inputs              - 8A monetised TTS benefits / 8B construction+maintenance+operating costs
+  Phase 9  CBA                           - discounted cost-benefit, aggregation, result plots
 """
 
 
@@ -60,17 +74,17 @@ def get_catchment_od_method() -> str:
 
 
 def get_routing_od_method() -> str:
-    """Translate the settings OD method to the internal string used by
-    catchment_OD_rail_network.route_od_matrices() when selecting W3 CSV files.
+    """Translate the settings OD method to the internal routing-method string
+    used by the Phase 4C / 6C passenger routing.
 
-    'feeder_weighted' -> 'pt_feeder'   (reads the PT_Feeder station OD matrices)
-    'municipal'       -> 'municipal'   (reads the Municipal station OD matrices)
+    'feeder_weighted' -> 'pt_feeder'   (PT_Feeder station OD)
+    'municipal'       -> 'municipal'   (Municipal station OD)
     """
     return 'pt_feeder' if get_catchment_od_method() == 'feeder_weighted' else 'municipal'
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Study / Catchment area helpers  (Option X -no input() patching)
+# Study / Catchment area helpers  (settings-driven, no interactive prompts)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _resolve_study_area():
@@ -123,9 +137,9 @@ def phase_1_initialisation(runtimes: dict) -> tuple:
     Returns:
         (sa_boundary, sa_buffer, ca_boundary, ca_buffer) -Shapely polygons.
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 1: INITIALISATION")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     # ── Step 1.1: Study area ──────────────────────────────────────────────────
@@ -235,9 +249,9 @@ def phase_1_initialisation(runtimes: dict) -> tuple:
     needs_proj_tag = "  [needs projection]" if PIPELINE_CONFIG.needs_projection else ""
 
     config_lines = [
-        "=" * 80,
+        "=" * 160,
         "  RUN CONFIGURATION",
-        "=" * 80,
+        "=" * 160,
         f"  Infrastructure   : {settings.INFRA_VERSION}{infra_tag}",
         f"  Raw version      : {settings.INFRA_RAW_VERSION}",
         f"  Services         : {settings.SVC_VERSION}{needs_proj_tag}",
@@ -250,7 +264,7 @@ def phase_1_initialisation(runtimes: dict) -> tuple:
         f"  Population base  : {settings.start_year_scenario}",
         f"  Scenarios        : {settings.amount_of_scenarios} x "
         f"[{settings.start_year_scenario}-{settings.end_year_scenario}]",
-        "-" * 80,
+        "-" * 160,
     ]
     print()
     for line in config_lines:
@@ -290,9 +304,9 @@ def phase_2_data_preparation(
         ca_buffer:   Catchment area polygon + GTFS buffer (Shapely).
         runtimes:    Dict tracking phase execution times.
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 2: DATA PREPARATION")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
     loaded = []
     skipped = []
@@ -388,14 +402,25 @@ def phase_2_data_preparation(
             print(f"  GTFS filter complete.\n")
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    print("-" * 80)
+    print("-" * 160)
     print("  DATA PREPARATION SUMMARY")
-    print("-" * 80)
+    print("-" * 160)
     if loaded:
         print(f"  Loaded  : {', '.join(loaded)}")
     if skipped:
         print(f"  Skipped : {', '.join(skipped)}  (already on disk)")
-    print("-" * 80 + "\n")
+    print("-" * 160 + "\n")
+
+    rt_file = os.path.join(paths.MAIN, 'report_new.txt')
+    with open(rt_file, 'a', encoding='utf-8') as f:
+        f.write("\n" + "=" * 160 + "\n")
+        f.write("  DATA PREPARATION (Phase 2)\n")
+        f.write("=" * 160 + "\n")
+        if loaded:
+            f.write(f"  Loaded  : {', '.join(loaded)}\n")
+        if skipped:
+            f.write(f"  Skipped : {', '.join(skipped)}  (already on disk)\n")
+        f.write("\n")
 
     runtimes["Phase 2: Data Preparation"] = time.time() - st
 
@@ -414,9 +439,9 @@ def phase_3a_infrastructure(runtimes: dict) -> None:
     Args:
         runtimes: Dict tracking phase execution times.
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 3A: INFRASTRUCTURE NETWORK BUILD")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     base_name = f'Base_{settings.CATCHMENT_CANTON_ABBREV}'
@@ -615,9 +640,9 @@ def phase_3b_services(
         ca_boundary: Catchment area polygon (Shapely) — held for future use.
         runtimes:    Dict tracking phase execution times.
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 3B: SERVICES NETWORK BUILD")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     infra_v = PIPELINE_CONFIG.infra_version  # e.g. 'AS_2026_ZH' or 'AS_2026_ZH_enhanced'
@@ -989,9 +1014,9 @@ def phase_3c_capacity(
         ca_boundary: Catchment area polygon (Shapely) — reserved for future use.
         runtimes:    Dict tracking phase execution times.
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 3C: CAPACITY ANALYSIS")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     # ── Step 3C.0: Mode check ─────────────────────────────────────────────────
@@ -1088,9 +1113,9 @@ def phase_4a_catchment_allocation(
         ca_boundary: Catchment area polygon (Shapely) — reserved for future use.
         runtimes:    Dict tracking phase execution times.
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 4A: CATCHMENT ALLOCATION")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     # ── Step 4A.0: Calibration inputs ─────────────────────────────────────────
@@ -1193,9 +1218,9 @@ def phase_4b_station_od_matrix(runtimes: dict) -> None:
     Args:
         runtimes: Dict tracking phase execution times.
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 4B: STATION OD MATRIX")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     # ── Step 4B.1: Resolve method and service version ────────────────────────
@@ -1270,9 +1295,9 @@ def phase_4c_network_assignment(runtimes: dict) -> None:
     catchment_OD_rail_network.passenger_routing(), honouring
     settings.ROUTING_ASSIGNMENT_METHOD and the active cost model.
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 4C: PASSENGER ROUTING")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     method = get_routing_od_method()   # 'pt_feeder' | 'municipal'
@@ -1339,9 +1364,9 @@ def _write_assignment_to_report(method: str, svc_network: str,
                                 assignment_method: str) -> None:
     """Append a 'NETWORK ASSIGNMENT (Phase 4C)' block to report_new.txt."""
     lines = [
-        "=" * 80,
+        "=" * 160,
         "  NETWORK ASSIGNMENT (Phase 4C)",
-        "=" * 80,
+        "=" * 160,
         f"  OD method            : {method}",
         f"  Assignment method    : {assignment_method}",
         f"  Service version      : {svc_network}",
@@ -1350,7 +1375,7 @@ def _write_assignment_to_report(method: str, svc_network: str,
         f"  Logit (K/maxT/theta) : {settings.ROUTING_K_PATHS} / "
         f"{settings.ROUTING_MAX_TRANSFERS} / {cp.LOGIT_ROUTE_THETA}",
         f"  Output dir           : data/Traffic_Flow/Assignment/{svc_network}/",
-        "=" * 80,
+        "=" * 160,
     ]
     for line in lines:
         print(line)
@@ -1365,16 +1390,16 @@ def _write_assignment_to_report(method: str, svc_network: str,
 def _write_station_od_to_report(method: str, svc_network: str) -> None:
     """Append a 'STATION OD MATRIX (Phase 4B)' block to report_new.txt."""
     lines = [
-        "=" * 80,
+        "=" * 160,
         "  STATION OD MATRIX (Phase 4B)",
-        "=" * 80,
+        "=" * 160,
         f"  Method               : {method}",
         f"  Attribution mode     : {settings.OD_ATTRIBUTION_MODE}",
         f"  Service version      : {svc_network}",
         f"  Population base year  : {settings.start_year_scenario}",
         f"  Temporal window      : {getattr(settings, 'TEMPORAL', 'full_day')}",
         f"  OD output dir        : data/Traffic_Flow/OD/{svc_network}/",
-        "=" * 80,
+        "=" * 160,
     ]
     for line in lines:
         print(line)
@@ -1415,42 +1440,42 @@ def _write_calibration_inputs_to_report() -> None:
         transfer_penalty_note   = "12.1 min eq. IVT (Axhausen 2014)"
 
     lines = [
-        "=" * 80,
+        "=" * 160,
         "  CALIBRATION INPUTS (Phase 4A)",
-        "=" * 80,
+        "=" * 160,
         f"  Travel cost method     : {method}",
         f"  Transfer cost model    : {tx_model}",
-        "-" * 80,
+        "-" * 160,
         "  Generalised-cost weights (cost_parameters.py)",
         f"    W_IVT      = {_w(cp.W_IVT)}",
         f"    W_WAIT     = {_w(cp.W_WAIT)}",
         f"    W_WALK     = {_w(cp.W_WALK)}",
         f"    W_BIKE     = {_w(cp.W_BIKE)}",
         f"    W_TRANSFER = {_w(cp.W_TRANSFER)}",
-        "-" * 80,
+        "-" * 160,
         "  Transfer-penalty parameters",
         f"    Active transfer penalty : {transfer_penalty_active:.2f} min  ({transfer_penalty_note})",
         f"    PI_TRANSFER_MIN         : {cp.PI_TRANSFER_MIN:.2f} min  (comfort-weighted, 'fixed_value' model)",
         f"    TRANSFER_WALK_MIN       : {cp.TRANSFER_WALK_MIN:.2f} min  ('explicit' model only)",
         f"    average_train_change_time : {cp.average_train_change_time:.2f} min  (Axhausen 2014 raw)",
         f"    change_time_comfort_factor: {cp.change_time_comfort_factor:.2f}",
-        "-" * 80,
+        "-" * 160,
         "  Wait-function parameters (piecewise; Wardman 2004 / Bates 2001)",
         f"    WAIT_THRESHOLD_MIN = {cp.WAIT_THRESHOLD_MIN:.2f} min",
         f"    WAIT_SLOPE_ABOVE   = {cp.WAIT_SLOPE_ABOVE:.3f}",
-        "-" * 80,
+        "-" * 160,
         "  Speed and detour factors",
         f"    WALK_SPEED_KMH     = {cp.WALK_SPEED_KMH:.2f}",
         f"    WALK_DETOUR        = {cp.WALK_DETOUR:.3f}",
         f"    CYCLE_SPEED_KMH    = {cp.CYCLE_SPEED_KMH:.2f}",
         f"    CYCLE_DETOUR       = {cp.CYCLE_DETOUR:.3f}",
         f"    CYCLE_MAX_RADIUS_M = {cp.CYCLE_MAX_RADIUS_M:.0f} m",
-        "-" * 80,
+        "-" * 160,
         "  Walk-buffer radii (catchment_allocate.py — ARE 2022)",
         f"    BUFFER_RAIL_M = {_ca.BUFFER_RAIL_M:.0f} m",
         f"    BUFFER_TRAM_M = {_ca.BUFFER_TRAM_M:.0f} m",
         f"    BUFFER_BUS_M  = {_ca.BUFFER_BUS_M:.0f} m",
-        "=" * 80,
+        "=" * 160,
     ]
 
     print()
@@ -1472,16 +1497,16 @@ def _save_runtimes(runtimes: dict, filename: str) -> None:
     # Use append mode: the config header was written at end of Phase 1
     with open(filename, 'a', encoding='utf-8') as f:
         f.write("PHASE RUNTIMES\n")
-        f.write("=" * 80 + "\n\n")
+        f.write("=" * 160 + "\n\n")
         for part, runtime in runtimes.items():
             mins = int(runtime // 60)
             secs = int(runtime % 60)
             f.write(f"{part:.<60} {mins}m {secs}s ({runtime:.2f}s)\n")
-        f.write("\n" + "=" * 80 + "\n")
+        f.write("\n" + "=" * 160 + "\n")
         total_mins = int(total_time // 60)
         total_secs = int(total_time % 60)
         f.write(f"{'TOTAL TIME':.<60} {total_mins}m {total_secs}s ({total_time:.2f}s)\n")
-        f.write("=" * 80 + "\n")
+        f.write("=" * 160 + "\n")
     print(f"Runtimes saved to: {filename}")
 
 
@@ -1514,9 +1539,9 @@ def phase_5a_infrastructure_interventions(sa_boundary, runtimes: dict) -> None:
     import infra_ints_orchestrator as _io
     if not _io.infra_int_active():
         return {}
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 5A: INFRASTRUCTURE INTERVENTIONS")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
     result: dict = {}
     try:
@@ -1555,9 +1580,9 @@ def phase_5b_service_interventions(sa_boundary, sa_buffer, runtimes: dict,
     import svc_ints_orchestrator as _so
     if not _so.svc_int_active():
         return {}
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 5B: SERVICE INTERVENTIONS")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
     result: dict = {}
     try:
@@ -1596,9 +1621,9 @@ def phase_5c_capacity_on_matched(runtimes: dict, svc_int_ids=None) -> dict:
         return {}
     if str(getattr(settings, 'CAPACITY_MODE', 'None')) == 'None':
         return {}
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 5C: CAPACITY ON THE MATCHED NETWORK")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
     result: dict = {}
     try:
@@ -2001,9 +2026,9 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
     import svc_ints_orchestrator as _so
     if not _so.svc_int_active():
         return
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 6: INTERVENTION RECOMPUTE")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     import svc_ints_orchestrator as _so
@@ -2219,9 +2244,9 @@ def phase_7_scenarios(runtimes: dict, svc_int_ids=None) -> None:
         svc_int_ids: optional subset of svc-int ids to process (None = all
                      registered; mirrors phase_6_intervention_recompute).
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 7: SCENARIOS")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     if settings.scenario_type != 'GENERATED':
@@ -2320,9 +2345,9 @@ def phase_8_valuation_inputs(runtimes: dict, svc_int_ids=None) -> None:
         svc_int_ids: optional subset of svc-int ids (None = all registered;
                      mirrors phase_6_intervention_recompute).
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 8: VALUATION INPUTS")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     import svc_ints_orchestrator as _so
@@ -2382,9 +2407,9 @@ def phase_9_cba(runtimes: dict, svc_int_ids=None) -> None:
         svc_int_ids: optional subset of svc-int ids (None = all covered by the
                      Phase 8 tables).
     """
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PHASE 9: CBA")
-    print("=" * 80 + "\n")
+    print("=" * 160 + "\n")
     st = time.time()
 
     import svc_ints_orchestrator as _so
@@ -2442,9 +2467,9 @@ def infrascanrail_new():
 
     _save_runtimes(runtimes, 'report_new.txt')
 
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 160)
     print("PIPELINE COMPLETE")
-    print("=" * 80)
+    print("=" * 160)
     total = sum(runtimes.values())
     print(f"\nTotal runtime: {int(total // 60)}m {int(total % 60)}s")
     print(f"Runtimes saved to: report_new.txt")

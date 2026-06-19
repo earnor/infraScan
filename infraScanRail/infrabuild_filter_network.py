@@ -1,6 +1,6 @@
 """
 Filter Infrastructure Network Module
-Last modified: 2026-05-02
+Last modified: 2026-06-19
 
 Loads Swiss BAV railway geopackages, cleans the data, joins route attributes
 onto segments, filters everything to the catchment area buffer, and produces
@@ -37,12 +37,9 @@ import paths
 # =============================================================================
 # OpenStreetMap (OSM) Fetch Constants
 # =============================================================================
-# Railway speed data is sourced from OpenStreetMap via the Overpass API.
-# OpenRailwayMap (ORM) is a rendering layer on top of OSM and has no
-# separate data API — the maxspeed tags live in the OSM database itself.
-# The bounding box passed to Overpass is a rectangle derived from the
-# catchment buffer extent.  Extra ways outside the buffer are harmless:
-# they are filtered out during spatial joining in the network builder.
+# Railway speed data is sourced from OpenStreetMap via the Overpass API. OpenRailwayMap (ORM) is a rendering layer on top of OSM and has
+# no separate data API — the maxspeed tags live in the OSM database itself. The bounding box passed to Overpass is a rectangle derived
+# from the catchment buffer extent. Extra ways outside the buffer are harmless: they are filtered out during spatial joining in the network builder.
 
 # Overpass API endpoints — tried in order until one responds.
 OVERPASS_INSTANCES = [
@@ -235,22 +232,18 @@ OBJVAL_MAPPING = {
 
 # --- Projection-based composition constants -----------------------------------
 
-# Maximum tolerated offset (m) between TLMRegio centreline and BAV segment.
-# Covers independently-digitized coordinate discrepancies (observed max ~99 m,
-# 75th percentile ~17 m).  Set conservatively to catch outliers without
-# pulling in features from a completely different nearby line.
+# Maximum tolerated offset (m) between TLMRegio centreline and BAV segment. Covers independently-digitized coordinate discrepancies
+# (observed max ~99 m, 75th percentile ~17 m). Set conservatively to catch outliers without pulling in features from a completely different nearby line.
 MAX_SNAP_DISTANCE = 60
 
 # Slivers shorter than this (m) are discarded after interval arithmetic.
 MIN_PIECE_LENGTH = 5
 
-# TLMRegio OBJVAL values that correspond to actual railway lines (excludes
-# aerial lifts and funiculars which have no BAV counterpart).
+# TLMRegio OBJVAL values that correspond to actual railway lines (excludes aerial lifts and funiculars which have no BAV counterpart).
 RAIL_OBJVALS = frozenset({'NS_Bahn', 'SS_Bahn', 'MS_Bahn', 'NS_BahnAuto', 'SS_BahnAuto'})
 
-# Edge case #4: map BAV gauge (integer mm) to the set of TLMRegio OBJVAL values
-# that represent the same gauge group.  Prevents a standard-gauge BAV segment
-# from inheriting tunnel/bridge attributes of a nearby narrow-gauge line.
+# Edge case #4: map BAV gauge (integer mm) to the set of TLMRegio OBJVAL values that represent the same gauge group. Prevents a
+# standard-gauge BAV segment from inheriting tunnel/bridge attributes of a nearby narrow-gauge line.
 GAUGE_TO_OBJVAL = {
     1435: frozenset({'NS_Bahn', 'NS_BahnAuto'}),
     1000: frozenset({'MS_Bahn', 'SS_Bahn', 'SS_BahnAuto'}),
@@ -267,7 +260,7 @@ GAUGE_TO_OBJVAL = {
 
 def classify_node(name: str) -> str:
     """
-    Classify a BAV node from its Betriebspunkt_Name using Phase-1 pattern matching.
+    Classify a BAV node from its Betriebspunkt_Name using Stage 1 pattern matching.
 
     All patterns are case-sensitive (matching the source data).
     Wds / boucle → turning_loop takes priority over all junction patterns.
@@ -600,18 +593,18 @@ def clean_segments(raw_segments: gpd.GeoDataFrame,
 
 def classify_nodes_bav(nodes: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
-    Phase-1 node classification from BAV Betriebspunkt_Name patterns.
+    Stage 1 node classification from BAV Betriebspunkt_Name patterns.
 
     Applied after catchment filtering.  Sets Node_Class for all nodes that
     match a known pattern; unmatched nodes are labelled 'unclassified' and
-    will be resolved in Phase 2 (enrich_nodes_oev).
+    will be resolved in Stage 2 (enrich_nodes_oev).
     """
-    print("Phase-1: classifying nodes from BAV name patterns...")
+    print("Stage 1: classifying nodes from BAV name patterns...")
     nodes = nodes.copy()
     nodes['Node_Class'] = nodes['Name'].apply(classify_node)
     n_classified   = (nodes['Node_Class'] != 'unclassified').sum()
     n_unclassified = (nodes['Node_Class'] == 'unclassified').sum()
-    print(f"  Classified: {n_classified}  |  Unclassified (→ OeV Phase 2): {n_unclassified}")
+    print(f"  Classified: {n_classified}  |  Unclassified (→ OeV Stage 2): {n_unclassified}")
     return nodes
 
 
@@ -622,7 +615,7 @@ def enrich_nodes_oev(
     boundary: gpd.GeoDataFrame,
 ) -> gpd.GeoDataFrame:
     """
-    Phase-2 node enrichment from HaltestellenOeV.gpkg.
+    Stage 2 node enrichment from HaltestellenOeV.gpkg.
 
     Steps
     -----
@@ -636,7 +629,7 @@ def enrich_nodes_oev(
         nodes.Betriebspunkt_Nummer → betriebspunkte.Nummer
         haltekanten.rHaltestelle   → betriebspunkte.xtf_id
     """
-    print("Phase-2: enriching nodes from HaltestellenOeV...")
+    print("Stage 2: enriching nodes from HaltestellenOeV...")
     nodes = nodes.copy()
 
     # Ensure betriebspunkte CRS matches nodes
@@ -690,8 +683,8 @@ def enrich_nodes_oev(
 
     nodes['Platform_Count'] = node_ids.map(nummer_to_platforms)
 
-    # Enforce: only stations (and assigned_service_points promoted to station in
-    # network_builder) get a Platform_Count value
+    # Enforce: only stations (and assigned_service_points promoted to station in network_builder) get
+    # a Platform_Count value
     nodes.loc[~nodes['Node_Class'].isin({'station', 'assigned_service_point'}),
               'Platform_Count'] = pd.NA
 
@@ -954,8 +947,8 @@ def build_segments_composition(
     # ------------------------------------------------------------------
     # 5. Project TLMRegio endpoints onto each BAV sub-line
     # ------------------------------------------------------------------
-    # matches.geometry is the BAV sub-line geometry (left side of sjoin).
-    # index_right indexes into non_normal for the original (unbuffered) TLMRegio geom.
+    # matches.geometry is the BAV sub-line geometry (left side of sjoin). index_right indexes into
+    # non_normal for the original (unbuffered) TLMRegio geom.
     def _compute_interval(row):
         tlm_geom = non_normal.geometry.at[int(row['index_right'])]
         return _project_onto_line(tlm_geom, row.geometry)
@@ -1299,11 +1292,11 @@ def run_filter_network(
     print("\n--- Filtering to catchment ---")
     nodes, segments = filter_to_catchment(nodes, segments, boundary)
 
-    # --- Phase-1 classification: BAV name patterns ----------------------------
+    # --- Stage 1 classification: BAV name patterns ----------------------------
     print("\n--- Classifying nodes (BAV patterns) ---")
     nodes = classify_nodes_bav(nodes)
 
-    # --- Phase-2 enrichment: HaltestellenOeV ---------------------------------
+    # --- Stage 2 enrichment: HaltestellenOeV ---------------------------------
     print("\n--- Enriching nodes (HaltestellenOeV) ---")
     nodes = enrich_nodes_oev(nodes, betriebspunkte, haltekanten, boundary)
 
@@ -1354,8 +1347,8 @@ def run_filter_network(
         if col in nodes.columns:
             nodes[col] = nodes[col].round(3)
 
-    # ---- Round Piece_Length; reconcile last piece per segment so pieces
-    #      sum exactly to the segment's rounded Length ----------------------
+    # ---- Round Piece_Length; reconcile last piece per segment so pieces sum exactly to the
+    #      segment's rounded Length ----------------------
     if not composition.empty and 'Piece_Length' in composition.columns:
         composition = composition.copy()
         composition['Piece_Length'] = composition['Piece_Length'].round(3)
