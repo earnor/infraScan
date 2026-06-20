@@ -1,5 +1,5 @@
 """Standalone runner for rail capacity analysis.
-Last modified: 2026-05-20
+Last modified: 2026-06-20
 
 Interactive CLI that discovers available infrastructure and service versions,
 then dispatches to one of four named workflows. All outputs are written to:
@@ -9,13 +9,14 @@ Workflows:
   Study Area     — capacity run scoped to the study area (SA-filtered infra + services)
   Catchment Area — capacity run for the full catchment (SA Dynamic + CA Set_Value or uniform)
   Development    — capacity run for a development infra version
-  Expanded       — capacity interventions on an existing Study Area or CA run
+  Added          — capacity interventions on an existing Study Area or CA run
 
-Phase 0 — interactive CLI: choose infra version + service version + workflow
-Phase 1 — build capacity tables (stations + segments, peak + off-peak)
-Phase 2 — build sections (Dynamic or Set_Value)
-Phase 3 — plot capacity network
-[Phase 4] — Expanded workflow only: capacity interventions
+Internal stages (named "Stage" so they never collide with the main_new phase numbers):
+Stage 0 — interactive CLI: choose infra version + service version + workflow
+Stage 1 — build capacity tables (stations + segments, peak + off-peak)
+Stage 2 — build sections (Dynamic or Set_Value)
+Stage 3 — plot capacity network
+[Stage 4] — Added workflow only: capacity interventions
 
 """
 
@@ -118,6 +119,21 @@ def _floor_capacity_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _boundary_extent(boundary_rel_path: str, margin_m: float = 2000.0):
+    """(xmin, xmax, ymin, ymax) of a boundary gpkg padded by margin_m; None on failure.
+
+    Mirrors infrabuild's _extent_from_boundary so the capacity SA/CA plots frame to the
+    study / catchment boundary (+buffer) instead of the tight data-driven bounds.
+    """
+    try:
+        import geopandas as gpd
+        b = gpd.read_file(str(Path(paths.MAIN) / boundary_rel_path)).total_bounds
+        return (b[0] - margin_m, b[2] + margin_m, b[1] - margin_m, b[3] + margin_m)
+    except Exception as exc:
+        print(f"  [extent] could not derive extent from {boundary_rel_path}: {exc}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # CLI helpers
 # ---------------------------------------------------------------------------
@@ -174,7 +190,7 @@ def _select_versions(require_existing_sections: bool = False) -> Optional[Tuple[
         ]
         if not svc_versions:
             print(f"\n  ERROR: No completed Study Area runs found for '{infra_version}'.")
-            print("  Run a Study Area workflow first (Phase 1-3).")
+            print("  Run a Study Area workflow first (Stage 1-3).")
             return None
 
     print("\n  Service version:")
@@ -254,22 +270,22 @@ def _execute_capacity_run(
         cap_path      = out_dir / f"capacity_{label}.xlsx"
         sections_path = out_dir / f"sections_{label}.xlsx"
 
-        print(f"\n{'='*70}")
+        print(f"\n{'='*160}")
         print(f"Infra:    {infra_version}")
         print(f"Service:  {svc_version}")
         if capacity_mode == "Dynamic":
             print(f"Strategy: {grouping_strategy}")
         print(f"Output:   {out_dir}")
-        print(f"{'='*70}\n")
+        print(f"{'='*160}\n")
 
-        # ── Phase 1: Capacity tables ─────────────────────────────────────────
-        print("Phase 1: Building capacity tables ...\n")
+        # ── Stage 1: Capacity tables ─────────────────────────────────────────
+        print("Stage 1: Building capacity tables ...\n")
         stations_peak, segments_peak, stations_offpeak, segments_offpeak, junction_numbers = \
             build_capacity_tables(infra_version, svc_version, label, output_dir=out_dir)
         print(f"\n  Capacity workbook: {cap_path}")
 
-        # ── Phase 2: Sections ────────────────────────────────────────────────
-        print(f"\nPhase 2: Building sections ({capacity_mode}) ...\n")
+        # ── Stage 2: Sections ────────────────────────────────────────────────
+        print(f"\nStage 2: Building sections ({capacity_mode}) ...\n")
         sections_df = _build_sections_dataframe(
             stations_peak, segments_peak,
             junction_numbers=junction_numbers,
@@ -307,9 +323,9 @@ def _execute_capacity_run(
             sections_df.to_excel(writer,      sheet_name="Sections",         index=False)
         print(f"\n  Sections workbook: {sections_path}")
 
-        # ── Phase 3: Plot ────────────────────────────────────────────────────
+        # ── Stage 3: Plot ────────────────────────────────────────────────────
         if visualize:
-            print("\nPhase 3: Plotting ...\n")
+            print("\nStage 3: Plotting ...\n")
             try:
                 from capacity_network_plots import plot_capacity_network, plot_service_network
                 _plots_dir = _PLOTS_ROOT / infra_version / svc_version
@@ -331,9 +347,9 @@ def _execute_capacity_run(
             except Exception as exc:
                 print(f"  WARNING: Plot failed: {exc}")
 
-        print(f"\n{'='*70}")
+        print(f"\n{'='*160}")
         print("COMPLETE")
-        print(f"{'='*70}\n")
+        print(f"{'='*160}\n")
         return 0
 
     except Exception as exc:
@@ -347,11 +363,11 @@ def _make_phase4_prep_workbook(
     sections_workbook_path: Path,
     prep_path: Path,
 ) -> None:
-    """Write a Phase 4-compatible prep workbook from a new-format sections workbook.
+    """Write an Added-workflow prep workbook from a new-format sections workbook.
 
-    Phase 4 (capacity_interventions.py) expects 'Stations' and 'Segments' sheets
-    with old column names ('tracks', 'platforms'). This adapter converts the
-    peak tables from the new format.
+    The interventions engine (capacity_interventions.py) expects 'Stations' and
+    'Segments' sheets with old column names ('tracks', 'platforms'). This adapter
+    converts the peak tables from the new format.
     """
     stations_df = pd.read_excel(sections_workbook_path, sheet_name="Stations_Peak")
     segments_df = pd.read_excel(sections_workbook_path, sheet_name="Segments_Peak")
@@ -391,6 +407,36 @@ def _section_seg_keys(segment_sequence) -> set:
     return {_seg_key(t) for t in str(segment_sequence).split('|') if '-' in t}
 
 
+def _effective_composed_capacity_mode():
+    """Resolve the 5C capacity method from the 3C settings.
+
+    Set_Value is used only when BOTH CAPACITY_MODE_SA and CAPACITY_MODE_CA are Set_Value;
+    any Dynamic on either scope → Dynamic (UIC) everywhere. CAPACITY_MODE='None' gates 5C
+    off upstream, so it is not handled here. Returns (mode, set_value).
+    """
+    _default = getattr(settings, 'CAPACITY_MODE', 'Dynamic')
+    sa = str(getattr(settings, 'CAPACITY_MODE_SA', _default))
+    ca = str(getattr(settings, 'CAPACITY_MODE_CA', _default))
+    if sa == 'Set_Value' and ca == 'Set_Value':
+        return 'Set_Value', float(getattr(settings, 'CAPACITY_SET_VALUE', 6))
+    return 'Dynamic', None
+
+
+def _apply_set_value(sections_df, set_value: float):
+    """Override section capacity with track_count x set_value (in place), recompute util.
+
+    Mirrors run_study_area_workflow's Set_Value branch so the composed-network design and
+    its local feasibility re-check use the same flat capacity convention as 3C.
+    """
+    cap = np.floor(pd.to_numeric(sections_df['track_count'], errors='coerce') * float(set_value))
+    sections_df['Capacity_peak'] = cap
+    sections_df['Capacity_offpeak'] = cap
+    for _w in ('peak', 'offpeak'):
+        _d = pd.to_numeric(sections_df.get(f'total_tphpd_{_w}'), errors='coerce')
+        sections_df[f'Utilization_{_w}'] = (_d / cap).where(cap > 0)
+    return sections_df
+
+
 def capacity_on_composed(
     base_infra: str,
     composed_infra: str,
@@ -401,6 +447,8 @@ def capacity_on_composed(
     modified_termini: Optional[set] = None,
     grouping_strategy: Optional[str] = None,
     threshold_tphpd: Optional[float] = None,
+    capacity_mode: Optional[str] = None,
+    set_value: Optional[float] = None,
 ) -> list:
     """Design CAP that resolves over-capacity sections on a composed network — one shot.
 
@@ -413,12 +461,14 @@ def capacity_on_composed(
     passing-siding to full duplication if still over). ``recalculate_enhanced_capacity``
     is never called, so the global non-convergence is structurally avoided.
 
-    Coverage: sections are built over the FULL composed network with UIC capacity
-    everywhere (SA and CA alike) — independent of the 3C CAPACITY_MODE_SA/CA toggles;
-    only the modified-segment restriction scopes the evaluation. (A 3C Set_Value CA
-    convention is NOT mirrored here.) Besides line sections, every terminus of the
-    evaluated supply within scope gets a station turnback check (a terminating train
-    needs a track clear of the through traffic).
+    Coverage: sections are built over the FULL composed network; only the modified-segment
+    restriction scopes the line-section evaluation. The capacity method follows the 3C
+    settings (resolved by _effective_composed_capacity_mode): Set_Value
+    (Capacity = track_count x CAPACITY_SET_VALUE) only when BOTH CAPACITY_MODE_SA and
+    CAPACITY_MODE_CA are Set_Value, otherwise UIC ('Dynamic') everywhere — any Dynamic on
+    either scope forces Dynamic for all; CAPACITY_MODE='None' gates 5C off upstream. Besides
+    line sections, every terminus of the evaluated supply within scope gets a station turnback
+    check (a terminating train needs a track clear of the through traffic), independent of mode.
 
     Args:
         base_infra: base infra version (where the svc-int delta was projected).
@@ -449,9 +499,16 @@ def capacity_on_composed(
     if threshold_tphpd is None:
         threshold_tphpd = float(getattr(settings, 'SVC_INT_CAP_THRESHOLD_TPHPD',
                                         getattr(settings, 'capacity_threshold', 1.0)))
+    if capacity_mode is None:
+        capacity_mode, _eff_sv = _effective_composed_capacity_mode()
+        if set_value is None:
+            set_value = _eff_sv
+    elif capacity_mode == 'Set_Value' and set_value is None:
+        set_value = float(getattr(settings, 'CAPACITY_SET_VALUE', 6))
 
     print(f"\n  [cap-composed] {network_label}: base={base_infra} composed={composed_infra} "
-          f"(headroom threshold={threshold_tphpd} tphpd)")
+          f"(mode={capacity_mode}{f'@{set_value}' if capacity_mode == 'Set_Value' else ''}, "
+          f"headroom threshold={threshold_tphpd} tphpd)")
 
     # 1-3. Composed infra + delta train supply → peak/off-peak aggregates + sections.
     tables = _composed_sections(
@@ -469,6 +526,10 @@ def capacity_on_composed(
     if sections_df.empty:
         print("  [cap-composed] no sections built")
         return []
+
+    # Set_Value override: flat capacity = track_count x set_value (when both SA+CA Set_Value).
+    if capacity_mode == 'Set_Value' and set_value is not None:
+        _apply_set_value(sections_df, set_value)
 
     composition = _build_composition_lookup(base_infra, composed_infra)
     termini = _termini_nodes(service_links)
@@ -540,7 +601,7 @@ def capacity_on_composed(
         interv = _resolve_section_locally(
             section, seg_aliased, sta_aliased, sta_peak, seg_peak, seg_off,
             junction_numbers, counter, grouping_strategy, threshold_tphpd,
-            termini_nodes=termini)
+            termini_nodes=termini, capacity_mode=capacity_mode, set_value=set_value)
         if interv is None:
             continue
         key = _target_key(interv)
@@ -860,7 +921,8 @@ def _build_composition_lookup(base_infra: str, composed_infra: str) -> dict:
 
 def _resolve_section_locally(section, seg_aliased, sta_aliased, sta_peak, seg_peak,
                              seg_off, junction_numbers, counter, grouping_strategy,
-                             threshold_tphpd, termini_nodes=None):
+                             threshold_tphpd, termini_nodes=None,
+                             capacity_mode='Dynamic', set_value=None):
     """Design one section's CAP and locally verify it clears the over-capacity.
 
     Applies the designed track delta on a working copy of the aggregate peak tables,
@@ -873,6 +935,12 @@ def _resolve_section_locally(section, seg_aliased, sta_aliased, sta_peak, seg_pe
 
     interv = design_section_intervention(section, seg_aliased, sta_aliased, counter,
                                          termini_nodes=termini_nodes)
+    if interv is None:
+        # Station already meets its requirement — a station track won't relieve this
+        # multi-segment section (e.g. an already-large hub). No CAP designed here.
+        print(f"    section {section.get('section_id')}: central station already "
+              f"sufficient — no station-track CAP")
+        return None
     target_keys = _section_seg_keys(section['segment_sequence'])
 
     def _still_over() -> bool:
@@ -893,6 +961,8 @@ def _resolve_section_locally(section, seg_aliased, sta_aliased, sta_peak, seg_pe
             work_sta, work_seg, junction_numbers=junction_numbers,
             segments_offpeak_df=seg_off, compute_capacity=True,
             grouping_strategy=grouping_strategy)
+        if capacity_mode == 'Set_Value' and set_value is not None:
+            _apply_set_value(rebuilt, set_value)
         over = identify_capacity_constrained_sections(rebuilt, threshold_tphpd=threshold_tphpd)
         if over.empty:
             return False
@@ -950,9 +1020,9 @@ def run_study_area_workflow(
     Returns:
         Exit code (0 success, 1 error).
     """
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 160)
     print("STUDY AREA WORKFLOW")
-    print("=" * 70)
+    print("=" * 160)
 
     cap_mode  = capacity_mode or settings.CAPACITY_MODE_SA
     cap_val   = set_value if set_value is not None else settings.CAPACITY_SET_VALUE
@@ -965,7 +1035,7 @@ def run_study_area_workflow(
         out_dir.mkdir(parents=True, exist_ok=True)
         sections_path = out_dir / f"sections_{label}.xlsx"
 
-        print(f"\n{'='*70}")
+        print(f"\n{'='*160}")
         print(f"Infra:     {infra_version}")
         print(f"Service:   {svc_version}")
         print(f"Scope:     Study Area")
@@ -973,13 +1043,13 @@ def run_study_area_workflow(
         if cap_mode == "Dynamic":
             print(f"Strategy:  {grp_strat}")
         print(f"Output:    {out_dir}")
-        print(f"{'='*70}\n")
+        print(f"{'='*160}\n")
 
-        print("Phase 1: Building SA capacity tables ...\n")
+        print("Stage 1: Building SA capacity tables ...\n")
         stations_peak, segments_peak, stations_offpeak, segments_offpeak, junction_numbers, _ = \
             build_capacity_tables_sa(infra_version, svc_version, label, output_dir=out_dir)
 
-        print(f"\nPhase 2: Building sections ({cap_mode}) ...\n")
+        print(f"\nStage 2: Building sections ({cap_mode}) ...\n")
         sections_df = _build_sections_dataframe(
             stations_peak, segments_peak,
             junction_numbers=junction_numbers,
@@ -1017,10 +1087,11 @@ def run_study_area_workflow(
         print(f"\n  Sections workbook: {sections_path}")
 
         if visualize:
-            print("\nPhase 3: Plotting ...\n")
+            print("\nStage 3: Plotting ...\n")
             try:
                 from capacity_network_plots import plot_capacity_network, plot_service_network
                 plots_dir.mkdir(parents=True, exist_ok=True)
+                _sa_ext = _boundary_extent(paths.STUDY_AREA_BOUNDARY_GPKG)
                 plot_capacity_network(
                     workbook_path=str(sections_path),
                     sections_workbook_path=str(sections_path),
@@ -1028,6 +1099,9 @@ def run_study_area_workflow(
                     infra_version=infra_version,
                     output_dir=plots_dir,
                     lakes_path=paths.LAKES_SA_GPKG,
+                    boundary_path=paths.STUDY_AREA_BOUNDARY_GPKG,
+                    extent=_sa_ext,
+                    ghost_outside=True,
                 )
                 print("  Capacity network plot complete.")
                 plot_service_network(
@@ -1035,12 +1109,14 @@ def run_study_area_workflow(
                     network_label=label,
                     output_dir=plots_dir,
                     lakes_path=paths.LAKES_SA_GPKG,
+                    boundary_path=paths.STUDY_AREA_BOUNDARY_GPKG,
+                    extent=_sa_ext,
                 )
                 print("  Service network plot complete.")
             except Exception as exc:
                 print(f"  WARNING: Plot failed: {exc}")
 
-        print(f"\n{'='*70}\nSTUDY AREA WORKFLOW COMPLETE\n{'='*70}\n")
+        print(f"\n{'='*160}\nSTUDY AREA WORKFLOW COMPLETE\n{'='*160}\n")
         return 0
 
     except Exception as exc:
@@ -1083,9 +1159,9 @@ def run_catchment_area_workflow(
     Returns:
         Exit code (0 success, 1 error).
     """
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 160)
     print("CATCHMENT AREA WORKFLOW")
-    print("=" * 70)
+    print("=" * 160)
 
     cap_mode_sa = mode_sa or settings.CAPACITY_MODE_SA
     cap_mode_ca = mode_ca or settings.CAPACITY_MODE_CA
@@ -1101,7 +1177,7 @@ def run_catchment_area_workflow(
         sections_path = out_dir / f"sections_{label}.xlsx"
         modes_same    = (cap_mode_sa == cap_mode_ca)
 
-        print(f"\n{'='*70}")
+        print(f"\n{'='*160}")
         print(f"Infra:    {infra_version}")
         print(f"Service:  {svc_version}")
         print(f"Scope:    Catchment Area")
@@ -1109,14 +1185,14 @@ def run_catchment_area_workflow(
         if "Dynamic" in (cap_mode_sa, cap_mode_ca):
             print(f"Strategy: {grp_strat}")
         print(f"Output:   {out_dir}")
-        print(f"{'='*70}\n")
+        print(f"{'='*160}\n")
 
-        print("Phase 1: Building CA capacity tables ...\n")
+        print("Stage 1: Building CA capacity tables ...\n")
         stations_peak, segments_peak, stations_offpeak, segments_offpeak, \
         junction_numbers, _, sa_node_set = \
             build_capacity_tables_ca(infra_version, svc_version, label, output_dir=out_dir)
 
-        print(f"\nPhase 2: Building sections ...\n")
+        print(f"\nStage 2: Building sections ...\n")
 
         if modes_same:
             # Single run — same method for all sections
@@ -1186,10 +1262,11 @@ def run_catchment_area_workflow(
         print(f"\n  Sections workbook: {sections_path}")
 
         if visualize:
-            print("\nPhase 3: CA Plotting ...\n")
+            print("\nStage 3: CA Plotting ...\n")
             try:
                 from capacity_network_plots import plot_capacity_network, plot_service_network
                 plots_dir.mkdir(parents=True, exist_ok=True)
+                _ca_ext = _boundary_extent(paths.CATCHMENT_AREA_BOUNDARY_GPKG)
                 plot_capacity_network(
                     workbook_path=str(sections_path),
                     sections_workbook_path=str(sections_path),
@@ -1202,6 +1279,7 @@ def run_catchment_area_workflow(
                     is_catchment=True,
                     network_marker_scale=2.25,
                     boundary_path=paths.CATCHMENT_AREA_BOUNDARY_GPKG,
+                    extent=_ca_ext,
                 )
                 print("  CA capacity network plot complete.")
                 plot_service_network(
@@ -1210,13 +1288,15 @@ def run_catchment_area_workflow(
                     output_dir=plots_dir,
                     lakes_path=paths.LAKES_CA_GPKG,
                     include_labels=False,
+                    boundary_path=paths.CATCHMENT_AREA_BOUNDARY_GPKG,
+                    extent=_ca_ext,
                 )
                 print("  CA service network plot complete.")
             except Exception as exc:
                 print(f"  WARNING: CA plot failed: {exc}")
 
             # Also generate SA-scoped plots
-            print("\nPhase 3b: SA Plotting ...\n")
+            print("\nStage 3b: SA Plotting ...\n")
             try:
                 run_study_area_workflow(
                     infra_version, svc_version,
@@ -1229,7 +1309,7 @@ def run_catchment_area_workflow(
             except Exception as exc:
                 print(f"  WARNING: SA plots failed: {exc}")
 
-        print(f"\n{'='*70}\nCATCHMENT AREA WORKFLOW COMPLETE\n{'='*70}\n")
+        print(f"\n{'='*160}\nCATCHMENT AREA WORKFLOW COMPLETE\n{'='*160}\n")
         return 0
 
     except Exception as exc:
@@ -1266,9 +1346,9 @@ def run_development_workflow(
     Returns:
         Exit code (0 success, 1 error).
     """
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 160)
     print(f"DEVELOPMENT WORKFLOW — Dev ID: {dev_id}")
-    print("=" * 70)
+    print("=" * 160)
 
     cap_mode  = capacity_mode or settings.CAPACITY_MODE
     cap_val   = set_value if set_value is not None else settings.CAPACITY_SET_VALUE
@@ -1287,17 +1367,18 @@ def run_development_workflow(
     )
 
 
-def run_enhanced_workflow(
+def run_added_workflow(
     infra_version: str,
     svc_version: str,
     threshold: float = 1.0,
     max_iterations: int = 10,
 ) -> int:
-    """Phase 4: apply iterative capacity interventions to an existing capacity run.
+    """Added workflow: apply iterative capacity interventions to an existing capacity run.
 
     Reads the completed sections workbook from the Study Area or Catchment Area
-    output directory, runs the intervention loop, and writes enhanced outputs to
-    an 'Enhanced' subdirectory.
+    output directory, runs the intervention loop, and writes the resulting outputs to
+    an 'Added' subdirectory. Standalone only — off the main_new path (Phase 5C is the
+    sole, cost-bearing CAP generator).
 
     Args:
         infra_version:  Infrastructure version name.
@@ -1308,14 +1389,14 @@ def run_enhanced_workflow(
     Returns:
         Exit code (0 success, 1 error).
     """
-    print("\n" + "=" * 70)
-    print("ENHANCED WORKFLOW — Phase 4 Capacity Interventions")
-    print("=" * 70)
+    print("\n" + "=" * 160)
+    print("ADDED WORKFLOW — Capacity Interventions")
+    print("=" * 160)
 
     label         = _safe(svc_version, infra_version)
     baseline_dir  = CAPACITY_ROOT / infra_version / svc_version
     sections_path = baseline_dir / f"sections_{label}.xlsx"
-    output_dir    = baseline_dir / "Enhanced"
+    output_dir    = baseline_dir / "Added"
 
     print(f"\n  Baseline:   {baseline_dir}")
     print(f"  Sections:   {sections_path}")
@@ -1325,19 +1406,19 @@ def run_enhanced_workflow(
 
     if not sections_path.exists():
         print(f"  ERROR: Sections workbook not found at {sections_path}")
-        print("  Run a Study Area or Catchment Area workflow first (Phase 1-3).")
+        print("  Run a Study Area or Catchment Area workflow first (Stage 1-3).")
         return 1
 
     try:
-        print("Loading Phase 3 outputs ...")
+        print("Loading Stage 3 outputs ...")
         stations_df = pd.read_excel(sections_path, sheet_name="Stations_Peak")
         segments_df = pd.read_excel(sections_path, sheet_name="Segments_Peak")
         sections_df = pd.read_excel(sections_path, sheet_name="Sections")
         print(f"  Loaded {len(stations_df)} stations, {len(segments_df)} segments, "
               f"{len(sections_df)} sections\n")
 
-        # Phase 4 internally reads 'Stations'/'Segments' sheets with old column names.
-        # Write a compatible adapter workbook first.
+        # The interventions engine reads 'Stations'/'Segments' sheets with old column
+        # names. Write a compatible adapter workbook first.
         output_dir.mkdir(parents=True, exist_ok=True)
         prep_path = output_dir / f"capacity_{label}_prep.xlsx"
         _make_phase4_prep_workbook(sections_path, prep_path)
@@ -1353,31 +1434,31 @@ def run_enhanced_workflow(
             max_iterations=max_iterations,
         )
 
-        # Phase 5C is the sole, cost-bearing CAP generator: this standalone enhanced workflow
+        # Phase 5C is the sole, cost-bearing CAP generator: this standalone Added workflow
         # designs + plots interventions but never registers/composes them into the CAP registry.
 
         # Reload enhanced stations/segments and write combined sections workbook
         enhanced_stations_df = pd.read_excel(enhanced_prep_path, sheet_name="Stations")
         enhanced_segments_df = pd.read_excel(enhanced_prep_path, sheet_name="Segments")
 
-        enhanced_sections_path = output_dir / f"sections_{label}_enhanced.xlsx"
+        enhanced_sections_path = output_dir / f"sections_{label}_added.xlsx"
         with pd.ExcelWriter(enhanced_sections_path, engine="openpyxl") as writer:
             enhanced_stations_df.to_excel(writer, sheet_name="Stations", index=False)
             enhanced_segments_df.to_excel(writer, sheet_name="Segments", index=False)
             final_sections_df.to_excel(writer,    sheet_name="Sections", index=False)
-        print(f"\n  Enhanced sections workbook: {enhanced_sections_path}")
+        print(f"\n  Added sections workbook: {enhanced_sections_path}")
 
         print("\nGenerating visualizations ...")
         visualize_enhanced_network(
             enhanced_prep_path=enhanced_prep_path,
             enhanced_sections_path=enhanced_sections_path,
             interventions_list=interventions_catalog,
-            network_label=f"{label}_enhanced",
+            network_label=f"{label}_added",
         )
 
-        print(f"\n{'='*70}")
-        print("ENHANCED WORKFLOW COMPLETE")
-        print(f"{'='*70}")
+        print(f"\n{'='*160}")
+        print("ADDED WORKFLOW COMPLETE")
+        print(f"{'='*160}")
         print(f"\n  Outputs:")
         print(f"    {enhanced_prep_path}")
         print(f"    {enhanced_sections_path}")
@@ -1438,17 +1519,17 @@ def _select_sa_ca_modes() -> Tuple[str, Optional[float], str, Optional[float]]:
 
 
 def main_interactive() -> int:
-    """Interactive workflow selection with Phase 0 version picker."""
-    print("\n" + "=" * 70)
+    """Interactive workflow selection with Stage 0 version picker."""
+    print("\n" + "=" * 160)
     print("RAIL NETWORK CAPACITY ANALYSIS")
-    print("=" * 70)
+    print("=" * 160)
     print("\n  Available Workflows:")
     print("    1) Study Area     — capacity for the study area (SA-filtered data)")
     print("    2) Catchment Area — capacity for the full catchment (SA+CA methods)")
     print("    3) Development    — development network capacity run")
-    print("    4) Enhanced       — Phase 4 capacity interventions")
+    print("    4) Added          — capacity interventions on an existing run")
     print("    0) Exit")
-    print("=" * 70)
+    print("=" * 160)
 
     while True:
         choice = input("\n  Select workflow (0-4): ").strip()
@@ -1521,7 +1602,7 @@ def main_interactive() -> int:
             except ValueError:
                 print("  Invalid value, using 10.")
                 max_iterations = 10
-            return run_enhanced_workflow(
+            return run_added_workflow(
                 infra_version, svc_version,
                 threshold=threshold, max_iterations=max_iterations,
             )
@@ -1550,7 +1631,7 @@ def main() -> None:
             "--infra AS_2026_ZH_enhanced --svc AK_2026 --mode-sa Dynamic --mode-ca Set_Value\n"
             "  python capacity_workflow_wrapper.py development "
             "--dev-id 101032 --infra AS_2026_ZH_enhanced --svc AK_2026\n"
-            "  python capacity_workflow_wrapper.py enhanced "
+            "  python capacity_workflow_wrapper.py added "
             "--infra AS_2026_ZH_enhanced --svc AK_2026"
         ),
     )
@@ -1602,8 +1683,8 @@ def main() -> None:
     _add_version_args(p_dev)
     _add_single_cap_args(p_dev, "CAPACITY_MODE_SA")
 
-    # enhanced
-    p_enh = subparsers.add_parser("enhanced", help="Phase 4 capacity interventions")
+    # added
+    p_enh = subparsers.add_parser("added", help="Capacity interventions on an existing run")
     _add_version_args(p_enh)
     p_enh.add_argument("--threshold", type=float, default=1.0,
                        help="Min available capacity in tphpd (default 1.0)")
@@ -1634,8 +1715,8 @@ def main() -> None:
             grouping_strategy=args.grouping_strategy,
             visualize=not args.no_plot,
         )
-    elif args.workflow == "enhanced":
-        code = run_enhanced_workflow(
+    elif args.workflow == "added":
+        code = run_added_workflow(
             args.infra, args.svc,
             threshold=args.threshold, max_iterations=args.max_iterations,
         )

@@ -412,12 +412,10 @@ def _changed_termini_nodes(base_svc, base_infra, composed_infra, merged_path) ->
 
 def plot_cap_changes(base_version: str, svc_version: Optional[str] = None,
                      extents=('CA', 'SA')) -> List[str]:
-    """Base-vs-(base+all CAP) diff (CAP additions in orange) + capacity-relief map.
+    """Base-vs-(base+all CAP) diff (CAP additions in orange).
 
-    The diff reuses the shared ints_core renderer; the relief map (post-CAP section
-    utilisation) is best-effort and skips cleanly when the capacity workbooks are absent.
-    The CAP registry + plot folder are keyed by the '<infra>__<svc>' combination.
-    Returns the written file paths.
+    Reuses the shared ints_core renderer. The CAP registry + plot folder are keyed by
+    the '<infra>__<svc>' combination. Returns the written file paths.
     """
     network = f"{base_version}__{svc_version}" if svc_version else core._default_network('cap')
     ids = core.list_intervention_ids('cap', network=network)
@@ -425,42 +423,13 @@ def plot_cap_changes(base_version: str, svc_version: Optional[str] = None,
         print("  [plot] no CAP interventions — skipping CAP diff")
         return []
     out_dir = core.plot_out_dir(network, 'cap')
-    written = core.render_int_diff(base_version, ids, out_tag='CAP',
-                                   added_label='Capacity intervention', added_color=cap._CAP_COLOR,
-                                   added_edge=cap._CAP_EDGE, out_dir=out_dir, extents=extents,
-                                   svc_version=svc_version)
-    written += _plot_capacity_relief(base_version, network)
+    written = core.render_int_diff(
+        base_version, ids, out_tag='CAP',
+        added_label='Capacity intervention', added_color=cap._CAP_COLOR,
+        added_edge=cap._CAP_EDGE, out_dir=out_dir, extents=extents,
+        svc_version=svc_version,
+        title="Capacity interventions for all generated interventions")
     return written
-
-
-def _plot_capacity_relief(base_version: str, network: Optional[str] = None) -> List[str]:
-    """Best-effort capacity/utilisation map of the post-CAP network (Phase 3C artifact).
-
-    Renders capacity_network_plots.plot_capacity_network on the latest capacity prep +
-    sections workbooks. Skips cleanly (with a note) when those workbooks are absent.
-    """
-    try:
-        import capacity_network_plots as cnp
-    except Exception as exc:
-        print(f"  [plot] capacity-relief skipped (import: {exc})")
-        return []
-
-    out_dir = core.plot_out_dir(network or core._combo(base_version), 'cap')
-    out_path = out_dir / f"infra_ints_CAP_relief_SA_{base_version}.pdf"
-    boundary = str(Path(paths.MAIN) / paths.STUDY_AREA_BOUNDARY_GPKG)
-    try:
-        _, cap_path = cnp.plot_capacity_network(
-            output_path=str(out_path), generate_network=False,
-            infra_version=base_version, boundary_path=boundary)
-        print(f"  [plot] wrote {Path(cap_path).name}")
-        return [str(cap_path)]
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"  [plot] capacity-relief skipped — no capacity workbook "
-              f"({exc}). Run the Phase 3C capacity workflow first.")
-        return []
-    except Exception as exc:
-        print(f"  [plot] capacity-relief failed: {exc}")
-        return []
 
 
 def _svc_int_capacity_artifacts(base_infra, base_svc, combo, p, composed_full, cap_ids,
@@ -481,6 +450,7 @@ def _svc_int_capacity_artifacts(base_infra, base_svc, combo, p, composed_full, c
     Best-effort: a failed map is logged and skipped, never aborting 5C.
     """
     import capacity_workflow_wrapper as cww
+    import svc_ints_orchestrator as so
 
     svc_id = p['id']
     data_dir = Path(paths.get_svc_int_cap_dir(combo)) / svc_id
@@ -490,6 +460,11 @@ def _svc_int_capacity_artifacts(base_infra, base_svc, combo, p, composed_full, c
         plot_dir.mkdir(parents=True, exist_ok=True)
     sa_boundary = str(Path(paths.MAIN) / paths.STUDY_AREA_BOUNDARY_GPKG)
     lakes_sa = paths.LAKES_SA_GPKG
+    sa_extent = cww._boundary_extent(paths.STUDY_AREA_BOUNDARY_GPKG)
+    rec = p.get('rec') or {}
+    _short = rec.get('line_short_name') or (so.svc_int_line_name(rec) if rec else svc_id)
+    _aff = rec.get('affected_stations') or []
+    _seg = f"{_aff[0]} - {_aff[-1]}" if _aff else svc_id
     written: List[str] = []
 
     # Maps 1 & 2 — pre/post-CAP utilisation, STUDY AREA only. The workbook (data) always
@@ -518,7 +493,9 @@ def _svc_int_capacity_artifacts(base_infra, base_svc, combo, p, composed_full, c
                 output_path=str(plot_dir / f"capacity_util_{svc_id}_{tag}.pdf"),
                 generate_network=False, network_label=f"{svc_id}_{tag}",
                 infra_version=composed_ver, infra_dir=infra_dir,
-                lakes_path=lakes_sa, boundary_path=sa_boundary)
+                lakes_path=lakes_sa, boundary_path=sa_boundary,
+                extent=sa_extent, ghost_outside=True,
+                title=f"Capacity Utilization - {_short}: {_seg} ({tag})")
             written.append(str(cap_png))
             print(f"  [plot] {svc_id}: wrote {Path(cap_png).name}")
         except Exception as exc:
@@ -534,22 +511,24 @@ def _svc_int_capacity_artifacts(base_infra, base_svc, combo, p, composed_full, c
                 svc_png = cnp.plot_service_network(
                     workbook_path=wb,
                     output_path=str(plot_dir / f"service_{svc_id}.pdf"),
-                    network_label=f"{svc_id}", lakes_path=lakes_sa)
+                    network_label=f"{svc_id}", lakes_path=lakes_sa,
+                    boundary_path=sa_boundary, extent=sa_extent)
                 written.append(str(svc_png))
                 print(f"  [plot] {svc_id}: wrote {Path(svc_png).name}")
             except Exception as exc:
                 print(f"  [plot] {svc_id} service map failed: {exc}")
 
-    # Map 4 — infra additions (this svc-int's CC and/or CAP), both CA + SA extents (plot-gated).
-    add_ids = list(p['req']) + list(cap_ids)
-    if make_plots and add_ids:
-        _diff_label = 'CC + CAP' if cap_ids else 'Connecting curve'
+    # Map 4 — capacity-intervention diff: the svc-int's CC is drawn as base (not a change),
+    # only its CAP is highlighted. Skipped when the svc-int triggered no CAP (nothing to show).
+    if make_plots and cap_ids:
         try:
             written += core.render_int_diff(
-                base_infra, add_ids, out_tag=f"{svc_id}_DELTA",
-                added_label=_diff_label, added_color=cap._CAP_COLOR,
+                base_infra, list(cap_ids), out_tag=f"{svc_id}_DELTA",
+                base_int_ids=list(p['req']),
+                added_label='Capacity intervention', added_color=cap._CAP_COLOR,
                 added_edge=cap._CAP_EDGE, out_dir=plot_dir, extents=('CA', 'SA'),
-                svc_version=base_svc)
+                svc_version=base_svc,
+                title=f"Capacity interventions - {_short}: {_seg}")
         except Exception as exc:
             print(f"  [plot] {svc_id} infra-diff failed: {exc}")
     return written

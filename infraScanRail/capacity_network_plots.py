@@ -1545,7 +1545,17 @@ def _load_map_overlays(
                     continue
                 try:
                     if _geom.geom_type == "MultiLineString":
-                        _coords = list(_geom.geoms[0].coords)
+                        # Concatenate every part (after merging) so a multi-part
+                        # composite segment renders in full — taking geoms[0] alone
+                        # dropped the rest of the segment.
+                        from shapely.ops import linemerge as _linemerge
+                        _merged = _linemerge(_geom)
+                        if _merged.geom_type == "MultiLineString":
+                            _coords = []
+                            for _part in _merged.geoms:
+                                _coords.extend(list(_part.coords))
+                        else:
+                            _coords = list(_merged.coords)
                     else:
                         _coords = list(_geom.coords)
                     if _coords:
@@ -2145,9 +2155,9 @@ def _draw_capacity_map(
     """Render a capacity utilization view of the network sections."""
     cmap = plt.get_cmap("RdYlGn_r")
 
-    utilization_values = [section.utilization for section in sections if not math.isnan(section.utilization)]
-    vmax_ratio = max([1.0] + utilization_values) if utilization_values else 1.0
-    norm = Normalize(vmin=0.0, vmax=max(1.0, vmax_ratio))
+    # Colour bar capped at 100%: over-utilised sections take the 100% colour
+    # (the clip below maps any value > 1.0 onto vmax).
+    norm = Normalize(vmin=0.0, vmax=1.0)
 
     annotation_boxes: List[Tuple[float, float, float, float]] = []
     extent_min_x = math.inf
@@ -2210,8 +2220,9 @@ def _draw_capacity_map(
             zorder=zorder,
         )
 
-        # Skip text annotations when either endpoint is a junction or annotations are suppressed.
-        has_junction_endpoint = start.is_junction or end.is_junction
+        # Annotate a section when at least one endpoint is a real station; skip only
+        # when BOTH endpoints are junctions (or annotations are suppressed).
+        has_junction_endpoint = start.is_junction and end.is_junction
         if math.isnan(util_value) or not include_annotations or has_junction_endpoint:
             continue
 
@@ -2247,7 +2258,7 @@ def _draw_capacity_map(
             ha="center",
             va="center",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", linewidth=0.6),
-            zorder=4,
+            zorder=6,
         )
 
         p_bounds = _bounds_from_anchor(percent_x, percent_y, percent_width, percent_height, "center")
@@ -2303,7 +2314,7 @@ def _draw_capacity_map(
             ha="left",
             va="center",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", linewidth=0.6),
-            zorder=4,
+            zorder=6,
         )
 
         d_bounds = _bounds_from_anchor(detail_x, detail_y, detail_width, detail_height, "left_center")
@@ -2438,7 +2449,7 @@ def _draw_speed_profile(
             ha="center",
             va="center",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", linewidth=0.6),
-            zorder=4,
+            zorder=6,
         )
 
         s_bounds = _bounds_from_anchor(speed_x, speed_y, speed_width, speed_height, "center")
@@ -2488,7 +2499,7 @@ def _draw_speed_profile(
             ha="left",
             va="center",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", linewidth=0.6),
-            zorder=4,
+            zorder=6,
         )
 
         d_bounds = _bounds_from_anchor(detail_x, detail_y, detail_width, detail_height, "left_center")
@@ -2789,7 +2800,7 @@ def _draw_service_map(
             ha="center",
             va="center",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", linewidth=0.6),
-            zorder=4,
+            zorder=6,
         )
 
         l_bounds = _bounds_from_anchor(label_x, label_y, service_width, service_height, "center")
@@ -2807,34 +2818,13 @@ def _draw_service_map(
 
 
 def _format_plot_title(base_title: str, network_label: str = None) -> str:
-    """Format plot title to include development ID if applicable.
+    """Return the plain plot-type title.
 
-    Args:
-        base_title: Base title (e.g., "Rail Network Infrastructure")
-        network_label: Optional network label (e.g., "AK_2035_dev_100023")
-
-    Returns:
-        Formatted title with network information.
+    The infra/service/capacity version label is intentionally dropped from the
+    title (it remains in the filename and the surrounding report); the figure
+    shows only the plot type, e.g. "Rail Network Infrastructure".
     """
-    if network_label is None:
-        network_tag = getattr(settings, "rail_network", "")
-    else:
-        network_tag = network_label
-
-    if not network_tag:
-        return base_title
-
-    # Check if development network
-    import re
-    dev_match = re.search(r'_dev_(\d+)', network_tag)
-    if dev_match:
-        dev_id = dev_match.group(1)
-        # Extract base network name (e.g., "AK_2035" from "AK_2035_dev_100023")
-        base_network = network_tag.split('_dev_')[0]
-        return f"{base_title} - {base_network} Development {dev_id}"
-    else:
-        # Baseline network
-        return f"{base_title} - {network_tag}"
+    return base_title
 
 
 def _configure_axes(
@@ -2842,29 +2832,38 @@ def _configure_axes(
     stations: Dict[int, Station],
     title: str = "Infrastructure Overview",
     annotation_bounds: Optional[Tuple[float, float, float, float]] = None,
+    extent: Optional[Tuple[float, float, float, float]] = None,
 ) -> None:
-    """Set axis styling and limits."""
+    """Set axis styling and limits.
+
+    extent (xmin, xmax, ymin, ymax) forces the view to a fixed window — e.g. the
+    study/catchment boundary plus a buffer — instead of the data-driven bounds.
+    """
     xs = [station.x for station in stations.values()]
     ys = [station.y for station in stations.values()]
     if not xs or not ys:
         return
 
-    min_x = min(xs)
-    max_x = max(xs)
-    min_y = min(ys)
-    max_y = max(ys)
+    if extent:
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
+    else:
+        min_x = min(xs)
+        max_x = max(xs)
+        min_y = min(ys)
+        max_y = max(ys)
 
-    if annotation_bounds:
-        ann_min_x, ann_max_x, ann_min_y, ann_max_y = annotation_bounds
-        min_x = min(min_x, ann_min_x)
-        max_x = max(max_x, ann_max_x)
-        min_y = min(min_y, ann_min_y)
-        max_y = max(max_y, ann_max_y)
+        if annotation_bounds:
+            ann_min_x, ann_max_x, ann_min_y, ann_max_y = annotation_bounds
+            min_x = min(min_x, ann_min_x)
+            max_x = max(max_x, ann_max_x)
+            min_y = min(min_y, ann_min_y)
+            max_y = max(max_y, ann_max_y)
 
-    padding_x = max(750.0, 0.08 * (max_x - min_x))
-    padding_y = max(750.0, 0.08 * (max_y - min_y))
-    ax.set_xlim(min_x - padding_x, max_x + padding_x)
-    ax.set_ylim(min_y - padding_y, max_y + padding_y)
+        padding_x = max(750.0, 0.08 * (max_x - min_x))
+        padding_y = max(750.0, 0.08 * (max_y - min_y))
+        ax.set_xlim(min_x - padding_x, max_x + padding_x)
+        ax.set_ylim(min_y - padding_y, max_y + padding_y)
 
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("Easting (LV95)")
@@ -2897,6 +2896,8 @@ def network_current_map(
     marker_scale: float = 1.5,
     boundary_path: Optional[str] = None,
     infra_dir: Optional[str] = None,
+    extent: Optional[Tuple[float, float, float, float]] = None,
+    ghost_outside: bool = False,
 ) -> Union[Path, Tuple[Path, Figure]]:
     """Render the current network infrastructure map.
 
@@ -2943,8 +2944,10 @@ def network_current_map(
         except Exception:
             pass
 
-    # Ghost pass: infra segments whose endpoints are not both in the workbook (CA only)
-    if is_catchment and segment_geometries:
+    # Ghost pass: infra segments whose endpoints are not both in the workbook —
+    # the outside-boundary network drawn faded for context (catchment maps, or any
+    # plot that opts in via ghost_outside, e.g. the study-area maps).
+    if (is_catchment or ghost_outside) and segment_geometries:
         workbook_node_set = set(stations.keys())
         for (a, b), coords in segment_geometries.items():
             if a in workbook_node_set and b in workbook_node_set:
@@ -2972,14 +2975,15 @@ def network_current_map(
     )
 
     plot_title = _format_plot_title("Rail Network Infrastructure", network_label)
-    _configure_axes(ax, stations, title=plot_title, annotation_bounds=annotation_bounds)
+    _configure_axes(ax, stations, title=plot_title, annotation_bounds=annotation_bounds,
+                    extent=extent)
 
     if boundary_path:
         _boundary_gdf = _load_boundary(boundary_path)
         if _boundary_gdf is not None and not getattr(_boundary_gdf, "empty", True):
             try:
                 _boundary_gdf.boundary.plot(
-                    ax=ax, color="#333333", linewidth=1.0, linestyle="--", alpha=0.6, zorder=5
+                    ax=ax, color="#333333", linewidth=1.0, linestyle="--", alpha=0.6, zorder=1.2
                 )
             except Exception:
                 pass
@@ -3026,6 +3030,9 @@ def plot_capacity_network(
     network_marker_scale: float = 1.5,
     boundary_path: Optional[str] = None,
     infra_dir: Optional[str] = None,
+    extent: Optional[Tuple[float, float, float, float]] = None,
+    ghost_outside: bool = False,
+    title: Optional[str] = None,
 ) -> Tuple[Path, Path]:
     """Plot the capacity prep workbook and return the saved image paths (network, capacity).
 
@@ -3091,6 +3098,8 @@ def plot_capacity_network(
             marker_scale=network_marker_scale,
             boundary_path=boundary_path,
             infra_dir=infra_dir,
+            extent=extent,
+            ghost_outside=ghost_outside,
         )
 
         if isinstance(base_result, tuple):
@@ -3119,13 +3128,23 @@ def plot_capacity_network(
     capacity_fig, capacity_ax = plt.subplots(figsize=figsize)
 
     # Draw lakes on capacity figure; also load segment geometries for BFS routing
-    _cap_water, _ = _load_map_overlays(infra_version=infra_version, lakes_path=lakes_path,
-                                       infra_dir=infra_dir)
+    _cap_water, _cap_geoms = _load_map_overlays(infra_version=infra_version, lakes_path=lakes_path,
+                                                infra_dir=infra_dir)
     if _cap_water is not None and not getattr(_cap_water, "empty", True):
         try:
             _cap_water.plot(ax=capacity_ax, color="#b7d4f0", edgecolor="#6ea3d5", linewidth=0.5, zorder=1)
         except Exception:
             pass
+
+    # Ghost pass: outside-boundary network drawn faded for context (opt-in).
+    if (is_catchment or ghost_outside) and _cap_geoms:
+        _sa_nodes = set(stations.keys())
+        for (_a, _b), _coords in _cap_geoms.items():
+            if _a in _sa_nodes and _b in _sa_nodes:
+                continue
+            _xs, _ys = zip(*_coords)
+            capacity_ax.plot(_xs, _ys, color="#9a9a9a", linewidth=1.0, alpha=0.35,
+                             zorder=1.4, solid_capstyle="round")
 
     capacity_annotation_bounds, _ = _draw_capacity_map(
         capacity_ax,
@@ -3146,16 +3165,26 @@ def plot_capacity_network(
     )
     combined_bounds = _merge_bounds(capacity_annotation_bounds, station_annotation_bounds)
 
-    # Format title with network information
-    capacity_title = _format_plot_title("Capacity Utilization", network_label)
+    # Format title with network information (caller may override, e.g. per svc-int 5C maps)
+    capacity_title = title if title is not None else _format_plot_title("Capacity Utilization", network_label)
     _configure_axes(
         capacity_ax,
         section_stations,
         title=capacity_title,
         annotation_bounds=combined_bounds,
+        extent=extent,
     )
     _add_north_arrow(capacity_ax)
     _add_scale_bar(capacity_ax)
+
+    if boundary_path:
+        _cap_bnd = _load_boundary(boundary_path)
+        if _cap_bnd is not None and not getattr(_cap_bnd, "empty", True):
+            try:
+                _cap_bnd.boundary.plot(ax=capacity_ax, color="#333333", linewidth=1.0,
+                                       linestyle="--", alpha=0.6, zorder=1.2)
+            except Exception:
+                pass
 
     capacity_fig.savefig(capacity_output, dpi=300, bbox_inches="tight")
 
@@ -3259,6 +3288,8 @@ def plot_service_network(
     allowed_node_classes: Optional[Set[str]] = None,
     infra_version: Optional[str] = None,
     infra_dir: Optional[str] = None,
+    boundary_path: Optional[str] = None,
+    extent: Optional[Tuple[float, float, float, float]] = None,
 ) -> Path:
     """Plot network services with frequency-based styling and return the saved image path.
 
@@ -3332,9 +3363,19 @@ def plot_service_network(
 
     # Format title with network information
     service_title = _format_plot_title("Service Frequencies", network_label)
-    _configure_axes(ax, stations, title=service_title, annotation_bounds=combined_bounds)
+    _configure_axes(ax, stations, title=service_title, annotation_bounds=combined_bounds,
+                    extent=extent)
     _add_north_arrow(ax)
     _add_scale_bar(ax)
+
+    if boundary_path:
+        _svc_bnd = _load_boundary(boundary_path)
+        if _svc_bnd is not None and not getattr(_svc_bnd, "empty", True):
+            try:
+                _svc_bnd.boundary.plot(ax=ax, color="#333333", linewidth=1.0,
+                                       linestyle="--", alpha=0.6, zorder=1.2)
+            except Exception:
+                pass
 
     legend_handles = [
         Line2D([0], [0], color=SERVICE_COLOUR_STOP, linewidth=2.0, label="Stopping"),

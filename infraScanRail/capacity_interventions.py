@@ -1,6 +1,6 @@
 """
 Capacity Expansion Interventions
-Last modified: 2026-06-09
+Last modified: 2026-06-20
 
 Identifies capacity-constrained sections and designs Tier-1 infrastructure
 interventions (real nodes + adjusted segments) to restore the reactive trigger
@@ -337,9 +337,11 @@ def _target_key(intervention: 'CapacityIntervention'):
 def _connected_equivalent(station_nr: int, segments_df: pd.DataFrame) -> float:
     """Track requirement a station's adjacent line topology implies.
 
-    Mirrors the capacity infrastructure plot (`_station_colour`): one adjacent
-    segment → its track count (terminus); two → their mean (through station);
-    three+ → their sum (junction). No usable adjacency → 1.0.
+    The station must match its **busiest adjacent line** — the max of the adjacent
+    segments' track counts (terminus, through, or junction alike). No usable
+    adjacency → 1.0. Revised 2026-06-20: the former junction SUM / through MEAN
+    over-stated hubs (e.g. Altstetten 6 legs → equiv 12); the busiest-leg max
+    reflects the actual crossing/platform requirement.
     """
     tcol = 'tracks' if 'tracks' in segments_df.columns else 'Num_Tracks'
     fn = pd.to_numeric(segments_df['from_node'], errors='coerce')
@@ -347,29 +349,22 @@ def _connected_equivalent(station_nr: int, segments_df: pd.DataFrame) -> float:
     adj = segments_df[(fn == float(station_nr)) | (tn == float(station_nr))]
     vals = pd.to_numeric(adj[tcol], errors='coerce').dropna()
     vals = [float(v) for v in vals if v > 0]
-    if not vals:
-        return 1.0
-    if len(vals) == 1:
-        return vals[0]
-    if len(vals) == 2:
-        return sum(vals) / 2.0
-    return sum(vals)
+    return max(vals) if vals else 1.0
 
 
 def _required_station_tracks(connected_equivalent: float, terminating: bool,
                              mixed: bool) -> int:
-    """Station tracks needed for its role: line equivalent + turnback + overtaking.
+    """Station tracks needed for its role: busiest-leg equivalent + one extra track.
 
-    `terminating` adds the turnback track (a terminating train must clear the
-    through track); `mixed` adds the overtaking track for sections carrying both
-    stopping and passing services. Floor of 2: crossing is impossible on a single
-    track even when it matches the line (the plot's matched-at-1 = red rule).
+    A single extra track covers BOTH the turnback need (a terminating train must
+    clear the through track) AND the overtaking need (a section carrying both
+    stopping and passing services): the empty turnback track lets a passing train
+    overtake, and vice versa, so they are not stacked (revised 2026-06-20 — was
+    +1 each). Floor of 2: crossing/turnback is impossible on a single track.
     """
     import math
     need = math.ceil(connected_equivalent - 1e-9)
-    if terminating:
-        need += 1
-    if mixed:
+    if terminating or mixed:
         need += 1
     return max(2, need)
 
@@ -381,7 +376,7 @@ def design_section_intervention(
     intervention_counter: int,
     iteration: int = 1,
     termini_nodes: Optional[set] = None,
-) -> CapacityIntervention:
+) -> Optional['CapacityIntervention']:
     """
     Design appropriate intervention for a capacity-constrained section.
 
@@ -445,7 +440,14 @@ def design_section_intervention(
             bool(_svc_str(section.get('passing_services')))
         terminating = bool(termini_nodes and int(middle_station_id) in termini_nodes)
         required = _required_station_tracks(equiv, terminating, mixed)
-        tracks_added = float(max(1, required - int(current_tracks)))
+        tracks_added = float(max(0, required - int(current_tracks)))
+        if tracks_added < 1:
+            # Station already meets its busiest-leg + turnback/overtaking requirement —
+            # an extra platform track would not relieve this section, so no station CAP
+            # is designed here (the section's over-capacity is not a station-track problem).
+            logger.debug(f"  → station {middle_station_id} already sufficient "
+                         f"(required {required} <= current {int(current_tracks)}); no station CAP")
+            return None
 
         intervention = CapacityIntervention(
             intervention_id=f"INT_ST_{intervention_counter:04d}",
@@ -823,7 +825,8 @@ def run_phase_four(
     max_iterations: int = 10
 ) -> Tuple[List[CapacityIntervention], Path, pd.DataFrame]:
     """
-    Execute Phase 4 capacity interventions with iteration until convergence.
+    Execute the iterate-to-convergence capacity-intervention loop (legacy "Added"
+    workflow — standalone only, off the main_new path).
 
     Args:
         original_sections_df: Sections DataFrame from Phase 3
@@ -837,9 +840,9 @@ def run_phase_four(
     Returns:
         Tuple of (interventions_catalog, enhanced_prep_path, final_sections_df)
     """
-    logger.info("=" * 60)
-    logger.info("Phase 4: Capacity Enhancement Interventions")
-    logger.info("=" * 60)
+    logger.info("=" * 160)
+    logger.info("Capacity Enhancement Interventions (Added workflow — standalone, off the main_new path)")
+    logger.info("=" * 160)
 
     # Bridge the current period-suffixed sheet schema to the names the engine reads
     # (Stations_Peak: Track_Count/Platform_Count; Segments_Peak: Length/Num_Tracks/Average_Speed).
@@ -883,6 +886,9 @@ def run_phase_four(
                 intervention_counter,
                 iteration
             )
+            if intervention is None:
+                # Station already sufficient — no station-track CAP for this section.
+                continue
             key = _target_key(intervention)
             if key in treated_targets:
                 logger.info(f"  skip section {section.get('section_id')}: "
@@ -930,9 +936,9 @@ def run_phase_four(
         all_interventions.extend(iteration_interventions)
 
     # Final summary
-    logger.info("\n" + "=" * 60)
-    logger.info("Phase 4 Complete!")
-    logger.info("=" * 60)
+    logger.info("\n" + "=" * 160)
+    logger.info("Capacity Enhancement Interventions complete")
+    logger.info("=" * 160)
     logger.info(f"Total iterations: {min(iteration, max_iterations)}")
     logger.info(f"Total interventions: {len(all_interventions)}")
 

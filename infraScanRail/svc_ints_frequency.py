@@ -1,6 +1,6 @@
 """
 svc_ints_frequency — FRQ svc-int discovery (Phase 5B, expansion part 1).
-Last modified: 2026-06-11
+Last modified: 2026-06-20
 
 Frequency-change interventions ('frq', id block DEV_ID_START_FRQ), two modes that
 always generate together:
@@ -811,13 +811,12 @@ def plot_frequency_map(
             Line2D([0], [0], color=bc, linewidth=blw * 0.7,
                    label=f"{blbl} dep / hr")
         )
-    ax.legend(handles=legend_handles, loc="upper right", fontsize=8,
-              title=f"Rail frequency\n{period_label}", title_fontsize=8)
+    _leg = ax.legend(handles=legend_handles, loc="upper right", fontsize=8,
+                     title="Rail frequency", title_fontsize=8)
+    _leg.get_title().set_fontweight("bold")
 
     ax.set_title(
-        f"Rail Service Frequency ({period_label}) — "
-        f"{svc_version} on {infra_version}"
-        f"\nBoundary: {boundary_name}",
+        f"Rail Service Frequency ({period_label})",
         fontsize=14, fontweight="bold",
     )
     if extent is not None:
@@ -952,9 +951,7 @@ def plot_frequency_diff(
               title="Δ dep/hr (peak − off-peak)", title_fontsize=8)
 
     ax.set_title(
-        f"Rail Frequency Change: Peak vs Off-Peak — "
-        f"{svc_version} on {infra_version}"
-        f"\nBoundary: {boundary_name}",
+        "Rail Frequency Change: Peak vs Off-Peak",
         fontsize=14, fontweight="bold",
     )
     if extent is not None:

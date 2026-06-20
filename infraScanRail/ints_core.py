@@ -453,7 +453,11 @@ def compose_frames(
         t = _registry_type_of(str(iid))
         by_type.setdefault(t, []).append(str(iid))
 
-    for int_type in sorted(by_type):
+    # Apply dependency providers before dependents: 'cc' before 'cap'. A CAP hosted on a
+    # CC-created segment must compose against a base that already carries the CC, else it
+    # validates against the unmodified base and is dropped (the old plain sorted() ordered
+    # 'cap' before 'cc' alphabetically).
+    for int_type in sorted(by_type, key=lambda _t: (0 if _t == 'cc' else 1, _t)):
         net = _registry_network(int_type, base_version, svc_version)
         r_nodes, r_segs, r_comp = read_registry(int_type, network=net)
         for iid in sorted(by_type[int_type]):
@@ -987,6 +991,8 @@ def render_int_diff(
     extents=('CA', 'SA'),
     svc_version: Optional[str] = None,
     superseded_color: Optional[str] = None,
+    title: Optional[str] = None,
+    base_int_ids: Optional[List[str]] = None,
 ) -> List[str]:
     """Base-vs-(base+int_ids) diff at the requested extents, recoloured by int type.
 
@@ -994,6 +1000,10 @@ def render_int_diff(
     lakes, labels); the developed side is composed in memory (no derived folder).
     ``out_dir`` routes the PDFs to the caller's mirrored plots folder; ``svc_version``
     is required when the int set includes CAP ids (cap registry keyed by '<infra>__<svc>').
+
+    ``title`` overrides the figure title. ``base_int_ids`` are composed into the
+    reference side (net_a) so they appear as base, not as a change — e.g. a CAP diff
+    that keeps the svc-int's connecting curve in the base and highlights only the CAP.
     """
     if not int_ids:
         return []
@@ -1001,8 +1011,15 @@ def render_int_diff(
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    base_nodes, base_segs = ic.load_version(base_version)
-    dev_nodes, dev_segs, _, warns = compose_frames(base_version, int_ids, svc_version)
+    if base_int_ids:
+        base_nodes, base_segs, _, base_warns = compose_frames(
+            base_version, list(base_int_ids), svc_version)
+        for w in base_warns:
+            print(f"  [plot]   WARN {w}")
+    else:
+        base_nodes, base_segs = ic.load_version(base_version)
+    dev_nodes, dev_segs, _, warns = compose_frames(
+        base_version, list(base_int_ids or []) + list(int_ids), svc_version)
     for w in warns:
         print(f"  [plot]   WARN {w}")
 
@@ -1022,7 +1039,7 @@ def render_int_diff(
         path = out_dir / f"infra_ints_{out_tag}_{ext_key}_{base_version}.pdf"
         fig = ic.plot_infrastructure_diff(
             net_a=net_a, net_b=net_b, extent=ext, output_path=path,
-            is_catchment=is_ca, show_outside=(not is_ca),
+            is_catchment=is_ca, show_outside=(not is_ca), title=title, rail_only=is_ca,
             added_color=added_color, added_edge=added_edge, added_label=added_label,
             superseded_seg_ids=superseded, superseded_color=superseded_color,
         )

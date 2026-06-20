@@ -1,4 +1,5 @@
 """Capacity calculator for the rail network.
+Last modified: 2026-06-20
 
 Reads infrastructure from infrabuild outputs (nodes.gpkg, segments.gpkg) and
 projected service data (rail_segments.gpkg) produced by services_service_projection.
@@ -3030,9 +3031,9 @@ def export_capacity_workbook(
 
     if needs_manual_enrichment and not skip_manual_checkpoint:
         # Prompt user to fill missing values
-        print("\n" + "="*80)
+        print("\n" + "="*160)
         print("MANUAL ENRICHMENT REQUIRED")
-        print("="*80)
+        print("="*160)
         if has_na_tracks_stations or has_na_platforms:
             print(f"  - {station_metrics['tracks'].isna().sum()} stations missing 'tracks'")
             print(f"  - {station_metrics['platforms'].isna().sum()} stations missing 'platforms'")
@@ -3044,7 +3045,7 @@ def export_capacity_workbook(
         print(f"  2. Fill all NA values for tracks, platforms, speed, length_m")
         print(f"  3. Save the file as: {prep_path}")
         print(f"  4. Return here and confirm completion")
-        print("="*80)
+        print("="*160)
 
         response = input("\nHave you filled the missing data and saved as *_prep.xlsx (y/n)? ").strip().lower()
         if response not in {"y", "yes"}:

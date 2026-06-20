@@ -278,8 +278,9 @@ def _plot_all_changes(base_version: str, svc_version: Optional[str] = None) -> L
         path = out_dir / f"infra_ints_ALL_{ext_key}_{base_version}.pdf"
         fig = ic.plot_infrastructure_diff(
             net_a=net_a, net_b=net_b, extent=ext, output_path=path,
-            is_catchment=is_ca, show_outside=(not is_ca),
-            added_type_colors=type_colors)
+            is_catchment=is_ca, show_outside=(not is_ca), rail_only=is_ca,
+            added_type_colors=type_colors,
+            title="All infrastructure changes necessary for each generated service intervention")
         plt.close(fig)
         written.append(str(path))
         print(f"  [plot] wrote {path.name}")
@@ -303,7 +304,7 @@ def _plot_developed_maps(base_version, full_name, full_dir, full_nodes, full_seg
         net = core._net_from_frames(full_nodes, full_segs, full_name, bdry)
         path = out_dir / f"infra_ints_DEV_infrastructure_{ext_key}_{base_version}.pdf"
         try:
-            kwargs = {'is_catchment': True, 'show_labels': False} if is_ca \
+            kwargs = {'is_catchment': True, 'show_labels': False, 'rail_only': True} if is_ca \
                 else {'show_outside': True}
             fig = ic.plot_infrastructure_canonical(net, extent=ext, output_path=path, **kwargs)
             plt.close(fig)

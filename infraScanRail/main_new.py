@@ -506,102 +506,67 @@ def phase_3a_infrastructure(runtimes: dict) -> None:
     print()
 
     # ── Step 3A.3: Pre-enhancement network visualisation ──────────────────────
-    # Skipped for _enhanced versions (no pre-enhancement state to capture).
+    # Skipped for _enhanced versions (no pre-enhancement state to capture; the
+    # enhanced network is plotted with its base↔enhanced diff in Step 3B.4).
     if not infra_v.endswith('_enhanced'):
         print("--- Step 3A.3: Pre-Enhancement Network Visualisation ---\n")
-        if paths.infra_version_exists(infra_v):
-            from infrabuild_network_builder import _build_infra_qgz
+        if not paths.infra_version_exists(infra_v):
+            print(f"  Version '{infra_v}' not on disk — skipping QGIS project and plots.")
+        else:
+            from infrabuild_network_builder import (
+                _build_infra_qgz, load_version, render_infrastructure_plots,
+            )
             _version_dir = Path(paths.get_infra_version_dir(infra_v))
             _build_infra_qgz(str(_version_dir / f'{infra_v}.qgz'), _version_dir)
             print(f"  QGIS project written: {_version_dir / f'{infra_v}.qgz'}")
-        else:
-            print(f"  Version '{infra_v}' not on disk — skipping QGIS project.")
 
-        if not settings.PLOT_INFRA:
-            print(f"  PLOT_INFRA = False — skipping infrastructure plots.")
-        elif not paths.infra_version_exists(infra_v):
-            print(f"  Version '{infra_v}' not on disk — skipping plots.")
-        else:
-            from infrabuild_network_builder import (
-                load_version,
-                build_networkx_graph,
-                plot_infrastructure_canonical,
-                plot_gauge_map,
-                plot_electrification_map,
-                plot_speed_map,
-                plot_engineering_structures,
-                NetworkData,
-            )
-            import matplotlib.pyplot as plt
-            print(f"  Generating plots for '{infra_v}' ...")
-
-            nodes, segments = load_version(infra_v)
-            G = build_networkx_graph(nodes, segments)
-
-            _ca_bdry_path = os.path.join(paths.MAIN, paths.CATCHMENT_AREA_BOUNDARY_GPKG)
-            _sa_bdry_path = os.path.join(paths.MAIN, paths.STUDY_AREA_BOUNDARY_GPKG)
-            ca_bdry_gdf = gpd.read_file(_ca_bdry_path) if os.path.isfile(_ca_bdry_path) else None
-            sa_bdry_gdf = gpd.read_file(_sa_bdry_path) if os.path.isfile(_sa_bdry_path) else None
-
-            def _extent_from_gdf(gdf, margin_m: int = 2000):
-                if gdf is None:
-                    return None
-                b = gdf.total_bounds
-                return (b[0] - margin_m, b[2] + margin_m, b[1] - margin_m, b[3] + margin_m)
-
-            ca_ext = _extent_from_gdf(ca_bdry_gdf)
-            sa_ext = _extent_from_gdf(sa_bdry_gdf)
-
-            net_ca = NetworkData(nodes=nodes, segments=segments, graph=G,
-                                 version=infra_v, boundary=ca_bdry_gdf)
-            net_sa = NetworkData(nodes=nodes, segments=segments, graph=G,
-                                 version=infra_v, boundary=sa_bdry_gdf)
-
-            plot_dir = Path(paths.MAIN) / paths.INFRASTRUCTURE_PLOTS_DIR / infra_v
-            plot_dir.mkdir(parents=True, exist_ok=True)
-            print(f"  Generating plots → {plot_dir}")
-
-            _plots = [
-                (plot_infrastructure_canonical, net_ca, ca_ext,
-                 'ca_infrastructure.pdf', {'is_catchment': True, 'show_labels': False}),
-                (plot_gauge_map,               net_ca, ca_ext,
-                 'ca_gauge.pdf',          {'is_catchment': True}),
-                (plot_electrification_map,     net_ca, ca_ext,
-                 'ca_electrification.pdf', {'is_catchment': True}),
-                (plot_speed_map,               net_ca, ca_ext,
-                 'ca_speed.pdf',           {'is_catchment': True}),
-                (plot_infrastructure_canonical, net_sa, sa_ext,
-                 'sa_infrastructure.pdf', {'show_outside': True}),
-                (plot_gauge_map,               net_sa, sa_ext,
-                 'sa_gauge.pdf',          {'show_outside': True}),
-                (plot_electrification_map,     net_sa, sa_ext,
-                 'sa_electrification.pdf', {'show_outside': True}),
-                (plot_speed_map,               net_sa, sa_ext,
-                 'sa_speed.pdf',           {'show_outside': True}),
-            ]
-            for _fn, _net, _ext, _fname, _kw in _plots:
-                print(f"    {_fname} ...")
-                _fig = _fn(_net, extent=_ext, output_path=plot_dir / _fname, **_kw)
-                plt.close(_fig)
-
-            # Engineering structures (tunnels/bridges) — SA only, mirrors the standalone
-            # builder's 'sa_construct' map. Needs segments_composition.gpkg (the per-piece
-            # construct types); skipped with a note when composition is absent/empty.
-            _comp_path = os.path.join(paths.get_infra_version_dir(infra_v),
-                                      'segments_composition.gpkg')
-            _composition = gpd.read_file(_comp_path) if os.path.isfile(_comp_path) \
-                else gpd.GeoDataFrame()
-            if _composition.empty:
-                print("    sa_engineering_structures.pdf — skipped (no composition data).")
+            if not settings.PLOT_INFRA:
+                print(f"  PLOT_INFRA = False — skipping infrastructure plots.")
             else:
-                print(f"    sa_engineering_structures.pdf ...")
-                _fig = plot_engineering_structures(
-                    net_sa, _composition, extent=sa_ext,
-                    output_path=plot_dir / 'sa_engineering_structures.pdf',
-                    show_outside=True, nodes=nodes)
-                plt.close(_fig)
+                print(f"  Generating plots for '{infra_v}' ...")
+                _nodes, _segments = load_version(infra_v)
+                _comp_path = _version_dir / 'segments_composition.gpkg'
+                _composition = gpd.read_file(_comp_path) if _comp_path.is_file() else None
+                _ca_bdry_path = os.path.join(paths.MAIN, paths.CATCHMENT_AREA_BOUNDARY_GPKG)
+                _sa_bdry_path = os.path.join(paths.MAIN, paths.STUDY_AREA_BOUNDARY_GPKG)
+                render_infrastructure_plots(
+                    _nodes, _segments, infra_v,
+                    plot_dir=Path(paths.MAIN) / paths.INFRASTRUCTURE_PLOTS_DIR / infra_v,
+                    ca_boundary=gpd.read_file(_ca_bdry_path) if os.path.isfile(_ca_bdry_path) else None,
+                    sa_boundary=gpd.read_file(_sa_bdry_path) if os.path.isfile(_sa_bdry_path) else None,
+                    composition=_composition,
+                )
 
-            print(f"  Plots complete.\n")
+    # ── Phase 3A runtime summary → report_new.txt ────────────────────────────
+    _src = ("Build_New (rebuilt Base + created version)"
+            if settings.INFRA_VERSION == 'Build_New'
+            else "named version (found on disk)")
+    _n_nodes = _n_segs = _n_comp = None
+    if paths.infra_version_exists(infra_v):
+        from infrabuild_network_builder import load_version
+        _rn, _rs = load_version(infra_v)
+        _n_nodes, _n_segs = len(_rn), len(_rs)
+        _comp_p = Path(paths.get_infra_version_dir(infra_v)) / 'segments_composition.gpkg'
+        _n_comp = len(gpd.read_file(_comp_p)) if _comp_p.is_file() else 0
+
+    if infra_v.endswith('_enhanced'):
+        _plots_line = "deferred to Step 3B.4 (enhanced version)"
+    elif not settings.PLOT_INFRA:
+        _plots_line = "skipped (PLOT_INFRA = False)"
+    elif not paths.infra_version_exists(infra_v):
+        _plots_line = "skipped (version not on disk)"
+    else:
+        _plots_line = f"generated to {paths.INFRASTRUCTURE_PLOTS_DIR}/{infra_v}"
+
+    _rt_file = os.path.join(paths.MAIN, 'report_new.txt')
+    with open(_rt_file, 'a', encoding='utf-8') as _f:
+        _f.write("\n--- INFRASTRUCTURE BUILD (Phase 3A) ---\n")
+        _f.write(f"  Infrastructure version : {infra_v}\n")
+        _f.write(f"  Source                 : {_src}\n")
+        if _n_nodes is not None:
+            _f.write(f"  Network size           : {_n_nodes} nodes, {_n_segs} segments, "
+                     f"{_n_comp} composition pieces\n")
+        _f.write(f"  Plots                  : {_plots_line}\n")
 
     runtimes["Phase 3A: Infrastructure Network Build"] = time.time() - st
 
@@ -709,20 +674,39 @@ def phase_3b_services(
         )
         if not need_rail and not need_feeder:
             print(f"  Services network '{svc_v}' found — skipping build.")
+        elif need_rail:
+            # Rail base is year-dependent: contemporary rail comes from the GTFS filter
+            # version (services_network_builder); future rail (e.g. AK_2035) from the
+            # hand-authored CSV helper docs/infraClaude/ak2035_data/build_ak2035_network.py
+            # and is NOT GTFS-derivable. The pipeline cannot infer which, so a missing rail
+            # base is a hard error rather than a silent (wrong) rebuild.
+            raise SystemExit(
+                f"  ERROR: rail base for service network '{svc_v}' is missing on disk.\n"
+                f"  Rail is not auto-rebuilt (source is year-dependent):\n"
+                f"    contemporary (AK_2026*): services_network_builder.py "
+                f"(--gtfs-folder {settings.GTFS_FILTER_VERSION} --output-name {svc_v}_network --modes rail)\n"
+                f"    future       (AK_2035*): docs/infraClaude/ak2035_data/build_ak2035_network.py\n"
+                + ("  (PT-feeder base is also missing — rebuild it too.)\n" if need_feeder else "")
+                + f"  Build the rail base first, then re-run."
+            )
         else:
-            missing = []
-            if need_rail:
-                missing.append("rail network")
-            if need_feeder:
-                missing.append("PT-feeder network")
-            print(f"  Missing: {', '.join(missing)} — running services_network_builder ...")
-            script_path = os.path.join(paths.MAIN, 'services_network_builder.py')
-            result = subprocess.run([sys.executable, script_path], cwd=paths.MAIN)
+            # PT-feeder base is GTFS-filter-derived for all years — safe to rebuild here.
+            print(f"  PT-feeder base for '{svc_v}' missing — rebuilding from GTFS "
+                  f"'{settings.GTFS_FILTER_VERSION}' (filter-version-derived for all years) ...")
+            builder = os.path.join(paths.MAIN, 'services_network_builder.py')
+            result = subprocess.run(
+                [sys.executable, builder,
+                 '--gtfs-folder', settings.GTFS_FILTER_VERSION,
+                 '--output-name', svc_v + '_network',
+                 '--modes',       'pt_feeder',
+                 '--all-periods', '--non-interactive'],
+                cwd=paths.MAIN,
+            )
             if result.returncode != 0:
                 print(f"  WARNING: services_network_builder.py exited with code "
                       f"{result.returncode}.")
             else:
-                print(f"  Services network build complete.\n")
+                print(f"  PT-feeder build complete.\n")
     print()
 
     # ── Step 3B.2: Service projection ─────────────────────────────────────
@@ -769,10 +753,11 @@ def phase_3b_services(
         print(f"  Skipping enhancement — network assumed complete.")
         print(f"  To re-calibrate, set INFRA_VERSION = '{base_infra_v}' and re-run.\n")
     else:
-        mode_hint = "(extend — fills null slots)" if paths.infra_version_exists(enhanced_v) \
-                    else "(initial — full calibration)"
+        # main_new always enhances from base_infra_v (initial/full GTFS calibration);
+        # any existing enhanced version on disk is overwritten. The extend mode (fill
+        # null slots only) is reachable solely via the standalone enhancement CLI.
         print(f"  Enhancing '{base_infra_v}' with GTFS-calibrated travel times "
-              f"{mode_hint} (non-interactive) ...")
+              f"(initial — full calibration, non-interactive) ...")
         script_path = os.path.join(
             paths.MAIN, 'infrabuild_infrastructure_enhancement.py'
         )
@@ -866,9 +851,8 @@ def phase_3b_services(
     from infrabuild_network_builder import (
         _build_infra_qgz,
         load_version,
-        build_networkx_graph,
-        NetworkData,
-        export_infrastructure_diff,
+        render_infrastructure_plots,
+        render_infrastructure_diff,
     )
 
     # QGIS project — always
@@ -876,117 +860,90 @@ def phase_3b_services(
     _build_infra_qgz(str(_version_dir / f'{final_infra_v}.qgz'), _version_dir)
     print(f"  QGIS project written: {_version_dir / f'{final_infra_v}.qgz'}")
 
-    # Load enhanced network — needed for Excel diff and/or plots
-    nodes, segments = load_version(final_infra_v)
-    G = build_networkx_graph(nodes, segments)
-
     _ca_bdry_path = os.path.join(paths.MAIN, paths.CATCHMENT_AREA_BOUNDARY_GPKG)
     _sa_bdry_path = os.path.join(paths.MAIN, paths.STUDY_AREA_BOUNDARY_GPKG)
     ca_bdry_gdf = gpd.read_file(_ca_bdry_path) if os.path.isfile(_ca_bdry_path) else None
     sa_bdry_gdf = gpd.read_file(_sa_bdry_path) if os.path.isfile(_sa_bdry_path) else None
 
-    # Excel diff report — always when the pre-enhancement version exists
+    nodes, segments = load_version(final_infra_v)
+    _enh_comp_path = _version_dir / 'segments_composition.gpkg'
+    _enh_comp = gpd.read_file(str(_enh_comp_path)) if _enh_comp_path.exists() else None
+
+    # Enhanced (final) network plots — full set incl. owner + engineering structures
+    if not settings.PLOT_INFRA:
+        print(f"  PLOT_INFRA = False — skipping infrastructure plots (diff report still written).")
+    else:
+        print(f"  Generating plots for '{final_infra_v}' ...")
+        render_infrastructure_plots(
+            nodes, segments, final_infra_v,
+            plot_dir=Path(paths.MAIN) / paths.INFRASTRUCTURE_PLOTS_DIR / final_infra_v,
+            ca_boundary=ca_bdry_gdf, sa_boundary=sa_bdry_gdf,
+            composition=_enh_comp,
+        )
+
+    # Base↔enhanced diff — Excel report always (data output); diff maps gated by PLOT_INFRA.
     _diff_base = base_infra_v if not already_enhanced else \
                  final_infra_v.removesuffix('_enhanced')
-    _base_nodes = _base_segs = _base_G = None
     if paths.infra_version_exists(_diff_base):
         _base_nodes, _base_segs = load_version(_diff_base)
-        _base_G = build_networkx_graph(_base_nodes, _base_segs)
         _ref_comp_path = Path(paths.get_infra_version_dir(_diff_base)) / 'segments_composition.gpkg'
-        _enh_comp_path = _version_dir / 'segments_composition.gpkg'
-        _ref_comp = gpd.read_file(str(_ref_comp_path)) if _ref_comp_path.exists() else gpd.GeoDataFrame()
-        _enh_comp = gpd.read_file(str(_enh_comp_path)) if _enh_comp_path.exists() else gpd.GeoDataFrame()
-        _diff_xlsx = _version_dir / f'diff_{final_infra_v}_vs_{_diff_base}.xlsx'
-        export_infrastructure_diff(
-            net_a=NetworkData(nodes=_base_nodes, segments=_base_segs,
-                              graph=_base_G, version=_diff_base),
-            net_b=NetworkData(nodes=nodes, segments=segments,
-                              graph=G, version=final_infra_v),
-            comp_a=_ref_comp,
-            comp_b=_enh_comp,
-            output_path=_diff_xlsx,
+        _ref_comp = gpd.read_file(str(_ref_comp_path)) if _ref_comp_path.exists() else None
+        render_infrastructure_diff(
+            _base_nodes, _base_segs, _diff_base,
+            nodes, segments, final_infra_v,
+            out_dir=Path(paths.MAIN) / paths.INFRASTRUCTURE_PLOTS_DIR / final_infra_v,
+            ca_boundary=ca_bdry_gdf, sa_boundary=sa_bdry_gdf,
+            comp_base=_ref_comp, comp_dev=_enh_comp,
+            xlsx_dir=_version_dir,
+            make_plots=settings.PLOT_INFRA,
         )
-        print(f"  Enhancement diff report → {_diff_xlsx}")
 
-    if not settings.PLOT_INFRA:
-        print(f"  PLOT_INFRA = False — skipping infrastructure plots.")
-    else:
-        from infrabuild_network_builder import (
-            plot_infrastructure_canonical,
-            plot_infrastructure_diff,
-            plot_gauge_map,
-            plot_electrification_map,
-            plot_speed_map,
-        )
-        import matplotlib.pyplot as plt
-        print(f"  Generating plots for '{final_infra_v}' ...")
+    print(f"  Network visualisation complete.\n")
 
-        def _extent_from_gdf(gdf, margin_m: int = 2000):
-            if gdf is None:
-                return None
-            b = gdf.total_bounds
-            return (b[0] - margin_m, b[2] + margin_m, b[1] - margin_m, b[3] + margin_m)
+    # ── Phase 3B runtime summary → report_new.txt ────────────────────────────
+    def _count_gpkg_layers(_p):
+        try:
+            import fiona as _fi
+            _n = 0
+            for _l in _fi.listlayers(_p):
+                with _fi.open(_p, layer=_l) as _src:
+                    _n += len(_src)
+            return _n
+        except Exception:
+            return None
 
-        ca_ext = _extent_from_gdf(ca_bdry_gdf)
-        sa_ext = _extent_from_gdf(sa_bdry_gdf)
+    _svc_net  = svc_v + '_network'
+    _uns_dir  = paths.SERVICES_UNPROJECTED_SUBDIR
+    _src_svc  = ("Build_New (built from GTFS + version manager)"
+                 if settings.SVC_VERSION == 'Build_New' else "named version (found on disk)")
+    _feeder_ln = ("built (CATCHMENT_METHOD = PT_Feeder)"
+                  if settings.CATCHMENT_METHOD == 'PT_Feeder'
+                  else f"skipped (CATCHMENT_METHOD = {settings.CATCHMENT_METHOD})")
+    _enh_line = ("already enhanced on input — calibration skipped" if already_enhanced
+                 else f"initial full GTFS calibration ({base_infra_v} → {enhanced_v})")
 
-        net_ca = NetworkData(nodes=nodes, segments=segments, graph=G,
-                             version=final_infra_v, boundary=ca_bdry_gdf)
-        net_sa = NetworkData(nodes=nodes, segments=segments, graph=G,
-                             version=final_infra_v, boundary=sa_bdry_gdf)
+    _rl = Path(paths.MAIN) / paths.RAIL_LINES_DIR   / _svc_net / _uns_dir / 'rail_lines.gpkg'
+    _rs = Path(paths.MAIN) / paths.RAIL_LINES_DIR   / _svc_net / _uns_dir / 'rail_segments.gpkg'
+    _fl = Path(paths.MAIN) / paths.FEEDER_LINES_DIR / _svc_net / _uns_dir / 'pt_feeder_lines.gpkg'
+    _n_rl = _count_gpkg_layers(_rl) if _rl.is_file() else None
+    _n_rs = _count_gpkg_layers(_rs) if _rs.is_file() else None
+    _n_fl = _count_gpkg_layers(_fl) if _fl.is_file() else None
 
-        plot_dir = Path(paths.MAIN) / paths.INFRASTRUCTURE_PLOTS_DIR / final_infra_v
-        plot_dir.mkdir(parents=True, exist_ok=True)
-        print(f"  Generating plots → {plot_dir}")
+    _plots_line = (f"generated to {paths.NETWORK_PLOTS_DIR}/Rail_Lines/{_svc_net}/"
+                   if settings.PLOT_SERVICES else "skipped (PLOT_SERVICES = False)")
 
-        _plots = [
-            (plot_infrastructure_canonical, net_ca, ca_ext,
-             'ca_infrastructure.pdf', {'is_catchment': True, 'show_labels': False}),
-            (plot_gauge_map,               net_ca, ca_ext,
-             'ca_gauge.pdf',          {'is_catchment': True}),
-            (plot_electrification_map,     net_ca, ca_ext,
-             'ca_electrification.pdf', {'is_catchment': True}),
-            (plot_speed_map,               net_ca, ca_ext,
-             'ca_speed.pdf',           {'is_catchment': True}),
-            (plot_infrastructure_canonical, net_sa, sa_ext,
-             'sa_infrastructure.pdf', {'show_outside': True}),
-            (plot_gauge_map,               net_sa, sa_ext,
-             'sa_gauge.pdf',          {'show_outside': True}),
-            (plot_electrification_map,     net_sa, sa_ext,
-             'sa_electrification.pdf', {'show_outside': True}),
-            (plot_speed_map,               net_sa, sa_ext,
-             'sa_speed.pdf',           {'show_outside': True}),
-        ]
-        for _fn, _net, _ext, _fname, _kw in _plots:
-            print(f"    {_fname} ...")
-            _fig = _fn(_net, extent=_ext, output_path=plot_dir / _fname, **_kw)
-            plt.close(_fig)
-
-        # Diff plots — reuse ref data already loaded for the Excel report
-        if _base_nodes is not None:
-            print(f"    diff vs '{_diff_base}' ...")
-            _net_base_ca = NetworkData(nodes=_base_nodes, segments=_base_segs,
-                                       graph=_base_G, version=_diff_base,
-                                       boundary=ca_bdry_gdf)
-            _fig = plot_infrastructure_diff(
-                _net_base_ca, net_ca,
-                extent=ca_ext,
-                output_path=plot_dir / f'ca_diff_vs_{_diff_base}.pdf',
-                is_catchment=True,
-            )
-            plt.close(_fig)
-            _net_base_sa = NetworkData(nodes=_base_nodes, segments=_base_segs,
-                                       graph=_base_G, version=_diff_base,
-                                       boundary=sa_bdry_gdf)
-            _fig = plot_infrastructure_diff(
-                _net_base_sa, net_sa,
-                extent=sa_ext,
-                output_path=plot_dir / f'sa_diff_vs_{_diff_base}.pdf',
-                show_outside=True,
-            )
-            plt.close(_fig)
-
-        print(f"  Plots complete.\n")
+    _rt_file = os.path.join(paths.MAIN, 'report_new.txt')
+    with open(_rt_file, 'a', encoding='utf-8') as _f:
+        _f.write("\n--- SERVICES BUILD (Phase 3B) ---\n")
+        _f.write(f"  Service version        : {svc_v}\n")
+        _f.write(f"  Infra version (final)  : {final_infra_v}\n")
+        _f.write(f"  Service source         : {_src_svc}\n")
+        _f.write(f"  Feeder network         : {_feeder_ln}\n")
+        _f.write(f"  Enhancement            : {_enh_line}\n")
+        if _n_rl is not None:
+            _f.write(f"  Full-day union         : {_n_rl} rail lines, {_n_rs} rail segments, "
+                     f"{_n_fl} feeder lines\n")
+        _f.write(f"  Plots                  : {_plots_line}\n")
 
     runtimes["Phase 3B: Services Network Build"] = time.time() - st
 
@@ -1082,6 +1039,42 @@ def phase_3c_capacity(
             grouping_strategy=_grp_strat,
             visualize=_visualize,
         )
+
+    # ── Phase 3C runtime summary → report_new.txt ─────────────────────────────
+    try:
+        import pandas as _pd
+        from capacity_calculator import CAPACITY_ROOT
+        from capacity_workflow_wrapper import _safe
+        _label = _safe(svc_v, infra_v) + ("_ca" if _scope == 'CA' else "")
+        _sec_path = CAPACITY_ROOT / infra_v / svc_v / f"sections_{_label}.xlsx"
+        _n_sec = _n_constr = None
+        if _sec_path.exists():
+            _sdf = _pd.read_excel(_sec_path, sheet_name='Sections')
+            _n_sec = len(_sdf)
+            if {'Capacity_peak', 'total_tphpd_peak'} <= set(_sdf.columns):
+                _avail = (_pd.to_numeric(_sdf['Capacity_peak'], errors='coerce')
+                          - _pd.to_numeric(_sdf['total_tphpd_peak'], errors='coerce'))
+                _n_constr = int((_avail < settings.capacity_threshold).sum())
+        _plots_line = (f"generated to {paths.CAPACITY_PLOTS_DIR}/{infra_v}/{svc_v}"
+                       if _visualize else "skipped (PLOT_CAPACITY = False)")
+        with open(os.path.join(paths.MAIN, 'report_new.txt'), 'a', encoding='utf-8') as _f:
+            _f.write("\n--- CAPACITY ANALYSIS (Phase 3C) ---\n")
+            _f.write(f"  Scope                  : {_scope}\n")
+            _f.write(f"  Infra / service        : {infra_v} / {svc_v}\n")
+            if _scope == 'SA':
+                _f.write(f"  Capacity method        : {_mode_sa}\n")
+            else:
+                _f.write(f"  Capacity method        : SA {_mode_sa} | CA {_mode_ca}\n")
+            _f.write(f"  Grouping strategy      : {_grp_strat}\n")
+            _f.write(f"  Constrained threshold  : {settings.capacity_threshold} tphpd available\n")
+            if _n_sec is not None:
+                _line = f"  Sections               : {_n_sec}"
+                if _n_constr is not None:
+                    _line += f" ({_n_constr} constrained at peak)"
+                _f.write(_line + "\n")
+            _f.write(f"  Plots                  : {_plots_line}\n")
+    except Exception as _exc:
+        print(f"  [3C] runtime summary skipped: {_exc}")
 
     runtimes["Phase 3C: Capacity Analysis"] = time.time() - st
 

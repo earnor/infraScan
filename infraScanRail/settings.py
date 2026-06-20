@@ -421,7 +421,7 @@ use_cache_tts_calc = True
 MAX_TRAIN_LENGTH_M = 400              # universal train-length cap [m]. Range 100–500 (regional 80–200, long-distance ≤400)
 SERVICE_BRAKE_DECEL_MS2 = 0.7         # service-brake deceleration [m/s²]. Range 0.5–1.3 (UIC 544-1 / ERTMS); calibrated to 0.7 vs GTFS
 TT_OPERATIONAL_BUFFER = 1.30          # operational buffer on physics TTs. Range 1.0–1.5; calibrated to 1.30 vs GTFS jct-jct
-MAX_SIDING_LENGTH_RATIO = 0.4         # passing-siding full-duplication threshold: if L_siding ≥ ratio·L_section → duplicate
+MAX_SIDING_LENGTH_RATIO = 0.25        # passing-siding full-duplication threshold: if L_siding ≥ ratio·L_section → duplicate
 
 # Connecting-curve (CC) geometry constants (Phase 5A). Min radius R = 11.8·v²/(u + u_f); v=80, u=150, u_f=100 → R ≈ 302 m. Adjust per situation.
 CC_DESIGN_SPEED_KMH     = 80          # design speed v [km/h]. Range 40–120
