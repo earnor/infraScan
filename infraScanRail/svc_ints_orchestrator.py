@@ -1,6 +1,6 @@
 """
 svc_ints_orchestrator — Phase 5B engine + entry point + standalone CLI.
-Last modified: 2026-06-11
+Last modified: 2026-06-20
 
 Single home for the service-intervention stack (mirrors infra_ints_orchestrator):
 
@@ -8,23 +8,25 @@ Single home for the service-intervention stack (mirrors infra_ints_orchestrator)
   • apply_svc_int               (delta materialisation — added in Phase 2)
   • Phase 5B orchestration + standalone CLI   (added in Phase 5)
 
-EXT discovery lives in ``svc_ints_extension`` and NDC building in ``svc_ints_ndc``;
-both import THIS module for registry helpers and are imported lazily (inside the phase
-function) to avoid an import cycle.
+Per-type discovery lives in the sibling modules — ``svc_ints_extend_lines`` (EXT),
+``svc_ints_new_direct_connections`` (NDC), ``svc_ints_frequency`` (FRQ) and
+``svc_ints_stop_patterns`` (STP); all import THIS module for registry helpers and are
+imported lazily (inside the phase function) to avoid an import cycle.
 
 Registry (declarative source of truth)
 --------------------------------------
 One logical record per service intervention (extended line 'ext' / new direct
-connection 'ndc' / frequency change 'frq'), identified by ``int_id`` and stored as a
-row of the ``extensions`` sheet of a per-type xlsx (``ext_interventions.xlsx`` /
-``ndc_interventions.xlsx`` / ``frq_interventions.xlsx``).
+connection 'ndc' / frequency change 'frq' / stopping-pattern change 'stp'), identified
+by ``int_id`` and stored as a row of the ``extensions`` sheet of a per-type xlsx
+(``ext_interventions.xlsx`` / ``ndc_interventions.xlsx`` / ``frq_interventions.xlsx`` /
+``stp_interventions.xlsx``).
 A record stores the *declarative operation list* (the service delta), keyed by the
 in-run ``(route_id, direction_id, variant_rank)`` of the line it targets — valid
 because svc-ints are generated against the active version each run.
 
-  operations     : [{op, params}, …] — extend / truncate / reroute / set_frequency
-                   on an existing line (applied to both direction_id rows), or
-                   new_line for an NDC.
+  operations     : [{op, params}, …] — extend / truncate / reroute / set_frequency /
+                   add_stop / drop_stop on an existing line (applied to both
+                   direction_id rows), or new_line for an NDC.
   requires_infra : the cc_id(s) the intervention activates (empty for pure EXT).
   affected_*     : affected-set primaries (stations / services) — Phase 6 expands
                    these to the exact closure.
@@ -55,8 +57,7 @@ import settings
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-# All svc-int registries store their rows in one sheet, named for back-compat with
-# infra_ints_orchestrator.enumerate_active_infra_ints (reads sheet 'extensions').
+# All svc-int registries store their rows in one sheet (historically read by name).
 SHEET = 'extensions'
 
 SUPPORTED_SVC_INT_TYPES = ('ext', 'ndc', 'frq', 'stp')
@@ -1622,7 +1623,7 @@ def phase_5b_service_interventions(
     # the propagated (enhanced) version, so EXT/NDC land in the SAME combo 5A's CC and 5C's
     # CAP use; passed explicitly because the _svc_network() default reads settings (base).
     combo = f"{base_infra}__{base_svc}"
-    print(f"\n=== Phase 5B — Service Interventions (mode={mode}) ===")
+    print(f"\n=== [5B] Service Interventions (mode={mode}) ===")
     print(f"  base infra: {base_infra} | services: {base_svc} | combo: {combo} | active: {active or 'none'}")
 
     result: Dict = {'ext_ids': [], 'ndc_ids': [], 'frq_ids': [], 'stp_ids': [],
@@ -1768,7 +1769,7 @@ def phase_5b_service_interventions(
         except Exception as exc:
             print(f"  [plot] WARNING: svc-int plots failed: {exc}")
 
-    print(f"=== Phase 5B done: {len(result['ext_ids'])} EXT, "
+    print(f"=== [5B] done: {len(result['ext_ids'])} EXT, "
           f"{len(result['ndc_ids'])} NDC, {len(result['frq_ids'])} FRQ, "
           f"{len(result['stp_ids'])} STP, "
           f"{len(result['materialised'])} materialised ===\n")
@@ -1932,7 +1933,345 @@ _BACKDROP      = '#d4d4d4'   # unused infrastructure
 _LAKE_FC       = '#c8e8f5'
 _LAKE_EC       = '#99c4d8'
 _ENDNODE_FC    = '#f6a21e'   # orange terminus / branch marker (candidate plots)
-_OFFSET_M      = 160.0       # perpendicular spacing between interventions sharing a track
+_OFFSET_M      = 160.0       # perpendicular spacing between interventions sharing a track (single-int legacy path)
+
+# Bundle / candidate / overview rendering (the per-int colour + dynamic-offset family).
+_SVC_SP    = 110.0   # perpendicular spacing between lines sharing one infra hop
+_SVC_LW    = 2.2     # uniform service-line width
+_ST_ALONG  = 70.0    # stadium half-thickness along the track (the short axis / cap radius)
+_ST_MARGIN = 45.0    # extra stadium half-width beyond the bundle offset (the long axis)
+
+
+def _svc_overview_colors(ids: List[str]) -> Dict[str, tuple]:
+    """Stable per-int colour map (tab20) shared by the candidate + overview plots."""
+    import matplotlib.pyplot as plt
+    cmap = plt.get_cmap('tab20', max(len(ids), 2))
+    return {i: cmap(k % cmap.N) for k, i in enumerate(ids)}
+
+
+def _fade(color, f: float = 0.55):
+    """Lighten a colour toward white by fraction f (the faded 'existing line' shade)."""
+    import matplotlib.colors as mcolors
+    r, g, b, _ = mcolors.to_rgba(color)
+    return (r + (1 - r) * f, g + (1 - g) * f, b + (1 - b) * f, 1.0)
+
+
+def _alt_mult(rank: int) -> float:
+    """Alternating-outward slot multiplier: 0→0 (centre), 1→+1, 2→-1, 3→+2, 4→-2 …"""
+    if rank == 0:
+        return 0.0
+    k = (rank + 1) // 2
+    return float(k if rank % 2 == 1 else -k)
+
+
+def _hop_membership(infos: List[Dict], new_only: bool = False) -> Dict[frozenset, List[str]]:
+    """hop (frozenset of the two stop names) → ordered list of int ids traversing it."""
+    mem: Dict[frozenset, List[str]] = {}
+    for info in infos:
+        seg = info['seg']
+        seg = seg[~seg['_old']] if new_only else seg
+        for h in seg['_hop'].dropna().unique():
+            mem.setdefault(h, [])
+            if info['id'] not in mem[h]:
+                mem[h].append(info['id'])
+    return mem
+
+
+def _draw_stadiums(ax, infos: List[Dict], hopmem: Dict[frozenset, List[str]], ctx: Dict) -> None:
+    """Capacity-plot-style station stadiums: oriented perpendicular to the local track
+    (doubled-angle mean) and sized to span only the bundle offset, so they connect the
+    parallel lines without painting over hops that traverse a junction."""
+    import math
+    from shapely.geometry import LineString
+    sxy: Dict[str, tuple] = {}
+    dir2: Dict[str, List[float]] = {}
+    maxoff: Dict[str, float] = {}
+    for info in infos:
+        for _, r in info['seg'].iterrows():
+            for nk, ek, nn in (('from_stop_name', 'from_stop_E', 'from_stop_N'),
+                               ('to_stop_name', 'to_stop_E', 'to_stop_N')):
+                nm = str(r.get(nk, '') or '')
+                if nm and nm not in sxy and pd.notna(r.get(ek)) and pd.notna(r.get(nn)):
+                    sxy[nm] = (float(r[ek]), float(r[nn])); dir2[nm] = [0.0, 0.0]; maxoff[nm] = 0.0
+    def _dir_at(geom, x, y):
+        """Tangent angle of ``geom`` at the geometry endpoint nearest (x, y).
+
+        Handles MultiLineStrings (the part actually touching the station) so the
+        stadium orientation follows the SERVICE direction at the stop — not the first
+        MLS part, which mis-oriented termini like Kempten / Kemptthal.
+        """
+        parts = list(geom.geoms) if geom.geom_type == 'MultiLineString' else [geom]
+        best = None
+        for ls in parts:
+            cs = list(ls.coords)
+            if len(cs) < 2:
+                continue
+            for idx, nb in ((0, 1), (-1, -2)):
+                px, py = cs[idx]; qx, qy = cs[nb]
+                d = (px - x) ** 2 + (py - y) ** 2
+                if best is None or d < best[0]:
+                    best = (d, math.atan2(qy - py, qx - px))
+        return best[1] if best else None
+
+    for info in infos:
+        for _, r in info['seg'].iterrows():
+            g = r.geometry
+            if g is None or g.is_empty:
+                continue
+            off = (len(hopmem.get(r['_hop'], [1])) - 1) / 2.0 * _SVC_SP
+            for nm in (str(r.get('from_stop_name', '') or ''), str(r.get('to_stop_name', '') or '')):
+                if nm not in dir2:
+                    continue
+                th = _dir_at(g, sxy[nm][0], sxy[nm][1])
+                if th is None:
+                    continue
+                dir2[nm][0] += math.sin(2 * th); dir2[nm][1] += math.cos(2 * th)
+                maxoff[nm] = max(maxoff[nm], off)
+    caps = []
+    for nm, (x, y) in sxy.items():
+        s2, c2 = dir2[nm]
+        orient = 0.5 * math.atan2(s2, c2) if (abs(s2) > 1e-9 or abs(c2) > 1e-9) else 0.0
+        vx, vy = -math.sin(orient), math.cos(orient)
+        half = max(maxoff[nm] + _ST_MARGIN - _ST_ALONG, 0.0)
+        caps.append(LineString([(x - vx * half, y - vy * half),
+                                (x + vx * half, y + vy * half)]).buffer(_ST_ALONG, cap_style=1))
+    if caps:
+        gpd.GeoSeries(caps, crs=SWISS_CRS).plot(ax=ax, facecolor='white', edgecolor='black',
+                                                linewidth=0.8, zorder=5)
+        for nm, (x, y) in sxy.items():
+            code = (ctx.get('node_xy', {}).get(nm, ('',)) or ('',))[0]
+            if code:
+                ax.annotate(code, xy=(x, y), xytext=(6, 6), textcoords='offset points', fontsize=5.5,
+                            fontweight='bold', color='#333333', zorder=7,
+                            bbox=dict(boxstyle='round,pad=0.1', fc='white', ec='none', alpha=0.6))
+
+
+
+def _svc_backdrop(ax, ctx) -> None:
+    """Lakes + grey infra + dashed SA boundary + extent (shared map base)."""
+    if ctx['lakes'] is not None and not ctx['lakes'].empty:
+        ctx['lakes'].plot(ax=ax, color=_LAKE_FC, edgecolor=_LAKE_EC, linewidth=0.3, zorder=0)
+    if ctx['backdrop'] is not None and not ctx['backdrop'].empty:
+        ctx['backdrop'].plot(ax=ax, color=_BACKDROP, linewidth=0.5, zorder=1)
+    if ctx['sa_gdf'] is not None:
+        ctx['sa_gdf'].boundary.plot(ax=ax, color='black', linewidth=0.8, linestyle='--',
+                                    alpha=0.6, zorder=2)
+    if ctx['extent'] is not None:
+        ax.set_xlim(ctx['extent'][0], ctx['extent'][1]); ax.set_ylim(ctx['extent'][2], ctx['extent'][3])
+
+
+def _classify_seg(seg, ctx):
+    """Tag delta segments with their hop (frozenset of stop names) + old/new flag.
+
+    A hop is 'old' (existing line) when it already exists on the BASE network for the
+    SAME GTFS_ID; everything else is 'new' (the delta). NDC = all-new (no base GTFS_ID).
+    """
+    seg = seg.copy()
+    if {'from_stop_name', 'to_stop_name'} <= set(seg.columns):
+        hops = seg.apply(lambda r: frozenset((str(r['from_stop_name']), str(r['to_stop_name']))), axis=1)
+        seg['_hop'] = hops
+        bp: set = set()
+        if 'GTFS_ID' in seg.columns:
+            for g in seg['GTFS_ID'].dropna().astype(str).unique():
+                bp |= ctx['base_pairs'].get(g, set())
+        seg['_old'] = hops.isin(bp) if bp else False
+    else:
+        seg['_hop'] = None; seg['_old'] = False
+    return seg
+
+
+def _load_svc_int_infos(int_type: str, base_infra: str, base_svc: str, ctx: Dict) -> List[Dict]:
+    """Load every registered svc-int of a type as a render-ready info (classified delta)."""
+    combo = f"{base_infra}__{base_svc}"
+    infos: List[Dict] = []
+    for rec in read_records(int_type, network=combo):
+        iid = rec['int_id']
+        pp = Path(paths.get_svc_int_network_dir(iid, combo)) / base_infra / 'rail_segments.gpkg'
+        seg = _load_delta_segments(pp)
+        if seg is None or seg.empty:
+            continue
+        aff = rec.get('affected_stations') or []
+        ops = rec.get('operations')
+        ops = ops if isinstance(ops, list) else deserialize_ops(ops)
+        seg = _classify_seg(seg, ctx)
+        # FRQ doubling (a set_frequency factor op) changes the whole line, not its geometry —
+        # paint the entire line as changed rather than faded-existing.
+        if any(o.get('op') == 'set_frequency' for o in ops):
+            seg['_old'] = False
+        added: set = set()
+        dropped: set = set()
+        for o in ops:
+            if o.get('op') == 'add_stop':
+                added |= {str(s) for s in (o.get('params', {}).get('stops') or [])}
+            elif o.get('op') == 'drop_stop':
+                dropped |= {str(s) for s in (o.get('params', {}).get('stops') or [])}
+        infos.append({'id': iid, 'type': int_type,
+                      'short': str(rec.get('line_short_name') or iid),
+                      'endpoint': str(aff[0]) if aff else '', 'target': str(aff[-1]) if aff else '',
+                      'added_stops': added, 'dropped_stops': dropped,
+                      'seg': seg})
+    return infos
+
+
+def _render_overview(infos: List[Dict], ctx: Dict, out_path, title: str,
+                     new_label: str) -> Optional[str]:
+    """All-of-a-type overview: per-int colour, faded existing, per-hop bundle offset
+    (centred — tightens as lines branch off), uniform width, perpendicular stadiums."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    import infrabuild_network_builder as ic
+    if not infos:
+        return None
+    try:
+        fig, ax = plt.subplots(figsize=(11, 13))
+        ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
+        ax.set_xlabel('E [m]', fontsize=10); ax.set_ylabel('N [m]', fontsize=10)
+        _svc_backdrop(ax, ctx)
+        colors = _svc_overview_colors([i['id'] for i in infos])
+        hopmem = _hop_membership(infos)
+        for info in infos:
+            col = colors[info['id']]
+            for _, row in info['seg'].iterrows():
+                members = hopmem.get(row['_hop'], [info['id']]); cnt = len(members)
+                dist = (members.index(info['id']) - (cnt - 1) / 2.0) * _SVC_SP \
+                    if info['id'] in members else 0.0
+                g = _safe_offset(row.geometry, dist)
+                c = _fade(col) if row['_old'] else col
+                gpd.GeoSeries([g], crs=SWISS_CRS).plot(ax=ax, color=c, linewidth=_SVC_LW,
+                                                       zorder=3 if row['_old'] else 4)
+        is_stp = any(i['type'] == 'stp' for i in infos)
+        if is_stp:
+            _draw_stp_markers(ax, infos, ctx)
+        else:
+            _draw_stadiums(ax, infos, hopmem, ctx)
+        if ctx['extent'] is not None:
+            ax.set_xlim(ctx['extent'][0], ctx['extent'][1]); ax.set_ylim(ctx['extent'][2], ctx['extent'][3])
+        handles = [Line2D([0], [0], color='#888', lw=_SVC_LW, label=new_label),
+                   Line2D([0], [0], color='#cfcfcf', lw=_SVC_LW, label='Existing line (faded)'),
+                   Line2D([0], [0], color=_BACKDROP, lw=1.5, label='Unused infrastructure')]
+        if is_stp:
+            handles += [Line2D([0], [0], marker='o', color='w', markerfacecolor=_STP_ADD_FC,
+                               markeredgecolor='black', markersize=7, label='Added call'),
+                        Line2D([0], [0], marker='o', color='w', markerfacecolor=_STP_DROP_FC,
+                               markeredgecolor='black', markersize=7, label='Dropped call')]
+        ax.legend(handles=handles, loc='upper right', fontsize=7)
+        ax.set_title(title, fontsize=13, fontweight='bold')
+        ic._add_north_arrow(ax, location='upper left', scale=0.5)
+        ic._add_scale_bar(ax, location=(0.755, 0.012))
+        plt.tight_layout(); fig.savefig(out_path, bbox_inches='tight'); plt.close(fig)
+        print(f"  [plot] wrote {Path(out_path).name}")
+        return str(out_path)
+    except Exception as exc:
+        print(f"  [plot]   WARNING {Path(out_path).name}: {exc}")
+        try:
+            plt.close('all')
+        except Exception:
+            pass
+        return None
+
+
+def _render_candidates(infos: List[Dict], ctx: Dict, out_path, title: str,
+                       mark_terminus: bool) -> Optional[str]:
+    """Candidate overview: each candidate's NEW (delta) geometry along the real infra,
+    per-hop offset (longest on the centre line, alternating outward; alone → on geometry).
+    End stations as white circles; the original terminus kept orange (EXT)."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    import infrabuild_network_builder as ic
+    if not infos:
+        return None
+    try:
+        fig, ax = plt.subplots(figsize=(11, 13))
+        ax.set_aspect('equal'); ax.grid(True, alpha=0.3)
+        ax.set_xlabel('E [m]', fontsize=10); ax.set_ylabel('N [m]', fontsize=10)
+        _svc_backdrop(ax, ctx)
+        colors = _svc_overview_colors([i['id'] for i in infos])
+        order = sorted(infos, key=lambda info: -float(info['seg'][~info['seg']['_old']].geometry.length.sum()))
+        rank = {info['id']: r for r, info in enumerate(order)}
+        hopmem = _hop_membership(infos, new_only=True)
+        nxy = ctx['node_xy']
+        handles: List = []
+        target_st: Dict = {}
+        termini: set = set()
+        for k, info in enumerate(infos):
+            col = colors[info['id']]
+            for _, row in info['seg'][~info['seg']['_old']].iterrows():
+                members = sorted(hopmem.get(row['_hop'], [info['id']]), key=lambda e: rank[e])
+                dist = _alt_mult(members.index(info['id'])) * _SVC_SP if info['id'] in members else 0.0
+                g = _safe_offset(row.geometry, dist)
+                gpd.GeoSeries([g], crs=SWISS_CRS).plot(ax=ax, color=col, linewidth=_SVC_LW, alpha=0.95, zorder=4)
+            new_ends = (info['target'],) if mark_terminus else (info['endpoint'], info['target'])
+            for nm in new_ends:
+                if nm in nxy:
+                    target_st[nm] = nxy[nm]
+            if mark_terminus and info['endpoint'] in nxy:
+                termini.add(info['endpoint'])
+            handles.append(Line2D([0], [0], color=col, lw=_SVC_LW,
+                           label=f"{k+1}: {info['short']}  {info['endpoint']} → {info['target']}"))
+        _plot_stations(ax, target_st, set())     # white circle + code at new end stations
+        for nm in termini:                        # original terminus kept orange
+            p = nxy.get(nm)
+            if p:
+                ax.plot(p[1], p[2], marker='o', markersize=9, markerfacecolor=_ENDNODE_FC,
+                        markeredgecolor='black', markeredgewidth=0.9, zorder=7)
+                if p[0]:
+                    ax.annotate(p[0], xy=(p[1], p[2]), xytext=(4, 4), textcoords='offset points',
+                                fontsize=6, fontweight='bold', color='#333333', zorder=8,
+                                bbox=dict(boxstyle='round,pad=0.15', fc='white', ec='none', alpha=0.7))
+        if ctx['extent'] is not None:
+            ax.set_xlim(ctx['extent'][0], ctx['extent'][1]); ax.set_ylim(ctx['extent'][2], ctx['extent'][3])
+        base = [Line2D([0], [0], color=_BACKDROP, lw=1.5, label='Unused infrastructure'),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
+                       markeredgecolor='black', markersize=6, label='End station')]
+        if mark_terminus:
+            base.append(Line2D([0], [0], marker='o', color='w', markerfacecolor=_ENDNODE_FC,
+                               markeredgecolor='black', markersize=8, label='Original terminus'))
+        ax.legend(handles=base + handles, loc='upper right', fontsize=6)
+        ax.set_title(title, fontsize=13, fontweight='bold')
+        ic._add_north_arrow(ax, location='upper left', scale=0.5)
+        ic._add_scale_bar(ax, location=(0.755, 0.012))
+        plt.tight_layout(); fig.savefig(out_path, bbox_inches='tight'); plt.close(fig)
+        print(f"  [plot] wrote {Path(out_path).name}")
+        return str(out_path)
+    except Exception as exc:
+        print(f"  [plot]   WARNING {Path(out_path).name}: {exc}")
+        try:
+            plt.close('all')
+        except Exception:
+            pass
+        return None
+
+
+_OVERVIEW_NEW_LABEL = {'ext': 'Extension (new)', 'ndc': 'New direct connection',
+                       'frq': 'Frequency change', 'stp': 'Stopping-pattern change'}
+_STP_ADD_FC = '#8bd3a0'   # light green: a stop added to a line
+_STP_DROP_FC = '#f3a6a6'  # light red: a stop dropped from a line
+
+
+def _draw_stp_markers(ax, infos: List[Dict], ctx: Dict) -> None:
+    """STP marks the changed CALLS, not stations: a small light-green circle per added
+    stop and light-red per dropped stop (per line). Drawn instead of the stadiums."""
+    xy: Dict[str, tuple] = {}
+    for info in infos:
+        for _, r in info['seg'].iterrows():
+            for nk, ek, nn in (('from_stop_name', 'from_stop_E', 'from_stop_N'),
+                               ('to_stop_name', 'to_stop_E', 'to_stop_N')):
+                nm = str(r.get(nk, '') or '')
+                if nm and nm not in xy and pd.notna(r.get(ek)) and pd.notna(r.get(nn)):
+                    xy[nm] = (float(r[ek]), float(r[nn]))
+    for info in infos:
+        for nm in info.get('added_stops', set()):
+            if nm in xy:
+                ax.plot(xy[nm][0], xy[nm][1], marker='o', markersize=6, markerfacecolor=_STP_ADD_FC,
+                        markeredgecolor='black', markeredgewidth=0.7, zorder=6)
+        for nm in info.get('dropped_stops', set()):
+            if nm in xy:
+                ax.plot(xy[nm][0], xy[nm][1], marker='o', markersize=6, markerfacecolor=_STP_DROP_FC,
+                        markeredgecolor='black', markeredgewidth=0.7, zorder=6)
 
 
 def plot_svc_interventions(base_infra: str, base_svc: str, result: Dict,
@@ -1956,6 +2295,11 @@ def plot_svc_interventions(base_infra: str, base_svc: str, result: Dict,
     ctx = _svc_plot_context(base_infra, base_svc, sa_polygon)
     written: List[str] = []
     combo = f"{base_infra}__{base_svc}"   # plots tree partition (decision H)
+    # affected_stations in REGISTRY order ([endpoint, target] for EXT; the changed span's
+    # ends for the other types) — m['affected_stations'] is alphabetically sorted, so read
+    # the records for the single-int title '<short>: <A> - <B>'.
+    recs_by_id = {r['int_id']: r for it in SUPPORTED_SVC_INT_TYPES
+                  for r in read_records(it, network=combo)}
 
     by_type: Dict[str, List] = {t: [] for t in SUPPORTED_SVC_INT_TYPES}
     for m in materialised:
@@ -1970,7 +2314,9 @@ def plot_svc_interventions(base_infra: str, base_svc: str, result: Dict,
         by_type.setdefault(t, []).append(info)
         out_t = core.plot_out_dir(combo, t)
         p = out_t / f"svc_int_{m['svc_int_id']}_{base_infra}.pdf"
-        if _render_svc_fig([info], ctx, p, f"{m['svc_int_id']} — {info['short']}", offset=False):
+        _aff = (recs_by_id.get(m['svc_int_id'], {}) or {}).get('affected_stations') or []
+        _ttl = f"{info['short']}: {_aff[0]} - {_aff[-1]}" if len(_aff) >= 2 else info['short']
+        if _render_svc_fig([info], ctx, p, _ttl, offset=False):
             written.append(str(p))
 
     for t, items in by_type.items():
@@ -1978,18 +2324,80 @@ def plot_svc_interventions(base_infra: str, base_svc: str, result: Dict,
             continue
         out_t = core.plot_out_dir(combo, t)
         p = out_t / f"svc_int_ALL_{t.upper()}_{base_infra}.pdf"
-        if _render_svc_fig(items, ctx, p, f"All {t.upper()} svc-ints ({len(items)})", offset=True):
-            written.append(str(p))
+        t_infos = _load_svc_int_infos(t, base_infra, base_svc, ctx)
+        wp = _render_overview(t_infos, ctx, p,
+                              f"Overview of all generated {t.upper()}-interventions ({len(t_infos)})",
+                              _OVERVIEW_NEW_LABEL.get(t, 'New (delta)'))
+        if wp:
+            written.append(wp)
 
-    allp = [info for t in SUPPORTED_SVC_INT_TYPES for info in by_type.get(t, [])]
-    if allp:
-        out_all = core.plot_out_dir(combo, None)
-        p = out_all / f"svc_int_ALL_PRODUCED_{base_infra}.pdf"
-        if _render_svc_fig(allp, ctx, p,
-                           "All svc-ints (EXT green, NDC orange, FRQ violet)",
-                           offset=True):
-            written.append(str(p))
+    out_all = core.plot_out_dir(combo, None)
+    p = out_all / f"svc_int_ALL_PRODUCED_{base_infra}.pdf"
+    wp = _render_all_produced(base_infra, base_svc, ctx, p)
+    if wp:
+        written.append(wp)
     return written
+
+
+def _render_type_panel(ax, infos: List[Dict], ctx: Dict, color, title: str) -> None:
+    """One ALL_PRODUCED panel: a type's lines in its single colour (faded existing),
+    bundle offset + stadiums (STP → add/drop call circles), legend listing the lines."""
+    from matplotlib.lines import Line2D
+    _svc_backdrop(ax, ctx)
+    ax.set_aspect('equal'); ax.set_xticks([]); ax.set_yticks([])
+    handles: List = []
+    if infos:
+        hopmem = _hop_membership(infos)
+        for k, info in enumerate(infos):
+            for _, row in info['seg'].iterrows():
+                members = hopmem.get(row['_hop'], [info['id']]); cnt = len(members)
+                dist = (members.index(info['id']) - (cnt - 1) / 2.0) * _SVC_SP \
+                    if info['id'] in members else 0.0
+                g = _safe_offset(row.geometry, dist)
+                c = _fade(color) if row['_old'] else color
+                gpd.GeoSeries([g], crs=SWISS_CRS).plot(ax=ax, color=c, linewidth=_SVC_LW,
+                                                       zorder=3 if row['_old'] else 4)
+            handles.append(Line2D([0], [0], color=color, lw=_SVC_LW,
+                           label=f"{k+1}: {info['short']}  {info['endpoint']} → {info['target']}"))
+        if any(i['type'] == 'stp' for i in infos):
+            _draw_stp_markers(ax, infos, ctx)
+        else:
+            _draw_stadiums(ax, infos, hopmem, ctx)
+    if ctx['extent'] is not None:
+        ax.set_xlim(ctx['extent'][0], ctx['extent'][1]); ax.set_ylim(ctx['extent'][2], ctx['extent'][3])
+    ax.set_title(title, fontsize=11, fontweight='bold', color=color)
+    if handles:
+        ax.legend(handles=handles, loc='upper right', fontsize=5, framealpha=0.85)
+
+
+_TYPE_PANEL_NAME = {'ext': 'EXT (line extensions)', 'ndc': 'NDC (new direct connections)',
+                    'frq': 'FRQ (frequency changes)', 'stp': 'STP (stopping-pattern changes)'}
+
+
+def _render_all_produced(base_infra: str, base_svc: str, ctx: Dict, out_path) -> Optional[str]:
+    """ALL_PRODUCED as a 2x2 panel — one type each in its distinct colour, each panel
+    legending its generated lines; no shared bottom legend."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    try:
+        fig, axes = plt.subplots(2, 2, figsize=(17, 19))
+        for ax, t in zip(axes.ravel(), ('ext', 'ndc', 'frq', 'stp')):
+            infos = _load_svc_int_infos(t, base_infra, base_svc, ctx)
+            _render_type_panel(ax, infos, ctx, _TYPE_COLOR[t],
+                               f"{_TYPE_PANEL_NAME[t]} ({len(infos)})")
+        fig.suptitle("All generated service interventions", fontsize=16, fontweight='bold')
+        fig.tight_layout(rect=(0, 0, 1, 0.98))
+        fig.savefig(out_path, bbox_inches='tight'); plt.close(fig)
+        print(f"  [plot] wrote {Path(out_path).name}")
+        return str(out_path)
+    except Exception as exc:
+        print(f"  [plot]   WARNING {Path(out_path).name}: {exc}")
+        try:
+            plt.close('all')
+        except Exception:
+            pass
+        return None
 
 
 def _svc_plot_context(base_infra: str, base_svc: str, sa_polygon) -> Dict:
@@ -2023,157 +2431,48 @@ def _svc_plot_context(base_infra: str, base_svc: str, sa_polygon) -> Dict:
 # Candidate-overview plots (potential connections from the original termini)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_ext_candidates(base_infra: str, base_svc: str, candidates: List[Dict],
+def plot_ext_candidates(base_infra: str, base_svc: str, candidates: List[Dict] = None,
                         sa_polygon=None):
-    """Overview of every discovered EXT candidate as a numbered terminus→target line."""
-    conns = _ext_candidate_conns(candidates)
-    return _plot_candidates('ext', base_infra, base_svc, conns, sa_polygon, highlight='a',
-                            endlabel='Terminus',
-                            title=f"Extended-line candidates — {base_infra} ({len(conns)})")
+    """EXT candidate overview — each candidate's extension along the real infra geometry.
 
-
-def plot_ndc_candidates(base_infra: str, base_svc: str, ndc_candidates: List[Dict],
-                        sa_polygon=None):
-    """Overview of every NDC connecting-curve candidate as a numbered branch–branch line."""
-    conns = _ndc_candidate_conns(ndc_candidates)
-    return _plot_candidates('ndc', base_infra, base_svc, conns, sa_polygon, highlight='both',
-                            endlabel='Branch station',
-                            title=f"New-direct-connection candidates — {base_infra} ({len(conns)})")
-
-
-def _ext_candidate_conns(candidates: Optional[List[Dict]]) -> List[Dict]:
-    """EXT candidate dicts → deduped [{a, b, label}] (terminus → target)."""
-    out: List[Dict] = []
-    seen: set = set()
-    for c in (candidates or []):
-        ep, tgt = str(c.get('endpoint', '') or ''), str(c.get('target', '') or '')
-        if not ep or not tgt:
-            continue
-        key = (ep, tgt)
-        if key in seen:
-            continue
-        seen.add(key)
-        sn = str(c.get('line_short_name', '') or '').strip()
-        out.append({'a': ep, 'b': tgt,
-                    'label': f"{len(out) + 1}: {sn + ' ' if sn else ''}{ep} → {tgt}"})
-    return out
-
-
-def _ndc_candidate_conns(ndc_candidates: Optional[List[Dict]]) -> List[Dict]:
-    """NDC connecting-curve candidate dicts → deduped [{a, b, label}] (branch – branch)."""
-    out: List[Dict] = []
-    seen: set = set()
-    for c in (ndc_candidates or []):
-        a, b = c.get('branch_a'), c.get('branch_b')
-        if not a or not b:
-            continue
-        key = frozenset((str(a), str(b)))
-        if key in seen:
-            continue
-        seen.add(key)
-        req = ','.join(str(r) for r in (c.get('requires_infra') or []))
-        out.append({'a': str(a), 'b': str(b),
-                    'label': f"{len(out) + 1}: {a} – {b}" + (f" ({req})" if req else "")})
-    return out
-
-
-def _plot_candidates(kind: str, base_infra: str, base_svc: str, conns: List[Dict],
-                     sa_polygon, *, highlight: str, endlabel: str, title: str):
-    """Draw candidate connections as numbered straight lines over the SA infra backdrop.
-
-    Mirrors the legacy 'developments' / 'missing connections' overview logic with our
-    styling: grey infra + lakes, each candidate a distinct colour with a numbered legend
-    entry, the original termini (EXT) / branch stations (NDC) marked as orange end-nodes.
+    Reads the materialised deltas (not the discovery dicts) so candidates follow the
+    routed track with the per-hop bundle offset; the original terminus is marked orange
+    and the new end station as a white circle. ``candidates`` is accepted for call-site
+    compatibility but no longer used.
     """
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
-    from matplotlib.lines import Line2D
-    import ints_core as core
-    import infrabuild_network_builder as ic
-
-    if not conns:
-        print(f"  [plot] no {kind.upper()} candidates — skipping candidate plot")
-        return None
-
     ctx = _svc_plot_context(base_infra, base_svc, sa_polygon)
-    nxy = ctx['node_xy']
-    try:
-        fig, ax = plt.subplots(figsize=(11, 13))
-        ax.set_aspect('equal')
-        ax.set_xlabel('E [m]', fontsize=10)
-        ax.set_ylabel('N [m]', fontsize=10)
-        ax.grid(True, alpha=0.3)
+    infos = _load_svc_int_infos('ext', base_infra, base_svc, ctx)
+    out = Path(paths.get_developments_plot_dir(f"{base_infra}__{base_svc}", 'ext'))
+    out.mkdir(parents=True, exist_ok=True)
+    return _render_candidates(infos, ctx, out / f"ext_candidates_{base_infra}.pdf",
+                              f"Extend-line candidates ({len(infos)})", mark_terminus=True)
 
-        if ctx['lakes'] is not None and not ctx['lakes'].empty:
-            ctx['lakes'].plot(ax=ax, color=_LAKE_FC, edgecolor=_LAKE_EC, linewidth=0.3, zorder=0)
-        if ctx['backdrop'] is not None and not ctx['backdrop'].empty:
-            ctx['backdrop'].plot(ax=ax, color=_BACKDROP, linewidth=0.5, zorder=1)
-        if ctx['sa_gdf'] is not None:
-            ctx['sa_gdf'].boundary.plot(ax=ax, color='black', linewidth=0.8,
-                                        linestyle='--', alpha=0.6, zorder=2)
 
-        cmap = cm.get_cmap('tab20', max(len(conns), 2))
-        endnodes: set = set()
-        involved: set = set()
-        handles: List = []
-        for i, c in enumerate(conns):
-            a, b = nxy.get(c['a']), nxy.get(c['b'])
-            if not a or not b:
-                continue
-            col = cmap(i % cmap.N)
-            ax.plot([a[1], b[1]], [a[2], b[2]], color=col, linewidth=3.0,
-                    solid_capstyle='round', alpha=0.9, zorder=4)
-            involved.update((c['a'], c['b']))
-            endnodes.update((c['a'], c['b']) if highlight == 'both' else (c['a'],))
-            handles.append(Line2D([0], [0], color=col, lw=3, label=c['label']))
+def plot_ndc_candidates(base_infra: str, base_svc: str, ndc_candidates: List[Dict] = None,
+                        sa_polygon=None):
+    """NDC candidate overview — each new through-service along the real infra geometry.
 
-        _plot_stations(ax, {nm: nxy[nm] for nm in involved if nm in nxy}, set())
-        for nm in endnodes:
-            p = nxy.get(nm)
-            if p:
-                ax.plot(p[1], p[2], marker='o', markersize=9, markerfacecolor=_ENDNODE_FC,
-                        markeredgecolor='black', markeredgewidth=0.9, zorder=7)
-
-        if ctx['extent'] is not None:
-            ax.set_xlim(ctx['extent'][0], ctx['extent'][1])
-            ax.set_ylim(ctx['extent'][2], ctx['extent'][3])
-
-        base_handles = [
-            Line2D([0], [0], color=_BACKDROP, lw=1.5, label='Unused infrastructure'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
-                   markeredgecolor='black', markersize=6, label='Service stop'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor=_ENDNODE_FC,
-                   markeredgecolor='black', markersize=8, label=endlabel),
-        ]
-        ax.legend(handles=base_handles + handles, loc='upper right', fontsize=6)
-
-        ax.set_title(title, fontsize=13, fontweight='bold')
-        ic._add_north_arrow(ax, location='upper left', scale=0.5)
-        ic._add_scale_bar(ax, location=(0.755, 0.012))
-        plt.tight_layout()
-
-        out_dir = core.plot_out_dir(core._combo(base_infra), kind)
-        out_path = out_dir / f"{kind}_candidates_{base_infra}.pdf"
-        fig.savefig(out_path, bbox_inches='tight')
-        plt.close(fig)
-        print(f"  [plot] wrote {out_path.name} ({len(conns)} candidate connection(s))")
-        return str(out_path)
-    except Exception as exc:
-        print(f"  [plot]   WARNING {kind} candidates: {exc}")
-        try:
-            plt.close('all')
-        except Exception:
-            pass
-        return None
+    Reads the materialised deltas; both ends are new stations (white circles). The
+    ``ndc_candidates`` arg is accepted for call-site compatibility but no longer used.
+    """
+    ctx = _svc_plot_context(base_infra, base_svc, sa_polygon)
+    infos = _load_svc_int_infos('ndc', base_infra, base_svc, ctx)
+    out = Path(paths.get_developments_plot_dir(f"{base_infra}__{base_svc}", 'ndc'))
+    out.mkdir(parents=True, exist_ok=True)
+    return _render_candidates(infos, ctx, out / f"ndc_candidates_{base_infra}.pdf",
+                              f"New-direct-connection candidates ({len(infos)})", mark_terminus=False)
 
 
 def _svc_int_plot_info(m: Dict, seg, t: str, ctx: Dict) -> Dict:
     """Classify a delta's segments (old vs new), collect stops + termini + short name."""
+    # Old (existing) vs new (delta) split: a delta stop-pair is "old" when it already
+    # exists on the BASE network for the SAME line. ctx['base_pairs'] is keyed by GTFS_ID,
+    # so look it up by the delta's GTFS_ID — NOT changed_route_ids (route_id), which never
+    # matches a GTFS_ID and silently left every segment classed "new" (all-dark plots).
     base_pairs: set = set()
-    for r in (m.get('changed_route_ids') or []):
-        base_pairs |= ctx['base_pairs'].get(str(r), set())
+    if 'GTFS_ID' in seg.columns:
+        for g in seg['GTFS_ID'].dropna().astype(str).unique():
+            base_pairs |= ctx['base_pairs'].get(g, set())
 
     has_names = 'from_stop_name' in seg.columns and 'to_stop_name' in seg.columns
     if has_names and base_pairs:

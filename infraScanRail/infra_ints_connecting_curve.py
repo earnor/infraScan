@@ -1,6 +1,6 @@
 """
 infra_ints_connecting_curve — Auto-discover and place connecting curves (CC).
-Last modified: 2026-06-07
+Last modified: 2026-06-20
 
 Automates the predecessor's connecting-curve logic on the real base graph
 (no hardcoded corridors / AK2035 reads). CC is a **rail-only** intervention: the
@@ -179,7 +179,8 @@ def plot_cc_changes(base_version: str, extents=('CA', 'SA')) -> List[str]:
     return core.render_int_diff(base_version, ids, out_tag='CC',
                                 added_label='Connecting curve', added_color=_CC_COLOR,
                                 added_edge=_CC_EDGE, out_dir=out_dir, extents=extents,
-                                superseded_color=_CC_SUPERSEDED)
+                                superseded_color=_CC_SUPERSEDED,
+                                title='Generated connecting curves')
 
 
 # ─────────────────────────────────────────────────────────────────────────────

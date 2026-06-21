@@ -1192,6 +1192,38 @@ def phase_4a_catchment_allocation(
         infra_projection=PIPELINE_CONFIG.infra_version,
     )
 
+    # ── Phase 4A runtime summary → report_new.txt ────────────────────────────
+    # The CALIBRATION INPUTS block (Step 4A.0) records the cost parameters; this
+    # block records the allocation outputs. NO_PT cells carry id_point == -1.
+    try:
+        _cm_dir = os.path.join(paths.MAIN, 'data', 'Catchment_Area', svc_network,
+                               'PT_Feeder' if method == 'pt_feeder' else 'Municipal')
+        _n_stations = None
+        _cgpkg = os.path.join(_cm_dir, 'catchment.gpkg')
+        if os.path.exists(_cgpkg):
+            _n_stations = len(gpd.read_file(_cgpkg))
+        _n_cells = _n_nopt = None
+        if method == 'pt_feeder':
+            _apath = os.path.join(_cm_dir, 'allocation_pt_feeder.parquet')
+            if os.path.exists(_apath):
+                _alloc = pd.read_parquet(_apath, columns=['id_point'])
+                _n_cells = len(_alloc)
+                _n_nopt = int((_alloc['id_point'] == -1).sum())
+        _plots_line = (f"generated to plots/Catchment_Area/{svc_network}"
+                       if settings.PLOT_CATCHMENT else "skipped (PLOT_CATCHMENT = False)")
+        with open(os.path.join(paths.MAIN, 'report_new.txt'), 'a', encoding='utf-8') as _f:
+            _f.write("\n--- CATCHMENT ALLOCATION (Phase 4A) ---\n")
+            _f.write(f"  Method                 : {catchment_method}  -> '{method}'\n")
+            _f.write(f"  Travel / transfer cost : {settings.TRAVEL_COST_METHOD} / {settings.TRANSFER_COST_MODEL}\n")
+            _f.write(f"  Temporal               : {temporal}\n")
+            if _n_stations is not None:
+                _f.write(f"  Stations with catchment: {_n_stations}\n")
+            if _n_cells is not None:
+                _f.write(f"  Cells allocated        : {_n_cells - _n_nopt} of {_n_cells} ({_n_nopt} no-PT)\n")
+            _f.write(f"  Plots                  : {_plots_line}\n")
+    except Exception as _exc:
+        print(f"  [4A] runtime summary skipped: {_exc}")
+
     runtimes["Phase 4A: Catchment Allocation"] = time.time() - st
 
 
@@ -1382,6 +1414,33 @@ def _write_assignment_to_report(method: str, svc_network: str,
 
 def _write_station_od_to_report(method: str, svc_network: str) -> None:
     """Append a 'STATION OD MATRIX (Phase 4B)' block to report_new.txt."""
+    # Key output counts (light reads; skipped silently if unavailable). For
+    # PT-Feeder the long CSV is keyed by the active attribution mode; Municipal
+    # is labelled 'municipal'.
+    _attr = settings.OD_ATTRIBUTION_MODE if method == 'pt_feeder' else 'municipal'
+    _n_pairs = _tot_trips = _pct_ext = _n_gw = None
+    try:
+        _lp = paths.get_station_od_long_csv(svc_network, method, _attr)
+        if os.path.exists(_lp):
+            _od = pd.read_csv(_lp)
+            _n_pairs, _tot_trips = len(_od), float(_od['trips'].sum())
+    except Exception:
+        pass
+    try:
+        _gwdir = paths.get_gateway_dir(svc_network)
+        _ip = os.path.join(_gwdir, 'od_internal.csv')
+        _ep = os.path.join(_gwdir, 'od_external.csv')
+        if os.path.exists(_ip) and os.path.exists(_ep):
+            _wi = float(pd.read_csv(_ip)['wert'].sum())
+            _we = float(pd.read_csv(_ep)['wert'].sum())
+            if _wi + _we > 0:
+                _pct_ext = 100.0 * _we / (_wi + _we)
+        _sx = os.path.join(_gwdir, 'gateway_splits.xlsx')
+        if os.path.exists(_sx):
+            _n_gw = len(pd.read_excel(_sx, sheet_name='Gateway_Split'))
+    except Exception:
+        pass
+
     lines = [
         "=" * 160,
         "  STATION OD MATRIX (Phase 4B)",
@@ -1391,6 +1450,13 @@ def _write_station_od_to_report(method: str, svc_network: str) -> None:
         f"  Service version      : {svc_network}",
         f"  Population base year  : {settings.start_year_scenario}",
         f"  Temporal window      : {getattr(settings, 'TEMPORAL', 'full_day')}",
+    ]
+    if _n_pairs is not None:
+        lines.append(f"  Station-OD pairs      : {_n_pairs:,} (full-day; {_tot_trips:,.0f} trips)")
+    if _pct_ext is not None:
+        _gw_note = f" ({_n_gw} boundary gateways)" if _n_gw is not None else ""
+        lines.append(f"  External demand       : {_pct_ext:.1f}% routed via gateways{_gw_note}")
+    lines += [
         f"  OD output dir        : data/Traffic_Flow/OD/{svc_network}/",
         "=" * 160,
     ]
@@ -1519,11 +1585,11 @@ def _phase5_base_infra() -> str:
 def phase_5a_infrastructure_interventions(sa_boundary, runtimes: dict) -> None:
     """Phase 5A: generate the infra-int registry + master tagged network.
 
-    Discovers connecting curves (CC) against the base infra + service version and
-    collects the capacity interventions (CAP) registered during Phase 3C, then
-    materialises the master tagged 'Dev_Full' network. Gated by settings.INFRA_INT_MODE
-    ('NONE' skips). Does not alter the baseline infra version; the per-svc-int deltas
-    are consumed downstream (Phase 6) via infra_ints_orchestrator.compose_infra.
+    Discovers connecting curves (CC) against the base infra + service version, then
+    materialises the master tagged 'Dev_Full' network (CC-only; CAP enters the master
+    in Phase 5C). Gated by settings.INFRA_INT_MODE ('NONE' skips). Does not alter the
+    baseline infra version; the per-svc-int deltas are consumed downstream (Phase 6)
+    via infra_ints_orchestrator.compose_infra.
 
     Args:
         sa_boundary: study-area polygon, used to restrict CC discovery centres.
@@ -1550,6 +1616,25 @@ def phase_5a_infrastructure_interventions(sa_boundary, runtimes: dict) -> None:
         ) or {}
     except Exception as exc:
         print(f"  WARNING: Phase 5A failed: {exc}")
+
+    # ── Phase 5A runtime summary → report_new.txt ────────────────────────────
+    _base = _phase5_base_infra()
+    _svc = PIPELINE_CONFIG.svc_version or _io._resolve_svc_version()
+    _n_cc = len(result.get('cc_ids', []) or [])
+    _master = result.get('master') or '(not built)'
+    if settings.PLOT_INFRA_INTS:
+        _combo = f"{_base}__{_svc}"
+        _plots_line = f"generated to {paths.DEVELOPMENTS_PLOTS_DIR}/{_combo}/{{cc,Dev_Full}}"
+    else:
+        _plots_line = "skipped (PLOT_INFRA_INTS = False)"
+    with open(os.path.join(paths.MAIN, 'report_new.txt'), 'a', encoding='utf-8') as _f:
+        _f.write("\n--- INFRASTRUCTURE INTERVENTIONS (Phase 5A) ---\n")
+        _f.write(f"  Mode (INFRA_INT_MODE)  : {settings.INFRA_INT_MODE}\n")
+        _f.write(f"  Base infra / service   : {_base} / {_svc}\n")
+        _f.write(f"  Connecting curves      : {_n_cc} CC registered\n")
+        _f.write(f"  Master network         : {_master} (CC-only Dev_Full)\n")
+        _f.write(f"  Plots                  : {_plots_line}\n")
+
     runtimes["Phase 5A: Infrastructure Interventions"] = time.time() - st
     return result
 
@@ -1570,6 +1655,7 @@ def phase_5b_service_interventions(sa_boundary, sa_buffer, runtimes: dict,
         runtimes:    dict tracking phase execution times.
         ndc_candidates: 5A connecting-curve candidates (branch_a/b, requires_infra).
     """
+    import infra_ints_orchestrator as _io
     import svc_ints_orchestrator as _so
     if not _so.svc_int_active():
         return {}
@@ -1579,8 +1665,6 @@ def phase_5b_service_interventions(sa_boundary, sa_buffer, runtimes: dict,
     st = time.time()
     result: dict = {}
     try:
-        import infra_ints_orchestrator as _io
-        import svc_ints_orchestrator as _so
         result = _so.phase_5b_service_interventions(
             base_infra=_phase5_base_infra(),
             base_svc=PIPELINE_CONFIG.svc_version or _io._resolve_svc_version(),
@@ -1589,6 +1673,25 @@ def phase_5b_service_interventions(sa_boundary, sa_buffer, runtimes: dict,
         ) or {}
     except Exception as exc:
         print(f"  WARNING: Phase 5B failed: {exc}")
+
+    # ── Phase 5B runtime summary → report_new.txt ────────────────────────────
+    _base = _phase5_base_infra()
+    _svc = PIPELINE_CONFIG.svc_version or _io._resolve_svc_version()
+    _n = {k: len(result.get(f"{k}_ids", []) or []) for k in ('ext', 'ndc', 'frq', 'stp')}
+    _mat = len(result.get('materialised', []) or [])
+    if settings.PLOT_SVC_INTS:
+        _plots_line = f"generated to {paths.DEVELOPMENTS_PLOTS_DIR}/{_base}__{_svc}/{{ext,ndc,frq,stp}}"
+    else:
+        _plots_line = "skipped (PLOT_SVC_INTS = False)"
+    with open(os.path.join(paths.MAIN, 'report_new.txt'), 'a', encoding='utf-8') as _f:
+        _f.write("\n--- SERVICE INTERVENTIONS (Phase 5B) ---\n")
+        _f.write(f"  Mode (SVC_INT_MODE)    : {settings.SVC_INT_MODE}\n")
+        _f.write(f"  Base infra / service   : {_base} / {_svc}\n")
+        _f.write(f"  Generated svc-ints     : {_n['ext']} EXT, {_n['ndc']} NDC, "
+                 f"{_n['frq']} FRQ, {_n['stp']} STP\n")
+        _f.write(f"  Materialised deltas    : {_mat}\n")
+        _f.write(f"  Plots                  : {_plots_line}\n")
+
     runtimes["Phase 5B: Service Interventions"] = time.time() - st
     return result
 
@@ -2265,59 +2368,80 @@ def phase_7_scenarios(runtimes: dict, svc_int_ids=None) -> None:
           f"({settings.start_year_scenario}-{settings.end_year_scenario}, "
           f"seeded LHS)")
 
-    _rs.build_scenario_factor_store(
+    print("\n--- Step 7.1: Baseline factor store ---")
+    build = _rs.build_scenario_factor_store(
         svc_version, base_infra, od_method, attribution,
         n_scenarios=settings.amount_of_scenarios,
         start_year=settings.start_year_scenario,
         end_year=settings.end_year_scenario,
         make_plots=settings.PLOT_SCENARIOS,
-        use_cache=settings.use_cache_scenarios)
+        use_cache=settings.use_cache_scenarios) or {}
 
+    print("\n--- Step 7.2: Per-svc-int factor overrides ---")
     import svc_ints_orchestrator as _so
-    if not _so.svc_int_active():
-        print("\n  SVC_INT_MODE resolves to no svc-ints — baseline factor store only.")
-        runtimes["Phase 7: Scenarios"] = time.time() - st
-        return
-    if od_method != 'pt_feeder':
-        print("\n  Municipal OD is intervention-invariant — no per-svc-int "
-              "overrides (compose uses the baseline factors).")
-        runtimes["Phase 7: Scenarios"] = time.time() - st
-        return
-
-    import svc_ints_orchestrator as _so
-    combo = f'{base_infra}__{svc_version}'
-    records = [(t, r) for t in _so.SUPPORTED_SVC_INT_TYPES
-               for r in _so.read_records(t, network=combo)]
-    if svc_int_ids is not None:
-        want = {str(i) for i in svc_int_ids}
-        records = [(t, r) for t, r in records if str(r['int_id']) in want]
-    if not records:
-        print(f"\n  No svc-ints registered for combo '{combo}' — baseline "
-              f"factor store only.")
-        runtimes["Phase 7: Scenarios"] = time.time() - st
-        return
-
     n_done = n_skip = n_fail = 0
-    for _, rec in records:
-        iid = str(rec['int_id'])
-        try:
-            res = _rs.build_svc_int_factor_overrides(
-                iid, svc_version, base_infra, od_method, attribution,
-                n_scenarios=settings.amount_of_scenarios,
-                start_year=settings.start_year_scenario,
-                end_year=settings.end_year_scenario,
-                use_cache=settings.use_cache_scenarios)
-            if res.get('cached') or res.get('overrides_path') is None:
-                n_skip += 1
-            else:
-                n_done += 1
-        except Exception as exc:
-            print(f"  WARNING: Phase 7 overrides failed for {iid}: {exc}")
-            n_fail += 1
+    records = []
+    if not _so.svc_int_active():
+        print("  [7.2] SVC_INT_MODE resolves to no svc-ints — baseline factor store only.")
+    elif od_method != 'pt_feeder':
+        print("  [7.2] Municipal OD is intervention-invariant — no overrides "
+              "(compose uses the baseline factors).")
+    else:
+        combo = f'{base_infra}__{svc_version}'
+        records = [(t, r) for t in _so.SUPPORTED_SVC_INT_TYPES
+                   for r in _so.read_records(t, network=combo)]
+        if svc_int_ids is not None:
+            want = {str(i) for i in svc_int_ids}
+            records = [(t, r) for t, r in records if str(r['int_id']) in want]
+        if not records:
+            print(f"  [7.2] No svc-ints registered for combo '{combo}' — baseline only.")
+        else:
+            for k, (_, rec) in enumerate(records, 1):
+                iid = str(rec['int_id'])
+                try:
+                    res = _rs.build_svc_int_factor_overrides(
+                        iid, svc_version, base_infra, od_method, attribution,
+                        n_scenarios=settings.amount_of_scenarios,
+                        start_year=settings.start_year_scenario,
+                        end_year=settings.end_year_scenario,
+                        use_cache=settings.use_cache_scenarios) or {}
+                    if res.get('cached'):
+                        n_skip += 1; tag = 'cached'
+                    elif res.get('overrides_path') is None:
+                        n_skip += 1; tag = 'no allocation change'
+                    else:
+                        n_done += 1
+                        n_ov = (len(res.get('changed_stations') or [])
+                                + len(res.get('new_stations') or []))
+                        tag = f"{n_ov} station override(s)"
+                    print(f"  [7.2] {iid} ({k}/{len(records)}): {tag}")
+                except Exception as exc:
+                    n_fail += 1
+                    print(f"  [7.2] WARNING {iid} ({k}/{len(records)}): {exc}")
+            print(f"\n  [7.2] {n_done} override table(s) written, {n_skip} skipped "
+                  f"(cached / no change), {n_fail} failed (of {len(records)}).")
 
-    print(f"\n  Phase 7 summary: {n_done} override table(s) written, "
-          f"{n_skip} skipped (cached / no allocation change), {n_fail} failed "
-          f"(of {len(records)} svc-int(s)).")
+    # ── Phase 7 runtime summary → report_new.txt ─────────────────────────────
+    _cls = build.get('classification') or {}
+    with open(os.path.join(paths.MAIN, 'report_new.txt'), 'a', encoding='utf-8') as _f:
+        _f.write("\n--- SCENARIOS (Phase 7) ---\n")
+        _f.write(f"  Scenario type          : {settings.scenario_type}\n")
+        _f.write(f"  Scenarios / years      : {settings.amount_of_scenarios} "
+                 f"({settings.start_year_scenario}-{settings.end_year_scenario}, seeded LHS)\n")
+        _f.write(f"  Service / infra        : {svc_version} / {base_infra}\n")
+        _f.write(f"  OD method / attribution: {od_method} / {attribution}\n")
+        if _cls:
+            _f.write(f"  Station factors        : {len(_cls.get('weighted', []))} pop-weighted, "
+                     f"{len(_cls.get('gateway', []))} gateway (CH), "
+                     f"{len(_cls.get('fallback', []))} CH-fallback\n")
+        elif build.get('cached'):
+            _f.write("  Station factors        : (baseline store reused from cache)\n")
+        _f.write(f"  Svc-int overrides      : {n_done} written, {n_skip} skipped, "
+                 f"{n_fail} failed (of {len(records)})\n")
+        _plots = (f"generated to {paths.PLOT_SCENARIOS}" if settings.PLOT_SCENARIOS
+                  else "skipped (PLOT_SCENARIOS = False)")
+        _f.write(f"  Plots                  : {_plots}\n")
+
     runtimes["Phase 7: Scenarios"] = time.time() - st
 
 

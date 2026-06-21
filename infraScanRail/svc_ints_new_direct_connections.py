@@ -1,6 +1,6 @@
 """
 svc_ints_new_direct_connections — Phase 5B: build new-direct-connection (NDC) svc-ints.
-Last modified: 2026-06-11
+Last modified: 2026-06-20
 
 Turns the connecting-curve candidates handed over by Phase 5A
 (``infra_ints_connecting_curve.discover_and_register`` → ``ndc_candidates``) into NDC
@@ -57,7 +57,7 @@ def build_ndc_records(
     Args:
         ndc_candidates: list from infra_ints_connecting_curve (branch_a/b, requires_infra).
         base_infra/base_svc: resolved base versions.
-        sa_polygon: study-area boundary (≥2 NDC stops must fall inside it).
+        sa_polygon: study-area boundary (≥1 NDC stop must fall inside it; relaxed from ≥2 on 2026-06-08).
         network: registry combo for id allocation; must match where the records are
             written so ids stay contiguous within the target combo (not the settings default).
 

@@ -1052,9 +1052,9 @@ def plot_frq_candidates(base_infra: str, base_svc: str, corridors: List[Dict],
             ax.set_ylim(ctx['extent'][2], ctx['extent'][3])
         ax.legend(handles=handles, loc='upper right', fontsize=7,
                   title='Low-frequency corridors', title_fontsize=8)
-        ax.set_title(f"FRQ corridor candidates — {combo}\n"
-                     f"{len(corridors)} corridor(s), {len(candidates)} "
-                     f"extension int(s)", fontsize=12, fontweight='bold')
+        ax.set_title(f"FRQ corridor candidates "
+                     f"({len(corridors)} corridor(s), {len(candidates)} extension int(s))",
+                     fontsize=12, fontweight='bold')
         ic._add_north_arrow(ax, location='upper left', scale=0.5)
         ic._add_scale_bar(ax, location=(0.755, 0.012))
         plt.tight_layout()

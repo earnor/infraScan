@@ -396,22 +396,22 @@ plot_passenger_flow = False   # legacy only (main.py / main_cap.py); ignored by 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Set True to load pre-computed outputs from disk instead of recomputing.
 
-use_cache_network = True
-use_cache_pt_catchment = True
-use_cache_developments = True
-use_cache_catchmentOD = True
-use_cache_stationsOD = True
-use_cache_railRouting = True         # Phase 4C — skip writing routing CSVs that already exist
-use_cache_infra_ints = True          # Phase 5A — keep existing cc registry, skip re-discovery
-use_cache_svc_ints = True            # Phase 5B — keep svc-int catalogue + materialised deltas
-use_cache_svc_int_cap = True        # Phase 5C — keep svc-int CAP + merged-services workbooks
-use_cache_int_recompute = True      # Phase 6A-6C — skip svc-ints whose recompute outputs exist
-use_cache_flows = True              # Phase 6D — keep existing flow tables + maps
-use_cache_traveltime_graph = True
-use_cache_scenarios = True           # Phase 7 — skip factor-store builds whose outputs exist
-use_cache_tts = True                 # Phase 8A — load per-svc-int tts.parquet caches when present
-use_cache_costs = True               # Phase 8B — skip when construction_cost.csv covers all svc-ints
-use_cache_tts_calc = True
+use_cache_network = False
+use_cache_pt_catchment = False
+use_cache_developments = False
+use_cache_catchmentOD = False
+use_cache_stationsOD = False
+use_cache_railRouting = False         # Phase 4C — skip writing routing CSVs that already exist
+use_cache_infra_ints = False          # Phase 5A — keep existing cc registry, skip re-discovery
+use_cache_svc_ints = False            # Phase 5B — keep svc-int catalogue + materialised deltas
+use_cache_svc_int_cap = False        # Phase 5C — keep svc-int CAP + merged-services workbooks
+use_cache_int_recompute = False      # Phase 6A-6C — skip svc-ints whose recompute outputs exist
+use_cache_flows = False              # Phase 6D — keep existing flow tables + maps
+use_cache_traveltime_graph = False
+use_cache_scenarios = False           # Phase 7 — skip factor-store builds whose outputs exist
+use_cache_tts = False                 # Phase 8A — load per-svc-int tts.parquet caches when present
+use_cache_costs = False               # Phase 8B — skip when construction_cost.csv covers all svc-ints
+use_cache_tts_calc = False
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # A3. PHYSICAL ATTRIBUTES  (physics & design constants)

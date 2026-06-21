@@ -1,6 +1,6 @@
 """
 infra_ints_orchestrator — Phase 5A: connecting-curve (CC) infra interventions.
-Last modified: 2026-06-08
+Last modified: 2026-06-20
 
 Infra interventions are **CC only**. This module orchestrates Phase 5A: discover and
 register connecting curves (via infra_ints_connecting_curve), build the master tagged
@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import geopandas as gpd
-import pandas as pd
 
 import cache_manifest
 import paths
@@ -30,8 +29,6 @@ from ints_core import _resolve_base_version, _resolve_svc_version, compose_infra
 
 # Infra interventions are CC only (CAP is a mixed int — see mixed_ints_orchestrator).
 SUPPORTED_INFRA_INT_TYPES = ('cc',)
-# svc-int types whose activation is driven by INFRA_INT_MODE (legacy resolver helpers).
-SVC_INT_TYPES = ('ext', 'cc')
 
 _MASTER_PLOT_SUBTYPE = 'Dev_Full'
 
@@ -75,7 +72,7 @@ def phase_5a_infra_interventions(
         buffer_polygon = core._load_buffer()
 
     active = _active_infra_types(mode)
-    print(f"\n=== Phase 5A — Infrastructure Interventions (mode={mode}) ===")
+    print(f"\n=== [5A] Infrastructure Interventions (mode={mode}) ===")
     print(f"  base infra: {base_version} | services: {svc_version} | active: {active or 'none'}")
 
     result: Dict = {'cc_ids': [], 'ndc_candidates': [], 'master': None}
@@ -125,7 +122,7 @@ def phase_5a_infra_interventions(
         except Exception as exc:
             print(f"  [plot] WARNING: change plots failed: {exc}")
 
-    print(f"=== Phase 5A done: {len(result['cc_ids'])} CC ===\n")
+    print(f"=== [5A] done: {len(result['cc_ids'])} CC ===\n")
     return result
 
 
@@ -181,50 +178,6 @@ def infra_int_active(mode=None) -> bool:
     if mode is None:
         mode = getattr(settings, 'INFRA_INT_MODE', 'NONE')
     return bool(_active_infra_types(mode))
-
-
-def resolve_active_svc_int_types() -> List[str]:
-    """Resolve which svc-int types are active under settings.INFRA_INT_MODE."""
-    raw = getattr(settings, 'INFRA_INT_MODE', 'NONE')
-    if isinstance(raw, (list, tuple, set)):
-        return core.normalise_int_types(raw, SVC_INT_TYPES, 'INFRA_INT_MODE')
-    mode = str(raw).upper()
-    if mode == 'NONE':
-        return []
-    if mode == 'ALL':
-        return list(SVC_INT_TYPES)
-    if mode.lower() in SVC_INT_TYPES:
-        return [mode.lower()]
-    return []
-
-
-def enumerate_active_infra_ints() -> List[str]:
-    """Collect all infra-int IDs implied by the active types."""
-    active = resolve_active_svc_int_types()
-    if not active:
-        return []
-    ids: set = set()
-    infra_types = set(SUPPORTED_INFRA_INT_TYPES)
-    combo = core._combo()
-    for t in active:
-        if t in infra_types:
-            ids.update(core.list_intervention_ids(t))
-        else:
-            svc_path = Path(paths.get_svc_int_registry(t, combo))
-            if not svc_path.exists():
-                continue
-            try:
-                df = pd.read_excel(svc_path, sheet_name='extensions')
-            except Exception as exc:
-                print(f"  [registry] cannot read {svc_path.name}: {exc}")
-                continue
-            if 'requires_infra' in df.columns:
-                for raw in df['requires_infra'].dropna().astype(str):
-                    for token in raw.split(','):
-                        s = token.strip()
-                        if s:
-                            ids.add(s)
-    return sorted(ids)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

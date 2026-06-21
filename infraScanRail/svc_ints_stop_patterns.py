@@ -1,6 +1,6 @@
 """
 svc_ints_stop_patterns — STP svc-int discovery (Phase 5B, expansion part 2).
-Last modified: 2026-06-13
+Last modified: 2026-06-20
 
 Stopping-pattern-change interventions ('stp', id block DEV_ID_START_STP), two
 modes that always generate together. STP edits the CALLING PATTERN (which
@@ -21,6 +21,10 @@ portal) and Via_Nodes/path_nodes only (passing).
 Detection is structural on the whole-day projected stop pattern; passed stations
 are read from path_nodes (the routed path) vs the stop sequence. Materialisation
 (split/merge of the affected hops) lives in svc_ints_orchestrator._build_stp_delta.
+
+STP carries NO rolling-stock operating-cost delta (permanent limitation): adding /
+dropping calls changes dwell + run time but not train-km in a way the 8B train-metre
+model captures, and the cycle-time rolling-stock effect is out of scope.
 
 Plan: docs/infraClaude/plans/2026-06-13-svc-int-stp-part2.md.
 """

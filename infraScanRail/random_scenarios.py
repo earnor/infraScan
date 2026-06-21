@@ -1,5 +1,5 @@
 """Demand-growth scenario engine: Phase 7 factor store + legacy full-OD pickles.
-Last modified: 2026-06-10
+Last modified: 2026-06-20
 
 Phase 7 (main_new) builds a factor store instead of materialised ODs: baseline
 per-station growth-factor vectors (scenario x year) weighted by the allocated
@@ -112,7 +112,9 @@ def build_scenario_factor_store(svc_version: str, base_infra: str, method: str,
     print(f"    {parquet_path}\n    {md_path}")
 
     if make_plots:
-        _plot_factor_store_inputs(n_scenarios, start_year, end_year)
+        _plot_factor_store_inputs(
+            n_scenarios, start_year, end_year,
+            districts=[d for d in W.columns if d != _CH_DISTRICT])
 
     return {'factors_path': parquet_path, 'modal_distance_path': md_path,
             'classification': classification, 'cached': False}
@@ -654,21 +656,29 @@ def _modal_distance_table(n_scenarios: int, start_year: int,
     return out
 
 
-def _plot_factor_store_inputs(n_scenarios: int, start_year: int,
-                              end_year: int, max_districts: int = 3) -> None:
-    """Fan plots (range/mean/90% band) for the first districts, the CH
-    pseudo-district, modal split and distance per person."""
+def _plot_factor_store_inputs(n_scenarios: int, start_year: int, end_year: int,
+                              districts: List[str] = None) -> None:
+    """Fan plots (range/mean/90% band) for the catchment-area districts, the CH
+    pseudo-district, modal split and distance per person.
+
+    ``districts`` is the catchment Bezirke (those contributing population to the
+    catchment's stations — the factor store's weight-matrix columns); when None
+    (standalone use) the first three Bezirke are plotted as a fallback.
+    """
     plot_dir = os.path.join(paths.MAIN, paths.PLOT_SCENARIOS)
     os.makedirs(plot_dir, exist_ok=True)
     refs = get_bezirk_population_scenarios()
-    targets = list(refs.items())[:max_districts]
+    if districts:
+        targets = [(d, refs[d]) for d in sorted(districts) if d in refs]
+    else:
+        targets = list(refs.items())[:3]
     targets.append(('CH', _get_ch_population_reference(start_year, end_year)))
     for district, ref in targets:
         scen = generate_population_scenarios(ref, start_year, end_year,
                                              n_scenarios)
         label = f"population_{district.replace(' ', '_')}"
         plot_scenarios_with_range(scen.rename(columns={'population': label}),
-                                  plot_dir, label)
+                                  plot_dir, label, title=f"Population {district}")
     modal = generate_modal_split_scenarios(
         avg_growth_rate=0.0045, start_value=0.209, start_year=start_year,
         end_year=end_year, n_scenarios=n_scenarios, start_std_dev=0.015,
@@ -1012,7 +1022,8 @@ def plot_population_scenarios(scenarios_df: pd.DataFrame, n_to_plot: int = 10):
 def plot_scenarios_with_range(
         scenarios_df: pd.DataFrame,
         save_path,
-        value_col: str = "population"
+        value_col: str = "population",
+        title: str = None
 ):
     """
     Plot the range of all scenarios for a given value column as a shaded area
@@ -1023,6 +1034,8 @@ def plot_scenarios_with_range(
     - scenarios_df: DataFrame with columns "scenario", "year", and the specified value column
     - save_path: path where the plot will be saved
     - value_col: name of the column in scenarios_df containing the values to plot
+    - title: optional chart-title prefix; defaults to the title-cased value_col (so a
+      caller can render e.g. 'CH' that title() would otherwise lowercase to 'Ch').
     """
     # compute per-year stats
     year_stats = (
@@ -1084,7 +1097,7 @@ def plot_scenarios_with_range(
     ax.yaxis.set_major_formatter(EngFormatter(unit='', places=2))
 
     # labels & styling
-    col_title = value_col.replace('_', ' ').title()
+    col_title = title if title is not None else value_col.replace('_', ' ').title()
     ax.set_xlabel("Year")
     ax.set_title(f"{col_title} Scenarios: Range, Mean and 90% Confidence Interval")
     ax.grid(True)
