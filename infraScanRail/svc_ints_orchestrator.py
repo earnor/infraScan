@@ -1126,11 +1126,18 @@ def _stp_apply_add(chain, names, rid, dir_id, var, resolve, borrow,
                       else [sa['nr'], sb['nr']])
             bor = borrow.get((sa['name'], sb['name']))
             borrowed = bor is not None and pd.notna(bor['TT'])
-            # Geometry/length always come from the host-hop substring (and sub_pn from the
-            # host path slice above): borrowing affects run TIME only, not the physical path.
-            # Overriding with a co-passer's express hop mis-measured train-km (negative).
+            # Geometry comes from the host-hop substring (and sub_pn from the host path
+            # slice above). The LENGTH is a proportional slice of the host's routed
+            # path_length_m (total_len), NOT the raw substring geometry length: adding a
+            # stop does not change the physical route, so the split pieces must sum back to
+            # the host length (mirrors the drop merge, which sums path_length_m). Using
+            # geom.length undercounted train-km -> a spurious negative operating cost in 8B,
+            # and broke TT conservation across the split.
             geom = _stp_substring(line, seq_pts, si)
-            length = geom.length if geom is not None else 0.0
+            frac = (geom.length / line.length
+                    if geom is not None and line is not None and line.length > 0
+                    else 1.0 / (len(seq_pts) - 1))
+            length = total_len * frac
             if borrowed:                                    # real stopping time — TT only
                 tt = float(bor['TT'])
             else:

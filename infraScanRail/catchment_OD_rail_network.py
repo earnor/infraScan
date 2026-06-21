@@ -1254,6 +1254,25 @@ def _direction_of(variant_key) -> str:
     return s.rsplit('_', 2)[1] if s.count('_') >= 2 else ''
 
 
+def _route_id_of(variant_key) -> str:
+    """route_id of a 'rid_did_vrnk' variant key — multi-token-safe.
+
+    _route_of splits on the first '_', so it collapses multi-token route ids
+    (IC_C/IC_D -> 'IC', 'ndc_103001_0_1' -> 'ndc') and mismatches the route_id in
+    rail_segs_tt / _variant_keys_for, silently dropping those services from the
+    service-load plots. rsplit keeps the full route id (consistent with
+    _direction_of and the f"{route}_{direction}_" prefix in _variant_keys_for)."""
+    return str(variant_key).rsplit('_', 2)[0]
+
+
+def _wholeday_period_freq(vfreq: dict) -> dict:
+    """Per-period frequency lookup that returns the WHOLE-DAY frequency (vfreq) for
+    both peak and off-peak, so per-period service loads = full_day_trips x tau /
+    whole_day_freq. New lines (e.g. NDC) carry no peak/off-peak split, so the real
+    variant_period_freq is 0 for them; the whole-day freq is always present."""
+    return {vk: {'peak': float(f), 'off_peak': float(f)} for vk, f in vfreq.items()}
+
+
 def _line_name(variant_key_or_route) -> str:
     """Readable line_short_name for a variant key or route_id; route_id fallback."""
     rid = _route_of(variant_key_or_route)
@@ -1906,7 +1925,7 @@ def _plot_service_load_sequences(prim: dict, variant_seq: dict,
         print("    service load plots: no segments — skipped")
         return
     seg = pd.DataFrame(prim['segments']).copy()
-    seg['route_id'] = seg['variant_key'].map(_route_of)
+    seg['route_id'] = seg['variant_key'].map(_route_id_of)
     seg['direction_id'] = seg['variant_key'].map(_direction_of)
     seg = seg[seg['route_id'].isin(qualifying_routes)].copy()
     if seg.empty:
@@ -1946,11 +1965,537 @@ def _plot_service_load_sequences(prim: dict, variant_seq: dict,
                                os.path.join(out_dir, f"{stem}.png"))
 
 
+# ---------------------------------------------------------------------------
+# Phase-6C service-load DELTA plots (developed-vs-baseline, one per drawn route).
+# ---------------------------------------------------------------------------
+_SLOAD_GREEN = '#238b45'   # load added (or boarding)
+_SLOAD_RED   = '#cb181d'   # load reduced (or alighting)
+_SLOAD_BLUE  = '#3182bd'   # unchanged
+
+
+def _sload_delta_str(delta: float, tol: float = 0.5) -> str:
+    """Signed compact delta label ('+12' / '-3' / '0')."""
+    return (f"{'+' if delta > 0 else ''}{delta:.0f}") if abs(delta) >= tol else '0'
+
+
+def _service_load_seg(prim: dict) -> pd.DataFrame:
+    """Segment table with multi-token-safe route_id/direction_id and numeric
+    from_id/to_id. _replace_pairs / _persist_primitive str-cast object columns, so
+    re-routed segments carry from_id/to_id as strings while variant_seq stations
+    are ints — without coercion board/alight never match and the new-line loads
+    integrate to 0."""
+    seg = pd.DataFrame(prim['segments']).copy()
+    if seg.empty:
+        seg['route_id'] = []
+        seg['direction_id'] = []
+        return seg
+    seg['route_id'] = seg['variant_key'].map(_route_id_of)
+    seg['direction_id'] = seg['variant_key'].map(_direction_of)
+    for c in ('from_id', 'to_id'):
+        if c in seg.columns:
+            seg[c] = pd.to_numeric(seg[c], errors='coerce')
+    return seg
+
+
+def _service_load_column(seg: pd.DataFrame, route: str, direction: str, period: str,
+                         tau: float, variant_seq: dict, variant_period_freq: dict) -> dict:
+    """One (period, direction) service-load column for a route, or {} if absent."""
+    rseg = seg[seg['route_id'] == route]
+    if rseg.empty:
+        return {}
+    return _service_dir_period(rseg, route, direction, period, tau,
+                               variant_seq, variant_period_freq)
+
+
+def _draw_service_sequence_delta(route: str, columns: list, name_lookup: dict,
+                                 out_png: str, dev_label: str, tol: float = 0.5) -> bool:
+    """Developed-vs-baseline station-sequence load plot: each (period, direction) is
+    a vertical station column; a segment is coloured green (load added) / red (less)
+    / blue (unchanged) and labelled `dev_total (delta)`. Per-station boardings (↑)
+    and alightings (↓) carry their own (delta). columns: (header, dev, base)."""
+    cols = [(h, dd, bd) for h, dd, bd in columns if dd and dd.get('load_factor')]
+    if not cols:
+        return False
+    max_n = max(len(dd['seq']) for _h, dd, _b in cols)
+    all_lf = [v for _h, dd, _b in cols for v in dd['load_factor'].values()
+              if np.isfinite(v)]
+    lf_max = max(all_lf) if all_lf else 1.0
+
+    fig, ax = plt.subplots(figsize=(max(6.0, 3.4 * len(cols)),
+                                    max(5.0, max_n * 0.55 + 2.0)))
+    for ci, (header, dd, bd) in enumerate(cols):
+        x = ci * 3.2
+        seq = dd['seq']
+        y = {s: -i for i, s in enumerate(seq)}
+        blf = (bd or {}).get('load_factor', {})
+        bboard = (bd or {}).get('board', {})
+        balight = (bd or {}).get('alight', {})
+        for (a, b), lf in dd['load_factor'].items():
+            d = lf - blf.get((a, b), 0.0)
+            col = (_SLOAD_GREEN if d > tol else
+                   (_SLOAD_RED if d < -tol else _SLOAD_BLUE))
+            lw = (max(0.8, 0.8 + 5.0 * (lf / lf_max))
+                  if np.isfinite(lf) and lf_max > 0 else 0.8)
+            ax.plot([x, x], [y[a], y[b]], color=col, lw=lw,
+                    solid_capstyle='round', zorder=1)
+            ym = (y[a] + y[b]) / 2.0
+            if np.isfinite(lf) and (lf >= tol or abs(d) >= tol):
+                ax.text(x + 0.2, ym, f"{lf:.0f} ({_sload_delta_str(d, tol)})",
+                        fontsize=7.5, fontweight='bold', va='center', ha='left',
+                        color=col, zorder=3)
+        for s in seq:
+            ax.scatter([x], [y[s]], s=42, color='white', edgecolor='black', zorder=2)
+            ax.text(x - 0.2, y[s], _name(name_lookup, s)[:22], fontsize=8,
+                    va='center', ha='right', zorder=3)
+            bdv, alv = dd['board'].get(s, 0.0), dd['alight'].get(s, 0.0)
+            bdd, ald = bdv - bboard.get(s, 0.0), alv - balight.get(s, 0.0)
+            if bdv >= tol:
+                ax.text(x + 0.2, y[s] + 0.16, f"↑{bdv:.0f} ({_sload_delta_str(bdd, tol)})",
+                        fontsize=6.5, color=_SLOAD_GREEN, va='bottom', ha='left', zorder=3)
+            if alv >= tol:
+                ax.text(x + 0.2, y[s] - 0.16, f"↓{alv:.0f} ({_sload_delta_str(ald, tol)})",
+                        fontsize=6.5, color=_SLOAD_RED, va='top', ha='left', zorder=3)
+        ax.text(x, 0.8, header, fontsize=10, fontweight='bold', va='bottom', ha='center')
+
+    ax.set_xlim(-1.6, (len(cols) - 1) * 3.2 + 2.0)
+    ax.set_ylim(-(max_n - 1) - 1.2, 2.2)
+    ax.axis('off')
+    import matplotlib.patches as mpatches
+    ax.legend(handles=[mpatches.Patch(color=_SLOAD_GREEN, label='Load added'),
+                       mpatches.Patch(color=_SLOAD_RED, label='Load reduced'),
+                       mpatches.Patch(color=_SLOAD_BLUE, label='Unchanged')],
+              loc='lower right', frameon=False, fontsize=8)
+    ax.set_title(f"Service {route} — {dev_label}", fontsize=12, fontweight='bold')
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"    Saved service load delta -> {out_png}")
+    return True
+
+
+def plot_service_load_delta(base_prim: dict, dev_prim: dict, base_variant_seq: dict,
+                            dev_variant_seq: dict, base_vfreq: dict, dev_vfreq: dict,
+                            name_lookup: dict, rail_segs_tt: pd.DataFrame,
+                            rail_stations: gpd.GeoDataFrame, sa_ids,
+                            affected_route_ids, svc_network: str, dev_label: str,
+                            method: str, windows: list) -> None:
+    """Developed-vs-baseline service-load delta plots for one svc-int.
+
+    One png per drawn route. The drawn set is the study-area scope only: the
+    svc-int's own line(s) (always), plus any service that visits >= 2 SA stations
+    AND whose per-train loads actually change. Per-period loads use the whole-day
+    frequency (full_day_trips x tau / whole_day_freq) so new lines without a
+    peak/off-peak split still resolve."""
+    if _prim_empty(dev_prim['segments']):
+        print("    service load delta: no developed segments — skipped")
+        return
+    tol = 0.5
+    base_seg = _service_load_seg(base_prim)
+    dev_seg = _service_load_seg(dev_prim)
+    base_vpf = _wholeday_period_freq(base_vfreq)
+    dev_vpf = _wholeday_period_freq(dev_vfreq)
+    qualifying = _routes_serving_sa(rail_segs_tt, rail_stations, sa_ids)
+    aff = {str(r) for r in (affected_route_ids or [])}
+    tau_map = {w: tau for tau, w in windows}
+    period_specs = [('peak', 'Peak'), ('off_peak', 'Off-peak')]
+    out_dir = os.path.join(paths.get_assignment_plot_dir(svc_network, method),
+                           'ServiceLoads')
+    os.makedirs(out_dir, exist_ok=True)
+
+    routes = sorted(set(dev_seg['route_id'].dropna()) | set(base_seg['route_id'].dropna()))
+    used, n = set(), 0
+    for route in routes:
+        is_aff_line = str(route) in aff
+        if not is_aff_line and route not in qualifying:
+            continue
+        directions = sorted(dev_seg[dev_seg['route_id'] == route]['direction_id'].unique())
+        if not directions:
+            directions = sorted(base_seg[base_seg['route_id'] == route]['direction_id'].unique())
+        columns, maxd = [], 0.0
+        for period, plabel in period_specs:
+            tau = tau_map.get(period, 0.0)
+            for direction in directions:
+                dd = _service_load_column(dev_seg, route, direction, period, tau,
+                                          dev_variant_seq, dev_vpf)
+                bd = _service_load_column(base_seg, route, direction, period, tau,
+                                          base_variant_seq, base_vpf)
+                if not dd:
+                    continue
+                try:
+                    dlabel = str(int(float(direction)))
+                except (TypeError, ValueError):
+                    dlabel = str(direction)
+                columns.append((f"{plabel}\nDir {dlabel} — "
+                                f"{dd.get('line_freq', 0.0):.0f} dep/h", dd, bd))
+                blf = (bd or {}).get('load_factor', {})
+                for k, v in dd['load_factor'].items():
+                    maxd = max(maxd, abs(v - blf.get(k, 0.0)))
+                for k, v in blf.items():
+                    if k not in dd['load_factor']:
+                        maxd = max(maxd, abs(v))
+        if not columns:
+            continue
+        if not is_aff_line and maxd < 1.0:
+            continue   # qualifying but unaffected by this intervention
+        stem = _sanitize_sheet(f"service_load_{route}", used)
+        if _draw_service_sequence_delta(route, columns, name_lookup,
+                                        os.path.join(out_dir, f"{stem}_delta.png"),
+                                        dev_label, tol):
+            n += 1
+    print(f"    service load delta: {n} route(s) drawn -> {out_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Phase-6C SA-matrix DELTA heatmaps (developed vs baseline): travel time and
+# frequency (direct / transfer), for SA x SA and SA x baseline-top-15.
+# ---------------------------------------------------------------------------
+_MAT_GREEN = (0.80, 0.93, 0.80)   # improved
+_MAT_RED   = (0.96, 0.80, 0.80)   # declined
+_MAT_GREY  = (0.92, 0.92, 0.92)   # unchanged
+_MAT_TOL   = 1e-6
+
+
+def _matrix_pivot(skims: dict, key: str, rows: list, cols: list) -> np.ndarray:
+    """Skim long-table -> dense [rows x cols] array (NaN where the OD is absent)."""
+    df = skims.get(key)
+    if df is None or df.empty:
+        return np.full((len(rows), len(cols)), np.nan)
+    piv = df.pivot_table(index='origin_id', columns='dest_id', values='value',
+                         aggfunc='mean')
+    return piv.reindex(index=rows, columns=cols).values.astype(float)
+
+
+def _matrix_single_delta_str(dev: float, base: float) -> str:
+    """Bracket text for a single-valued dev vs base ('new' / 'lost' / signed)."""
+    if not np.isfinite(base):
+        return 'new'
+    if not np.isfinite(dev):
+        return 'lost'
+    d = dev - base
+    return (f"{'+' if d > 0 else ''}{d:.0f}") if abs(d) >= _MAT_TOL else '0'
+
+
+def _matrix_freq_row(label: str, dev: float, base: float):
+    """'D:6 (+2)' style row; a missing service counts as 0 so a gained/lost
+    connection shows its signed amount (+2 / -2) rather than new/lost."""
+    dv = dev if np.isfinite(dev) else 0.0
+    bv = base if np.isfinite(base) else 0.0
+    if dv == 0 and bv == 0:
+        return None
+    d = dv - bv
+    ds = (f"{'+' if d > 0 else ''}{d:.0f}") if abs(d) >= _MAT_TOL else '0'
+    return f"{label}:{dv:.0f} ({ds})"
+
+
+def _draw_matrix_axes(n_r: int, n_c: int, rlab: list, clab: list, title: str):
+    import matplotlib.patches as mpatches
+    fig, ax = plt.subplots(figsize=(max(8.0, n_c * 0.75 + 3.0),
+                                    max(5.0, n_r * 0.55 + 2.0)))
+    ax.set_xticks(range(n_c)); ax.set_xticklabels(clab, rotation=45, ha='right', fontsize=8)
+    ax.set_yticks(range(n_r)); ax.set_yticklabels(rlab, fontsize=8)
+    ax.legend(handles=[mpatches.Patch(color=_MAT_GREEN, label='Improved'),
+                       mpatches.Patch(color=_MAT_RED, label='Declined'),
+                       mpatches.Patch(color=_MAT_GREY, label='Unchanged')],
+              bbox_to_anchor=(1.01, 1.0), loc='upper left', frameon=False, fontsize=8)
+    ax.set_title(title, fontsize=11, fontweight='bold')
+    return fig, ax
+
+
+def _draw_matrix_save(fig, ax, bg: np.ndarray, txt: list, out: str) -> None:
+    ax.imshow(bg, aspect='auto')
+    for i in range(bg.shape[0]):
+        for j in range(bg.shape[1]):
+            if txt[i][j]:
+                ax.text(j, i, txt[i][j], ha='center', va='center', fontsize=7.2,
+                        fontweight='bold', color='black', linespacing=1.0)
+    fig.tight_layout(); fig.savefig(out, dpi=200, bbox_inches='tight'); plt.close(fig)
+    print(f"    Saved matrix delta -> {out}")
+
+
+def _draw_matrix_travel_delta(dev: np.ndarray, base: np.ndarray, rlab: list,
+                              clab: list, title: str, out: str) -> None:
+    """Single-value (lower-is-better) delta heatmap: improved green / declined red
+    / unchanged grey; a newly-served OD is green ('new'), a lost OD red ('lost')."""
+    n_r, n_c = dev.shape
+    bg = np.ones((n_r, n_c, 3)); txt = [['' for _ in range(n_c)] for _ in range(n_r)]
+    for i in range(n_r):
+        for j in range(n_c):
+            dv, bv = dev[i, j], base[i, j]
+            if not np.isfinite(dv) and not np.isfinite(bv):
+                continue
+            if np.isfinite(dv) and not np.isfinite(bv):
+                bg[i, j] = _MAT_GREEN; txt[i][j] = f"{dv:.0f}\n(new)"; continue
+            if np.isfinite(bv) and not np.isfinite(dv):
+                bg[i, j] = _MAT_RED; txt[i][j] = "-\n(lost)"; continue
+            d = dv - bv
+            bg[i, j] = (_MAT_GREEN if d < -_MAT_TOL else
+                        (_MAT_RED if d > _MAT_TOL else _MAT_GREY))
+            txt[i][j] = f"{dv:.0f}\n({_matrix_single_delta_str(dv, bv)})"
+    fig, ax = _draw_matrix_axes(n_r, n_c, rlab, clab, title)
+    _draw_matrix_save(fig, ax, bg, txt, out)
+
+
+def _draw_matrix_freq_delta(dD, dT, bD, bT, rlab, clab, title, out) -> None:
+    """Frequency D/T delta heatmap with direct-priority colouring: more direct
+    service is an improvement (green) even if transfer frequency drops; only when
+    direct is unchanged does transfer decide. A T->D switch is therefore green."""
+    n_r, n_c = dD.shape
+    bg = np.ones((n_r, n_c, 3)); txt = [['' for _ in range(n_c)] for _ in range(n_r)]
+    for i in range(n_r):
+        for j in range(n_c):
+            dD0 = dD[i, j] if np.isfinite(dD[i, j]) else 0.0
+            bD0 = bD[i, j] if np.isfinite(bD[i, j]) else 0.0
+            dT0 = dT[i, j] if np.isfinite(dT[i, j]) else 0.0
+            bT0 = bT[i, j] if np.isfinite(bT[i, j]) else 0.0
+            if not (dD0 or bD0 or dT0 or bT0):
+                continue
+            ddel, tdel = dD0 - bD0, dT0 - bT0
+            if ddel > _MAT_TOL:
+                cat = 1
+            elif ddel < -_MAT_TOL:
+                cat = -1
+            elif tdel > _MAT_TOL:
+                cat = 1
+            elif tdel < -_MAT_TOL:
+                cat = -1
+            else:
+                cat = 0
+            bg[i, j] = _MAT_GREEN if cat == 1 else (_MAT_RED if cat == -1 else _MAT_GREY)
+            rows = [r for r in (_matrix_freq_row('D', dD[i, j], bD[i, j]),
+                                _matrix_freq_row('T', dT[i, j], bT[i, j])) if r]
+            txt[i][j] = "\n".join(rows)
+    fig, ax = _draw_matrix_axes(n_r, n_c, rlab, clab, title)
+    _draw_matrix_save(fig, ax, bg, txt, out)
+
+
+def plot_service_matrix_delta(base_skims: dict, dev_skims: dict, base_paths,
+                              name_lookup: dict, sa_ids, svc_network: str,
+                              dev_label: str, method: str) -> None:
+    """Developed-vs-baseline SA-matrix heatmaps (travel time + frequency D/T) for
+    SA x SA and SA x baseline-top-15 destinations. The top-15 destinations are
+    fixed from the baseline so the base and dev columns align."""
+    sa = sorted(int(s) for s in sa_ids)
+    if base_paths is None or len(base_paths) == 0:
+        print("    matrix delta: no baseline paths — skipped")
+        return
+    dest_tot = (pd.DataFrame(base_paths).groupby('dest_id')['trips'].sum()
+                .sort_values(ascending=False))
+    top15 = [int(d) for d in dest_tot.index[:15]]
+    out_dir = paths.get_assignment_plot_dir(svc_network, method)
+    os.makedirs(out_dir, exist_ok=True)
+    for sname, rows, cols in (('sa', sa, sa), ('top15', sa, top15)):
+        rlab = [_name(name_lookup, s) for s in rows]
+        clab = [_name(name_lookup, c) for c in cols]
+        _draw_matrix_travel_delta(
+            _matrix_pivot(dev_skims, 'journey_time', rows, cols),
+            _matrix_pivot(base_skims, 'journey_time', rows, cols), rlab, clab,
+            f"Travel time (min) — {dev_label}",
+            os.path.join(out_dir, f"matrix_travel_{sname}_delta.png"))
+        _draw_matrix_freq_delta(
+            _matrix_pivot(dev_skims, 'freq_direct', rows, cols),
+            _matrix_pivot(dev_skims, 'freq_transfer', rows, cols),
+            _matrix_pivot(base_skims, 'freq_direct', rows, cols),
+            _matrix_pivot(base_skims, 'freq_transfer', rows, cols), rlab, clab,
+            f"Frequency D/T (trains/h) — {dev_label}",
+            os.path.join(out_dir, f"matrix_frequency_{sname}_delta.png"))
+
+
+# ---------------------------------------------------------------------------
+# Phase-6C per-cell accessibility improve/decline map (PT-Feeder). Needs the
+# routed skims, so it lives here rather than in catchment_allocate (6A).
+# ---------------------------------------------------------------------------
+_CELL_PLOT_BASE_CACHE: dict = {}   # (base_svc_network, infra) -> base alloc + map base layers
+
+
+def _cell_skim_col() -> str:
+    return 'gc_min' if settings.TRAVEL_COST_METHOD == 'calibrated' else 'journey_time_min'
+
+
+def _cell_best_path_od(prim: dict) -> pd.DataFrame:
+    """Per-(origin, dest) BEST-path skim (min over the choice set) + OD trips."""
+    pdf = prim['paths']
+    if _prim_empty(pdf):
+        return pd.DataFrame(columns=['origin_id', 'dest_id', 'skim', 'trips'])
+    col = _cell_skim_col()
+    g = pd.DataFrame(pdf).groupby(['origin_id', 'dest_id'])
+    return pd.DataFrame({'skim': g[col].min(), 'trips': g['trips'].sum()}).reset_index()
+
+
+def _cell_onward_mean(od: pd.DataFrame) -> pd.Series:
+    """T_onward(s): trip-weighted mean onward skim per origin station."""
+    if od.empty:
+        return pd.Series(dtype=float)
+    return od.groupby('origin_id').apply(
+        lambda d: np.average(d['skim'], weights=d['trips'])
+        if d['trips'].sum() > 0 else np.nan)
+
+
+def _cell_onward_floored(base_od: pd.DataFrame, dev_od: pd.DataFrame) -> pd.Series:
+    """T_onward(s) with BASE demand weights and DEV skims FLOORED at base.
+
+    Floor = min(dev, base) per pair: added/extended/more-frequent service cannot
+    worsen the best achievable onward path on a superset network, so any rise is
+    a routing candidate-generation artifact and is clamped away."""
+    if base_od.empty:
+        return pd.Series(dtype=float)
+    m = base_od.merge(dev_od[['origin_id', 'dest_id', 'skim']].rename(
+        columns={'skim': 'skim_dev'}), on=['origin_id', 'dest_id'], how='left')
+    m['skim_dev'] = np.minimum(m['skim_dev'].fillna(m['skim']), m['skim'])
+    return m.groupby('origin_id').apply(
+        lambda d: np.average(d['skim_dev'], weights=d['trips'])
+        if d['trips'].sum() > 0 else np.nan)
+
+
+def _cell_pt_feeder_allocation(network_name: str) -> pd.DataFrame:
+    """Load a network's PT-Feeder cell allocation (RELI, cell coords, chosen
+    station, access time); None when absent."""
+    p = os.path.join(catchment_base.CATCHMENT_DATA_DIR, network_name,
+                     'PT_Feeder', 'allocation_pt_feeder.parquet')
+    if not os.path.exists(p):
+        return None
+    a = pd.read_parquet(p)
+    a['id_point'] = a['id_point'].astype(int)
+    return a[['RELI', 'E_KOORD', 'N_KOORD', 'id_point', 'access_time_sec']]
+
+
+def plot_cell_accessibility_delta(base_prim: dict, dev_prim: dict,
+                                  base_svc_network: str, svc_int_network: str,
+                                  svc_int_id: str, infra_version: str,
+                                  combo: str, method: str) -> None:
+    """Phase-6C per-cell accessibility improve/decline map (PT-Feeder).
+
+    metric(cell) = access(cell -> chosen station) [access_time_sec, already
+    GC-weighted under settings.TRAVEL_COST_METHOD] + demand-weighted onward
+    Sigma_d w_base(s,d)*skim(s,d), the onward skim being the BEST-path skim
+    (gc / travel time per TRAVEL_COST_METHOD) FLOORED at baseline. The signed
+    delta(dev-base) drives a 3-colour fill (improved / declined / unchanged at
+    +-0.5 min); cells whose chosen station changed are outlined, and the svc-int
+    line is drawn to full extent in its type colour. Whole-catchment extent.
+    Needs the dev 6A allocation (written before 6C runs) and skips otherwise."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    from shapely.geometry import box
+    import svc_ints_orchestrator as so
+
+    if not infra_version:
+        print("    cell accessibility delta: no infra version — skipped")
+        return
+    dev_alloc = _cell_pt_feeder_allocation(svc_int_network)
+    if dev_alloc is None:
+        print("    cell accessibility delta: no developed allocation — skipped")
+        return
+
+    bkey = (base_svc_network, infra_version)
+    if bkey not in _CELL_PLOT_BASE_CACHE:
+        nodes = gpd.read_file(os.path.join(
+            paths.resolve_infra_dir(infra_version), 'nodes.gpkg'))
+        boundary = catchment_allocate._load_catchment_boundary()
+        _CELL_PLOT_BASE_CACHE[bkey] = (
+            _cell_pt_feeder_allocation(base_svc_network), boundary,
+            catchment_allocate._load_lakes_for_extent(boundary, scope='ca'),
+            {int(n): g for n, g in zip(nodes['Number'], nodes.geometry)})
+    base_alloc, boundary, lakes, node_pts = _CELL_PLOT_BASE_CACHE[bkey]
+    if base_alloc is None:
+        print("    cell accessibility delta: no baseline allocation — skipped")
+        return
+
+    no_pt = catchment_allocate.NO_PT_ID
+    base_od = _cell_best_path_od(base_prim)
+    base_onward = _cell_onward_mean(base_od)
+    dev_onward = _cell_onward_floored(base_od, _cell_best_path_od(dev_prim))
+    tol = 0.5
+
+    def _metric(alloc, onward):
+        m = alloc.copy()
+        m['onward'] = m['id_point'].map(onward)
+        m['metric'] = np.where(m['id_point'] == no_pt, np.nan,
+                               m['access_time_sec'] / 60.0 + m['onward'])
+        return m
+
+    b = _metric(base_alloc, base_onward).rename(columns={'id_point': 'sb', 'metric': 'mb'})
+    d = _metric(dev_alloc, dev_onward).rename(columns={'id_point': 'sd', 'metric': 'md'})
+    c = b[['RELI', 'E_KOORD', 'N_KOORD', 'sb', 'mb']].merge(
+        d[['RELI', 'sd', 'md']], on='RELI', how='inner')
+    gained = (c['sb'] == no_pt) & (c['sd'] != no_pt)
+    lost = (c['sb'] != no_pt) & (c['sd'] == no_pt)
+    both = (c['sb'] != no_pt) & (c['sd'] != no_pt)
+    delta = c['md'] - c['mb']
+    cat = np.zeros(len(c), dtype=int)
+    cat = np.where(both & (delta < -tol), 1, cat)
+    cat = np.where(both & (delta > tol), -1, cat)
+    cat = np.where(gained, 1, cat)
+    cat = np.where(lost, -1, cat)
+    c['cat'] = cat
+    c['switched'] = c['sb'] != c['sd']
+
+    gdf = gpd.GeoDataFrame(
+        c, geometry=[box(e, n, e + 100, n + 100)
+                     for e, n in zip(c['E_KOORD'], c['N_KOORD'])], crs=_CODEBASE_CRS)
+    green, red, grey = (0.62, 0.85, 0.62), (0.95, 0.70, 0.70), (0.86, 0.86, 0.86)
+    fig, ax = plt.subplots(figsize=(13, 11))
+    ax.set_facecolor('#E8E8E8')
+    bnd = gpd.GeoDataFrame(geometry=[boundary], crs=_CODEBASE_CRS)
+    bnd.plot(ax=ax, color='white', edgecolor='none', zorder=0)
+    for val, col in ((0, grey), (1, green), (-1, red)):
+        sub = gdf[gdf['cat'] == val]
+        if not sub.empty:
+            sub.plot(ax=ax, color=col, edgecolor='none', zorder=2)
+    if lakes is not None and not lakes.empty:
+        lakes.plot(ax=ax, color='#A8D8EA', edgecolor='none', zorder=3)
+    sw = gdf[gdf['switched']]
+    if not sw.empty:
+        sw.boundary.plot(ax=ax, color='#1a1a8a', linewidth=0.5, zorder=4)
+    bnd.boundary.plot(ax=ax, color='black', linewidth=1.8, linestyle='--', zorder=5)
+
+    int_type = svc_int_id.split('_')[0]
+    icol = so._TYPE_COLOR.get(int_type, '#000000')
+    iseg = so._load_delta_segments(
+        Path(paths.get_svc_int_network_dir(svc_int_id, combo)) / infra_version
+        / 'rail_segments.gpkg')
+    if iseg is not None and not iseg.empty:
+        iseg = iseg.to_crs(_CODEBASE_CRS) if iseg.crs else iseg
+        iseg.plot(ax=ax, color=icol, linewidth=2.8, zorder=5, alpha=0.95)
+
+    chosen = set(c.loc[c['sd'] != no_pt, 'sd']) | set(c.loc[c['sb'] != no_pt, 'sb'])
+    ax.scatter([node_pts[s].x for s in chosen if s in node_pts],
+               [node_pts[s].y for s in chosen if s in node_pts],
+               s=22, c='white', edgecolors='black', linewidths=0.8,
+               marker='o', zorder=6)
+    bx0, by0, bx1, by1 = boundary.bounds
+    ax.set_xlim(bx0 - 200, bx1 + 200)
+    ax.set_ylim(by0 - 200, by1 + 200)
+    ax.set_aspect('equal')
+    ax.set_xlabel('E [m]')
+    ax.set_ylabel('N [m]')
+    catchment_allocate._add_map_elements(ax)
+    ax.set_title(f'Accessibility change — {svc_int_id}', fontsize=14)
+    ax.legend(handles=[
+        Patch(facecolor=green, label='Improved'),
+        Patch(facecolor=red, label='Declined'),
+        Patch(facecolor=grey, label='Unchanged'),
+        Line2D([0], [0], color='#1a1a8a', lw=1.2, label='Chosen station switched'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
+               markeredgecolor='black', markersize=8, label='Rail station'),
+        Line2D([0], [0], color=icol, lw=2.8,
+               label=f'Service intervention ({int_type})'),
+    ], loc='upper right', fontsize=9, framealpha=0.9)
+
+    out_dir = paths.get_assignment_plot_dir(svc_int_network, method)
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, 'cell_accessibility_change.pdf')
+    fig.savefig(out, bbox_inches='tight')
+    plt.close(fig)
+    print(f"    cell accessibility delta: {int((cat == 1).sum()):,} improved / "
+          f"{int((cat == -1).sum()):,} declined / {int(c['switched'].sum()):,} "
+          f"switched -> {out}")
+
+
 def _write_reports(prim: dict, skims: dict, rail_segs_tt: pd.DataFrame,
                    rail_stations: gpd.GeoDataFrame, name_lookup: dict,
                    svc_network: str, method: str, windows: list, sa_ids,
                    variant_seq: dict, variant_period_freq: dict,
-                   make_plots: bool = True) -> None:
+                   make_plots: bool = True,
+                   plot_service_loads: bool = True) -> None:
     """Reporting workbooks + plots for one assignment method.
 
     Skim matrices and heatmaps are τ-independent and written once; trip-bearing
@@ -1988,8 +2533,12 @@ def _write_reports(prim: dict, skims: dict, rail_segs_tt: pd.DataFrame,
     if make_plots:
         _plot_corridor_service_sankeys(prim, name_lookup, svc_network, method,
                                        tau_full_day)
-        _plot_service_load_sequences(prim, variant_seq, variant_period_freq, qualifying,
-                                     name_lookup, svc_network, method, windows)
+        # Phase 6C draws the developed-vs-baseline delta plots instead (study-area
+        # scope only); the absolute per-service plots are the Phase-4C baseline.
+        if plot_service_loads:
+            _plot_service_load_sequences(prim, variant_seq, variant_period_freq,
+                                         qualifying, name_lookup, svc_network,
+                                         method, windows)
 
 
 # ===============================================================================
@@ -2435,6 +2984,37 @@ def clear_baseline_primitive_cache() -> None:
     """Drop the in-process baseline-primitive cache (call if Phase 4C re-runs in
     the same process and the baseline changes underneath Phase 6)."""
     _BASELINE_PRIM_CACHE.clear()
+    _BASELINE_SLOAD_CACHE.clear()
+
+
+# Process-lifetime cache: (base_svc_network, od_method, infra_version) -> the
+# baseline graph bits the Phase-6C delta plots diff against (variant_seq +
+# whole-day vfreq for service loads; reporting frequencies for the base skims of
+# the matrix heatmaps). Built once per Phase-6 run (plotting only).
+_BASELINE_SLOAD_CACHE: dict = {}
+
+
+def _load_baseline_plot_bits(base_svc_network: str, od_method: str,
+                             infra_version: str) -> dict:
+    """Baseline graph bits for the Phase-6C delta plots: variant_seq + whole-day
+    vfreq (service-load base columns) and the reporting frequencies (matrix base
+    skims). Builds the baseline routing graph once (cached per process);
+    _build_routing_graph mutates the _ROUTE_NAME / _GATEWAY_IDS globals, so they
+    are saved and restored around the build."""
+    key = (base_svc_network, od_method, infra_version)
+    if key in _BASELINE_SLOAD_CACHE:
+        return _BASELINE_SLOAD_CACHE[key]
+    global _ROUTE_NAME, _GATEWAY_IDS
+    saved_rn, saved_gw = _ROUTE_NAME, _GATEWAY_IDS
+    try:
+        bctx = _build_routing_graph(base_svc_network, od_method, infra_version)
+    finally:
+        _ROUTE_NAME, _GATEWAY_IDS = saved_rn, saved_gw
+    bits = {'variant_seq': bctx['variant_seq'], 'vfreq': bctx['vfreq'],
+            'vfreq_report': bctx['report_ctx']['vfreq_report'],
+            'direct_freq_report': bctx['report_ctx']['direct_freq_report']}
+    _BASELINE_SLOAD_CACHE[key] = bits
+    return bits
 
 
 def _load_baseline_primitive(svc_network: str, method: str,
@@ -2713,7 +3293,31 @@ def route_svc_int(svc_int_id: str, base_svc_network: str, affected_stations,
                        ctx['name_lookup'], svc_int_network, m, windows,
                        _sa_station_ids(), ctx['variant_seq'],
                        ctx['report_ctx']['variant_period_freq'],
-                       make_plots=make_plots)
+                       make_plots=make_plots, plot_service_loads=full_recompute)
+
+        # Phase-6C developed-vs-baseline DELTA plots (service loads + SA matrices)
+        # replace the absolute per-service plots: study-area scope only (the
+        # svc-int's own line plus SA services that actually change). The oracle has
+        # no baseline to diff, so it keeps the absolute plots (plot_service_loads).
+        if make_plots and not full_recompute:
+            base_bits = _load_baseline_plot_bits(base_svc_network, od_method,
+                                                 infra_version)
+            aff_route_ids = {_route_id_of(v) for v in (affected_services or [])}
+            plot_service_load_delta(
+                base_prim, merged, base_bits['variant_seq'], ctx['variant_seq'],
+                base_bits['vfreq'], ctx['vfreq'], ctx['name_lookup'],
+                ctx['rail_segs_tt'], ctx['rail_stations'], _sa_station_ids(),
+                aff_route_ids, svc_int_network, svc_int_id, m, windows)
+            base_skims = _build_skims(base_prim, base_bits['vfreq_report'],
+                                      base_bits['direct_freq_report'])
+            plot_service_matrix_delta(
+                base_skims, skims, base_prim['paths'], ctx['name_lookup'],
+                _sa_station_ids(), svc_int_network, svc_int_id, m)
+            # Per-cell accessibility map (PT-Feeder only; needs the dev 6A allocation)
+            if od_method == 'pt_feeder':
+                plot_cell_accessibility_delta(
+                    base_prim, merged, base_svc_network, svc_int_network,
+                    svc_int_id, infra_version, combo, m)
 
         cache_manifest.write_manifest(
             paths.get_assignment_method_dir(svc_int_network, m),

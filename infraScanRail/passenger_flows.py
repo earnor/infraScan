@@ -1,5 +1,5 @@
 """Phase-6D passenger flows: unroll routed loads onto the real infrastructure.
-Last modified: 2026-06-09
+Last modified: 2026-06-21
 
 Joins the persisted routing primitive (service-link hops, unprojected stop ids)
 to the projected service links via station NAMES (the projection re-keys
@@ -7,21 +7,25 @@ interchange stations to platform-group Betriebspunkte, e.g. Zürich HB 8503000 �
 Zürich HB Löwenstrasse 8516144, so ids do not bridge the two spaces), then
 unrolls each link's load over its Via_Segment node-pair chain onto the composed
 infra version's segments. Produces per-network infra-segment and node load
-tables (local vs passing split) plus flow / diff maps. Replaces the legacy
-main_cap Phase 7 flow plotting.
+tables (local vs passing split) plus the absolute flow map and the
+developed-vs-baseline flow-change map (baseline-fixed width scale, catchment
+extent, all rail stations) under plots/Traffic_Flow/Passenger_Flows/. Replaces
+the legacy main_cap Phase 7 flow plotting.
 
 Entry points:
     build_passenger_flows(svc_network, infra_version, method, ...) -> dict
-    build_flow_diff(base_network, dev_network, infra_version, method, ...)
+    build_flow_diff(base_network, dev_network, infra_version, method, ...) -> int
 Standalone CLI in __main__ (module-CLI convention); main_new passes settings.
 """
 
 import os
+from pathlib import Path
 
 import geopandas as gpd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import pyogrio
 from matplotlib.lines import Line2D
@@ -79,10 +83,10 @@ def build_passenger_flows(svc_network: str, infra_version: str, method: str = ''
         print(f"  [flows] cached outputs at {flow_dir} — reuse")
         return {'cached': True}
 
-    print("=" * 70)
+    print("=" * 160)
     print(f"PHASE 6D PASSENGER FLOWS — {svc_network}")
     print(f"  Method : {method}  |  Infra: {infra_version}")
-    print("=" * 70)
+    print("=" * 160)
 
     prim_path = paths.get_routing_primitive_path(svc_network, method, 'segments')
     if not os.path.exists(prim_path):
@@ -208,7 +212,7 @@ def build_passenger_flows(svc_network: str, infra_version: str, method: str = ''
           f"{n_walked_pairs:,} pair(s) walked onto split sections")
 
     if make_plots:
-        _plot_flow_map(segments_gdf, svc_network, method)
+        _plot_flow_map(segments_gdf, nodes_gdf, svc_network, method)
 
     return {'segments': segments_gdf, 'nodes': nodes_gdf,
             'trips_total': trips_total, 'n_synthetic': len(synthetic_rows)}
@@ -216,12 +220,16 @@ def build_passenger_flows(svc_network: str, infra_version: str, method: str = ''
 
 def build_flow_diff(base_network: str, dev_network: str, infra_version: str,
                     method: str = '', make_plots: bool = True,
-                    dev_infra_version: str = '') -> None:
+                    dev_infra_version: str = '') -> int:
     """Diff the developed network's infra-segment loads against the baseline.
 
     Writes flow_segments_diff.gpkg under the DEV network's flow dir and (gated)
-    renders the red/green diff map: green = load increase, red = decrease,
-    width ∝ |Δ|, synthetic legs dashed — the legacy main_cap Phase-7 semantics.
+    renders the green/red flow-change map (green = increase, red = decrease,
+    width ∝ |Δ| at the baseline-fixed scale, labels on the svc-int's affected
+    line) under plots/Traffic_Flow/Passenger_Flows/.
+
+    Returns:
+        int: number of infra segments whose load changed (|Δ| > 1e-6).
 
     Args:
         infra_version:     the BASELINE's infra version.
@@ -268,7 +276,9 @@ def build_flow_diff(base_network: str, dev_network: str, infra_version: str,
           f"-> {out}")
 
     if make_plots:
-        _plot_diff_map(merged, base_network, dev_network, method)
+        _plot_diff_map(merged, base_network, dev_network, infra_version, method,
+                       max(float(base['trips'].max()), 1.0))
+    return int(len(changed))
 
 
 # ===============================================================================
@@ -524,73 +534,218 @@ def _build_nodes_gdf(hops, prim_ev, passing_interior, stop_names, stop_pts,
 # MAPS
 # ===============================================================================
 
-def _plot_geom(ax, geom, **kw) -> None:
-    """Plot a LineString or MultiLineString."""
-    if geom is None:
+_FLOW_COLOR = '#1f6fb4'
+_INC_COLOR  = '#2ca02c'
+_DEC_COLOR  = '#d62728'
+_UNCH_COLOR = '#c8c8c8'
+_LAKE_FC    = '#A8D8EA'
+_LW_MIN, _LW_SPAN = 0.4, 6.0
+_FLOW_PAD   = 1500.0
+_DIFF_REF_FRAC = 0.05
+_STATION_SIZE  = 9
+_LEG_FRACS  = (0.03, 0.1, 0.25, 0.5, 0.75, 1.0)
+_CATCHMENT_LAYERS = None
+
+
+def _catchment_layers():
+    """(boundary polygon, lakes GeoDataFrame) for the flow maps, built once."""
+    global _CATCHMENT_LAYERS
+    if _CATCHMENT_LAYERS is None:
+        import catchment_allocate as _ca
+        boundary = _ca._load_catchment_boundary()
+        _CATCHMENT_LAYERS = (boundary,
+                             _ca._load_lakes_for_extent(boundary, scope='ca'))
+    return _CATCHMENT_LAYERS
+
+
+def _plot_label(svc_network: str) -> str:
+    """Clean title/label: the svc-int id for dev networks, else the network name."""
+    parts = svc_network.replace('\\', '/').split('/')
+    return parts[2].removesuffix('_network') if parts[0] == 'Developments' else svc_network
+
+
+def _seg_ref(svc_network: str, method: str, fallback: gpd.GeoDataFrame) -> float:
+    """Fixed width reference = baseline max segment load (widths comparable across
+    base / dev / diff). Dev networks resolve their baseline via the combo; falls
+    back to the given frame's own max when the baseline table is absent."""
+    parts = svc_network.replace('\\', '/').split('/')
+    base = (parts[1].split('__', 1)[1] + '_network') if parts[0] == 'Developments' else svc_network
+    try:
+        s = gpd.read_file(paths.get_flow_table_path(base, method, 'flow_segments.gpkg'))
+        return max(float(s['trips'].max()), 1.0)
+    except Exception:
+        return max(float(fallback['trips'].max()), 1.0)
+
+
+def _lw(vals, ref: float):
+    return _LW_MIN + _LW_SPAN * np.minimum(np.abs(np.asarray(vals, float)) / ref, 1.0)
+
+
+def _width_legend(ref: float, color: str) -> list:
+    """5-7 width swatches at round trip levels (multiples of 100) spanning the scale."""
+    seen, handles = set(), []
+    for f in _LEG_FRACS:
+        lvl = round(ref * f / 100.0) * 100.0
+        if lvl <= 0 or lvl in seen:
+            continue
+        seen.add(lvl)
+        handles.append(Line2D([0], [0], color=color, lw=_LW_MIN + _LW_SPAN * f,
+                              label=f"{lvl:,.0f}"))
+    return handles
+
+
+def _base_map(ax, boundary, lakes) -> None:
+    ax.set_facecolor('#E8E8E8')
+    bnd = gpd.GeoDataFrame(geometry=[boundary], crs=CODEBASE_CRS)
+    bnd.plot(ax=ax, color='white', edgecolor='none', zorder=0)
+    if lakes is not None and not lakes.empty:
+        lakes.plot(ax=ax, color=_LAKE_FC, edgecolor='none', zorder=1)
+    bnd.boundary.plot(ax=ax, color='black', linewidth=1.6, linestyle='--', zorder=2)
+
+
+def _frame(ax, boundary) -> None:
+    import catchment_allocate as _ca
+    bx0, by0, bx1, by1 = boundary.bounds
+    ax.set_xlim(bx0 - _FLOW_PAD, bx1 + _FLOW_PAD)
+    ax.set_ylim(by0 - _FLOW_PAD, by1 + _FLOW_PAD)
+    ax.set_aspect('equal')
+    ax.set_xlabel('E [m]')
+    ax.set_ylabel('N [m]')
+    try:
+        _ca._add_map_elements(ax)
+    except Exception as exc:
+        print(f"    (map elements skipped: {exc})")
+
+
+def _draw_stations(ax, nodes) -> None:
+    """All served rail stations (scheduled stops, not pure junctions) as small
+    uniform white / black-outline circles."""
+    if nodes is None or nodes.empty:
         return
-    parts = geom.geoms if geom.geom_type == 'MultiLineString' else [geom]
-    for part in parts:
-        ax.plot(*part.xy, **kw)
+    sched = nodes[nodes[['board', 'alight', 'transfer', 'through']].sum(axis=1) > 0]
+    if sched.empty:
+        sched = nodes
+    ax.scatter(sched.geometry.x, sched.geometry.y, s=_STATION_SIZE, c='white',
+               edgecolors='black', linewidths=0.5, marker='o', zorder=6)
 
 
-def _plot_flow_map(segments: gpd.GeoDataFrame, svc_network: str,
-                   method: str) -> None:
-    """Per-network flow map: width ∝ load on real geometry, synthetic dashed."""
-    fig, ax = plt.subplots(figsize=(14, 12))
-    vmax = max(float(segments['trips'].max()), 1.0)
-    for _, r in segments.iterrows():
-        lw = 0.3 + 5.5 * (r['trips'] / vmax)
-        _plot_geom(ax, r.geometry, color='#1f6fb4',
-                   linewidth=lw, alpha=0.85,
-                   linestyle='--' if r['synthetic'] else '-')
-    ax.set_title(f'Passenger flows — {svc_network} ({method}, full day)',
-                 fontsize=14)
-    ax.set_aspect('equal')
-    ax.set_axis_off()
-    handles = [Line2D([0], [0], color='#1f6fb4', lw=3, label=f'{vmax:,.0f} trips'),
-               Line2D([0], [0], color='#1f6fb4', lw=3, linestyle='--',
-                      label='synthetic leg')]
-    ax.legend(handles=handles, loc='lower right', fontsize=9)
-    out_dir = paths.get_flow_plot_dir(svc_network, method)
-    os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, 'flow_map.png')
-    fig.savefig(out, bbox_inches='tight', dpi=180)
-    plt.close(fig)
-    print(f"  flow map -> {out}")
+def _affected_int_geometry(dev_network: str, base_network: str,
+                           infra_version: str):
+    """The svc-int's affected line geometry for diff labelling, by type: ext -> only
+    the new (extension) hops not on the base line; ndc / frq / stp -> the entire
+    delta line. None when not a dev network or no delta geometry."""
+    parts = dev_network.replace('\\', '/').split('/')
+    if parts[0] != 'Developments':
+        return None
+    combo, iid = parts[1], parts[2].removesuffix('_network')
+    int_type = iid.split('_')[0]
+    import svc_ints_orchestrator as _so
+    iseg = _so._load_delta_segments(
+        Path(paths.get_svc_int_network_dir(iid, combo)) / infra_version
+        / 'rail_segments.gpkg')
+    if iseg is None or iseg.empty:
+        return None
+    if int_type == 'ext' and {'GTFS_ID', 'from_stop_name', 'to_stop_name'} <= set(iseg.columns):
+        base_path = os.path.join(paths.MAIN, paths.RAIL_LINES_DIR, base_network,
+                                 infra_version, 'rail_segments.gpkg')
+        try:
+            base = pd.concat([gpd.read_file(base_path, layer=L)
+                              for L, _ in pyogrio.list_layers(base_path)],
+                             ignore_index=True)
+            base_hops: dict = {}
+            for r in base.itertuples(index=False):
+                base_hops.setdefault(str(getattr(r, 'GTFS_ID', '')), set()).add(
+                    frozenset((str(getattr(r, 'from_stop_name', '')),
+                               str(getattr(r, 'to_stop_name', '')))))
+            mask = iseg.apply(
+                lambda row: frozenset((str(row['from_stop_name']),
+                                       str(row['to_stop_name'])))
+                not in base_hops.get(str(row['GTFS_ID']), set()), axis=1)
+            if mask.any():
+                return iseg[mask]
+        except Exception as exc:
+            print(f"    (ext new-hop split skipped: {exc})")
+    return iseg
 
 
-def _plot_diff_map(merged: gpd.GeoDataFrame, base_network: str,
-                   dev_network: str, method: str) -> None:
-    """Red/green diff map: green = increase, red = decrease, width ∝ |Δ|."""
-    fig, ax = plt.subplots(figsize=(14, 12))
+def _plot_flow_map(segments: gpd.GeoDataFrame, nodes: gpd.GeoDataFrame,
+                   svc_network: str, method: str) -> None:
+    """Absolute passenger-flow map: render-batched real / synthetic segments at the
+    baseline-fixed width scale, all rail stations, catchment extent, a 5-7-range
+    width legend. PDF under plots/Traffic_Flow/Passenger_Flows/."""
+    ref = _seg_ref(svc_network, method, segments)
+    boundary, lakes = _catchment_layers()
+    fig, ax = plt.subplots(figsize=(13, 11))
+    _base_map(ax, boundary, lakes)
+    real = segments[~segments['synthetic']].sort_values('trips')
+    syn = segments[segments['synthetic']]
+    if not real.empty:
+        real.plot(ax=ax, color=_FLOW_COLOR, linewidth=_lw(real['trips'], ref),
+                  alpha=0.85, zorder=4)
+    if not syn.empty:
+        syn.plot(ax=ax, color=_FLOW_COLOR, linewidth=_lw(syn['trips'], ref),
+                 alpha=0.7, linestyle='--', zorder=3)
+    _draw_stations(ax, nodes)
+    _frame(ax, boundary)
+    ax.set_title(f'Passenger flows — {_plot_label(svc_network)} (full day)', fontsize=14)
+    ax.legend(handles=_width_legend(ref, _FLOW_COLOR) + [
+        Line2D([0], [0], color=_FLOW_COLOR, lw=2, linestyle='--', label='synthetic leg'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
+               markeredgecolor='black', markersize=7, label='Rail station'),
+    ], loc='upper right', fontsize=8, framealpha=0.9, title='Flow metrics')
+    _save_flow(fig, paths.get_passenger_flow_plot_path(svc_network, 'map'))
+
+
+def _plot_diff_map(merged: gpd.GeoDataFrame, base_network: str, dev_network: str,
+                   infra_version: str, method: str, ref: float) -> None:
+    """Developed-vs-baseline flow diff: green increase / red decrease / grey unchanged
+    at the baseline-fixed width scale, flow-change labels on the svc-int's affected
+    line, all rail stations, catchment extent. PDF under Passenger_Flows/."""
+    dref = _DIFF_REF_FRAC * ref
+    boundary, lakes = _catchment_layers()
+    npath = paths.get_flow_table_path(dev_network, method, 'flow_nodes.gpkg')
+    nodes = gpd.read_file(npath) if os.path.exists(npath) else None
+    fig, ax = plt.subplots(figsize=(13, 11))
+    _base_map(ax, boundary, lakes)
     unchanged = merged[merged['delta'].abs() <= 1e-6]
-    for _, r in unchanged.iterrows():
-        _plot_geom(ax, r.geometry, color='#cccccc', linewidth=0.4, alpha=0.6)
-    changed = merged[merged['delta'].abs() > 1e-6]
-    dmax = max(float(changed['delta'].abs().max()), 1.0) if len(changed) else 1.0
-    for _, r in changed.iterrows():
-        lw = 0.6 + 5.5 * (abs(r['delta']) / dmax)
-        _plot_geom(ax, r.geometry,
-                   color='#2ca02c' if r['delta'] > 0 else '#d62728',
-                   linewidth=lw, alpha=0.9,
-                   linestyle='--' if bool(r.get('synthetic')) else '-')
-    ax.set_title(f'Flow diff — {dev_network} vs {base_network} '
-                 f'({method}, full day)', fontsize=14)
-    ax.set_aspect('equal')
-    ax.set_axis_off()
-    handles = [
-        Line2D([0], [0], color='#2ca02c', lw=3, label=f'+{dmax:,.0f} trips'),
-        Line2D([0], [0], color='#d62728', lw=3, label=f'-{dmax:,.0f} trips'),
-        Line2D([0], [0], color='#999999', lw=2, linestyle='--',
-               label='synthetic leg'),
-    ]
-    ax.legend(handles=handles, loc='lower right', fontsize=9)
-    out_dir = paths.get_flow_plot_dir(dev_network, method)
-    os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, f'flow_diff_vs_{base_network}.png')
-    fig.savefig(out, bbox_inches='tight', dpi=180)
+    if not unchanged.empty:
+        unchanged.plot(ax=ax, color=_UNCH_COLOR, linewidth=0.5, alpha=0.7, zorder=3)
+    for sign, col in ((1, _INC_COLOR), (-1, _DEC_COLOR)):
+        sub = merged[(np.sign(merged['delta']) == sign) & (merged['delta'].abs() > 1e-6)]
+        for syn, ls, z in ((False, '-', 5), (True, '--', 4)):
+            layer = sub[sub['synthetic'] == syn].sort_values('delta', key=lambda s: s.abs())
+            if not layer.empty:
+                layer.plot(ax=ax, color=col, linewidth=_lw(layer['delta'], dref),
+                           alpha=0.9, linestyle=ls, zorder=z)
+    aff = _affected_int_geometry(dev_network, base_network, infra_version)
+    if aff is not None and not aff.empty:
+        buf = aff.to_crs(merged.crs).buffer(80).union_all()
+        for _, r in merged[merged.geometry.intersects(buf)
+                           & (merged['delta'].abs() > 1.0)].iterrows():
+            if r.geometry is None or r.geometry.is_empty:
+                continue
+            p = r.geometry.interpolate(0.5, normalized=True)
+            ax.annotate(f"{'+' if r['delta'] > 0 else ''}{r['delta']:,.0f}", (p.x, p.y),
+                        fontsize=6.2, ha='center', va='center', zorder=7,
+                        bbox=dict(boxstyle='round,pad=0.1', fc='white', ec='none', alpha=0.65))
+    _draw_stations(ax, nodes)
+    _frame(ax, boundary)
+    ax.set_title(f'Flow change — {_plot_label(dev_network)}', fontsize=14)
+    ax.legend(handles=_width_legend(dref, _INC_COLOR) + [
+        Line2D([0], [0], color=_DEC_COLOR, lw=_LW_MIN + _LW_SPAN, label='decrease (red)'),
+        Line2D([0], [0], color=_UNCH_COLOR, lw=2, label='unchanged'),
+        Line2D([0], [0], color='#777', lw=2, linestyle='--', label='synthetic leg'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
+               markeredgecolor='black', markersize=7, label='Rail station'),
+    ], loc='upper right', fontsize=8, framealpha=0.9, title='Flow metrics')
+    _save_flow(fig, paths.get_passenger_flow_plot_path(dev_network, 'diff'))
+
+
+def _save_flow(fig, out: str) -> None:
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    fig.savefig(out, bbox_inches='tight')
     plt.close(fig)
-    print(f"  diff map -> {out}")
+    print(f"  flow plot -> {out}")
 
 
 if __name__ == '__main__':
