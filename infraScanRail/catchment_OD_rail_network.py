@@ -1,5 +1,5 @@
 """catchment_OD_rail_network.py
-Last modified: 2026-06-09
+Last modified: 2026-06-21
 
 Passenger routing for infraScanRail (Phase 4C). Takes the W3 station-pair OD
 matrices from catchment_OD_preparation and assigns demand onto rail services
@@ -34,9 +34,11 @@ one sheet per service period: peak / off_peak / full_day, unless noted):
   skims.xlsx              (one sheet per skim: travel time, generalised cost,
                            frequency, transfers — station x station matrices)
   matrix_sa_top20.xlsx    unresolved_pairs.xlsx
-Plots under plots/Traffic_Flow/Assignment/<svc_network>/<method>/:
-  matrix_{travel_time,generalised_cost,frequency,interchange}.png   (SA -> top dest)
-  matrix_*_sa.png                                                   (SA x SA)
+Plots under plots/Traffic_Flow/Assignment/<svc_network>/<method>/ (each also _sa = SA x SA):
+  matrix_travel.png / matrix_generalised_cost.png            (total actual / weighted)
+  matrix_actual_cost_components.png /                        (W/V/T per cell)
+    matrix_generalised_cost_components.png
+  matrix_frequency.png                                       (direct D / transfer T rows)
   Sankey/sankey_service_<corridor>.{pdf,html}
   ServiceLoads/service_load_<line>.png   (per-service station-sequence loads)
 """
@@ -141,6 +143,9 @@ def _build_rail_graph(rail_segments: pd.DataFrame,
     Edges (attributes gc=weighted-min, time=clock-min):
         entry->sub (board wait), sub->sub same variant (in-vehicle),
         sub->sub same station diff variant (transfer), sub->exit (alight, 0).
+        Board and transfer waits use the COMBINED headway of all lines sharing the
+        segment the rider takes out of the stop (common lines: 60 / Σ freq), not
+        each line's individual headway.
 
     skey is the station id_point (int) when the stop resolves, else the stop_id
     string (out-of-catchment through stops — never an OD endpoint, but routable).
@@ -205,7 +210,9 @@ def _build_rail_graph(rail_segments: pd.DataFrame,
     direct_freq = {}
     direct_freq_report = {}    # (skey_a, skey_c) -> summed vfreq_report (reporting)
     variant_seq = {}           # variant_key -> ordered list of skey (stop sequence)
-    station_subs = {}          # skey -> list of (sub_node, headway_min)
+    station_subs = {}          # skey -> list of (sub_node, pooled_headway_min)
+    seg_window_freq = {}       # (skey_a, skey_b) -> Σ vfreq over variants on the
+                               # consecutive segment (combined common-lines freq)
     n_variants_used = n_variants_skip = 0
 
     def _skey(sid):
@@ -218,6 +225,9 @@ def _build_rail_graph(rail_segments: pd.DataFrame,
             G.add_node(ex, kind='exit',  station_key=skey)
         return en, ex
 
+    # Pass 1: per-variant sequence, frequencies and in-vehicle times; accumulate the
+    # combined per-segment frequency used for common-lines boarding-wait pooling.
+    variants = []   # (variant_key, sequence_raw, seq_skeys, tt_map, freq)
     for (rid, did, vrnk), var_segs in seg.groupby(
             ['route_id', 'direction_id', 'variant_rank'], sort=False):
         freq = ln_freq.get((rid, did, vrnk))
@@ -246,20 +256,50 @@ def _build_rail_graph(rail_segments: pd.DataFrame,
         positive = [x for x in (am, pm, op) if x > 0]
         vfreq_report[variant_key] = min(positive) if positive else float(freq)
         variant_period_freq[variant_key] = {'peak': max(am, pm), 'off_peak': op}
-        h = 60.0 / float(freq)
         n_variants_used += 1
 
+        seq_skeys = [_skey(sid) for sid in sequence]
+        variant_seq[variant_key] = seq_skeys
+        variants.append((variant_key, sequence, seq_skeys, tt_map, float(freq)))
+
+        # combined per-segment frequency (common-lines pooling) + direct frequency
+        for i in range(len(seq_skeys) - 1):
+            key = (seq_skeys[i], seq_skeys[i + 1])
+            seg_window_freq[key] = seg_window_freq.get(key, 0.0) + float(freq)
+        freq_rep = vfreq_report[variant_key]
+        for i in range(len(seq_skeys)):
+            a = seq_skeys[i]
+            for j in range(i + 1, len(seq_skeys)):
+                c = seq_skeys[j]
+                direct_freq[(a, c)] = direct_freq.get((a, c), 0.0) + float(freq)
+                direct_freq_report[(a, c)] = \
+                    direct_freq_report.get((a, c), 0.0) + freq_rep
+
+    # Pass 2: nodes + edges. The boarding wait uses the COMBINED frequency of every
+    # line sharing the segment the rider takes out of the stop (common lines /
+    # Chriqui-Robillard): h_pool = 60 / Σ freq, so parallel trunk services give the
+    # pooled headway, not each line's individual headway. The same pooled headway
+    # keys the transfer wait onto that line. Terminus stops (no outgoing segment)
+    # fall back to the line's own headway — no in-vehicle edge follows there.
+    def _board_headway(seq_skeys, i, own_freq):
+        if i < len(seq_skeys) - 1:
+            f = seg_window_freq.get((seq_skeys[i], seq_skeys[i + 1]), 0.0)
+            if f > 0:
+                return 60.0 / f
+        return 60.0 / own_freq
+
+    for variant_key, sequence, seq_skeys, tt_map, freq in variants:
         sub_nodes = []
-        for sid in sequence:
-            skey = _skey(sid)
+        for i, skey in enumerate(seq_skeys):
             en, ex = _ensure_portal(skey)
             sub = f"sub_{skey}_{variant_key}"
             G.add_node(sub, kind='sub', station_key=skey, variant_key=variant_key)
-            G.add_edge(en, sub, gc=w['wait'] * _wait_min(h), time=_wait_min(h))
+            h_pool = _board_headway(seq_skeys, i, freq)
+            G.add_edge(en, sub, gc=w['wait'] * _wait_min(h_pool),
+                       time=_wait_min(h_pool), board_freq=60.0 / h_pool)
             G.add_edge(sub, ex, gc=0.0, time=0.0)
-            station_subs.setdefault(skey, []).append((sub, h))
+            station_subs.setdefault(skey, []).append((sub, h_pool))
             sub_nodes.append((skey, sub))
-        variant_seq[variant_key] = [sk for (sk, _su) in sub_nodes]
 
         # in-vehicle edges between consecutive stops
         for i in range(len(sequence) - 1):
@@ -268,17 +308,8 @@ def _build_rail_graph(rail_segments: pd.DataFrame,
             sv = sub_nodes[i + 1][1]
             G.add_edge(su, sv, gc=w['ivt'] * ivt, time=ivt)
 
-        # direct-frequency accumulation (origin before dest on this variant)
-        freq_rep = vfreq_report[variant_key]
-        for i in range(len(sub_nodes)):
-            a = sub_nodes[i][0]
-            for j in range(i + 1, len(sub_nodes)):
-                c = sub_nodes[j][0]
-                direct_freq[(a, c)] = direct_freq.get((a, c), 0.0) + float(freq)
-                direct_freq_report[(a, c)] = \
-                    direct_freq_report.get((a, c), 0.0) + freq_rep
-
-    # transfer edges: between every pair of sub-nodes at a station (cost by target line)
+    # transfer edges: between every pair of sub-nodes at a station (cost by the
+    # target line's pooled boarding headway, so transfers pool like boardings)
     n_transfer_edges = 0
     for skey, subs in station_subs.items():
         for su, _h_u in subs:
@@ -286,7 +317,7 @@ def _build_rail_graph(rail_segments: pd.DataFrame,
                 if su == sv:
                     continue
                 G.add_edge(su, sv, gc=_transfer_penalty_min(h_v),
-                           time=_transfer_time_min(h_v))
+                           time=_transfer_time_min(h_v), board_freq=60.0 / h_v)
                 n_transfer_edges += 1
 
     # Curated same-complex links: connect sub-nodes across physically-single
@@ -300,7 +331,7 @@ def _build_rail_graph(rail_segments: pd.DataFrame,
             for su, _h in src_subs:
                 for sv, h_v in dst_subs:
                     G.add_edge(su, sv, gc=_transfer_penalty_min(h_v),
-                               time=_transfer_time_min(h_v))
+                               time=_transfer_time_min(h_v), board_freq=60.0 / h_v)
                     n_link_edges += 1
 
     # Diagnostic: flag co-located distinct served stations not already linked.
@@ -346,10 +377,17 @@ def _walk_path(G: nx.DiGraph, path: list) -> dict:
         lines_used             list[variant_key] in boarding order
         segments               list[(from_skey, to_skey, variant_key)]
         events                 list[(station_key, event, variant_key)]
+        wait_t/ivt_t/xfer_t    unweighted component minutes (boarding wait /
+                               in-vehicle incl. IVWT / transfer)
+        wait_g/ivt_g/xfer_g    the same components with GC weights applied
+        frequency              bottleneck of the per-leg pooled boarding frequency
+                               (min over board + transfer edges); nan if no in-graph
+                               boarding (e.g. a forced gateway-only leg)
     """
     gc = jt = 0.0
+    wait_t = ivt_t = xfer_t = wait_g = ivt_g = xfer_g = 0.0
     n_transfers = 0
-    lines, segments, events = [], [], []
+    lines, segments, events, board_freqs = [], [], [], []
 
     for u, v in zip(path[:-1], path[1:]):
         ed = G.edges[u, v]
@@ -361,19 +399,29 @@ def _walk_path(G: nx.DiGraph, path: list) -> dict:
         if ku == 'entry' and kv == 'sub':                      # board
             events.append((dv['station_key'], 'board', dv['variant_key']))
             lines.append(dv['variant_key'])
+            wait_t += ed['time']; wait_g += ed['gc']
+            if 'board_freq' in ed:
+                board_freqs.append(ed['board_freq'])
         elif ku == 'sub' and kv == 'exit':                     # alight
             events.append((du['station_key'], 'alight', du['variant_key']))
         elif ku == 'sub' and kv == 'sub':
             if du['variant_key'] == dv['variant_key']:          # in-vehicle (same line)
                 segments.append((du['station_key'], dv['station_key'],
                                  du['variant_key']))
+                ivt_t += ed['time']; ivt_g += ed['gc']
             else:                                # transfer (same station or curated link)
                 n_transfers += 1
                 events.append((dv['station_key'], 'transfer', dv['variant_key']))
                 lines.append(dv['variant_key'])
+                xfer_t += ed['time']; xfer_g += ed['gc']
+                if 'board_freq' in ed:
+                    board_freqs.append(ed['board_freq'])
 
     return {'gc': gc, 'journey_time': jt, 'n_transfers': n_transfers,
-            'lines_used': lines, 'segments': segments, 'events': events}
+            'lines_used': lines, 'segments': segments, 'events': events,
+            'wait_t': wait_t, 'ivt_t': ivt_t, 'xfer_t': xfer_t,
+            'wait_g': wait_g, 'ivt_g': ivt_g, 'xfer_g': xfer_g,
+            'frequency': min(board_freqs) if board_freqs else float('nan')}
 
 
 # ===============================================================================
@@ -402,13 +450,30 @@ def _record_path(prim: dict, A: int, C: int, path_id: int, share: float,
         'lines_used': '>'.join(info['lines_used']),
         'journey_time_min': round(info['journey_time'], 3),
         'gc_min': round(info['gc'], 3),
+        'wait_t': round(info.get('wait_t', 0.0), 3),
+        'ivt_t': round(info.get('ivt_t', 0.0), 3),
+        'xfer_t': round(info.get('xfer_t', 0.0), 3),
+        'wait_g': round(info.get('wait_g', 0.0), 3),
+        'ivt_g': round(info.get('ivt_g', 0.0), 3),
+        'xfer_g': round(info.get('xfer_g', 0.0), 3),
+        'frequency': round(info.get('frequency', float('nan')), 3),
+        'freq_direct': round(info.get('freq_direct', float('nan')), 3),
+        'freq_transfer': round(info.get('freq_transfer', float('nan')), 3),
         'share': share, 'trips': trips,
     })
+    # Gateways are routing-only terminals: drop the synthetic terminal hop and the
+    # gateway alight so downstream segment/station-flow consumers (service loads,
+    # capacity) see exactly what they did before (gateways contribute no segments).
+    gw = _GATEWAY_IDS
     for (fr, to, vk) in info['segments']:
+        if fr in gw or to in gw:
+            continue
         prim['segments'].append({
             'origin_id': A, 'dest_id': C, 'path_id': path_id,
             'from_id': fr, 'to_id': to, 'variant_key': vk, 'trips': trips})
     for (skey, ev, vk) in info['events']:
+        if skey in gw:
+            continue
         prim['events'].append({
             'origin_id': A, 'dest_id': C, 'path_id': path_id,
             'station_id': skey, 'event': ev, 'variant_key': vk, 'trips': trips})
@@ -450,37 +515,127 @@ def _assign_shortest_path(G: nx.DiGraph, od_long: pd.DataFrame) -> dict:
 
 # --- Logit: unified scoring over engine-generated candidates -------------------
 
-def _finalize_pair(prim: dict, A: int, C: int, trips: float, infos: list, k: int,
-                   window_min: float, window_pct: float, max_transfers: int,
-                   theta: float) -> bool:
-    """Filter candidate path infos to the cost window and transfer cap, dedupe,
-    keep the K lowest-GC, split demand by softmax(-theta*gc) and record. Returns
-    True if the pair resolved (>=1 accepted path), else flags it unresolved."""
+def _choose_pair(prim: dict, A: int, C: int, trips: float, infos: list,
+                 vfreq: dict, theta: float, max_transfers: int, k: int,
+                 window_min: float, window_pct: float) -> bool:
+    """Attractive-set choice model for one OD pair. Returns True if it resolved.
+
+    Keeps EVERY direct service (no speed/frequency drop); admits a transfer only
+    when no direct exists or its clock travel time <= the fastest direct's, then
+    caps the transfer alternatives to the k lowest-GC (directs are never capped).
+    The boarding wait and each transfer-hub wait are pooled over the distinct
+    services of the kept set (combined headway, common-lines). Demand splits by a
+    frequency-weighted logit (share ~ f_first * exp(-theta*gc)) over the kept set,
+    which renormalises to 1 so the capped tail's demand is conserved. The reported
+    components are re-scored with the pooled waits. Each chosen path is recorded.
+    """
     if not infos:
         prim['unresolved'].append({'origin_id': A, 'dest_id': C, 'trips': trips})
         return False
-    best_gc = min(i['gc'] for i in infos)
-    cutoff = best_gc + max(window_min, best_gc * window_pct)
-    acc = [i for i in infos
-           if i['gc'] <= cutoff + 1e-9 and i['n_transfers'] <= max_transfers]
+
+    # Dedupe by line sequence, keep the cheapest enumerated GC variant.
     seen, uniq = set(), []
-    for i in sorted(acc, key=lambda x: x['gc']):
-        key = ('>'.join(i['lines_used']), round(i['gc'], 4))
+    for i in sorted(infos, key=lambda x: x['gc']):
+        key = '>'.join(i['lines_used'])
         if key in seen:
             continue
         seen.add(key)
         uniq.append(i)
-    acc = uniq[:k]
-    if not acc:
+
+    direct = [i for i in uniq if i['n_transfers'] == 0]
+    transfer = [i for i in uniq if 1 <= i['n_transfers'] <= max_transfers]
+
+    # Admission (decision 5): all direct; transfers only if competitive on clock
+    # travel time, else (no direct) bounded by the GC cost window.
+    if direct:
+        min_direct = min(i['journey_time'] for i in direct)
+        transfer = [i for i in transfer if i['journey_time'] <= min_direct + 1e-9]
+    elif transfer:
+        best = min(i['gc'] for i in transfer)
+        cut = best + max(window_min, best * window_pct)
+        transfer = [i for i in transfer if i['gc'] <= cut + 1e-9]
+    viable_full = direct + transfer
+    if not viable_full:
         prim['unresolved'].append({'origin_id': A, 'dest_id': C, 'trips': trips})
         return False
-    gcs = np.array([i['gc'] for i in acc], dtype=float)
+
+    # Boarding legs: ordered (station_key, variant_key) per board + transfer event;
+    # leg[0] is the origin boarding, the rest are transfer hubs.
+    def _legs(info):
+        return [(st, vk) for (st, ev, vk) in info['events']
+                if ev in ('board', 'transfer')]
+
+    # Pool the boarding + transfer waits over the FULL viable set (decision c): the
+    # wait reflects every service a passenger could take, including those the
+    # storage cap below drops. Origin pooled wait = combined headway of the distinct
+    # first-leg services; per-hub pooled wait = combined headway of the distinct
+    # services boarded at that hub.
+    first_svcs, hub_svcs = {}, {}
+    for i in viable_full:
+        lg = _legs(i)
+        if lg:
+            first_svcs[lg[0][1]] = float(vfreq.get(lg[0][1], 0.0))
+        for (st, vk) in lg[1:]:
+            hub_svcs.setdefault(st, {})[vk] = float(vfreq.get(vk, 0.0))
+    f_origin = sum(first_svcs.values())
+    h_origin = 60.0 / f_origin if f_origin > 0 else float('inf')
+    hub_h = {st: (60.0 / s if (s := sum(d.values())) > 0 else float('inf'))
+             for st, d in hub_svcs.items()}
+
+    # Cap transfer alternatives to the k lowest-GC for storage (decision A). The
+    # pooled waits above already account for the dropped tail; the logit over the
+    # kept set renormalises so demand is conserved. Directs are never capped.
+    if len(transfer) > k:
+        transfer = sorted(transfer, key=lambda i: i['gc'])[:k]
+    viable = direct + transfer
+
+    w_wait = _active_weights()['wait']
+    wait_t = _wait_min(h_origin)
+    wait_g = w_wait * wait_t
+
+    scored = []
+    for i in viable:
+        hubs = [st for (st, _vk) in _legs(i)[1:]]
+        xfer_t = sum(_transfer_time_min(hub_h[st]) for st in hubs)
+        xfer_g = sum(_transfer_penalty_min(hub_h[st]) for st in hubs)
+        gc = wait_g + i['ivt_g'] + xfer_g
+        jt = wait_t + i['ivt_t'] + xfer_t
+        lg = _legs(i)
+        f_first = float(vfreq.get(lg[0][1], 0.0)) if lg else 0.0
+        # Per-path connection frequency = bottleneck of THIS path's pooled legs
+        # (origin pooled, then each of its own transfer hubs). A minor alternative
+        # via a thin hub no longer drags the whole OD's reported frequency down.
+        freq_path = min([f_origin] + [sum(hub_svcs[st].values()) for st in hubs])
+        scored.append((i, gc, jt, xfer_t, xfer_g, f_first, freq_path))
+
+    # Direct vs transfer connection frequency for the frequency plot: D = combined
+    # supply of the direct services; T = the best (least-GC) transfer route's
+    # bottleneck. Either is nan when the OD has no option of that kind.
+    direct_first = {}
+    for i in direct:
+        lg = _legs(i)
+        if lg:
+            direct_first[lg[0][1]] = float(vfreq.get(lg[0][1], 0.0))
+    freq_direct = sum(direct_first.values()) if direct_first else float('nan')
+    _xfer_scored = [s for s in scored if s[0]['n_transfers'] > 0]
+    freq_transfer = (min(_xfer_scored, key=lambda s: s[1])[6]
+                     if _xfer_scored else float('nan'))
+
+    gcs = np.array([s[1] for s in scored], dtype=float)
+    fw = np.array([s[5] for s in scored], dtype=float)
     u = -theta * gcs
     u -= u.max()
-    shares = np.exp(u)
-    shares /= shares.sum()
-    for pid, (info, sh) in enumerate(zip(acc, shares.tolist())):
-        _record_path(prim, A, C, pid, sh, trips, info)
+    wts = fw * np.exp(u)
+    tot = wts.sum()
+    shares = (wts / tot) if tot > 0 else np.full(len(scored), 1.0 / len(scored))
+
+    for pid, idx in enumerate(np.argsort(gcs).tolist()):
+        info, gc, jt, xfer_t, xfer_g, _f, freq_path = scored[idx]
+        rec = dict(info)
+        rec.update(gc=gc, journey_time=jt, wait_t=wait_t, wait_g=wait_g,
+                   xfer_t=xfer_t, xfer_g=xfer_g, frequency=freq_path,
+                   freq_direct=freq_direct, freq_transfer=freq_transfer)
+        _record_path(prim, A, C, pid, float(shares[idx]), trips, rec)
     return True
 
 
@@ -582,8 +737,12 @@ def _table_infos(G: nx.DiGraph, A: int, C: int, sp_path: list, ctx: dict,
         if ia is not None and ic is not None and ia < ic:
             proposals.append([(vk, A, C)])
 
+    # Boundary gateways are pure terminals (origin/dest), never transfer hubs:
+    # transferring at one means riding out to the boundary and back. Exclude them
+    # from interchange candidates (the synthetic gateway sub also has no transfer
+    # edge, so proposing one would dead-end).
     interch1 = [T for T in sorted(set(downA) & set(upC), key=str)
-                if T not in (A, C) and _in(f"exit_{T}")]
+                if T not in (A, C) and T not in _GATEWAY_IDS and _in(f"exit_{T}")]
     for T in interch1:                                            # 1-transfer
         for v1 in sorted(downA[T]):
             if not _in(f"sub_{T}_{v1}"):
@@ -596,11 +755,11 @@ def _table_infos(G: nx.DiGraph, A: int, C: int, sp_path: list, ctx: dict,
 
     if len(proposals) < cap:                                      # 2-transfer
         set_upC = set(upC)
-        for T1 in sorted((t for t in downA
-                          if t not in (A, C) and _in(f"exit_{t}")), key=str):
+        for T1 in sorted((t for t in downA if t not in (A, C)
+                          and t not in _GATEWAY_IDS and _in(f"exit_{t}")), key=str):
             downT1 = down.get(T1, {})
             for T2 in sorted(set(downT1) & set_upC, key=str):
-                if T2 in (A, C, T1) or not _in(f"exit_{T2}"):
+                if T2 in (A, C, T1) or T2 in _GATEWAY_IDS or not _in(f"exit_{T2}"):
                     continue
                 for v1 in sorted(downA[T1]):
                     if not _in(f"sub_{T1}_{v1}"):
@@ -626,15 +785,17 @@ def _table_infos(G: nx.DiGraph, A: int, C: int, sp_path: list, ctx: dict,
 
 
 def _assign_logit(G: nx.DiGraph, od_long: pd.DataFrame, engine: str,
-                  variant_seq: dict, k: int, window_min: float, window_pct: float,
-                  max_transfers: int, max_examine: int, theta: float) -> dict:
+                  variant_seq: dict, vfreq: dict, k: int, window_min: float,
+                  window_pct: float, max_transfers: int, max_examine: int,
+                  theta: float) -> dict:
     """Logit route-choice assignment over an engine-generated candidate set.
 
     engine: 'table' — connection-table itinerary proposal (0/1/2-transfer + SP path),
                       pruned to the cost window by the per-origin SP oracle (fast);
             'yen'   — Yen k-shortest on the full graph (exact baseline, slow).
     Both engines score candidates with the same _walk_path (one cost model) and split
-    demand by the same softmax in _finalize_pair, so they are directly comparable.
+    demand by the same attractive-set choice model in _choose_pair, so they are
+    directly comparable.
     """
     engine = (engine or 'table').strip().lower()
     prim = _empty_primitives()
@@ -672,8 +833,8 @@ def _assign_logit(G: nx.DiGraph, od_long: pd.DataFrame, engine: str,
                     continue
                 infos = _table_infos(G, A, C, sp, tablectx, dist_f,
                                      window_min, window_pct)
-            if _finalize_pair(prim, A, C, trips, infos, k, window_min, window_pct,
-                              max_transfers, theta):
+            if _choose_pair(prim, A, C, trips, infos, vfreq, theta,
+                            max_transfers, k, window_min, window_pct):
                 n_ok += 1
             else:
                 n_unres += 1
@@ -750,103 +911,80 @@ def _build_gateway_conn_lookup(conn_df: pd.DataFrame, variant_seq: dict) -> tupl
     return lookup, gateway_ids
 
 
-def _augment_gateway_graph(G: nx.DiGraph, lookup: dict, vfreq: dict) -> None:
-    """Add per-(gateway, service) virtual source/sink nodes that force boarding /
-    alighting a specific crossing service at the gateway's attach stop.
+def _attach_gateways(G: nx.DiGraph, lookup: dict, vfreq: dict,
+                     variant_seq: dict) -> dict:
+    """Make each boundary gateway an ordinary terminal stop of its crossing
+    services, so gateway ODs route through the normal choice model and crossing
+    services pool at the transfer hub (replaces the forced gwsrc/gwsnk mechanism).
 
-    inbound  -> gwsrc_<gid>_<vk> --board--> sub_<attach>_<vk>   (kind='entry')
-    outbound -> sub_<attach>_<vk> --0--> gwsnk_<gid>_<vk>       (kind='exit')
+    For every (gateway gid, role, crossing service vk, attach stop): ensure the
+    `entry_{gid}` / `exit_{gid}` portals and a `sub_{gid}_{vk}` node. A passing
+    service (gid not in its sequence) gets a 0-cost terminal hop
+    `sub_{attach}_{vk} -> sub_{gid}_{vk}` that delivers demand to the boundary
+    (mirroring the old 0-cost gwsnk); a stopping service already has `gid` in its
+    sequence, so its `sub_{gid}_{vk}` and board/alight edges exist. A board edge
+    `entry_{gid} -> sub_{gid}_{vk}` lets gateway-origin demand board the crossing
+    service (the choice model re-pools this wait over the combined crossing supply).
 
-    Boarding wait mirrors the in-graph board edge (w_wait * t_wait(headway)).
+    Returns `routing_seq` = variant_seq with `gid` appended to each passing crossing
+    service — used only for the table-engine reachability so it proposes
+    A -> hub -> crossing -> gateway itineraries. Reported segments/events at gateway
+    ids are dropped in _record_path, so downstream (service loads, capacity) is
+    unchanged.
     """
     w_wait = _active_weights()['wait']
+    routing_seq = {vk: list(s) for vk, s in variant_seq.items()}
+    gw_vks = {}
+    for (gid, _role), items in lookup.items():
+        gw_vks.setdefault(gid, set()).update(vk for vk, _w, _a in items)
+    gw_h = {gid: (60.0 / s if (s := sum(vfreq.get(v, 0.0) for v in vks)) > 0
+                  else 60.0)
+            for gid, vks in gw_vks.items()}
+
     for (gid, role), items in lookup.items():
+        en, ex = f"entry_{gid}", f"exit_{gid}"
+        if en not in G:
+            G.add_node(en, kind='entry', station_key=gid)
+            G.add_node(ex, kind='exit', station_key=gid)
+        h_gw = gw_h.get(gid, 60.0)
         for vk, _w, attach in items:
-            sub = f"sub_{attach}_{vk}"
-            if sub not in G:
+            attach_sub = f"sub_{attach}_{vk}"
+            if attach_sub not in G:
                 continue
+            gsub = f"sub_{gid}_{vk}"
+            if gsub in G:                # stopping service: gid already a real stop
+                continue
+            # Passing service: synthesise the gateway terminal on this service. The
+            # boundary sits BEFORE the first in-network stop for an inbound (origin)
+            # service and AFTER the last for an outbound (destination) one.
+            G.add_node(gsub, kind='sub', station_key=gid, variant_key=vk)
+            seq = routing_seq[vk]
             if role == 'inbound':
-                src = f"gwsrc_{gid}_{vk}"
-                G.add_node(src, kind='entry', station_key=gid)
-                freq = float(vfreq.get(vk, 0.0))
-                h = 60.0 / freq if freq > 0 else 60.0
-                G.add_edge(src, sub, gc=w_wait * _wait_min(h), time=_wait_min(h))
-            else:
-                snk = f"gwsnk_{gid}_{vk}"
-                G.add_node(snk, kind='exit', station_key=gid)
-                G.add_edge(sub, snk, gc=0.0, time=0.0)
+                G.add_edge(gsub, attach_sub, gc=0.0, time=0.0)   # ride in
+                G.add_edge(en, gsub, gc=w_wait * _wait_min(h_gw),
+                           time=_wait_min(h_gw), board_freq=60.0 / h_gw,
+                           var_freq=float(vfreq.get(vk, 0.0)))
+                if gid not in seq:
+                    seq.insert(0, gid)
+            else:                                                # outbound: ride out
+                G.add_edge(attach_sub, gsub, gc=0.0, time=0.0)
+                G.add_edge(gsub, ex, gc=0.0, time=0.0)
+                if gid not in seq:
+                    seq.append(gid)
+    return routing_seq
 
 
 def _expand_gateway_od(od_long: pd.DataFrame, lookup: dict,
                        gateway_ids: set) -> tuple:
-    """Split the OD into (normal, gateway) frames with explicit src/tgt graph nodes.
-
-    Gateway-origin rows are expanded per inbound service (trips × renormalised
-    boarding weight); gateway-destination rows per outbound service; gateway↔
-    gateway over the cross-product. Returns:
-        od_normal: original columns (both ends non-gateway) for the standard
-                   per-method assignment (entry_/exit_ portals implied).
-        od_gw:     columns origin_id, dest_id, trips, src_node, tgt_node — routed
-                   all-or-nothing from the forced boarding/alighting nodes.
-    """
-    gset = set(int(g) for g in gateway_ids)
-    normal_rows, gw_rows = [], []
-    for r in od_long.itertuples(index=False):
-        o, d, trips = int(r.origin_id), int(r.dest_id), float(r.trips)
-        o_in = lookup.get((o, 'inbound')) if o in gset else None
-        d_out = lookup.get((d, 'outbound')) if d in gset else None
-        if not o_in and not d_out:
-            normal_rows.append((o, d, trips))
-            continue
-        if o_in and not d_out:
-            for vk, w, _a in o_in:
-                gw_rows.append((o, d, trips * w, f"gwsrc_{o}_{vk}", f"exit_{d}"))
-        elif d_out and not o_in:
-            for vk, w, _a in d_out:
-                gw_rows.append((o, d, trips * w, f"entry_{o}", f"gwsnk_{d}_{vk}"))
-        else:                                   # both ends are gateways
-            for vki, wi, _ai in o_in:
-                for vko, wo, _ao in d_out:
-                    gw_rows.append((o, d, trips * wi * wo,
-                                    f"gwsrc_{o}_{vki}", f"gwsnk_{d}_{vko}"))
-    od_normal = pd.DataFrame(normal_rows, columns=['origin_id', 'dest_id', 'trips'])
+    """Gateway demand now routes through the normal choice model: boundary gateways
+    are ordinary terminal stations (see _attach_gateways), so every OD pair —
+    including gateway origins/destinations — is a normal row keyed by its
+    entry_/exit_ portal. Returns (od_normal, empty od_gw); the empty second frame
+    keeps the legacy `if not od_gw.empty` call sites as no-ops."""
+    od_normal = od_long[['origin_id', 'dest_id', 'trips']].copy()
     od_gw = pd.DataFrame(
-        gw_rows, columns=['origin_id', 'dest_id', 'trips', 'src_node', 'tgt_node'])
+        columns=['origin_id', 'dest_id', 'trips', 'src_node', 'tgt_node'])
     return od_normal, od_gw
-
-
-def _assign_gateway(G: nx.DiGraph, od_gw: pd.DataFrame) -> dict:
-    """All-or-nothing least-GC assignment for gateway-injected demand, routed from
-    the forced src_node to tgt_node (one multi-target Dijkstra per source node).
-
-    Deterministic and method-independent: the service split is already fixed by the
-    connection-table weights in od_gw, so both shortest_path and logit runs share
-    this same gateway assignment.
-    """
-    prim = _empty_primitives()
-    n_ok = n_unres = 0
-    for src, grp in od_gw.groupby('src_node', sort=False):
-        if src not in G:
-            for r in grp.itertuples(index=False):
-                prim['unresolved'].append({'origin_id': int(r.origin_id),
-                                           'dest_id': int(r.dest_id),
-                                           'trips': float(r.trips)})
-                n_unres += 1
-            continue
-        _dist, sp_paths = nx.single_source_dijkstra(G, src, weight='gc')
-        for r in grp.itertuples(index=False):
-            path = sp_paths.get(r.tgt_node)
-            if path is None:
-                prim['unresolved'].append({'origin_id': int(r.origin_id),
-                                           'dest_id': int(r.dest_id),
-                                           'trips': float(r.trips)})
-                n_unres += 1
-                continue
-            _record_path(prim, int(r.origin_id), int(r.dest_id), 0, 1.0,
-                         float(r.trips), _walk_path(G, path))
-            n_ok += 1
-    print(f"  [gateway] injected {n_ok:,} service-legs, unresolved {n_unres:,}.")
-    return prim
 
 
 # ===============================================================================
@@ -854,44 +992,73 @@ def _assign_gateway(G: nx.DiGraph, od_gw: pd.DataFrame) -> dict:
 # ===============================================================================
 
 def _build_skims(prim: dict, vfreq_report: dict, direct_freq_report: dict) -> dict:
-    """From path_id==0 (least-GC path) per pair, build journey-time (unweighted
-    clock), generalised-cost (weighted), transfers and frequency long-format skims.
+    """Build journey-time (unweighted clock), generalised-cost (weighted),
+    transfers, component and frequency long-format skims.
     Returns dict[name -> DataFrame(origin_id, dest_id, value)].
 
-    journey_time: in-vehicle + boarding wait + transfer time, all unweighted.
-    gc:           the same components with the active GC weights applied.
-    frequency:    direct (0 transfers) -> summed direct-variant reporting freq;
-                  else -> min reporting freq of the boarded variants (bottleneck).
-                  Reporting freq is the lowest positive period dep/h per variant.
+    journey_time / gc / transfers and the components (wait_t/ivt_t/xfer_t +
+    weighted wait_g/ivt_g/xfer_g) are the **demand-weighted blend** across the
+    chosen paths of each OD pair (Σ share·value / Σ share), so the reported value
+    reflects how passengers actually split (decision 4), not the single best path.
+    frequency:    the OD connection frequency carried on the paths (the pooled
+                  attractive-set bottleneck from the choice model, equal across a
+                  pair's paths); gateway ends are still min'd against the gateway's
+                  combined crossing supply until the gateway rework lands. Falls
+                  back to the legacy direct/single-variant bottleneck when the
+                  primitive predates the per-path frequency column.
     """
+    keys = ('journey_time', 'gc', 'frequency', 'freq_direct', 'freq_transfer',
+            'transfers', 'wait_t', 'ivt_t', 'xfer_t', 'wait_g', 'ivt_g', 'xfer_g')
     empty = pd.DataFrame()
     if _prim_empty(prim['paths']):
-        return {'journey_time': empty, 'gc': empty, 'frequency': empty,
-                'transfers': empty}
-    pdf = pd.DataFrame(prim['paths'])
+        return {k: empty for k in keys}
+    pdf = pd.DataFrame(prim['paths']).copy()
+    pdf['share'] = pdf['share'].astype(float)
+
+    # Demand-weighted blend per (origin, dest). den ~ 1.0 per pair (shares sum to
+    # 1); dividing by it keeps the blend exact even if they don't.
+    den = pdf.groupby(['origin_id', 'dest_id'])['share'].sum().rename('den')
+    skims = {}
+    for src, name in (('journey_time_min', 'journey_time'), ('gc_min', 'gc'),
+                      ('n_transfers', 'transfers'),
+                      ('wait_t', 'wait_t'), ('ivt_t', 'ivt_t'), ('xfer_t', 'xfer_t'),
+                      ('wait_g', 'wait_g'), ('ivt_g', 'ivt_g'), ('xfer_g', 'xfer_g')):
+        if src not in pdf.columns:
+            continue
+        num = (pdf[src].astype(float) * pdf['share']).groupby(
+            [pdf['origin_id'], pdf['dest_id']]).sum().rename('num')
+        m = pd.concat([num, den], axis=1).reset_index()
+        m['value'] = m['num'] / m['den']
+        skims[name] = m[['origin_id', 'dest_id', 'value']]
+
+    # Frequency is an OD property (equal across a pair's paths): take the least-GC
+    # representative's per-path pooled bottleneck. Gateways are ordinary stations
+    # now, so their crossing supply is already in the per-path frequency — no floor.
     best = pdf[pdf['path_id'] == 0].copy()
-
-    jt = best[['origin_id', 'dest_id', 'journey_time_min']].rename(
-        columns={'journey_time_min': 'value'})
-    gc = best[['origin_id', 'dest_id', 'gc_min']].rename(
-        columns={'gc_min': 'value'})
-    tr = best[['origin_id', 'dest_id', 'n_transfers']].rename(
-        columns={'n_transfers': 'value'})
-
-    def _freq(row):
-        a, c, nt = int(row['origin_id']), int(row['dest_id']), int(row['n_transfers'])
-        if nt == 0:
-            f = direct_freq_report.get((a, c))
-            if f is not None:
-                return f
-        variants = [v for v in str(row['lines_used']).split('>') if v]
-        fr = [vfreq_report[v] for v in variants if v in vfreq_report]
-        return min(fr) if fr else np.nan
-
-    fq = best[['origin_id', 'dest_id', 'lines_used', 'n_transfers']].copy()
-    fq['value'] = fq.apply(_freq, axis=1)
-    fq = fq[['origin_id', 'dest_id', 'value']]
-    return {'journey_time': jt, 'gc': gc, 'frequency': fq, 'transfers': tr}
+    if 'gc_min' in best.columns:
+        best = best.sort_values('gc_min').drop_duplicates(
+            ['origin_id', 'dest_id'], keep='first')
+    if 'frequency' in best.columns:
+        skims['frequency'] = best[['origin_id', 'dest_id', 'frequency']].rename(
+            columns={'frequency': 'value'})
+        for col in ('freq_direct', 'freq_transfer'):
+            if col in best.columns:
+                skims[col] = best[['origin_id', 'dest_id', col]].rename(
+                    columns={col: 'value'})
+    else:
+        def _freq(row):
+            a, c, nt = int(row['origin_id']), int(row['dest_id']), int(row['n_transfers'])
+            if nt == 0:
+                f = direct_freq_report.get((a, c))
+                if f is not None:
+                    return f
+            variants = [v for v in str(row['lines_used']).split('>') if v]
+            fr = [vfreq_report[v] for v in variants if v in vfreq_report]
+            return min(fr) if fr else np.nan
+        fq = best[['origin_id', 'dest_id', 'lines_used', 'n_transfers']].copy()
+        fq['value'] = fq.apply(_freq, axis=1)
+        skims['frequency'] = fq[['origin_id', 'dest_id', 'value']]
+    return skims
 
 
 # ===============================================================================
@@ -1069,6 +1236,11 @@ def _sa_station_ids() -> list:
 # route_id (str) -> line_short_name for the active run; populated in
 # passenger_routing from the graph builder's report_ctx. Empty -> id pass-through.
 _ROUTE_NAME = {}
+
+# Boundary gateway station ids for the active run; set in _build_routing_graph.
+# Segments/events at these terminal stops are dropped from the recorded primitive
+# (gateways are routing-only terminals, so downstream loads/capacity are unchanged).
+_GATEWAY_IDS = set()
 
 
 def _route_of(variant_key) -> str:
@@ -1368,10 +1540,86 @@ def _draw_interchange_heatmap(coded: np.ndarray, row_labels: list, col_labels: l
     print(f"    Saved interchange plot -> {out_png}")
 
 
+def _draw_component_heatmap(total: np.ndarray, w: np.ndarray, v: np.ndarray,
+                            t: np.ndarray, row_labels: list, col_labels: list,
+                            title: str, out_png: str) -> None:
+    """Origin × destination heatmap coloured by the total travel time, each cell
+    annotated with its three components — W: wait, V: in-vehicle (IVT+IVWT),
+    T: transfer. Colour scheme matches the total travel-time map (viridis_r)."""
+    fig, ax = plt.subplots(figsize=(max(9.0, len(col_labels) * 0.9 + 3.0),
+                                    max(6.0, len(row_labels) * 0.75 + 2.0)))
+    im = ax.imshow(total, aspect='auto', cmap='viridis_r')
+    ax.set_xticks(range(len(col_labels)))
+    ax.set_xticklabels(col_labels, rotation=45, ha='right', fontsize=9)
+    ax.set_yticks(range(len(row_labels)))
+    ax.set_yticklabels(row_labels, fontsize=9)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('total travel time (min)', fontsize=10)
+    cmap_obj, norm = im.cmap, im.norm
+    for i in range(total.shape[0]):
+        for j in range(total.shape[1]):
+            tv = total[i, j]
+            if np.isfinite(tv):
+                tc = _annotation_colour(cmap_obj(norm(tv)))
+                ax.text(j, i, f"W:{w[i, j]:.0f}\nV:{v[i, j]:.0f}\nT:{t[i, j]:.0f}",
+                        ha='center', va='center', fontsize=8, fontweight='bold',
+                        color=tc, linespacing=1.05)
+    ax.set_title(f"{title}\nW: wait   V: in-vehicle (IVT+IVWT)   T: transfer",
+                 fontsize=12, fontweight='bold')
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"    Saved component heatmap -> {out_png}")
+
+
+def _draw_freq_dt_heatmap(fd: np.ndarray, ft: np.ndarray, row_labels: list,
+                          col_labels: list, title: str, out_png: str) -> None:
+    """Origin × destination service-frequency heatmap. Each cell lists the direct
+    combined frequency (D) and/or the best transfer route's bottleneck (T) on
+    separate rows; both appear only when the OD has both options. Coloured by the
+    better (higher) of the two."""
+    best = fd if ft is None else np.fmax(fd, ft)     # nan-aware max
+    fig, ax = plt.subplots(figsize=(max(9.0, len(col_labels) * 0.8 + 3.0),
+                                    max(6.0, len(row_labels) * 0.7 + 2.0)))
+    im = ax.imshow(best, aspect='auto', cmap='viridis')
+    ax.set_xticks(range(len(col_labels)))
+    ax.set_xticklabels(col_labels, rotation=45, ha='right', fontsize=9)
+    ax.set_yticks(range(len(row_labels)))
+    ax.set_yticklabels(row_labels, fontsize=9)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('service frequency (trains/h)', fontsize=10)
+    cmap_obj, norm = im.cmap, im.norm
+    for i in range(best.shape[0]):
+        for j in range(best.shape[1]):
+            d = fd[i, j]
+            t = ft[i, j] if ft is not None else float('nan')
+            rows = []
+            if np.isfinite(d):
+                rows.append(f"D:{d:.0f}")
+            if np.isfinite(t):
+                rows.append(f"T:{t:.0f}")
+            if not rows:
+                continue
+            bv = best[i, j]
+            tc = _annotation_colour(cmap_obj(norm(bv))) if np.isfinite(bv) else 'black'
+            ax.text(j, i, "\n".join(rows), ha='center', va='center', fontsize=9,
+                    fontweight='bold', color=tc, linespacing=1.05)
+    ax.set_title(f"{title}\nD: direct (combined)   T: transfer (bottleneck)",
+                 fontsize=12, fontweight='bold')
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"    Saved frequency heatmap -> {out_png}")
+
+
 def _plot_matrix_set(skims: dict, name_lookup: dict, rows: list, cols: list,
                      out_dir: str, suffix: str, scope: str) -> None:
-    """Draw the heatmap set (unweighted travel time, weighted generalised cost,
-    frequency, interchange) for the given origin rows × destination cols."""
+    """Draw the heatmap set for the given origin rows × destination cols:
+    total actual travel time (`matrix_travel`), total weighted GC
+    (`matrix_generalised_cost`), their W/V/T component versions
+    (`matrix_actual_cost_components`, `matrix_generalised_cost_components`), and the
+    service-frequency plot (`matrix_frequency`, direct/transfer rows). Component
+    plots are skipped when the component skims are absent (legacy primitive)."""
     if not rows or not cols:
         print(f"    heatmaps{suffix}: no origins/destinations — skipped")
         return
@@ -1384,35 +1632,42 @@ def _plot_matrix_set(skims: dict, name_lookup: dict, rows: list, cols: list,
                              aggfunc='mean')
         return piv.reindex(index=rows, columns=cols)
 
-    jt, gc, fq, tr = _mat('journey_time'), _mat('gc'), _mat('frequency'), _mat('transfers')
     row_labels = [_name(name_lookup, s) for s in rows]
     col_labels = [_name(name_lookup, d) for d in cols]
+    jt, gc = _mat('journey_time'), _mat('gc')
+    wt, it, xt = _mat('wait_t'), _mat('ivt_t'), _mat('xfer_t')
+    wg, ig, xg = _mat('wait_g'), _mat('ivt_g'), _mat('xfer_g')
+    fd, ft = _mat('freq_direct'), _mat('freq_transfer')
 
-    numeric = [
-        (f'matrix_travel_time{suffix}.png', jt,
-         f'Travel time — actual (IVT + wait + transfer, min){scope}', 'viridis_r'),
-        (f'matrix_generalised_cost{suffix}.png', gc,
-         f'Travel time — weighted generalised cost (min){scope}', 'viridis_r'),
-        (f'matrix_frequency{suffix}.png', fq,
-         f'Service frequency (trains/h){scope}', 'viridis'),
-    ]
-    for fname, mat, label, cmap in numeric:
-        if mat is None:
-            print(f"    {label}: no skim — skipped")
-            continue
-        _draw_matrix_heatmap(mat.values, row_labels, col_labels, label, cmap,
-                             os.path.join(out_dir, fname))
+    # Totals (one value per cell).
+    if jt is not None:
+        _draw_matrix_heatmap(jt.values, row_labels, col_labels,
+                             f'Travel time — actual total (min){scope}', 'viridis_r',
+                             os.path.join(out_dir, f'matrix_travel{suffix}.png'))
+    if gc is not None:
+        _draw_matrix_heatmap(gc.values, row_labels, col_labels,
+                             f'Generalised cost — weighted total (min){scope}',
+                             'viridis_r',
+                             os.path.join(out_dir, f'matrix_generalised_cost{suffix}.png'))
 
-    if tr is not None:
-        coded = np.where(np.isfinite(tr.values), (tr.values >= 1).astype(float), -1.0)
-        # explicit same-station diagonal where origin == destination
-        for i, ro in enumerate(rows):
-            for j, co in enumerate(cols):
-                if int(ro) == int(co):
-                    coded[i, j] = -1.0
-        _draw_interchange_heatmap(coded, row_labels, col_labels,
-                                  f'Connection type{scope}',
-                                  os.path.join(out_dir, f'matrix_interchange{suffix}.png'))
+    # Component versions (W/V/T per cell).
+    if jt is not None and all(m is not None for m in (wt, it, xt)):
+        _draw_component_heatmap(
+            jt.values, wt.values, it.values, xt.values, row_labels, col_labels,
+            f'Travel time — actual cost components (min){scope}',
+            os.path.join(out_dir, f'matrix_actual_cost_components{suffix}.png'))
+    if gc is not None and all(m is not None for m in (wg, ig, xg)):
+        _draw_component_heatmap(
+            gc.values, wg.values, ig.values, xg.values, row_labels, col_labels,
+            f'Generalised cost — weighted cost components (min){scope}',
+            os.path.join(out_dir, f'matrix_generalised_cost_components{suffix}.png'))
+
+    if fd is not None or ft is not None:
+        _draw_freq_dt_heatmap(
+            fd.values if fd is not None else np.full((len(rows), len(cols)), np.nan),
+            ft.values if ft is not None else None, row_labels, col_labels,
+            f'Service frequency (trains/h){scope}',
+            os.path.join(out_dir, f'matrix_frequency{suffix}.png'))
 
 
 def _plot_sa_destination_matrices(prim: dict, skims: dict, name_lookup: dict,
@@ -1532,8 +1787,9 @@ def _segment_period_freq(route: str, direction: str, period: str,
 def _service_dir_period(rseg_route: pd.DataFrame, route: str, direction: str,
                         period: str, tau: float, variant_seq: dict,
                         variant_period_freq: dict) -> dict:
-    """Assemble one (direction, period) column: station sequence, per-segment load
-    factor (pax / period dep_h) and per-station board/alight counts."""
+    """Assemble one (direction, period) column: station sequence, per-station
+    per-train board/alight counts, the per-train segment load (running integral of
+    net boardings) and the line (trunk) frequency for the period."""
     seq = max((variant_seq[vk]
                for vk in _variant_keys_for(route, direction, variant_seq)),
               key=len, default=[])
@@ -1541,15 +1797,8 @@ def _service_dir_period(rseg_route: pd.DataFrame, route: str, direction: str,
     if sub.empty or len(seq) < 2:
         return {}
     sub['trips'] = sub['trips'] * tau
-    pax = sub.groupby(['from_id', 'to_id'])['trips'].sum().to_dict()
     seg_freq = _segment_period_freq(route, direction, period, variant_seq,
                                     variant_period_freq)
-
-    load_factor = {}
-    for (a, b) in zip(seq[:-1], seq[1:]):
-        p = pax.get((a, b), 0.0)
-        f = seg_freq.get((a, b), 0.0)
-        load_factor[(a, b)] = (p / f) if f > 0 else np.nan
 
     board = {s: 0.0 for s in seq}
     alight = {s: 0.0 for s in seq}
@@ -1558,15 +1807,40 @@ def _service_dir_period(rseg_route: pd.DataFrame, route: str, direction: str,
             board[st] = board.get(st, 0.0) + tr
         else:
             alight[st] = alight.get(st, 0.0) + tr
-    return {'seq': seq, 'load_factor': load_factor, 'board': board,
-            'alight': alight}
+
+    # Per-train so board/alight reconcile with the per-train segment loads:
+    # boardings leave on downstream trains (f of the next segment), alightings
+    # arrived on upstream trains (f of the previous segment).
+    idx = {s: i for i, s in enumerate(seq)}
+    board_pt, alight_pt = {}, {}
+    for s in seq:
+        i = idx[s]
+        f_down = seg_freq.get((seq[i], seq[i + 1]), 0.0) if i < len(seq) - 1 else 0.0
+        f_up = seg_freq.get((seq[i - 1], seq[i]), 0.0) if i > 0 else 0.0
+        board_pt[s] = (board[s] / f_down) if f_down > 0 else 0.0
+        alight_pt[s] = (alight[s] / f_up) if f_up > 0 else 0.0
+
+    # Segment load = running integral of net per-train boardings, so the drawn
+    # loads reconcile exactly with the board/alight figures. A direct per-segment
+    # pax/dep_h count diverges mid-line where rare OD legs loop and traverse a
+    # segment twice (the load counts both, board/alight mark only start+end); the
+    # integral form keeps the profile internally consistent.
+    load_factor = {}
+    cum = 0.0
+    for i in range(len(seq) - 1):
+        cum += board_pt[seq[i]] - alight_pt[seq[i]]
+        load_factor[(seq[i], seq[i + 1])] = cum
+
+    line_freq = max(seg_freq.values()) if seg_freq else 0.0
+    return {'seq': seq, 'load_factor': load_factor, 'board': board_pt,
+            'alight': alight_pt, 'line_freq': line_freq}
 
 
 def _draw_service_sequence(route: str, columns: list, name_lookup: dict,
                            out_png: str) -> None:
     """Draw one service's station-sequence load plot: each (period, direction) is a
     vertical station column; segment line width ∝ load factor (pax/train), with
-    board (↑) and alight (↓) counts per station. columns: list of
+    per-train board (↑) and alight (↓) counts per station. columns: list of
     (header, data-dict)."""
     cols = [(h, d) for h, d in columns if d]
     if not cols:
@@ -1583,12 +1857,13 @@ def _draw_service_sequence(route: str, columns: list, name_lookup: dict,
         seq = d['seq']
         y = {s: -i for i, s in enumerate(seq)}
         for (a, b), lf in d['load_factor'].items():
-            lw = 0.8 + 5.0 * (lf / lf_max) if np.isfinite(lf) and lf_max > 0 else 0.8
+            lw = (max(0.8, 0.8 + 5.0 * (lf / lf_max))
+                  if np.isfinite(lf) and lf_max > 0 else 0.8)
             ax.plot([x, x], [y[a], y[b]], color='#3182bd', lw=lw,
                     solid_capstyle='round', zorder=1)
             ym = (y[a] + y[b]) / 2.0
-            if np.isfinite(lf):
-                ax.text(x + 0.18, ym, f"{lf:.0f}" if lf >= 1 else f"{lf:.1f}",
+            if np.isfinite(lf) and lf >= 0.5:
+                ax.text(x + 0.18, ym, f"{lf:.0f}",
                         fontsize=8, fontweight='bold', va='center', ha='left',
                         color='#08519c', zorder=3)
         for s in seq:
@@ -1598,10 +1873,10 @@ def _draw_service_sequence(route: str, columns: list, name_lookup: dict,
             ax.text(x - 0.18, y[s], nm[:22], fontsize=8, va='center', ha='right',
                     zorder=3)
             bd, al = d['board'].get(s, 0.0), d['alight'].get(s, 0.0)
-            if bd > 0:
+            if bd >= 0.5:
                 ax.text(x + 0.18, y[s] + 0.18, f"↑{bd:.0f}", fontsize=7,
                         color='#238b45', va='bottom', ha='left', zorder=3)
-            if al > 0:
+            if al >= 0.5:
                 ax.text(x + 0.18, y[s] - 0.18, f"↓{al:.0f}", fontsize=7,
                         color='#cb181d', va='top', ha='left', zorder=3)
         ax.text(x, 0.8, header, fontsize=10, fontweight='bold', va='bottom',
@@ -1611,8 +1886,8 @@ def _draw_service_sequence(route: str, columns: list, name_lookup: dict,
     ax.set_ylim(-(max_n - 1) - 1.2, 2.0)
     ax.axis('off')
     line_label = _line_name(route)
-    ax.set_title(f"Service {line_label} — station loads (pax/train), boardings (↑) "
-                 f"& alightings (↓)", fontsize=12, fontweight='bold')
+    ax.set_title(f"Service {line_label} — loads, boardings (↑) & alightings (↓) "
+                 f"[all pax/train]", fontsize=12, fontweight='bold')
     fig.tight_layout()
     fig.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close(fig)
@@ -1661,7 +1936,9 @@ def _plot_service_load_sequences(prim: dict, variant_seq: dict,
                         dlabel = str(int(float(direction)))
                     except (TypeError, ValueError):
                         dlabel = str(direction)
-                    columns.append((f"{plabel}\nDir {dlabel}", data))
+                    header = (f"{plabel}\nDir {dlabel} — "
+                              f"{data.get('line_freq', 0.0):.0f} dep/h")
+                    columns.append((header, data))
         if not columns:
             continue
         stem = _sanitize_sheet(f"service_load_{_line_name(route)}", used)
@@ -1764,6 +2041,29 @@ def _load_rail_segments_with_tt() -> pd.DataFrame:
     return combined.drop_duplicates(
         subset=['from_stop_id', 'to_stop_id',
                 'route_id', 'direction_id', 'variant_rank'])
+
+
+def _through_stop_names() -> dict:
+    """{str(stop_nr) -> stop_name} from the full-day rail_segments.gpkg.
+
+    Covers every stop in the service network (including out-of-catchment through-
+    stops absent from the infra nodes.gpkg), so the load-sequence plots can resolve
+    the 'x<stop_id>' skeys to station names.
+    """
+    path = os.path.join(catchment_allocate._RAIL_BASE, 'rail_segments.gpkg')
+    if not os.path.exists(path):
+        return {}
+    out = {}
+    for layer_name, _ in pyogrio.list_layers(path):
+        g = gpd.read_file(path, layer=layer_name)
+        for col_id, col_nm in (('from_stop_nr', 'from_stop_name'),
+                               ('to_stop_nr', 'to_stop_name')):
+            if col_id not in g.columns or col_nm not in g.columns:
+                continue
+            for sid, nm in zip(g[col_id], g[col_nm]):
+                if pd.notna(sid) and pd.notna(nm) and str(nm).strip():
+                    out.setdefault(str(int(sid)), str(nm).strip())
+    return out
 
 
 def _load_rail_line_freqs_full_day() -> pd.DataFrame:
@@ -1904,15 +2204,39 @@ def _build_routing_graph(svc_version: str, od_method: str = 'pt_feeder',
     G, vfreq, direct_freq, variant_seq, report_ctx = _build_rail_graph(
         rail_segs_tt, rail_lines, rail_stations_g)
 
+    # Out-of-catchment through-stops carry the skey 'x<stop_id>' (never an OD
+    # endpoint, but they appear in the per-service load sequences). Resolve their
+    # names from the infra nodes (same source as gateway names) so the plots show
+    # station names instead of 'x<number>'.
+    _ooc_skeys = sorted({sk for seq in variant_seq.values() for sk in seq
+                         if isinstance(sk, str) and sk.startswith('x') and sk[1:].isdigit()})
+    if _ooc_skeys:
+        # Primary source: segment stop names (covers every network stop, including
+        # those beyond the infra nodes.gpkg). Fallback: infra nodes (rare gaps).
+        _seg_names = _through_stop_names()
+        _ids = [int(sk[1:]) for sk in _ooc_skeys]
+        _node_names = cod._build_boundary_station_index(_ids, infra_version)
+        for sk in _ooc_skeys:
+            sid = sk[1:]
+            nm = _seg_names.get(sid)
+            if not nm:
+                _n = _node_names.get(int(sid))
+                nm = str(_n[0]) if _n else None
+            if nm:
+                name_lookup.setdefault(sk, nm)
+
     print("\n[Step 2b] Gateway service-connection wiring ...")
     conn_df = _load_gateway_connections(svc_version)
     gw_lookup, gw_ids = _build_gateway_conn_lookup(conn_df, variant_seq)
-    _augment_gateway_graph(G, gw_lookup, vfreq)
+    routing_seq = _attach_gateways(G, gw_lookup, vfreq, variant_seq)
+    global _GATEWAY_IDS
+    _GATEWAY_IDS = set(int(g) for g in gw_ids)
 
     return {'G': G, 'name_lookup': name_lookup, 'rail_stations': rail_stations,
             'rail_segs_tt': rail_segs_tt, 'variant_seq': variant_seq,
-            'report_ctx': report_ctx, 'gw_lookup': gw_lookup, 'gw_ids': gw_ids,
-            'infra_version': infra_version}
+            'routing_seq': routing_seq, 'report_ctx': report_ctx,
+            'gw_lookup': gw_lookup, 'gw_ids': gw_ids,
+            'vfreq': vfreq, 'infra_version': infra_version}
 
 
 def passenger_routing(svc_version: str = '',
@@ -1972,9 +2296,9 @@ def passenger_routing(svc_version: str = '',
     od_long = _load_routing_od(svc_version, od_method)
 
     od_normal, od_gw = _expand_gateway_od(od_long, gw_lookup, gw_ids)
-    print(f"  Gateways wired: {len(gw_ids)} boundary gateways, "
-          f"{len(gw_lookup)} (gateway,role) entries; OD split into "
-          f"{len(od_normal):,} normal + {len(od_gw):,} gateway service-legs.")
+    print(f"  Gateways: {len(gw_ids)} boundary gateways as terminal stations "
+          f"({len(gw_lookup)} (gateway,role) entries); {len(od_normal):,} OD pairs "
+          f"routed through the normal choice model.")
 
     windows = [(cp.TAU_PEAK_SHARE, 'peak'),
                (cp.TAU_OFFPEAK_SHARE, 'off_peak'),
@@ -1990,15 +2314,13 @@ def passenger_routing(svc_version: str = '',
             prim = _assign_logit(
                 G, od_normal,
                 engine=getattr(settings, 'ROUTING_LOGIT_ENGINE', 'table'),
-                variant_seq=variant_seq,
+                variant_seq=ctx['routing_seq'], vfreq=ctx['vfreq'],
                 k=settings.ROUTING_K_PATHS,
                 window_min=settings.ROUTING_COST_WINDOW_MIN,
                 window_pct=settings.ROUTING_COST_WINDOW_PCT,
                 max_transfers=settings.ROUTING_MAX_TRANSFERS,
                 max_examine=settings.ROUTING_MAX_EXAMINE,
                 theta=cp.LOGIT_ROUTE_THETA)
-        if not od_gw.empty:
-            _merge_primitives(prim, _assign_gateway(G, od_gw))
         skims = _build_skims(prim, report_ctx['vfreq_report'],
                              report_ctx['direct_freq_report'])
 
@@ -2086,15 +2408,13 @@ def route_subset(svc_version: str, od_subset: pd.DataFrame, method: str = '',
         prim = _assign_logit(
             G, od_normal,
             engine=getattr(settings, 'ROUTING_LOGIT_ENGINE', 'table'),
-            variant_seq=ctx['variant_seq'],
+            variant_seq=ctx['routing_seq'], vfreq=ctx['vfreq'],
             k=settings.ROUTING_K_PATHS,
             window_min=settings.ROUTING_COST_WINDOW_MIN,
             window_pct=settings.ROUTING_COST_WINDOW_PCT,
             max_transfers=settings.ROUTING_MAX_TRANSFERS,
             max_examine=settings.ROUTING_MAX_EXAMINE,
             theta=cp.LOGIT_ROUTE_THETA)
-    if not od_gw.empty:
-        _merge_primitives(prim, _assign_gateway(G, od_gw))
     return prim
 
 
@@ -2356,15 +2676,13 @@ def route_svc_int(svc_int_id: str, base_svc_network: str, affected_stations,
             prim_new = _assign_logit(
                 ctx['G'], od_normal,
                 engine=getattr(settings, 'ROUTING_LOGIT_ENGINE', 'table'),
-                variant_seq=ctx['variant_seq'],
+                variant_seq=ctx['routing_seq'], vfreq=ctx['vfreq'],
                 k=settings.ROUTING_K_PATHS,
                 window_min=settings.ROUTING_COST_WINDOW_MIN,
                 window_pct=settings.ROUTING_COST_WINDOW_PCT,
                 max_transfers=settings.ROUTING_MAX_TRANSFERS,
                 max_examine=settings.ROUTING_MAX_EXAMINE,
                 theta=cp.LOGIT_ROUTE_THETA)
-        if not od_gw.empty:
-            _merge_primitives(prim_new, _assign_gateway(ctx['G'], od_gw))
 
         if full_recompute:
             cols = {'paths': ['origin_id', 'dest_id', 'path_id', 'n_transfers',

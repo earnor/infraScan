@@ -1,22 +1,26 @@
 """catchment_OD_preparation.py
-Last modified: 2026-05-27
+Last modified: 2026-06-20
 
-Station-pair OD matrix preparation for two methods (PT-feeder, Municipal)
-across three time windows (AM peak, off-peak, all-day). Both methods consume
-the same scaled communal OD; differ only in cell-to-station attribution.
+Phase 4B — station-pair OD matrix preparation for the active catchment method
+(PT-Feeder or Municipal; the standalone CLI can run both). Both methods consume
+the same GVM-anchored commune OD; they differ only in commune-to-station attribution.
 
-Public entry point: prepare_all_od_matrices(use_cache: bool) -> None
+Public entry point: prepare_all_od_matrices(use_cache, svc_version, infra_version,
+method, attribution_mode, ...) -> None
 
-Pipeline (W3):
+Pipeline (Phase 4B):
   1. Load catchment boundary, rail stations (within boundary), name lookup.
-  2. Load the GVM-anchored commune OD for the target year via od_communal (2018
+  2. Build the GVM-anchored commune OD for the target year via od_communal (2018
      actual blended toward the symmetrised 2040 forecast; exact at 2018 / 2040,
      population-only beyond 2040).
-  4. PT-feeder branch: apply per-(commune, station) Pop/FTE shares read from
-     catchment_allocate's station_commune_breakdown.csv as origin/dest weights.
-  5. Municipal branch (Phase 3): commune→station 1:1 mapping (Phase 3).
-  6. Emit per (method, time-window) name-keyed station OD CSV.
-  7. Print conservation diagnostics for each method.
+  3. Classify pairs in/out of catchment; route external demand to boundary gateway
+     stations (volume split + convergence / dead-gateway handling).
+  4. Branch attribution: PT-Feeder applies per-(commune, station) Pop/FTE or count-
+     blend shares read from catchment_allocate's station_commune_breakdown.csv as
+     origin/dest weights; Municipal uses a commune→station 1:1 mapping.
+  5. Scale by τ into peak / off-peak / full-day station-OD workbooks (XLSX).
+  6. Persist long-format OD + weights + gateway inputs for Phase 6B.
+  7. Print conservation diagnostics; export top-relations, OD pie map, Sankeys, heatmaps.
 """
 
 import json
@@ -112,7 +116,7 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
     methods   = _resolve_methods(method)
     attr_mode = (attribution_mode or settings.OD_ATTRIBUTION_MODE).strip().lower()
 
-    print("\n=== Preparing station-pair OD matrices (W3) ===")
+    print("\n=== Preparing station-pair OD matrices (Phase 4B) ===")
     print(f"  Method(s): {', '.join(methods)}   Attribution: {attr_mode}")
 
     boundary      = catchment_base._load_catchment_boundary()
@@ -277,7 +281,7 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
                                   'station_od_4b',
                                   {'svc_network': svc_version,
                                    'infra_version': infra_version})
-    print("\n=== W3 OD matrices done ===")
+    print("\n=== Phase 4B OD matrices done ===")
 
 
 def _resolve_methods(method: str) -> list:
@@ -297,7 +301,7 @@ def _resolve_methods(method: str) -> list:
 
 
 # ===============================================================================
-# NEW SHARED HELPERS (W3)
+# NEW SHARED HELPERS (Phase 4B)
 # ===============================================================================
 
 # ===============================================================================
@@ -1691,7 +1695,7 @@ def _run_municipal_branch(communal_od: pd.DataFrame,
         Long-format DataFrame: origin_station_id (int), dest_station_id (int),
         trips (float).
     """
-    print("\n  --- Municipal branch ---")
+    print("\n  --- 4B Municipal branch ---")
     assign = _load_municipal_assignment()
     bfs_to_stn = dict(zip(assign['BFS_NR'].astype(int),
                           assign['station_id'].astype(int)))
@@ -1752,7 +1756,7 @@ def _run_pt_feeder_branch(communal_od: pd.DataFrame, gateway_station_ids=None,
         long_df:      DataFrame[origin_station_id, dest_station_id, trips]
         orig_weights: DataFrame[BFS, station_id, orig_weight] — for diagnostic.
     """
-    print("\n  --- PT-feeder branch ---")
+    print("\n  --- 4B PT-feeder branch ---")
     breakdown = _load_station_breakdown('pt_feeder')
     orig_weights, dest_weights = _attribution_weight_tables(
         breakdown, attribution_mode, gateway_station_ids)
@@ -2057,7 +2061,7 @@ def _reaggregate_to_stations(
 
 
 # ===============================================================================
-# SCENARIO / DELTA SEAMS  (dormant — NOT on the deterministic W3 path)
+# SCENARIO / DELTA SEAMS  (dormant — NOT on the deterministic 4B path)
 # ===============================================================================
 # Interfaces the future scenario loop and per-intervention delta engine will call.
 # They reuse the live attribution / reaggregation internals so behaviour stays in
@@ -2559,7 +2563,7 @@ def _export_method_comparison_excel(pt_long: pd.DataFrame, muni_long: pd.DataFra
 
 
 # ===============================================================================
-# DIAGNOSTIC PLOTS (W3 Phase 4)
+# DIAGNOSTIC PLOTS (Phase 4B)
 # ===============================================================================
 
 def _build_station_summary(rail_stations, pt_long, muni_long, name_lookup):

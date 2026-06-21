@@ -1,18 +1,19 @@
-# catchment_allocate.py
-#
-# Station catchment area generation for infraScanRail.
-# Houses both the municipal (centroid-based) and PT-Feeder (GTFS multimodal)
-# methods. Both methods are always run so their results can be compared.
-#
-# Public entry point: get_catchment(use_cache: bool) -> None
-#
-# Directory layout:
-#   Data outputs  -> data/Catchment_Area/            (shared Step 1)
-#                    data/Catchment_Area/Municipal/   (municipal method)
-#                    data/Catchment_Area/PT_Feeder/   (PT-feeder method)
-#   Plot outputs  -> plots/Catchment_Area/            (shared Step 1 plots)
-#                    plots/Catchment_Area/Municipal/  (municipal method)
-#                    plots/Catchment_Area/PT_Feeder/  (PT-feeder method)
+"""Station catchment area generation for infraScanRail (Phase 4A).
+
+Last modified: 2026-06-20
+
+Houses both the Municipal (centroid-based) and PT-Feeder (GTFS multimodal)
+allocation methods. On the main_new path only the active settings.CATCHMENT_METHOD
+runs; the standalone CLI can run both ('both') to produce the comparison diff plot.
+
+Public entry point: get_catchment(use_cache, method, feeder_base, rail_base, ...).
+
+Directory layout:
+  Data outputs  -> data/Catchment_Area/<svc>/{Municipal,PT_Feeder}/
+  Plot outputs  -> plots/Catchment_Area/<svc>/{Municipal,PT_Feeder}/
+Shared inputs (boundary, pop/employment grids, per-municipality summary) are
+produced by catchment_base.py (Phase 2) and consumed here.
+"""
 
 import os
 import sys
@@ -371,7 +372,7 @@ def _run_municipal_method(boundary, rail_stations, pop_grid=None, empl_grid=None
     gpd.GeoDataFrame or None
         Municipal catchment polygons (for diff plot), or None on failure.
     """
-    print("\n--- Municipal Method ---")
+    print("\n--- 4A Municipal Method ---")
 
     # Load municipalities — only those whose centroid falls within the
     # study-area boundary (drops peripheral municipalities that merely
@@ -3426,6 +3427,13 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
             legend_handles.append(
                 Patch(facecolor=colour, edgecolor='none', label=label))
 
+    # Lakes — drawn above the category cells but below the catchment-boundary
+    # lines and station markers, mirroring the other catchment maps so water
+    # reads as water in the diff view (uses the shared CA lakes helper).
+    _diff_lakes = _load_lakes_for_extent(boundary, scope='ca')
+    if not _diff_lakes.empty:
+        _diff_lakes.plot(ax=ax, color='#A8D8EA', edgecolor='none', zorder=3)
+
     # Normalise catchment column names
     muni_c = muni_catchment.copy()
     if 'id_point' not in muni_c.columns and 'id' in muni_c.columns:
@@ -5205,10 +5213,10 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
     tuple(gpd.GeoDataFrame, pd.DataFrame)
         PT-Feeder catchment polygons and the population cell allocation.
     """
-    print("\n--- PT-Feeder Method ---")
+    print("\n--- 4A PT-Feeder Method ---")
     st = time.time()
 
-    # Step 2-PT: Load network data
+    # Load network data
     feeder_stops    = _load_feeder_stops(boundary, temporal)
     # Restrict to rail stations strictly inside the catchment boundary —
     # out-of-boundary stations (e.g. Killwangen-Spreitenbach) are not
@@ -5225,14 +5233,14 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
 
     _build_pt_buffers(feeder_stops, rail_stations, boundary, pop_grid, empl_grid)
 
-    print(f"  [Step 2-PT complete: {time.time() - st:.1f}s]")
+    print(f"  [4A PT-Feeder] network prep complete: {time.time() - st:.1f}s")
     st = time.time()
 
-    # Step 3: Build feeder graph
+    # Build feeder graph
     feeder_stop_to_rail_times, feeder_stop_to_rail_components, feeder_graph = _build_feeder_graph(
         feeder_stops, feeder_segments, rail_stations)
 
-    # Step 3b: W2 frequency-aware lookups. Run in both cost methods — the only
+    # W2 frequency-aware lookups. Run in both cost methods — the only
     # difference between 'calibrated' and 'absolute' is the weights applied
     # downstream (w_wait scales the boarding-wait term; the station penalty is
     # raw seconds either way). The frequency logic itself is mode-independent.
@@ -5249,7 +5257,7 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
         rail_lines, rail_segments, rail_stations,
     )
 
-    print(f"  [Step 3 complete: {time.time() - st:.1f}s]")
+    print(f"  [4A PT-Feeder] feeder graph + frequency lookups complete: {time.time() - st:.1f}s")
     st = time.time()
 
     # Bundle the pre-built network objects so the cell→station allocation core is
@@ -5263,15 +5271,15 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
         'station_freq_penalty': station_freq_penalty,
     }
 
-    # Step 4: Allocate cells — population grid first
+    # Allocate cells — population grid first
     print("\n  Allocating population cells ...")
     alloc_pop, walk_pop, cycle_pop, feeder_pop = _allocate_pt_feeder_core(
         pop_grid, svc_network)
 
-    print(f"  [Pop allocation complete: {time.time() - st:.1f}s]")
+    print(f"  [4A PT-Feeder] population allocation complete: {time.time() - st:.1f}s")
     st = time.time()
 
-    # Step 4b: Allocate employment-only cells (RELIs in empl_grid but not in pop_grid).
+    # Allocate employment-only cells (RELIs in empl_grid but not in pop_grid).
     # Necessary so the diff plot can compare all inhabited cells, not just pop cells.
     pop_relis_set = set(pop_grid['RELI'].values)
     empl_only_grid = empl_grid[~empl_grid['RELI'].isin(pop_relis_set)].copy()
@@ -5283,7 +5291,7 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
         walk_all   = pd.concat([walk_pop,   walk_empl  ], ignore_index=True)
         cycle_all  = pd.concat([cycle_pop,  cycle_empl ], ignore_index=True)
         feeder_all = pd.concat([feeder_pop, feeder_empl], ignore_index=True)
-        print(f"  [Empl-only allocation complete: {time.time() - st:.1f}s]")
+        print(f"  [4A PT-Feeder] employment-only allocation complete: {time.time() - st:.1f}s")
     else:
         alloc_combined = alloc_pop.copy()
         walk_all, cycle_all, feeder_all = walk_pop, cycle_pop, feeder_pop
@@ -5360,7 +5368,7 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
             breakdown=breakdown,
         )
 
-    print(f"  [Outputs complete: {time.time() - st:.1f}s]")
+    print(f"  [4A PT-Feeder] outputs complete: {time.time() - st:.1f}s")
 
     return pt_catchment, alloc_combined
 
@@ -6687,9 +6695,9 @@ def _interactive_config():
         rail_base:   str  – resolved path to the rail Unprojected directory
         temporal      : 'full_day' | 'all_day' | 'peak' | 'offpeak'
     """
-    print("=" * 70)
+    print("=" * 160)
     print("catchment_allocate.py — PIPELINE CONFIGURATION")
-    print("=" * 70)
+    print("=" * 160)
 
     # --- A. Method selection ---
     print("\nA. CATCHMENT METHOD")
@@ -6892,9 +6900,9 @@ def _interactive_config():
         'pt_feeder': 'PT-Feeder (GTFS multimodal)',
         'both':      'Both + diff comparison plot',
     }
-    print("\n" + "-" * 70)
+    print("\n" + "-" * 160)
     print("  CONFIGURATION SUMMARY")
-    print("-" * 70)
+    print("-" * 160)
     print(f"  Method         : {method_labels[method]}")
     print(f"  Service version: {svc_version}")
     if need_feeder:
@@ -6905,7 +6913,7 @@ def _interactive_config():
     print(f"  Infra projection: {infra_projection if infra_projection else 'Unprojected'}")
     print(f"  Travel cost    : {travel_cost_method}")
     print(f"  Transfer model : {transfer_cost_model}")
-    print("-" * 70)
+    print("-" * 160)
 
     return {
         'method':              method,
@@ -6970,7 +6978,7 @@ def get_catchment(use_cache: bool, method: str = 'both',
     os.chdir(paths.MAIN)
     _ensure_dirs()
 
-    print("=" * 70)
+    print("=" * 160)
     print("CATCHMENT ALLOCATION")
     print(f"  Method : {method}")
     if method in ('pt_feeder', 'both'):
@@ -6983,7 +6991,7 @@ def get_catchment(use_cache: bool, method: str = 'both',
         print(f"  Transfer penalty   : {_xp_sec:.0f}s "
               f"({_xp_sec / 60:.2f} min, "
               f"{'comfort-weighted PI_TRANSFER' if settings.TRAVEL_COST_METHOD == 'calibrated' else 'raw average_train_change_time'})")
-    print("=" * 70)
+    print("=" * 160)
 
     total_start = time.time()
 
@@ -7005,12 +7013,12 @@ def get_catchment(use_cache: bool, method: str = 'both',
             missing = [f for f in expected_files if not os.path.exists(f)]
             print(f"Cache enabled but {len(missing)} file(s) missing. Regenerating ...")
 
-    # --- Step 1: Read shared data from catchment_base cache ---
-    # Step 1 (boundary, filtered grids, per-municipality summary, raster +
-    # choropleth plots) is produced by `python catchment_base.py`. This module
+    # --- Read shared data from catchment_base cache (Phase 2) ---
+    # The shared inputs (boundary, filtered grids, per-municipality summary, raster +
+    # choropleth plots) are produced by `python catchment_base.py`. This module
     # only consumes the cached outputs — if any are missing, the cache readers
     # raise FileNotFoundError with an actionable message.
-    print("\n[Step 1] Reading shared data from catchment_base cache ...")
+    print("\n[4A] Reading shared data from catchment_base cache ...")
     boundary  = _load_catchment_boundary()
     pop_grid  = load_population_grid_cached()
     empl_grid = load_employment_grid_cached()
@@ -7043,7 +7051,7 @@ def get_catchment(use_cache: bool, method: str = 'both',
             boundary, pop_grid, empl_grid, temporal, visualize=visualize)
 
     if method == 'both' and visualize:
-        print("\n[Comparison] Building diff plot ...")
+        print("\n[4A] Building Municipal vs PT-Feeder diff plot ...")
         rail_stations = _load_rail_stations(boundary, temporal, buffer=0)
         plot_rs = _get_plot_rail_stations(rail_stations, scope='ca')
         _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
