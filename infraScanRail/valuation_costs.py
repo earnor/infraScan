@@ -1,6 +1,6 @@
 """
 valuation_costs — Phase 8B: construction / maintenance / operating cost per svc-int.
-Last modified: 2026-06-11
+Last modified: 2026-06-21
 
 NEW cost track only (the legacy OLD 12-trains/track methodology was dropped,
 decision 2026-06-10). Sources:
@@ -40,8 +40,8 @@ import svc_ints_orchestrator as so
 
 
 def compute_construction_costs(svc_int_ids=None, *, combo: str,
-                               base_infra: str = None, use_cache: bool = True,
-                               make_plots: bool = False) -> pd.DataFrame:
+                               base_infra: str = None,
+                               use_cache: bool = True) -> pd.DataFrame:
     """Phase 8B: construction + maintenance + operating cost per svc-int.
 
     Args:
@@ -51,7 +51,6 @@ def compute_construction_costs(svc_int_ids=None, *, combo: str,
             (None = the combo's infra half).
         use_cache: skip when construction_cost.csv already covers all ids and
             the costs_8b manifest matches.
-        make_plots: cost-composition plot (data outputs always write).
 
     Returns:
         DataFrame(Development, Dev_ConstructionCost, Dev_MaintenanceCost,
@@ -96,6 +95,9 @@ def compute_construction_costs(svc_int_ids=None, *, combo: str,
         paths.MAIN, paths.RAIL_LINES_DIR, svc_version + '_network',
         paths.SERVICES_UNPROJECTED_SUBDIR, 'rail_lines.gpkg'))
 
+    # Serial by design: 8B is ~50 ms/svc-int (registry + attribution reads + one
+    # gpkg read), so loky spawn/pickle overhead makes parallelism slower
+    # (measured 0.74x). 8A is the parallel valuation subphase; 8B stays serial.
     rows = []
     for iid in svc_int_ids:
         rec = so.read_record(_svc_int_type(iid), iid, network=combo)
@@ -111,12 +113,6 @@ def compute_construction_costs(svc_int_ids=None, *, combo: str,
     cache_manifest.write_manifest(out_dir, 'costs_8b', versions,
                                   name='_settings_manifest_costs_8b.json')
     print(f"  [csv] wrote {csv_path} ({len(result)} svc-int row(s))")
-
-    if make_plots:
-        try:
-            _plot_costs(result, combo)
-        except Exception as exc:
-            print(f"  [plot] 8B cost plot failed: {exc}")
     print(f"  Phase 8B done in {time.time() - t0:.1f}s")
     return result
 
@@ -210,7 +206,11 @@ def _delta_train_m(svc_int_id: str, combo: str, base_infra: str,
     needs cycle-time/turnaround data and a consistent global re-cost of EXT/NDC/FRQ).
     STP is NOT benefit-only regardless: the user-time effects of re-stopping (a
     longer ride from an added stop; a longer wait/access from a dropped call) are
-    captured as travel-time-savings deltas in Phase 8A, where they carry real cost."""
+    valued in Phase 8A. As of 2026-06-21 (supervisor decision) those slowdowns are
+    no longer netted against the travel-time savings but split off as a separate
+    travel-time-LOSS cost (monetized_tt_loss_yearly in traveltime_savings.csv) that
+    Phase 9 routes to the CBA cost side — so they appear as a cost here in spirit,
+    computed in 8A where the demand and skims live, not recomputed in 8B."""
     delta_path = paths.get_svc_int_projected_path(svc_int_id, base_infra, combo)
     dev = _route_lengths(delta_path)
     if dev.empty:
@@ -285,43 +285,6 @@ def _costs_for_svc_int(svc_int_id: str, rec: dict, combo: str, base_infra: str,
             'uncoveredOperatingCost': op_cost}
 
 
-def _plot_costs(result: pd.DataFrame, combo: str) -> None:
-    """Stacked construction bars + annual cost bars per svc-int."""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    import numpy as np
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    x = np.arange(len(result))
-    labels = result['Development'].astype(str)
-
-    ax1.bar(x, result['Dev_ConstructionCost'] / 1e6, label='CC (Dev)')
-    ax1.bar(x, result['CapInt_ConstructionCost'] / 1e6,
-            bottom=result['Dev_ConstructionCost'] / 1e6, label='CAP (CapInt)')
-    ax1.set_title('Construction cost [Mio. CHF]')
-    ax1.set_xticks(x, labels, rotation=45, ha='right', fontsize=8)
-    ax1.legend()
-    ax1.grid(alpha=0.3, axis='y')
-
-    ax2.bar(x - 0.2, result['YearlyMaintenanceCost'] / 1e6, width=0.4,
-            label='Maintenance /a')
-    ax2.bar(x + 0.2, result['uncoveredOperatingCost'] / 1e6, width=0.4,
-            label='Uncovered operating /a')
-    ax2.set_title('Annual costs [Mio. CHF/a]')
-    ax2.set_xticks(x, labels, rotation=45, ha='right', fontsize=8)
-    ax2.legend()
-    ax2.grid(alpha=0.3, axis='y')
-
-    fig.suptitle(f'Phase 8B cost composition ({combo})')
-    out_dir = paths.get_developments_plot_dir(combo, 'valuation')
-    os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, 'construction_costs.pdf')
-    fig.savefig(out, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  [plot] saved {out}")
-
-
 if __name__ == "__main__":
     import ints_core as _core
 
@@ -336,8 +299,4 @@ if __name__ == "__main__":
     _cache_def = 'y' if settings.use_cache_costs else 'n'
     _cache = (input(f"Use cost cache? [y/n] [{_cache_def}]: ").strip()
               or _cache_def).lower() == 'y'
-    _plot_def = 'y' if settings.PLOT_COSTS else 'n'
-    _plots = (input(f"Generate plots? [y/n] [{_plot_def}]: ").strip()
-              or _plot_def).lower() == 'y'
-    compute_construction_costs(combo=_combo, use_cache=_cache,
-                               make_plots=_plots)
+    compute_construction_costs(combo=_combo, use_cache=_cache)

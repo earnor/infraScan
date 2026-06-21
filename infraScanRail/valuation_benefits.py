@@ -1,14 +1,17 @@
 """
-valuation_benefits — Phase 8A: monetised travel-time savings per svc-int.
-Last modified: 2026-06-10
+valuation_benefits — Phase 8A: monetised travel-time gains and losses per svc-int.
+Last modified: 2026-06-21
 
 Benefit measure = the 6C generalised-cost skim (gc_min of the least-GC path per
 station pair, read from the routing primitive parquet), composed under the
 active settings. Demand = Phase 7 factor-store compositions
-(random_scenarios.compose_scenario_od). Benefit per pair =
-dGC x (q_base + q_dev) / 2 (rule of half; reduces to the fixed-demand formula
-where the OD is unchanged — always under Municipal). Annualisation =
-whole-day hours x 365 x VTTS.
+(random_scenarios.compose_scenario_od). Per pair the rule-of-half contribution is
+dGC x (q_base + q_dev) / 2; pairs that get faster contribute a GAIN, pairs that
+get slower a LOSS. Decision 2026-06-21 (supervisor): the loss side is no longer
+netted against the gain — it is reported as a separate travel-time-LOSS cost so
+it lands on the CBA cost side, not as a smaller benefit. Especially relevant for
+STP (an added stop lengthens the ride for through-passengers), but applies to any
+int that slows some OD pairs. Annualisation = whole-day hours x 365 x VTTS.
 
 Only pairs with a time in BOTH networks are valued; dropped demand pairs are
 counted and printed per svc-int (no silent truncation).
@@ -16,10 +19,13 @@ counted and printed per svc-int (no silent truncation).
 Replaces the legacy compute_tts chain (TT_Delay.py / main_cap.py Phase 9):
 no per-dev Dijkstra graphs, no Rail_Node.csv read, no 'Development_1'
 convention, no scenario-OD pickles, no tau. Note on the output schema:
-status_quo_tt / development_tt are true totals (sum gc x q / 60, hours/day)
-while tt_savings_daily is the rule-of-half value, so under changed demand it
-intentionally differs from status_quo_tt - development_tt; Phase 9 consumes
-only monetized_savings_yearly.
+status_quo_tt / development_tt are true totals (sum gc x q / 60, hours/day).
+tt_savings_daily stays the SIGNED net rule-of-half value (= tt_gain_daily -
+tt_loss_daily, kept for reconciliation), but monetized_savings_yearly is now the
+GROSS gain only (tt_gain_daily x 365 x VTTS) and monetized_tt_loss_yearly the
+gross loss (a positive cost). Phase 9 consumes monetized_savings_yearly as the
+benefit and monetized_tt_loss_yearly as a cost; gain - loss reproduces the old
+net benefit exactly (NPV unchanged, only the cost composition / BCR shift).
 """
 
 import os
@@ -39,8 +45,7 @@ import svc_ints_orchestrator as so
 def compute_travel_time_savings(svc_int_ids=None, *, svc_version: str,
                                 combo: str, method: str, attribution: str,
                                 assignment_method: str, scenarios=None,
-                                years=None, use_cache: bool = True,
-                                make_plots: bool = False) -> pd.DataFrame:
+                                years=None, use_cache: bool = True) -> pd.DataFrame:
     """Phase 8A: monetised TTS per svc-int x scenario x year (rule of half).
 
     Args:
@@ -56,12 +61,12 @@ def compute_travel_time_savings(svc_int_ids=None, *, svc_version: str,
             (default settings.start_valuation_year..end_year_scenario).
         use_cache: load per-svc-int tts.parquet caches when present and the
             costs_8a manifest matches.
-        make_plots: benefit-distribution plot (data outputs always write).
 
     Returns:
         DataFrame(development, scenario, year, status_quo_tt, development_tt,
-        tt_savings_daily, monetized_savings_yearly) over all svc-ints — also
-        written to data/costs/Developments/<combo>/traveltime_savings.csv.
+        tt_savings_daily, tt_gain_daily, tt_loss_daily, monetized_savings_yearly,
+        monetized_tt_loss_yearly) over all svc-ints — also written to
+        data/costs/Developments/<combo>/traveltime_savings.csv.
     """
     t0 = time.time()
     if svc_int_ids is None:
@@ -99,12 +104,22 @@ def compute_travel_time_savings(svc_int_ids=None, *, svc_version: str,
            'store_base': store_base, 'use_cache': use_cache,
            'manifest_ok': manifest_ok}
 
+    n_jobs = max(1, int(getattr(settings, 'PHASE_PARALLEL_N_JOBS', 1)))
+    if n_jobs == 1 or len(svc_int_ids) <= 1:
+        results = [_tts_safe(iid, ctx) for iid in svc_int_ids]
+    else:
+        os.environ.setdefault('MPLBACKEND', 'Agg')
+        from joblib import Parallel, delayed
+        print(f"  [8A] parallel: {len(svc_int_ids)} svc-int(s) on {n_jobs} "
+              f"loky worker(s)")
+        results = Parallel(n_jobs=n_jobs, backend='loky')(
+            delayed(_tts_safe)(iid, ctx) for iid in svc_int_ids)
     frames = []
-    for iid in svc_int_ids:
-        try:
-            frames.append(_tts_for_svc_int(iid, ctx))
-        except FileNotFoundError as exc:
-            print(f"  [8A] {iid}: SKIPPED — {exc}")
+    for iid, fr, err in results:
+        if err is not None:
+            print(f"  [8A] {iid}: SKIPPED — {err}")
+        elif fr is not None:
+            frames.append(fr)
     if not frames:
         print("  [8A] no svc-int produced TTS rows — nothing written")
         return pd.DataFrame(columns=_OUT_COLS)
@@ -116,18 +131,14 @@ def compute_travel_time_savings(svc_int_ids=None, *, svc_version: str,
     cache_manifest.write_manifest(out_dir, 'costs_8a', versions,
                                   name='_settings_manifest_costs_8a.json')
     print(f"  [csv] wrote {csv_path} ({len(result):,} rows)")
-
-    if make_plots:
-        try:
-            _plot_benefits(result, combo)
-        except Exception as exc:
-            print(f"  [plot] 8A benefit plot failed: {exc}")
     print(f"  Phase 8A done in {time.time() - t0:.1f}s")
     return result
 
 
 _OUT_COLS = ['development', 'scenario', 'year', 'status_quo_tt',
-             'development_tt', 'tt_savings_daily', 'monetized_savings_yearly']
+             'development_tt', 'tt_savings_daily', 'tt_gain_daily',
+             'tt_loss_daily', 'monetized_savings_yearly',
+             'monetized_tt_loss_yearly']
 
 
 def _load_gc_skim(network_name: str, assignment_method: str) -> pd.DataFrame:
@@ -175,6 +186,15 @@ def _gather(trips: np.ndarray, idx: np.ndarray) -> np.ndarray:
     hit = idx >= 0
     out[hit] = trips[idx[hit]]
     return out
+
+
+def _tts_safe(svc_int_id: str, ctx: dict) -> tuple:
+    """Loky-dispatchable wrapper: (iid, frame|None, error|None). Module-level so
+    it pickles by reference; FileNotFoundError (missing skim) skips, not crashes."""
+    try:
+        return svc_int_id, _tts_for_svc_int(svc_int_id, ctx), None
+    except FileNotFoundError as exc:
+        return svc_int_id, None, str(exc)
 
 
 def _tts_for_svc_int(svc_int_id: str, ctx: dict) -> pd.DataFrame:
@@ -227,49 +247,30 @@ def _tts_for_svc_int(svc_int_id: str, ctx: dict) -> pd.DataFrame:
                                            store=store_dev, **kw)
             qb = _gather(qb_od['trips'].to_numpy(dtype=float), idx_b)
             qd = _gather(qd_od['trips'].to_numpy(dtype=float), idx_d)
-            tt_savings_daily = float((dgc * (qb + qd) / 2.0).sum()) / 60.0
+            # Gross-disbenefit split (decision 2026-06-21): faster pairs (dgc>0)
+            # are a gain, slower pairs (dgc<0) a separate loss-cost, not netted.
+            # (qb+qd)/2 >= 0, so sign(contrib) == sign(dgc).
+            contrib = dgc * (qb + qd) / 2.0
+            gain_daily = float(contrib[contrib > 0].sum()) / 60.0
+            loss_daily = float(-contrib[contrib < 0].sum()) / 60.0
             rows.append({
                 'development': svc_int_id, 'scenario': int(s), 'year': int(y),
                 'status_quo_tt': float((gcb * qb).sum()) / 60.0,
                 'development_tt': float((gcd * qd).sum()) / 60.0,
-                'tt_savings_daily': tt_savings_daily,
-                'monetized_savings_yearly':
-                    tt_savings_daily * 365.0 * float(cp.VTTS),
+                'tt_savings_daily': gain_daily - loss_daily,
+                'tt_gain_daily': gain_daily,
+                'tt_loss_daily': loss_daily,
+                'monetized_savings_yearly': gain_daily * 365.0 * float(cp.VTTS),
+                'monetized_tt_loss_yearly': loss_daily * 365.0 * float(cp.VTTS),
             })
     out = pd.DataFrame(rows, columns=_OUT_COLS)
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     out.to_parquet(cache_path, index=False)
     print(f"  [8A] {svc_int_id}: {len(pairs):,} valued pairs -> "
           f"{len(out):,} (scenario, year) rows  "
-          f"[mean yearly saving {out['monetized_savings_yearly'].mean():,.0f} CHF]")
+          f"[mean yearly gain {out['monetized_savings_yearly'].mean():,.0f} CHF, "
+          f"loss {out['monetized_tt_loss_yearly'].mean():,.0f} CHF]")
     return out
-
-
-def _plot_benefits(result: pd.DataFrame, combo: str) -> None:
-    """Per-svc-int mean benefit over years with a p10-p90 scenario band."""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for iid, grp in result.groupby('development'):
-        by_year = grp.groupby('year')['monetized_savings_yearly']
-        years = by_year.mean().index.to_numpy()
-        ax.plot(years, by_year.mean().to_numpy() / 1e6, label=str(iid))
-        ax.fill_between(years, by_year.quantile(0.1).to_numpy() / 1e6,
-                        by_year.quantile(0.9).to_numpy() / 1e6, alpha=0.15)
-    ax.set_xlabel('Year')
-    ax.set_ylabel('Monetised TT savings [Mio. CHF/a]')
-    ax.set_title(f'Phase 8A benefits — mean + p10-p90 across scenarios '
-                 f'({combo})')
-    ax.legend(fontsize=8)
-    ax.grid(alpha=0.3)
-    out_dir = paths.get_developments_plot_dir(combo, 'valuation')
-    os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, 'tts_benefits.pdf')
-    fig.savefig(out, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  [plot] saved {out}")
 
 
 if __name__ == "__main__":
@@ -290,9 +291,6 @@ if __name__ == "__main__":
     _cache_def = 'y' if settings.use_cache_tts else 'n'
     _cache = (input(f"Use TTS caches? [y/n] [{_cache_def}]: ").strip()
               or _cache_def).lower() == 'y'
-    _plot_def = 'y' if settings.PLOT_TTS else 'n'
-    _plots = (input(f"Generate plots? [y/n] [{_plot_def}]: ").strip()
-              or _plot_def).lower() == 'y'
     compute_travel_time_savings(
         svc_version=_svc, combo=_combo, method=_method, attribution=_attr,
-        assignment_method=_assign, use_cache=_cache, make_plots=_plots)
+        assignment_method=_assign, use_cache=_cache)
