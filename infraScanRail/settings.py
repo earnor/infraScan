@@ -70,9 +70,9 @@ GTFS_FILTER_VERSION = 'GTFS_SVC2026_ZH'        # services_filter_gtfs output: da
 # 'AS_2026_ZH_enhanced' — AS_2026_ZH enriched with projected svc travel times and corrections
 # 'AS_2035_ZH'          — BAV network as-is for 2035 (must already exist on disk)
 # 'AS_2035_ZH_enhanced' — AS_2035_ZH enriched with projected svc travel times and corrections
-INFRA_VERSION = 'AS_2035_ZH'
+INFRA_VERSION = 'Build_New'
 
-INFRA_BUILD_NEW_NAME = 'AS_2035_ZH'        # name for the new version — used only when INFRA_VERSION = 'Build_New'
+INFRA_BUILD_NEW_NAME = 'AS_2026_ZH'        # name for the new version — used only when INFRA_VERSION = 'Build_New'
 
 # When INFRA_VERSION = 'Build_New', open the interactive infra version manager to edit nodes/segments. False auto-creates the version from Base and saves without prompts.
 OPEN_INFRA_VERSION_MANAGER = False
@@ -88,9 +88,9 @@ OPEN_INFRA_VERSION_MANAGER = False
 # 'AK_2026_S18' — AK_2026 with the S18 line included
 # 'AK_2035'     — scheduled services as of the 2035 timetable
 # 'AK_2035_S18' — AK_2035 with the S18 line included
-SVC_VERSION = 'AK_2035_S18'
+SVC_VERSION = 'Build_New'
 
-SVC_BUILD_NEW_NAME = 'AK_2035_S18'                 # name for the new version — used only when SVC_VERSION = 'Build_New'
+SVC_BUILD_NEW_NAME = 'AK_2026_S18'                 # name for the new version — used only when SVC_VERSION = 'Build_New'
 
 # When SVC_VERSION = 'Build_New', open the interactive services version manager to edit lines/services. False finalises the freshly built network and saves without prompts.
 OPEN_SVC_VERSION_MANAGER = False
@@ -121,7 +121,7 @@ CAPACITY_MODE_CA = 'Dynamic'    # method applied to Catchment Area sections outs
 # 'conservative' — always choose the lowest capacity option
 # 'baseline'     — always choose the middle option
 # 'optimal'      — always choose the highest capacity option
-CAPACITY_GROUPING_STRATEGY = 'baseline'
+CAPACITY_GROUPING_STRATEGY = 'conservative'
 
 CAPACITY_SET_VALUE = 6             # trains/hour/direction — used when CAPACITY_MODE = 'Set_Value'
 # capacity_threshold — reactive CAP trigger margin: a section is constrained when available = Capacity − total_tphpd < this. User's choice [tphpd, 0–2 reasonable]:
@@ -301,7 +301,7 @@ use_full_recompute_ints = False
 # True  — write them per svc-int (human-facing; slow at ~1-3M rows each)
 WRITE_INT_WORKBOOKS = False
 
-PHASE6_N_JOBS = 3   # parallel Phase-6 workers (loky processes, ~1-2.5 GB each); 1 = serial; forced serial when use_full_recompute_ints
+PHASE_PARALLEL_N_JOBS = 3   # shared parallel-worker count for Phases 6 / 8A (loky; ~1-2.5 GB each for Phase 6); 1 = serial; Phase 6 forced serial when use_full_recompute_ints. 8B stays serial (~50 ms/int — parallel overhead loses)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 7. SCENARIOS
@@ -384,8 +384,6 @@ PLOT_MIXED_INTS = True   # per-svc-int capacity/service maps + CAP diff (Phase 5
 PLOT_INT_RECOMPUTE = True  # per-svc-int catchment/OD/routing delta plots (Phase 6A-6C)
 PLOT_FLOWS     = True    # infra-level passenger-flow maps + base-vs-dev diff (Phase 6D)
 PLOT_SCENARIOS = True    # population/modal/distance scenario fans (Phase 7)
-PLOT_TTS       = True    # per-svc-int benefit distribution across scenarios over years (Phase 8A)
-PLOT_COSTS     = True    # per-svc-int cost composition bars (Phase 8B)
 PLOT_RESULTS   = True   # core CBA result set — savings/net-benefit/BCR charts, waterfalls, network maps (Phase 9)
 PLOT_VALIDATION = True   # V-track comparison plots — scatters, rank/share charts, corridor profiles, tau check (V1-V3)
 

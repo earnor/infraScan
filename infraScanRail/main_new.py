@@ -1575,11 +1575,12 @@ def _phase5_base_infra() -> str:
     Phase 5 (5A/5B/5C) discovers, composes and measures interventions on the SAME
     network the rest of the run used: the enhanced version produced by Phase 3B
     (PIPELINE_CONFIG.infra_version), not the unenhanced base name. Falls back to the
-    configured base when the pipeline value is unset (partial runs).
+    PROPAGATED enhanced version (the '<base>_enhanced' on disk, else the configured
+    base) when the pipeline value is unset (partial / standalone runs).
     """
-    import infra_ints_orchestrator as _io
+    import ints_core as _core
     v = PIPELINE_CONFIG.infra_version
-    return v if v and v != 'Build_New' else _io._resolve_base_version()
+    return v if v and v != 'Build_New' else _core._resolve_base_version_propagated()
 
 
 def phase_5a_infrastructure_interventions(sa_boundary, runtimes: dict) -> None:
@@ -1888,7 +1889,7 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str,
                    ctx: dict, capture_log: bool = True) -> dict:
     """Phase-6 body for one svc-int: 6A/6B (PT_Feeder only), 6C, 6D + diff.
 
-    Runs in a loky child process when PHASE6_N_JOBS > 1, so every
+    Runs in a loky child process when PHASE_PARALLEL_N_JOBS > 1, so every
     runtime-resolved decision arrives via ``ctx`` — children re-import settings
     from file and must never read PIPELINE_CONFIG or mutated module state.
     With ``capture_log`` the worker's stdout is buffered and returned so the
@@ -1920,6 +1921,7 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str,
     redirect = (contextlib.redirect_stdout(buf) if capture_log
                 else contextlib.nullcontext())
     status, error = 'done', ''
+    metrics: dict = {}      # per-subphase aggregates for the Phase-6 report block
     with redirect:
         print(f"\n--- Phase 6 [{iid}] ({int_type.upper()}) ---")
         try:
@@ -1954,6 +1956,9 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str,
                       f"commune(s), {len(res6b['changed_gateways'])} changed "
                       f"gateway(s), {len(od_changed_pairs):,} changed OD "
                       f"pair(s).")
+                metrics.update(pt_feeder=True,
+                               n_6b_pairs=len(od_changed_pairs),
+                               n_6b_gateways=len(res6b['changed_gateways']))
 
             res = _pr.route_svc_int(
                 iid, ctx['svc_network'], aff['stations'], aff['services'],
@@ -1966,22 +1971,28 @@ def _phase6_worker(int_type: str, rec: dict, merged_dir: str,
                   f"{res['n_pairs_total']:,} pairs re-routed; routed "
                   f"{res['routed_trips']:,.1f} / unresolved "
                   f"{res['unresolved_trips']:,.1f} trips.")
+            metrics.update(routed=True, n_6c_closure=res['n_pairs_closure'])
 
-            _pf.build_passenger_flows(int_network, composed_infra,
-                                      method=ctx['assignment_method'],
-                                      make_plots=ctx['plot_flows'],
-                                      use_cache=ctx['use_cache_flows'],
-                                      links_infra_version=ctx['base_infra'])
-            _pf.build_flow_diff(ctx['svc_network'], int_network,
-                                ctx['base_infra'],
-                                method=ctx['assignment_method'],
-                                make_plots=ctx['plot_flows'],
-                                dev_infra_version=composed_infra)
+            _res_flows = _pf.build_passenger_flows(
+                int_network, composed_infra,
+                method=ctx['assignment_method'],
+                make_plots=ctx['plot_flows'],
+                use_cache=ctx['use_cache_flows'],
+                links_infra_version=ctx['base_infra'])
+            _n_changed = _pf.build_flow_diff(
+                ctx['svc_network'], int_network, ctx['base_infra'],
+                method=ctx['assignment_method'],
+                make_plots=ctx['plot_flows'],
+                dev_infra_version=composed_infra)
+            metrics.update(flows=True,
+                           n_6d_synthetic=int(_res_flows.get('n_synthetic', 0)),
+                           n_6d_changed=int(_n_changed or 0))
         except Exception as exc:
             status = 'fail'
             error = f"{exc}\n{traceback.format_exc()}"
     return {'iid': iid, 'int_type': int_type, 'status': status,
-            'error': error, 'log': buf.getvalue() if capture_log else ''}
+            'error': error, 'metrics': metrics,
+            'log': buf.getvalue() if capture_log else ''}
 
 
 def _reuse_twin_outputs(iid: str, twin_id: str, combo: str, ctx: dict) -> bool:
@@ -2040,7 +2051,7 @@ def _phase6_run_oracle(iid: str, merged_dir: str, composed_infra: str,
                        combo: str, parity_results: dict) -> None:
     """Full-recompute oracle + parity report for one svc-int (decision C).
 
-    Serial-only: PHASE6_N_JOBS is forced to 1 when use_full_recompute_ints is
+    Serial-only: PHASE_PARALLEL_N_JOBS is forced to 1 when use_full_recompute_ints is
     on, so this never runs inside a worker. Final on-disk outputs = oracle's.
     """
     import catchment_OD_rail_network as _pr
@@ -2179,7 +2190,7 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
           f"(parity check lands in plan Phase 4)")
 
     oracle = bool(getattr(settings, 'use_full_recompute_ints', False))
-    n_jobs = max(1, int(getattr(settings, 'PHASE6_N_JOBS', 1)))
+    n_jobs = max(1, int(getattr(settings, 'PHASE_PARALLEL_N_JOBS', 1)))
     if oracle and n_jobs > 1:
         print("  use_full_recompute_ints = True — forcing serial Phase 6 "
               "(oracle + parity stay debuggable).")
@@ -2232,9 +2243,11 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
                 print(f"  [twin] {iid}: twin {twin} outputs incomplete — "
                       f"computing normally.")
 
-            _so.apply_svc_int(rec, svc_version, base_infra, use_cache=True)
-            merged_dir = _so.build_merged_unprojected(rec, svc_version,
-                                                      base_infra, use_cache=True)
+            _so.apply_svc_int(rec, svc_version, base_infra,
+                              use_cache=settings.use_cache_svc_ints)
+            merged_dir = _so.build_merged_unprojected(
+                rec, svc_version, base_infra,
+                use_cache=settings.use_cache_svc_ints)
             if not merged_dir:
                 print(f"  {iid}: empty delta — network equals baseline, skipping.")
                 n_skip += 1
@@ -2254,6 +2267,24 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
             n_fail += 1
 
     parity_results: dict = {}
+    agg = {'6b_pairs': 0, '6b_gw': 0, '6b_ints': 0,    # grow-per-subphase report aggregates
+           '6c_ints': 0, '6c_closure': 0,
+           '6d_ints': 0, '6d_changed': 0, '6d_synthetic': 0}
+
+    def _accumulate(rec_metrics: dict) -> None:
+        m = rec_metrics or {}
+        if m.get('pt_feeder'):
+            agg['6b_pairs'] += m.get('n_6b_pairs', 0)
+            agg['6b_gw'] += m.get('n_6b_gateways', 0)
+            agg['6b_ints'] += 1
+        if m.get('routed'):
+            agg['6c_ints'] += 1
+            agg['6c_closure'] += m.get('n_6c_closure', 0)
+        if m.get('flows'):
+            agg['6d_ints'] += 1
+            agg['6d_changed'] += m.get('n_6d_changed', 0)
+            agg['6d_synthetic'] += m.get('n_6d_synthetic', 0)
+
     if n_jobs == 1 or len(todo) <= 1:
         for int_type, rec, merged_dir, composed, aff in todo:
             r = _phase6_worker(int_type, rec, merged_dir, composed, aff, ctx,
@@ -2272,6 +2303,7 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
                     n_fail += 1
                     continue
             n_done += 1
+            _accumulate(r.get('metrics'))
     else:
         # loky children inherit the env — pin the non-interactive backend
         # before any worker imports matplotlib.
@@ -2293,6 +2325,7 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
                 print(r['log'], end='' if r['log'].endswith('\n') else '\n')
             if r['status'] == 'done':
                 n_done += 1
+                _accumulate(r.get('metrics'))
             else:
                 print(f"  WARNING: Phase 6 failed for {r['iid']}: {r['error']}")
                 n_fail += 1
@@ -2321,6 +2354,38 @@ def phase_6_intervention_recompute(sa_boundary, ca_boundary, runtimes: dict,
                     cells.append(f"{r['n_mismatch']:,}/{r['n_rows_compared']:,}"
                                  f" ({mad_s})".rjust(22))
             print(f"    {iid:<14}" + ''.join(cells))
+
+    # ── Phase 6 runtime summary → report_new.txt ─────────────────────────────
+    # Phase-level decisions + the recompute outcome counts. Per-subphase
+    # aggregates (6A cells, 6B pairs, 6C pairs re-routed, 6D flow delta) are
+    # added by their own walks (grow-per-subphase, user decision 2026-06-21).
+    try:
+        with open(os.path.join(paths.MAIN, 'report_new.txt'), 'a', encoding='utf-8') as _f:
+            _f.write("\n--- INTERVENTION RECOMPUTE (Phase 6) ---\n")
+            _f.write(f"  Combo              : {combo}\n")
+            _f.write(f"  Svc-ints           : {len(records)}\n")
+            _f.write(f"  Catchment method   : {catchment_method}  -> {gate_note}\n")
+            _f.write(f"  OD / assignment    : {od_method} / {assignment_method}\n")
+            _f.write(f"  Parallelism        : PHASE_PARALLEL_N_JOBS = {n_jobs} (effective)\n")
+            _f.write(f"  Oracle (parity)    : use_full_recompute_ints = {oracle}\n")
+            _f.write(f"  Recompute outcome  : {n_done} recomputed, {n_skip} skipped, "
+                     f"{n_twin} twin-reused, {n_fail} failed\n")
+            if agg['6b_ints']:
+                _f.write(f"  6B reattribution   : {agg['6b_pairs']:,} changed pair(s), "
+                         f"{agg['6b_gw']} changed gateway(s) "
+                         f"(sum over {agg['6b_ints']} PT-Feeder int(s))\n")
+            if agg['6c_ints']:
+                _f.write(f"  6C routing         : {agg['6c_closure']:,} pair(s) re-routed "
+                         f"(sum over {agg['6c_ints']} int(s))\n")
+            if agg['6d_ints']:
+                _f.write(f"  6D flows           : {agg['6d_changed']:,} changed infra "
+                         f"segment(s), {agg['6d_synthetic']:,} synthetic leg(s) "
+                         f"(sum over {agg['6d_ints']} int(s))\n")
+            _f.write(f"  Plots              : int-recompute={settings.PLOT_INT_RECOMPUTE}, "
+                     f"flows={settings.PLOT_FLOWS}\n")
+    except Exception as _exc:
+        print(f"  [6] runtime summary skipped: {_exc}")
+
     runtimes["Phase 6: Intervention Recompute"] = time.time() - st
 
 
@@ -2496,15 +2561,43 @@ def phase_8_valuation_inputs(runtimes: dict, svc_int_ids=None) -> None:
     import valuation_costs as _vc
 
     print("\n--- Phase 8A: Travel-Time Savings ---")
-    _vb.compute_travel_time_savings(
+    tts_df = _vb.compute_travel_time_savings(
         svc_int_ids, svc_version=svc_version, combo=combo, method=od_method,
         attribution=attribution, assignment_method=assignment_method,
-        use_cache=settings.use_cache_tts, make_plots=settings.PLOT_TTS)
+        use_cache=settings.use_cache_tts)
 
     print("\n--- Phase 8B: Construction/Maintenance/Operating Costs ---")
-    _vc.compute_construction_costs(
+    cost_df = _vc.compute_construction_costs(
         svc_int_ids, combo=combo, base_infra=base_infra,
-        use_cache=settings.use_cache_costs, make_plots=settings.PLOT_COSTS)
+        use_cache=settings.use_cache_costs)
+
+    # ── Phase 8 runtime summary → report_new.txt (8A benefits + 8B costs) ──
+    import cost_parameters as _cp8
+    _n_svc_8a = int(tts_df['development'].nunique()) if not tts_df.empty else 0
+    _n_svc_8b = len(cost_df) if cost_df is not None else 0
+    _constr = float(cost_df['TotalConstructionCost'].sum()) if _n_svc_8b else 0.0
+    _maint = float(cost_df['TotalMaintenanceCost'].sum()) if _n_svc_8b else 0.0
+    _op = float(cost_df['uncoveredOperatingCost'].sum()) if _n_svc_8b else 0.0
+    _rt_file = os.path.join(paths.MAIN, 'report_new.txt')
+    with open(_rt_file, 'a', encoding='utf-8') as _f:
+        _f.write("\n--- VALUATION INPUTS (Phase 8) ---\n")
+        _f.write(f"  Combo                  : {combo}\n")
+        _f.write(f"  OD method / attribution: {od_method} / {attribution}\n")
+        _f.write(f"  Assignment method      : {assignment_method}\n")
+        _f.write(f"  8A travel-time benefits: {_n_svc_8a} svc-int(s), "
+                 f"{len(tts_df):,} (scenario, year) row(s); VTTS {_cp8.VTTS} CHF/h, "
+                 f"years {settings.start_valuation_year}-"
+                 f"{settings.end_year_scenario}, "
+                 f"{settings.amount_of_scenarios} scenarios\n")
+        _f.write("  8A loss reclassification: travel-time losses split off as a "
+                 "separate cost (monetized_tt_loss_yearly -> Phase 9), "
+                 "NPV-neutral\n")
+        _f.write(f"  8B costs               : {_n_svc_8b} svc-int(s); construction "
+                 f"{_constr / 1e6:,.1f} Mio (CC+CAP), maintenance "
+                 f"{_maint / 1e6:,.1f} Mio/{_cp8.duration}y, uncovered operating "
+                 f"{_op / 1e6:,.2f} Mio/a [{_cp8.operating_cost_s_bahn_per_meter} "
+                 f"CHF/m/a x (1-KDG {_cp8.general_KDG}) @ "
+                 f"{_cp8.operating_cost_ref_daily_dep}dep]\n")
 
     runtimes["Phase 8: Valuation Inputs"] = time.time() - st
 

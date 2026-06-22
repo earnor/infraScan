@@ -1,0 +1,218 @@
+INFRASCANRAIL NEW PIPELINE - RUN LOG
+
+================================================================================================================================================================
+  RUN CONFIGURATION
+================================================================================================================================================================
+  Infrastructure   : Build_New  -->  build as 'AS_2026_ZH'
+  Raw version      : Raw_ZH
+  Services         : Build_New  [needs projection]
+  GTFS version     : GTFS_SVC2026_ZH
+  Canton           : ZH
+  Catchment method : PT_Feeder  (OD: feeder_weighted)
+  Travel cost      : calibrated  (transfer: explicit)
+  Capacity mode    : Dynamic
+  Population base  : 2018
+  Scenarios        : 100 x [2018-2100]
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+--- Grid Scaling (Step 2.2) ---
+
+  Grid scaling 2023 → 2018 by Bezirk:
+  Bezirk       | Population | Employment
+  -------------+------------+-----------
+  Affoltern    |     0.9471 |     0.9619
+  Andelfingen  |     0.9586 |     0.9285
+  Bülach       |     0.9231 |     0.8960
+  Dielsdorf    |     0.9509 |     0.9619
+  Dietikon     |     0.9321 |     0.9072
+  Hinwil       |     0.9485 |     0.9628
+  Horgen       |     0.9504 |     0.9687
+  Meilen       |     0.9591 |     0.9497
+  Pfäffikon    |     0.9583 |     0.9478
+  Uster        |     0.9406 |     0.9845
+  Winterthur   |     0.9405 |     0.9266
+  Zürich       |     0.9569 |     0.9049
+  -------------+------------+-----------
+  Mean         |     0.9472 |     0.9417
+
+  Total population  :    1,609,779 (2023) →    1,524,721 (2018)
+  Total employment  :      914,349 (2023) →      843,506 (2018)
+
+================================================================================================================================================================
+  DATA PREPARATION (Phase 2)
+================================================================================================================================================================
+  Loaded  : lakes (CA), lakes (SA), pop/empl grid (2018)
+  Skipped : BAV filter, GTFS filter  (already on disk)
+
+
+--- INFRASTRUCTURE BUILD (Phase 3A) ---
+  Infrastructure version : AS_2026_ZH
+  Source                 : Build_New (rebuilt Base + created version)
+  Network size           : 617 nodes, 660 segments, 1191 composition pieces
+  Plots                  : generated to plots/Infrastructure/AS_2026_ZH
+
+--- Enhancement Stats: AS_2026_ZH_enhanced ---
+  Total segments         : 687
+  TT_Stopping filled     : 660 (96.1%)
+  speed_source = gtfs    : 687
+  speed_source = formula : 0
+  speed_source = estimate: 0
+  speed_source = design  : 0
+  Feeder-derived segs    : 27
+
+--- SERVICES BUILD (Phase 3B) ---
+  Service version        : AK_2026_S18
+  Infra version (final)  : AS_2026_ZH_enhanced
+  Service source         : Build_New (built from GTFS + version manager)
+  Feeder network         : built (CATCHMENT_METHOD = PT_Feeder)
+  Enhancement            : initial full GTFS calibration (AS_2026_ZH → AS_2026_ZH_enhanced)
+  Full-day union         : 125 rail lines, 1339 rail segments, 732 feeder lines
+  Plots                  : generated to plots/Network/Rail_Lines/AK_2026_S18_network/
+
+--- CAPACITY ANALYSIS (Phase 3C) ---
+  Scope                  : CA
+  Infra / service        : AS_2026_ZH_enhanced / AK_2026_S18
+  Capacity method        : SA Dynamic | CA Dynamic
+  Grouping strategy      : conservative
+  Constrained threshold  : 0.0 tphpd available
+  Sections               : 187 (4 constrained at peak)
+  Plots                  : generated to plots/Network/Capacity/AS_2026_ZH_enhanced/AK_2026_S18
+
+================================================================================================================================================================
+  CALIBRATION INPUTS (Phase 4A)
+================================================================================================================================================================
+  Travel cost method     : calibrated
+  Transfer cost model    : explicit
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  Generalised-cost weights (cost_parameters.py)
+    W_IVT      = 1.000
+    W_WAIT     = 1.500
+    W_WALK     = 2.000
+    W_BIKE     = 1.500
+    W_TRANSFER = 2.000
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  Transfer-penalty parameters
+    Active transfer penalty : 12.10 min  (12.1 min eq. IVT (Axhausen 2014))
+    PI_TRANSFER_MIN         : 12.10 min  (comfort-weighted, 'fixed_value' model)
+    TRANSFER_WALK_MIN       : 4.00 min  ('explicit' model only)
+    average_train_change_time : 7.10 min  (Axhausen 2014 raw)
+    change_time_comfort_factor: 1.70
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  Wait-function parameters (piecewise; Wardman 2004 / Bates 2001)
+    WAIT_THRESHOLD_MIN = 12.00 min
+    WAIT_SLOPE_ABOVE   = 0.250
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  Speed and detour factors
+    WALK_SPEED_KMH     = 5.00
+    WALK_DETOUR        = 1.250
+    CYCLE_SPEED_KMH    = 15.00
+    CYCLE_DETOUR       = 1.200
+    CYCLE_MAX_RADIUS_M = 2500 m
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  Walk-buffer radii (catchment_allocate.py — ARE 2022)
+    BUFFER_RAIL_M = 1000 m
+    BUFFER_TRAM_M = 750 m
+    BUFFER_BUS_M  = 500 m
+================================================================================================================================================================
+
+
+--- CATCHMENT ALLOCATION (Phase 4A) ---
+  Method                 : PT_Feeder  -> 'pt_feeder'
+  Travel / transfer cost : calibrated / explicit
+  Temporal               : full_day
+  Stations with catchment: 157
+  Cells allocated        : 36515 of 38999 (2484 no-PT)
+  Plots                  : generated to plots/Catchment_Area/AK_2026_S18_network
+
+================================================================================================================================================================
+  STATION OD MATRIX (Phase 4B)
+================================================================================================================================================================
+  Method               : pt_feeder
+  Attribution mode     : blended
+  Service version      : AK_2026_S18_network
+  Population base year  : 2018
+  Temporal window      : full_day
+  Station-OD pairs      : 23,982 (full-day; 797,504 trips)
+  External demand       : 43.1% routed via gateways (5 boundary gateways)
+  OD output dir        : data/Traffic_Flow/OD/AK_2026_S18_network/
+================================================================================================================================================================
+
+
+================================================================================================================================================================
+  NETWORK ASSIGNMENT (Phase 4C)
+================================================================================================================================================================
+  OD method            : pt_feeder
+  Assignment method    : logit
+  Service version      : AK_2026_S18_network
+  Cost model           : calibrated / explicit
+  Logit (K/maxT/theta) : 5 / 3 / 0.2
+  Output dir           : data/Traffic_Flow/Assignment/AK_2026_S18_network/
+================================================================================================================================================================
+
+
+--- INFRASTRUCTURE INTERVENTIONS (Phase 5A) ---
+  Mode (INFRA_INT_MODE)  : CC
+  Base infra / service   : AS_2026_ZH_enhanced / AK_2026_S18
+  Connecting curves      : 4 CC registered
+  Master network         : AS_2026_ZH_enhanced_full (CC-only Dev_Full)
+  Plots                  : generated to plots/Developments/AS_2026_ZH_enhanced__AK_2026_S18/{cc,Dev_Full}
+
+--- SERVICE INTERVENTIONS (Phase 5B) ---
+  Mode (SVC_INT_MODE)    : ALL
+  Base infra / service   : AS_2026_ZH_enhanced / AK_2026_S18
+  Generated svc-ints     : 6 EXT, 10 NDC, 7 FRQ, 23 STP
+  Materialised deltas    : 46
+  Plots                  : generated to plots/Developments/AS_2026_ZH_enhanced__AK_2026_S18/{ext,ndc,frq,stp}
+
+--- INTERVENTION RECOMPUTE (Phase 6) ---
+  Combo              : AS_2026_ZH_enhanced__AK_2026_S18
+  Svc-ints           : 46
+  Catchment method   : PT_Feeder  -> 6A/6B run (PT_Feeder)
+  OD / assignment    : pt_feeder / logit
+  Parallelism        : PHASE_PARALLEL_N_JOBS = 3 (effective)
+  Oracle (parity)    : use_full_recompute_ints = False
+  Recompute outcome  : 46 recomputed, 0 skipped, 0 twin-reused, 0 failed
+  6B reattribution   : 131,582 changed pair(s), 0 changed gateway(s) (sum over 46 PT-Feeder int(s))
+  6C routing         : 626,350 pair(s) re-routed (sum over 46 int(s))
+  6D flows           : 10,424 changed infra segment(s), 552 synthetic leg(s) (sum over 46 int(s))
+  Plots              : int-recompute=True, flows=True
+
+--- SCENARIOS (Phase 7) ---
+  Scenario type          : GENERATED
+  Scenarios / years      : 100 (2018-2100, seeded LHS)
+  Service / infra        : AK_2026_S18 / AS_2026_ZH_enhanced
+  OD method / attribution: pt_feeder / blended
+  Station factors        : 156 pop-weighted, 5 gateway (CH), 3 CH-fallback
+  Svc-int overrides      : 45 written, 1 skipped, 0 failed (of 46)
+  Plots                  : generated to plots/scenarios
+
+--- VALUATION INPUTS (Phase 8) ---
+  Combo                  : AS_2026_ZH_enhanced__AK_2026_S18
+  OD method / attribution: pt_feeder / blended
+  Assignment method      : logit
+  8A travel-time benefits: 46 svc-int(s), 234,600 (scenario, year) row(s); VTTS 14.8 CHF/h, years 2050-2100, 100 scenarios
+  8A loss reclassification: travel-time losses split off as a separate cost (monetized_tt_loss_yearly -> Phase 9), NPV-neutral
+  8B costs               : 46 svc-int(s); construction 3,454.3 Mio (CC+CAP), maintenance 5,181.5 Mio/50y, uncovered operating 184.86 Mio/a [879 CHF/m/a x (1-KDG 0.623) @ 28dep]
+PHASE RUNTIMES
+================================================================================================================================================================
+
+Phase 1: Initialisation..................................... 0m 0s (0.60s)
+Phase 2: Data Preparation................................... 0m 59s (59.16s)
+Phase 3A: Infrastructure Network Build...................... 0m 17s (17.57s)
+Phase 3B: Services Network Build............................ 6m 56s (416.31s)
+Phase 3C: Capacity Analysis................................. 0m 5s (5.20s)
+Phase 4A: Catchment Allocation.............................. 2m 36s (156.60s)
+Phase 4B: Station OD Matrix................................. 2m 1s (121.58s)
+Phase 4C: Passenger Routing................................. 7m 25s (445.89s)
+Phase 5A: Infrastructure Interventions...................... 1m 6s (66.74s)
+Phase 5B: Service Interventions............................. 9m 20s (560.48s)
+Phase 5C: Capacity on Matched Network....................... 5m 6s (306.28s)
+Phase 6: Intervention Recompute............................. 65m 17s (3917.18s)
+Phase 7: Scenarios.......................................... 0m 15s (15.90s)
+Phase 8: Valuation Inputs................................... 17m 50s (1070.08s)
+Phase 9: CBA................................................ 4m 3s (243.94s)
+
+================================================================================================================================================================
+TOTAL TIME.................................................. 123m 23s (7403.52s)
+================================================================================================================================================================

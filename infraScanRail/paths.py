@@ -133,6 +133,12 @@ def get_cc_composition_cache(combo: str) -> str:
     return os.path.join(MAIN, DEVELOPMENTS_DIR, combo, 'cc', 'cc_composition.csv')
 
 
+def get_cc_interventions_gpkg(combo: str) -> str:
+    """Return absolute path to the per-combo CC interventions geopackage
+    (nodes/segments/segments_composition layers for the connecting curves)."""
+    return os.path.join(MAIN, DEVELOPMENTS_DIR, combo, 'cc', 'cc_interventions.gpkg')
+
+
 def get_svc_int_catalogue_dir(combo: str) -> str:
     """Return the combo-root directory for svc-int catalogue / affected-set CSVs.
 
@@ -526,6 +532,33 @@ def get_flow_plot_dir(svc_network: str, method: str) -> str:
     return os.path.join(get_assignment_plot_dir(svc_network, method), 'flows')
 
 
+def get_passenger_flow_plot_path(svc_network: str, kind: str) -> str:
+    """Combined Phase-6D passenger-flow plot file (PDF).
+
+    Baseline networks save under their own svc-network folder; per-svc-int
+    networks pool under Developments/<combo>/ with the id in the filename (no
+    per-int subfolders):
+      plots/Traffic_Flow/Passenger_Flows/<svc_network>/flows_map_<svc_network>.pdf
+      plots/Traffic_Flow/Passenger_Flows/Developments/<combo>/flows_map_<id>.pdf
+      plots/Traffic_Flow/Passenger_Flows/Developments/<combo>/flows_map_diff_<id>.pdf
+
+    Args:
+        svc_network: baseline svc network ('..._network') or a dev network
+                     ('Developments/<combo>/<id>_network').
+        kind:        'map' (absolute) | 'diff'.
+    """
+    root = os.path.join(MAIN, 'plots', 'Traffic_Flow', 'Passenger_Flows')
+    parts = svc_network.replace('\\', '/').split('/')
+    if parts[0] == 'Developments':
+        out_dir = os.path.join(root, 'Developments', parts[1])
+        label = parts[2].removesuffix('_network')
+    else:
+        out_dir = os.path.join(root, svc_network)
+        label = svc_network
+    stem = f'flows_map_{label}' if kind == 'map' else f'flows_map_diff_{label}'
+    return os.path.join(out_dir, f'{stem}.pdf')
+
+
 def get_assignment_report_xlsx(svc_network: str, method: str, name: str) -> str:
     """Per-method assignment report workbook
     (data/Traffic_Flow/Assignment/<svc_network>/<method>/<name>.xlsx).
@@ -754,6 +787,13 @@ def get_total_costs_geometry_gpkg(combo: str) -> str:
     projected service delta unioned with its required CC arcs, EPSG:2056)."""
     return os.path.join(get_costs_combo_dir(combo),
                         'total_costs_with_geometry.gpkg')
+
+
+def get_factsheet_path(combo: str, svc_int_id: str) -> str:
+    """Return absolute path to a svc-int's Phase-9 A4 factsheet PDF
+    (plots/Developments/<combo>/results/factsheets/factsheet_<id>.pdf)."""
+    return os.path.join(get_developments_plot_dir(combo, 'results'),
+                        'factsheets', f'factsheet_{svc_int_id}.pdf')
 
 PLOT_DIRECTORY = r"plots"
 PLOT_SCENARIOS = r"plots/scenarios"
