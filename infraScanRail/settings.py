@@ -70,9 +70,9 @@ GTFS_FILTER_VERSION = 'GTFS_SVC2026_ZH'        # services_filter_gtfs output: da
 # 'AS_2026_ZH_enhanced' — AS_2026_ZH enriched with projected svc travel times and corrections
 # 'AS_2035_ZH'          — BAV network as-is for 2035 (must already exist on disk)
 # 'AS_2035_ZH_enhanced' — AS_2035_ZH enriched with projected svc travel times and corrections
-INFRA_VERSION = 'Build_New'
+INFRA_VERSION = 'AS_2026_ZH_enhanced'
 
-INFRA_BUILD_NEW_NAME = 'AS_2026_ZH'        # name for the new version — used only when INFRA_VERSION = 'Build_New'
+INFRA_BUILD_NEW_NAME = 'AS_2035_ZH'        # name for the new version — used only when INFRA_VERSION = 'Build_New'
 
 # When INFRA_VERSION = 'Build_New', open the interactive infra version manager to edit nodes/segments. False auto-creates the version from Base and saves without prompts.
 OPEN_INFRA_VERSION_MANAGER = False
@@ -88,9 +88,9 @@ OPEN_INFRA_VERSION_MANAGER = False
 # 'AK_2026_S18' — AK_2026 with the S18 line included
 # 'AK_2035'     — scheduled services as of the 2035 timetable
 # 'AK_2035_S18' — AK_2035 with the S18 line included
-SVC_VERSION = 'Build_New'
+SVC_VERSION = 'AK_2026_S18'
 
-SVC_BUILD_NEW_NAME = 'AK_2026_S18'                 # name for the new version — used only when SVC_VERSION = 'Build_New'
+SVC_BUILD_NEW_NAME = 'AK_2035_S18'                 # name for the new version — used only when SVC_VERSION = 'Build_New'
 
 # When SVC_VERSION = 'Build_New', open the interactive services version manager to edit lines/services. False finalises the freshly built network and saves without prompts.
 OPEN_SVC_VERSION_MANAGER = False
@@ -350,9 +350,12 @@ RESULTS_CORRIDOR_SPINES = {
 VALIDATION_BASELINE_INFRA = 'AS_2026_ZH_enhanced'
 VALIDATION_BASELINE_SVC   = 'AK_2026_S18'
 
-VALIDATION_SBB_YEAR  = 2018    # V1 observed reference year (= start_year_scenario demand anchor; AK_2026-service-vs-2018-counts mismatch noted, not corrected) [decided 2026-06-12]
+VALIDATION_SBB_YEAR  = 2024    # V1 observed reference year (latest SBB counts; AK_2026-service-vs-2024-counts mismatch much smaller than the former 2018 anchor, noted not corrected) [switched 2026-06-22]
 VALIDATION_NPVM_YEAR = 2017    # V2 observed reference year (NPVM 2017 base state, ARE release Stand 30.06.2023; model-assigned loads, not counts)
 V1_EXCLUDE_CLIPPED   = True    # exclude observed DWV==49 stations from fit metrics (SBB clips volumes <50 to a fixed 49); kept in tables either way
+
+VALIDATION_CATCHMENT_ONLY     = True   # restrict all validation (V1 stations, V2 + single-service segments) to elements fully within the catchment boundary; boundary-crossing/gateway elements structurally undershoot [decided 2026-06-22]
+VALIDATION_CATCHMENT_BUFFER_M = 50.0   # tolerance added to the catchment boundary before the within-test [m]
 
 V2_MATCH_BUFFER_M     = 30.0   # belastung-link <-> model-segment matching buffer [m; geometries verified to align within ~1 m]
 V2_MATCH_MIN_COVERAGE = 0.5    # min share of model-segment length covered to accept a belastung feature [-]
@@ -366,50 +369,44 @@ V3_COMBOS = ['calibrated__explicit', 'calibrated__fixed',
 V3_SVC_INT_SUBSET = ['ext_100001', 'ext_100003', 'ext_100010',
                      'ndc_103007', 'ndc_103009']
 
+PLOT_VALIDATION = True               # standalone validation track only — V-track scatters, rank/share charts, corridor profiles, tau check (V1-V3)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # A1. PLOTS  (per-phase visualisation toggles — all phases)
 # ═══════════════════════════════════════════════════════════════════════════════
 # One toggle per phase; data/CSV outputs are always written regardless of these.
 
-PLOT_DATA      = True   # catchment_base population/employment maps (Phase 2)
-PLOT_INFRA     = True    # infrabuild network plots (Phase 3A)
-PLOT_SERVICES  = True    # services pipeline plots (Phase 3B)
-PLOT_CAPACITY  = True    # capacity analysis plots (Phase 3C)
-PLOT_CATCHMENT = True   # catchment allocation plots (Phase 4A)
-PLOT_STATION_OD = True   # station OD pie map + corridor Sankeys (Phase 4B)
-PLOT_ASSIGNMENT = True   # rail assignment heatmaps + Sankeys + service loads (Phase 4C)
-PLOT_INFRA_INTS = True   # infra-int master tagged network .qgz (Phase 5A)
-PLOT_SVC_INTS  = True    # svc-int delta + per-type/all-produced overlays (Phase 5B)
-PLOT_MIXED_INTS = True   # per-svc-int capacity/service maps + CAP diff (Phase 5C)
-PLOT_INT_RECOMPUTE = True  # per-svc-int catchment/OD/routing delta plots (Phase 6A-6C)
-PLOT_FLOWS     = True    # infra-level passenger-flow maps + base-vs-dev diff (Phase 6D)
-PLOT_SCENARIOS = True    # population/modal/distance scenario fans (Phase 7)
-PLOT_RESULTS   = True   # core CBA result set — savings/net-benefit/BCR charts, waterfalls, network maps (Phase 9)
-PLOT_VALIDATION = True   # V-track comparison plots — scatters, rank/share charts, corridor profiles, tau check (V1-V3)
-
-plot_passenger_flow = False   # legacy only (main.py / main_cap.py); ignored by main_new
+PLOT_DATA      = True   # Phase 2 — catchment_base population/employment maps
+PLOT_INFRA     = True    # Phase 3A — infrabuild network plots
+PLOT_SERVICES  = True    # Phase 3B — services pipeline plots
+PLOT_CAPACITY  = True    # Phase 3C — capacity analysis plots
+PLOT_CATCHMENT = True   # Phase 4A — catchment allocation plots
+PLOT_STATION_OD = True   # Phase 4B — station OD pie map + corridor Sankeys
+PLOT_ASSIGNMENT = True   # Phase 4C — rail assignment heatmaps + Sankeys + service loads
+PLOT_INFRA_INTS = True   # Phase 5A — infra-int master tagged network .qgz
+PLOT_SVC_INTS  = True    # Phase 5B — svc-int delta + per-type/all-produced overlays
+PLOT_MIXED_INTS = True   # Phase 5C — per-svc-int capacity/service maps + CAP diff
+PLOT_INT_RECOMPUTE = True  # Phase 6A-6C — per-svc-int catchment/OD/routing delta plots
+PLOT_FLOWS     = True    # Phase 6D — infra-level passenger-flow maps + base-vs-dev diff
+PLOT_SCENARIOS = True    # Phase 7 — population/modal/distance scenario fans
+PLOT_RESULTS   = True   # Phase 9 — core CBA result set: savings/net-benefit/BCR charts, waterfalls, network maps
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # A2. CACHE  (load pre-computed outputs instead of recomputing — all phases)
 # ═══════════════════════════════════════════════════════════════════════════════
 # Set True to load pre-computed outputs from disk instead of recomputing.
 
-use_cache_network = False
-use_cache_pt_catchment = False
-use_cache_developments = False
-use_cache_catchmentOD = False
-use_cache_stationsOD = False
+use_cache_pt_catchment = False        # Phase 4A — skip catchment allocation when outputs exist & manifest fresh
+use_cache_stationsOD = False          # Phase 4B — skip station-OD preparation when outputs exist & manifest fresh
 use_cache_railRouting = False         # Phase 4C — skip writing routing CSVs that already exist
 use_cache_infra_ints = False          # Phase 5A — keep existing cc registry, skip re-discovery
 use_cache_svc_ints = False            # Phase 5B — keep svc-int catalogue + materialised deltas
 use_cache_svc_int_cap = False        # Phase 5C — keep svc-int CAP + merged-services workbooks
 use_cache_int_recompute = False      # Phase 6A-6C — skip svc-ints whose recompute outputs exist
 use_cache_flows = False              # Phase 6D — keep existing flow tables + maps
-use_cache_traveltime_graph = False
 use_cache_scenarios = False           # Phase 7 — skip factor-store builds whose outputs exist
 use_cache_tts = False                 # Phase 8A — load per-svc-int tts.parquet caches when present
 use_cache_costs = False               # Phase 8B — skip when construction_cost.csv covers all svc-ints
-use_cache_tts_calc = False
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # A3. PHYSICAL ATTRIBUTES  (physics & design constants)
@@ -437,3 +434,11 @@ CC_BACKTRACK_ANGLE_DEG  = 120         # CC needed when the through-move's leg an
 OD_TYPE = 'canton_ZH'
 
 only_demand_from_to_perimeter = True   # when True, OD demand is filtered to trips from/to the study-area perimeter
+
+# Plot / cache toggles not driven by main_new (superseded by the A1/A2 per-phase toggles).
+plot_passenger_flow = False          # main.py / main_cap.py only — passenger-flow maps
+use_cache_network = True             # main.py / main_cap.py only — network build cache
+use_cache_developments = False       # main.py / main_cap.py only — developments cache
+use_cache_catchmentOD = True         # main.py / main_cap.py only — catchment-OD cache (superseded by 4A/4B)
+use_cache_traveltime_graph = True    # main.py / main_cap.py only — travel-time graph cache
+use_cache_tts_calc = True            # main.py / main_cap.py only — travel-time-savings calc cache

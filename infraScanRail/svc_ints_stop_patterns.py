@@ -1,6 +1,6 @@
 """
 svc_ints_stop_patterns — STP svc-int discovery (Phase 5B, expansion part 2).
-Last modified: 2026-06-20
+Last modified: 2026-06-22
 
 Stopping-pattern-change interventions ('stp', id block DEV_ID_START_STP), two
 modes that always generate together. STP edits the CALLING PATTERN (which
@@ -194,6 +194,18 @@ def _service_patterns(base_infra: str, base_svc: str, sa_polygon) -> Dict:
                     passed.append(inf['name'])
                     seen_pass.add(inf['name'])
         passed_sa[rid] = passed
+
+    # Require ≥2 SA stops in the representative stop sequence; lines with only one
+    # SA stop cannot meaningfully change their calling pattern within the study area.
+    ineligible = [rid for rid in list(seqs)
+                  if sum(1 for s in seqs[rid] if name_in_sa.get(s)) < 2]
+    for rid in ineligible:
+        seqs.pop(rid)
+        passed_sa.pop(rid, None)
+        route_len.pop(rid, None)
+    if ineligible:
+        print(f"  [stp] {len(ineligible)} route(s) excluded (<2 SA stops): "
+              f"{', '.join(sorted(ineligible))}")
 
     route_meta = _route_meta(base_lines, rep)
     return {'seqs': seqs, 'passed_sa': passed_sa, 'stop_services': stop_services,

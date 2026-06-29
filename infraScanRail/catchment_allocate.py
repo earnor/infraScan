@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Wedge
+import matplotlib.patheffects as pe
 from scipy.spatial import cKDTree
 from scipy.stats import gaussian_kde
 import fiona
@@ -1108,6 +1109,238 @@ def _plot_municipal_catchments_network(muni_catchment, rail_stations,
         output_dir=MUNICIPAL_PLOT_DIR, method_label='Municipal',
         temporal=temporal,
     )
+
+
+# Graph-colouring palette shared with _build_visualisation (right panel).
+_CATCHMENT_PALETTE = [
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+    '#8c564b', '#e377c2', '#bcbd22', '#17becf', '#393b79',
+    '#637939', '#8c6d31', '#843c39', '#7b4173', '#5254a3',
+]
+
+
+def _colour_catchments_graph(clipped_catchment, id_col):
+    """Balanced 8-colour graph colouring of adjacent catchments.
+
+    Mirrors the colouring in `_build_visualisation` so the fills here match the
+    station-allocation panel. Returns {station_id -> hex colour}.
+    """
+    G = nx.Graph()
+    for i in range(len(clipped_catchment)):
+        G.add_node(clipped_catchment.loc[i, id_col])
+    for i in range(len(clipped_catchment)):
+        for j in range(i + 1, len(clipped_catchment)):
+            gi = clipped_catchment.loc[i, 'geometry']
+            gj = clipped_catchment.loc[j, 'geometry']
+            if gi.intersects(gj):
+                inter = gi.intersection(gj)
+                if hasattr(inter, 'length') and inter.length > 0:
+                    G.add_edge(clipped_catchment.loc[i, id_col],
+                               clipped_catchment.loc[j, id_col])
+    n_target = min(8, len(_CATCHMENT_PALETTE))
+    usage = [0] * n_target
+    coloring = {}
+    for node in sorted(G.nodes(), key=lambda n: -G.degree(n)):
+        neigh = {coloring[v] for v in G.neighbors(node) if v in coloring}
+        cands = [c for c in range(n_target) if c not in neigh] or list(range(n_target))
+        best = min(cands, key=lambda c: (usage[c], c))
+        coloring[node] = best
+        usage[best] += 1
+    return {sid: _CATCHMENT_PALETTE[cidx] for sid, cidx in coloring.items()}
+
+
+def _plot_catchment_areas_with_network(allocation, catchment_gdf, rail_stations,
+                                       boundary, output_dir, method_label,
+                                       temporal='full_day'):
+    """Combined overview: graph-coloured catchment cells + rail/feeder network,
+    stations filled with their catchment colour and labelled with the BAV Code,
+    plus a right-hand column with the legend and three zoom insets (Zürich,
+    Winterthur, study area).
+
+    Cells are coloured by `id_point` from `allocation` — the same source as the
+    `catchment_visualisation_*_areas` panel — so colours stay consistent; cells
+    with no catchment (id_point == NO_PT_ID, populated/FTE) are drawn grey.
+
+    Args:
+        allocation:    Per-cell allocation with E_KOORD/N_KOORD, id_point.
+        catchment_gdf: Dissolved catchment polygons (column `id`/`train_station`)
+                       used only for the graph-colouring adjacency.
+        rail_stations: Rail stations for plotting; uses `id_point` and (when
+                       present) the BAV `Code` column for the in-dot labels.
+        boundary:      Catchment-area polygon (clipping + main-map extent).
+        output_dir:    Directory for the output PDF.
+        method_label:  e.g. 'PT-Feeder' — title + output filename slug.
+        temporal:      Passed to the line loaders.
+    """
+    if allocation is None or len(allocation) == 0 or catchment_gdf is None or catchment_gdf.empty:
+        print(f"  Skipping {method_label} areas+network overview — no allocation/catchment")
+        return
+    print(f"  Building {method_label} catchment areas + network overview ...")
+
+    GREY = '#d9d9d9'
+    CA_LW, SA_LW = 1.8, round(1.8 * 0.7, 2)   # study-area border 30% thinner
+    RAIL_COLOUR = 'black'
+    mode_colours = {'bus': '#0000FF', 'tram': '#FF00FF', 'metro': '#00246B',
+                    'ship': '#004B8D', 'funicular': '#1B5E20'}
+    mode_labels = {'bus': 'Bus', 'tram': 'Tram', 'metro': 'Metro',
+                   'ship': 'Ship', 'funicular': 'Funicular'}
+
+    # --- base layers ---------------------------------------------------------
+    boundary_gdf = gpd.GeoDataFrame(geometry=[boundary], crs=CODEBASE_CRS)
+    sa_geom = _load_sa_boundary()
+    sa_bnd_gdf = (gpd.GeoDataFrame(geometry=[sa_geom], crs=CODEBASE_CRS)
+                  if sa_geom is not None else None)
+    lakes = _load_lakes_for_extent(boundary, scope='ca')
+
+    feeder_lines = _load_feeder_lines(boundary, temporal)
+    rail_lines = _load_rail_lines_for_plot(boundary, temporal)
+    if feeder_lines is not None and not feeder_lines.empty:
+        feeder_lines = gpd.clip(feeder_lines, boundary)
+    if rail_lines is not None and not rail_lines.empty:
+        rail_lines = gpd.clip(rail_lines, boundary)
+    plotted_modes = [m for m in mode_colours
+                     if feeder_lines is not None and not feeder_lines.empty
+                     and len(feeder_lines[feeder_lines['mode'].fillna('').str.lower() == m])]
+
+    # --- graph colouring (exclude the id == -1 no-PT pseudo-catchment) -------
+    clipped = gpd.clip(catchment_gdf, boundary).reset_index(drop=True)
+    id_col = 'id' if 'id' in clipped.columns else 'train_station'
+    clipped = clipped[clipped[id_col] != NO_PT_ID].reset_index(drop=True)
+    color_map = _colour_catchments_graph(clipped, id_col)
+    cmap_str = {str(k): v for k, v in color_map.items()}
+
+    # --- cells coloured by id_point (no-catchment -> grey) -------------------
+    al = allocation.copy()
+    al['geometry'] = [box(e, n, e + CELL_SIZE_M, n + CELL_SIZE_M)
+                      for e, n in zip(al['E_KOORD'], al['N_KOORD'])]
+    al = gpd.GeoDataFrame(al, geometry='geometry', crs=CODEBASE_CRS)
+    al = gpd.clip(al, boundary)
+    al['_cellcolour'] = al['id_point'].map(color_map).fillna(GREY)
+
+    # --- stations: fill = catchment colour, label = BAV Code -----------------
+    prep_bnd = prep(boundary)
+    rs = rail_stations[rail_stations.geometry.apply(lambda p: prep_bnd.contains(p))].copy()
+    rs['idp'] = rs['id_point'].astype(str)
+    rs['has_cat'] = rs['idp'].isin(cmap_str.keys())
+    rs['fill'] = rs['idp'].map(cmap_str).fillna(GREY)
+    rs['code'] = rs['Code'].astype(str) if 'Code' in rs.columns else ''
+    rs_yes, rs_no = rs[rs['has_cat']], rs[~rs['has_cat']]
+
+    def draw(ax, code_fs, sa_boundary=False):
+        ax.set_facecolor('#E8E8E8')
+        boundary_gdf.plot(ax=ax, color='white', edgecolor='none', zorder=0)
+        al.plot(ax=ax, color=al['_cellcolour'].tolist(), edgecolor='none',
+                alpha=0.85, zorder=2)
+        if lakes is not None and not lakes.empty:
+            lakes.plot(ax=ax, color='#A8D8EA', edgecolor='none', zorder=3)
+        for m in plotted_modes:
+            feeder_lines[feeder_lines['mode'].fillna('').str.lower() == m].plot(
+                ax=ax, color=mode_colours[m], linewidth=0.6, alpha=0.9, zorder=4)
+        if rail_lines is not None and not rail_lines.empty:
+            rail_lines.plot(ax=ax, color=RAIL_COLOUR, linewidth=1.3, zorder=5)
+        if sa_boundary:
+            if sa_bnd_gdf is not None:
+                sa_bnd_gdf.boundary.plot(ax=ax, color='black', linewidth=SA_LW,
+                                         linestyle='--', zorder=6)
+        else:
+            boundary_gdf.boundary.plot(ax=ax, color='black', linewidth=CA_LW,
+                                       linestyle='--', zorder=6)
+        halo = [pe.withStroke(linewidth=code_fs * 0.32, foreground='white')]
+        for sub, dot_z, txt_z in ((rs_no, 6.3, 6.4), (rs_yes, 7, 8)):
+            if not len(sub):
+                continue
+            ax.scatter(sub.geometry.x, sub.geometry.y, s=28,
+                       c=(GREY if sub is rs_no else sub['fill'].tolist()),
+                       edgecolors='black', linewidths=0.7, marker='o', zorder=dot_z)
+            for _, r in sub.iterrows():
+                if r['code'] and r['code'].lower() != 'nan':
+                    ax.text(r.geometry.x, r.geometry.y, r['code'],
+                            ha='center', va='center', fontsize=code_fs,
+                            color='black', zorder=txt_z, clip_on=True,
+                            path_effects=halo)
+        ax.set_aspect('equal')
+
+    def legend_handles():
+        h = [Patch(facecolor=_CATCHMENT_PALETTE[0], edgecolor='white', linewidth=0.4,
+                   label='Station catchment'),
+             Patch(facecolor=GREY, edgecolor='none', label='Populated cells, no catchment')]
+        for m in plotted_modes:
+            h.append(Line2D([0], [0], color=mode_colours[m], lw=1.4,
+                            label=mode_labels[m] + ' feeder'))
+        h += [Line2D([0], [0], color=RAIL_COLOUR, lw=1.6, label='Rail line'),
+              Line2D([0], [0], marker='o', color='w', markerfacecolor='#bcbd22',
+                     markeredgecolor='black', markersize=9, label='Rail Station'),
+              Line2D([0], [0], color='black', lw=CA_LW, linestyle='--',
+                     label='Catchment area boundary'),
+              Line2D([0], [0], color='black', lw=SA_LW, linestyle='--',
+                     label='Study area boundary')]
+        return h
+
+    # --- inset windows: administrative / study-area extents ------------------
+    def _bounds_win(b):
+        return (b[0], b[2], b[1], b[3])
+    insets = []
+    muni_path = os.path.join(paths.MAIN, paths.MUNICIPAL_BOUNDARIES_GPKG)
+    if os.path.exists(muni_path):
+        muni = gpd.read_file(muni_path).to_crs(CODEBASE_CRS)
+        for name, bfs in (('Zürich', 261), ('Winterthur', 230)):
+            g = muni[muni['bfs_nummer'] == bfs]
+            if not g.empty:
+                insets.append((name, _bounds_win(g.total_bounds)))
+    if sa_geom is not None:
+        insets.append(('Study area', _bounds_win(sa_geom.bounds)))
+
+    # === figure ==============================================================
+    fig = plt.figure(figsize=(22, 18))
+    TOP, BOTTOM = 0.95, 0.05
+    COL_W = 0.2128
+    COL_LEFT = 0.95 - COL_W
+    GAP_LR = 0.006
+    H_INSET = (COL_W * 22) / (1.06 * 18)
+
+    ax_main = fig.add_axes([0.045, BOTTOM, COL_LEFT - GAP_LR - 0.045, TOP - BOTTOM])
+    ax_main.set_anchor('E')
+    draw(ax_main, code_fs=2.4)
+    bx0, by0, bx1, by1 = boundary.bounds
+    mpad = 200
+    ax_main.set_xlim(bx0 - mpad, bx1 + mpad)
+    ax_main.set_ylim(by0 - mpad, by1 + mpad)
+    ax_main.set_xlabel('E [m]')
+    ax_main.set_ylabel('N [m]')
+    _add_map_elements(ax_main)
+    ax_main.set_title(f'{method_label} Catchment Areas with Network', fontsize=16)
+
+    # legend pinned to the plotting-area top; measure its height for equal gaps
+    ax_leg = fig.add_axes([COL_LEFT, BOTTOM, COL_W, TOP - BOTTOM])
+    ax_leg.axis('off')
+    ax_leg.patch.set_visible(False)
+    leg = ax_leg.legend(handles=legend_handles(), loc='upper left',
+                        bbox_to_anchor=(0.0, 1.0, 1.0, 0.0), mode='expand',
+                        fontsize=12, frameon=True, facecolor='white',
+                        edgecolor='black', borderaxespad=0)
+    fig.canvas.draw()
+    h_leg = leg.get_window_extent(fig.canvas.get_renderer()).height / fig.bbox.height
+
+    n_ins = max(len(insets), 1)
+    gap_v = ((TOP - BOTTOM) - h_leg - n_ins * H_INSET) / n_ins
+    for k, (name, (x0, x1, y0, y1)) in enumerate(insets):
+        y_box = TOP - h_leg - (k + 1) * (gap_v + H_INSET)
+        ax_i = fig.add_axes([COL_LEFT, y_box, COL_W, H_INSET])
+        draw(ax_i, code_fs=4.5, sa_boundary=True)
+        ax_i.set_xlim(x0, x1)
+        ax_i.set_ylim(y0, y1)
+        ax_i.set_xticks([]); ax_i.set_yticks([])
+        ax_i.text(1.04, 0.5, name, transform=ax_i.transAxes, rotation=90,
+                  va='center', ha='center', fontsize=15, fontweight='bold')
+        for sp in ax_i.spines.values():
+            sp.set_linewidth(1.4)
+
+    slug = method_label.lower().replace(' ', '_').replace('-', '_')
+    out_path = os.path.join(output_dir, f'catchment_{slug}_areas_network_insets.pdf')
+    os.makedirs(output_dir, exist_ok=True)
+    fig.savefig(out_path, bbox_inches='tight', dpi=250)
+    plt.close(fig)
+    print(f"    Saved -> {out_path}")
 
 
 # ===============================================================================
@@ -5349,6 +5582,12 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
             output_dir=PT_FEEDER_PLOT_DIR, method_label='PT-Feeder',
             temporal=temporal,
         )
+        # Combined areas + network overview with legend and zoom insets
+        _plot_catchment_areas_with_network(
+            alloc_combined, pt_catchment, plot_rs, boundary,
+            output_dir=PT_FEEDER_PLOT_DIR, method_label='PT-Feeder',
+            temporal=temporal,
+        )
 
     # Phase 4A plot suite (added 2026-05-25) — gated by the `visualize` flag.
     # alloc_combined is the union of population and employment-only cells, with
@@ -6594,6 +6833,109 @@ def _plot_gueteklassen_stacked_bar(feeder_stops, rail_stops,
 
 # --- Orchestrator --------------------------------------------------------------
 
+def _plot_study_catchment_overview(ca_boundary, sa_boundary, rail_lines, out_dir):
+    """Overview map locating the study area within the catchment area.
+
+    Same cartographic grammar as the catchment_base pop/empl/lakes maps (grey
+    exterior, white catchment interior, faint municipal boundaries, lakes,
+    dashed catchment boundary, north arrow + scale bar). The study area is an
+    orange overlay with a solid boundary; the rail network is faint grey
+    context when provided. No municipality labels.
+
+    Args:
+        ca_boundary: Catchment-area polygon (EPSG:2056) — extent and clip.
+        sa_boundary: Study-area polygon (EPSG:2056) — highlighted overlay.
+        rail_lines:  Optional rail-line GeoDataFrame for context (clipped to
+                     the catchment area); omitted when None/empty.
+        out_dir:     Directory for the PDF (the versioned network plot root,
+                     e.g. plots/Catchment_Area/<svc_network>/).
+
+    Produces: <out_dir>/study_catchment_area_overview.pdf
+    """
+    print("  Plotting study/catchment area overview ...")
+
+    muni = gpd.read_file(paths.MUNICIPAL_BOUNDARIES_GPKG).to_crs(CODEBASE_CRS)
+    if 'objektart' in muni.columns:
+        muni = muni[muni['objektart'] == 'Gemeindegebiet']
+    muni = muni[muni.geometry.intersects(ca_boundary)].copy()
+
+    lakes = None
+    if os.path.exists(paths.LAKES_SHP):
+        lakes = gpd.read_file(paths.LAKES_SHP).to_crs(CODEBASE_CRS)
+        lakes = lakes[lakes.geometry.intersects(ca_boundary)].copy()
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+    ax.set_facecolor('#E8E8E8')   # grey outside the catchment
+
+    ca_gdf = gpd.GeoDataFrame(geometry=[ca_boundary], crs=CODEBASE_CRS)
+    sa_gdf = gpd.GeoDataFrame(geometry=[sa_boundary], crs=CODEBASE_CRS)
+
+    # White catchment interior
+    ca_gdf.plot(ax=ax, color='white', edgecolor='none', zorder=0)
+
+    # Study-area highlight (blue overlay)
+    sa_gdf.plot(ax=ax, color='#6BAED6', edgecolor='none', alpha=0.5, zorder=1)
+
+    # Municipal boundaries (clipped to catchment), faint
+    muni_comp  = gpd.clip(muni, ca_boundary)
+    muni_lines = muni_comp.boundary.explode(index_parts=False)
+    muni_lines = muni_lines[~muni_lines.geom_type.isin(['Point', 'MultiPoint'])]
+    muni_lines.plot(ax=ax, color='#404040', linewidth=0.3, zorder=2)
+
+    # Lakes above municipal lines, below boundaries
+    if lakes is not None and not lakes.empty:
+        lakes_draw = gpd.clip(lakes, ca_boundary)
+        if not lakes_draw.empty:
+            lakes_draw.plot(ax=ax, color='#A8D8EA', edgecolor='none', zorder=3)
+
+    # Study-area boundary (solid blue), below the rail network
+    sa_gdf.boundary.plot(ax=ax, color='#08519C', linewidth=1.8, zorder=5)
+
+    # Rail network context (orange), above the study-area boundary
+    rail_plotted = rail_lines is not None and not rail_lines.empty
+    if rail_plotted:
+        rail_draw = gpd.clip(rail_lines, ca_boundary)
+        if not rail_draw.empty:
+            rail_draw.plot(ax=ax, color='#FF7F00', linewidth=1.0, alpha=0.9,
+                           zorder=6)
+        else:
+            rail_plotted = False
+
+    # Catchment area boundary (dashed black), on top
+    ca_gdf.boundary.plot(ax=ax, color='black', linewidth=1.8, linestyle='--',
+                         zorder=7)
+
+    bx_min, by_min, bx_max, by_max = ca_boundary.bounds
+    pad = 200
+    ax.set_xlim(bx_min - pad, bx_max + pad)
+    ax.set_ylim(by_min - pad, by_max + pad)
+
+    _add_map_elements(ax)
+
+    legend_handles = [
+        Patch(facecolor='white', edgecolor='black', label='Catchment area'),
+        Patch(facecolor='#6BAED6', edgecolor='#08519C', label='Study area'),
+        Line2D([0], [0], color='#404040', linewidth=0.3, label='Municipal boundary'),
+        Patch(facecolor='#A8D8EA', edgecolor='none', label='Lake'),
+    ]
+    if rail_plotted:
+        legend_handles.append(
+            Line2D([0], [0], color='#FF7F00', linewidth=1.1, label='Rail network'))
+    ax.legend(handles=legend_handles, fontsize=7, loc='upper right',
+              framealpha=0.9)
+
+    ax.set_title('Study area within the catchment area', fontsize=13)
+    ax.set_xlabel('E [m]')
+    ax.set_ylabel('N [m]')
+    ax.set_aspect('equal')
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, 'study_catchment_area_overview.pdf')
+    fig.savefig(out_path, bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    print(f"    Saved -> {out_path}")
+
+
 def make_phase_4a_plots(method, sa_boundary,
                           allocation, rail_stations,
                           pop_grid, empl_grid,
@@ -6676,6 +7018,14 @@ def make_phase_4a_plots(method, sa_boundary,
         _plot_gueteklassen_stacked_bar(feeder_stops, rail_stops,
                                          sa_boundary,
                                          pop_grid, empl_grid, plot_dir)
+
+    # Network-level orientation map: study area within the catchment area.
+    # Saved to the versioned network root (parent of the method plot dir).
+    # Rail context is loaded canton-wide (catchment extent), not just the SA.
+    ca_boundary = _load_catchment_boundary()
+    overview_rail = _load_rail_lines_for_plot(ca_boundary)
+    _plot_study_catchment_overview(
+        ca_boundary, sa_boundary, overview_rail, os.path.dirname(plot_dir))
 
     print(f"  === Phase 4A plot suite complete ({method}) ===\n")
 

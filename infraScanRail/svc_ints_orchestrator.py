@@ -957,6 +957,48 @@ def _as_linestring(geom):
     return merged if merged.geom_type == 'LineString' else None
 
 
+def _force_linestring(geom):
+    """Coerce a (Multi)LineString to ONE LineString, bridging the small (~metre)
+    seams that defeat linemerge.
+
+    A long passing host hop (e.g. Oerlikon->Uster, a stop never called by the
+    base service) projects to a MultiLineString whose parts meet within a few
+    metres but not exactly, so linemerge keeps them apart and _as_linestring
+    returns None — which left every added-stop sub-hop with null geometry. Chain
+    the parts greedily (flipping as needed) so substring() has a continuous line.
+    """
+    if geom is None:
+        return None
+    if geom.geom_type == 'LineString':
+        return geom
+    merged = linemerge(geom)
+    if merged.geom_type == 'LineString':
+        return merged
+    parts = (list(merged.geoms) if merged.geom_type == 'MultiLineString'
+             else list(getattr(geom, 'geoms', [])))
+    parts = [p for p in parts if p is not None and not p.is_empty]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    coords = list(parts[0].coords)
+    remaining = parts[1:]
+    while remaining:
+        tx, ty = coords[-1]
+        best_i, best_flip, best_d = 0, False, None
+        for i, p in enumerate(remaining):
+            pc = p.coords
+            d0 = (pc[0][0] - tx) ** 2 + (pc[0][1] - ty) ** 2
+            d1 = (pc[-1][0] - tx) ** 2 + (pc[-1][1] - ty) ** 2
+            if best_d is None or min(d0, d1) < best_d:
+                best_d, best_i, best_flip = min(d0, d1), i, d1 < d0
+        pc = list(remaining.pop(best_i).coords)
+        if best_flip:
+            pc = pc[::-1]
+        coords += pc[1:] if pc and pc[0] == coords[-1] else pc
+    return LineString(coords)
+
+
 def _build_stp_delta(svc_int, base_lines, base_segs, resolve, base_svc, base_infra):
     """STP delta: split (add_stop) / merge (drop_stop) the calling pattern.
 
@@ -1042,7 +1084,13 @@ def _stp_apply_drop(chain, dropped, rid, dir_id, var, resolve, borrow, penalty, 
     for j in range(len(keep) - 1):
         i0, i1 = keep[j], keep[j + 1]
         consumed = chain[i0:i1]
-        a_nr, b_nr = base_nrs[i0], base_nrs[i1]
+        # Key the preserved/merged TT by the SAME stop numbers _emit_line uses
+        # (the resolve()-based new_seq nrs), not the base projected-chain nrs.
+        # Major hubs (e.g. Zürich HB: 8516144 in the projected chain vs 8503000
+        # from the resolver) carry two ids; keying by base_nrs made _emit_line's
+        # lookup miss for those hops, dropping the GTFS time to the kinematic
+        # formula on segments the drop never touched.
+        a_nr, b_nr = new_seq[j]['nr'], new_seq[j + 1]['nr']
         a_nm, b_nm = base_names[i0], base_names[i1]
         ivwt = float(consumed[0]['IVWT'] or 0.0)
         if len(consumed) == 1:                      # unchanged hop — base reuse
@@ -1110,7 +1158,7 @@ def _stp_apply_add(chain, names, rid, dir_id, var, resolve, borrow,
         # ordered stops across this host hop: from + added(by path order) + to
         mids = [s for (_idx, _nm, s) in adds]
         seq_pts = [a] + mids + [b]
-        line = _as_linestring(h['geometry'])
+        line = _force_linestring(h['geometry'])
         total_len = float(h.get('path_length_m') or (line.length if line else 0.0))
         pn = h['path_nodes']
         node_seq = [a['nr']] + [s['nr'] for s in mids] + [b['nr']]
@@ -2321,8 +2369,31 @@ def plot_svc_interventions(base_infra: str, base_svc: str, result: Dict,
         by_type.setdefault(t, []).append(info)
         out_t = core.plot_out_dir(combo, t)
         p = out_t / f"svc_int_{m['svc_int_id']}_{base_infra}.pdf"
-        _aff = (recs_by_id.get(m['svc_int_id'], {}) or {}).get('affected_stations') or []
-        _ttl = f"{info['short']}: {_aff[0]} - {_aff[-1]}" if len(_aff) >= 2 else info['short']
+        _rec = recs_by_id.get(m['svc_int_id'], {}) or {}
+        _aff = _rec.get('affected_stations') or []
+        if t == 'stp':
+            _ops = _rec.get('operations')
+            _ops = _ops if isinstance(_ops, list) else deserialize_ops(_ops)
+            _dropped, _added = [], []
+            for o in (_ops or []):
+                _st = [str(s) for s in (o.get('params', {}).get('stops') or [])]
+                if o.get('op') == 'drop_stop':
+                    _dropped += _st
+                elif o.get('op') == 'add_stop':
+                    _added += _st
+            info['dropped_stops'] = list(dict.fromkeys(_dropped))
+            info['added_stops'] = list(dict.fromkeys(_added))
+            _what = []
+            if info['dropped_stops']:
+                _what.append("Dropped " + ", ".join(info['dropped_stops']))
+            if info['added_stops']:
+                _what.append("Added " + ", ".join(info['added_stops']))
+            _ttl = (f"{info['short']}: " + "; ".join(_what)) if _what else \
+                   (f"{info['short']}: {_aff[0]} - {_aff[-1]}" if len(_aff) >= 2
+                    else info['short'])
+        else:
+            _ttl = f"{info['short']}: {_aff[0]} - {_aff[-1]}" if len(_aff) >= 2 \
+                else info['short']
         if _render_svc_fig([info], ctx, p, _ttl, offset=False):
             written.append(str(p))
 
@@ -2496,6 +2567,61 @@ def _svc_int_plot_info(m: Dict, seg, t: str, ctx: Dict) -> Dict:
             'termini': _termini(seg, stations)}
 
 
+_STP_DROP_RED = '#d62728'    # per-int plot: a call dropped from the line
+_STP_ADD_GREEN = '#2ca02c'   # per-int plot: a call added to the line
+
+
+def _stp_change_xy(name, info: Dict, ctx: Dict):
+    """(x, y) of a changed-call station: an added stop sits in the delta segments,
+    a dropped stop is gone from them — fall back to the base node coordinates."""
+    st = (info.get('stations') or {}).get(name)
+    if st and st[1] is not None and st[2] is not None:
+        return (st[1], st[2])
+    nx = (ctx.get('node_xy') or {}).get(name)
+    if nx and nx[1] is not None and nx[2] is not None:
+        return (nx[1], nx[2])
+    return None
+
+
+def _draw_stp_change(ax, name: str, xy, color: str) -> None:
+    """Filled colour marker + name label for one changed call (red drop / green add)."""
+    ax.plot(xy[0], xy[1], marker='o', markersize=8, markerfacecolor=color,
+            markeredgecolor='black', markeredgewidth=1.0, zorder=8)
+    ax.annotate(name, xy=xy, xytext=(5, -9), textcoords='offset points',
+                fontsize=6.5, fontweight='bold', color=color, zorder=9,
+                bbox=dict(boxstyle='round,pad=0.18', fc='white', ec=color, alpha=0.9))
+
+
+def _focus_extent(infos: List[Dict], focus_xy: List, margin: float = 2500.0,
+                  min_span: float = 9000.0):
+    """Axis extent (xmin, xmax, ymin, ymax) framing the int geometry + changed calls.
+
+    The shared SA extent crops STP plots whose changed stops sit outside the study
+    area; this frames the line's own bounds plus every red/green marker instead.
+    """
+    xs: List = []
+    ys: List = []
+    for info in infos:
+        for key in ('old', 'new'):
+            g = info.get(key)
+            if g is not None and not g.empty:
+                b = g.total_bounds   # minx, miny, maxx, maxy
+                if np.all(np.isfinite(b)):
+                    xs += [b[0], b[2]]
+                    ys += [b[1], b[3]]
+    for (x, y) in focus_xy:
+        xs.append(x)
+        ys.append(y)
+    if not xs:
+        return None
+    cx = (min(xs) + max(xs)) / 2.0
+    cy = (min(ys) + max(ys)) / 2.0
+    spanx = max(max(xs) - min(xs), min_span)
+    spany = max(max(ys) - min(ys), min_span)
+    return (cx - spanx / 2 - margin, cx + spanx / 2 + margin,
+            cy - spany / 2 - margin, cy + spany / 2 + margin)
+
+
 def _render_svc_fig(infos: List[Dict], ctx: Dict, out_path, title: str,
                     offset: bool = False) -> bool:
     """Draw lakes + SA infra + the svc-int line(s) (old light / new dark) + stops → PDF."""
@@ -2531,7 +2657,28 @@ def _render_svc_fig(infos: List[Dict], ctx: Dict, out_path, title: str,
             color = _TYPE_COLOR.get(info['type'], _EXT_COLOR)
             _plot_termini_labels(ax, info, color)
 
-        if ctx['extent'] is not None:
+        # STP: mark the changed calls — dropped red, added green, with name labels.
+        focus_xy: List = []
+        for info in infos:
+            for nm in info.get('dropped_stops') or []:
+                xy = _stp_change_xy(nm, info, ctx)
+                if xy:
+                    _draw_stp_change(ax, nm, xy, _STP_DROP_RED)
+                    focus_xy.append(xy)
+            for nm in info.get('added_stops') or []:
+                xy = _stp_change_xy(nm, info, ctx)
+                if xy:
+                    _draw_stp_change(ax, nm, xy, _STP_ADD_GREEN)
+                    focus_xy.append(xy)
+
+        # Per-int STP plots frame the int's own geometry + the changed calls (which
+        # can sit outside the SA frame); other types keep the shared SA extent.
+        is_stp = any(info.get('type') == 'stp' for info in infos)
+        focus = _focus_extent(infos, focus_xy) if is_stp else None
+        if focus is not None:
+            ax.set_xlim(focus[0], focus[1])
+            ax.set_ylim(focus[2], focus[3])
+        elif ctx['extent'] is not None:
             ax.set_xlim(ctx['extent'][0], ctx['extent'][1])
             ax.set_ylim(ctx['extent'][2], ctx['extent'][3])
 
@@ -2547,7 +2694,11 @@ def _render_svc_fig(infos: List[Dict], ctx: Dict, out_path, title: str,
                         Line2D([0], [0], color=_FRQ_COLOR, lw=2.5, label='Frequency change')]
         if 'stp' in types:
             handles += [Line2D([0], [0], color=_STP_COLOR_OLD, lw=2, label='Existing line (STP)'),
-                        Line2D([0], [0], color=_STP_COLOR, lw=2.5, label='Stopping-pattern change')]
+                        Line2D([0], [0], color=_STP_COLOR, lw=2.5, label='Stopping-pattern change'),
+                        Line2D([0], [0], marker='o', color='w', markerfacecolor=_STP_DROP_RED,
+                               markeredgecolor='black', markersize=8, label='Dropped call'),
+                        Line2D([0], [0], marker='o', color='w', markerfacecolor=_STP_ADD_GREEN,
+                               markeredgecolor='black', markersize=8, label='Added call')]
         handles += [Line2D([0], [0], color=_BACKDROP, lw=1.5, label='Unused infrastructure'),
                     Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
                            markeredgecolor='black', markersize=6, label='Service stop')]

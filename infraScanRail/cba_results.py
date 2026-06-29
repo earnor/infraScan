@@ -458,6 +458,72 @@ _CHART_SUFFIXES = ['boxplot_savings', 'violinplot_savings',
                    'cumulative_cost_distribution']
 
 
+def _namelist_entry(svc_int_id: str, rec, combo: str, base_infra: str):
+    """'<label>: <stations>' for the chart side-list, per type: EXT affected
+    endpoints, FRQ line terminals, STP added/dropped stops, NDC endpoints."""
+    rec = rec or {}
+    itype = _svc_int_type(svc_int_id)
+    stations = rec.get('affected_stations') or []
+    label = svc_int_label(svc_int_id)
+    if itype == 'ext':
+        body = (f"{stations[0]} → {stations[-1]}" if len(stations) >= 2
+                else 'affected stations n/a')
+    elif itype == 'frq':
+        term = None
+        try:
+            term = _line_terminals(svc_int_id, combo, base_infra)
+        except Exception:
+            term = None
+        if term:
+            body = f"{term[0]} → {term[1]}"
+        elif len(stations) >= 2:
+            body = f"{stations[0]} → {stations[-1]}"
+        else:
+            body = 'start/end n/a'
+    elif itype == 'stp':
+        added, dropped = [], []
+        for o in (rec.get('operations') or []):
+            stops = (o.get('params') or {}).get('stops') or []
+            if o.get('op') == 'add_stop':
+                added += stops
+            elif o.get('op') == 'drop_stop':
+                dropped += stops
+        bits = []
+        if added:
+            bits.append('added: ' + ', '.join(added))
+        if dropped:
+            bits.append('dropped: ' + ', '.join(dropped))
+        short = (rec.get('line_short_name') or '').split('_')[0]
+        prefix = f"Line {short}, " if short else ''
+        body = (prefix + '; '.join(bits)) if bits else (
+            f"{stations[0]} → {stations[-1]}" if len(stations) >= 2 else 'n/a')
+    else:  # ndc
+        body = (f"{stations[0]} – {stations[-1]}" if len(stations) >= 2
+                else 'start/end n/a')
+    return label, body
+
+
+def _draw_namelist(ax, order, label_to_dev: dict, records: dict, combo: str,
+                   base_infra: str, color_map: dict, fontsize: float = 8.0,
+                   wrap: int = 34, loc: str = 'upper left',
+                   title: str = 'Interventions') -> None:
+    """The intervention list rendered AS a legend so its font, spacing and
+    rounded outline match the chart legends exactly. Each entry uses a short
+    coloured-line mark (the cumulative-distribution mark style); the station
+    text wraps in the same font on continuation lines."""
+    from matplotlib.lines import Line2D
+    ax.axis('off')
+    handles, labels = [], []
+    for lab in order:
+        iid = label_to_dev.get(lab)
+        _, body = _namelist_entry(iid, records.get(iid), combo, base_infra)
+        handles.append(Line2D([0], [0], color=color_map.get(lab, 'black'), lw=2))
+        labels.append('\n'.join(textwrap.wrap(f"{lab}: {body}", wrap)))
+    ax.legend(handles, labels, loc=loc, title=title, frameon=True,
+              edgecolor='black', framealpha=0.9, fontsize=fontsize,
+              title_fontsize=fontsize + 1.5, borderaxespad=0.0)
+
+
 def _seaborn_pandas_compat() -> None:
     """seaborn 0.12 wraps categorical plots in
     pd.option_context('mode.use_inf_as_na', ...), an option pandas 3.x removed
@@ -548,13 +614,15 @@ def _make_result_plots(raw: pd.DataFrame, cb_disc: pd.DataFrame, records: dict,
                     for iid in geo['development']}
     map_ctx = _load_map_context(base_infra, svc_version)
 
-    def _charts_map_combined(selected, prefix, chart_dir, out_combined_dir):
-        _plot_basic_charts(selected, prefix, chart_dir)
+    def _charts_map_combined(selected, prefix, chart_dir, out_combined_dir,
+                             order=None, title=None):
+        _plot_basic_charts(selected, prefix, chart_dir, records, combo,
+                           base_infra, order=order)
         labels = selected['line_name'].unique().tolist()
         map_path = os.path.join(maps_dir, f"railway_lines_{prefix}.png")
         _plot_network_map(labels, geom_by_label, _type_colors(labels),
                           aff_by_label, map_path, map_ctx,
-                          prefix.replace('_', ' '), zoom_to_group=True)
+                          title or prefix.replace('_', ' '), zoom_to_group=True)
         for suffix in _CHART_SUFFIXES:
             _combine_images(
                 os.path.join(chart_dir, f"{prefix}_{suffix}.png"), map_path,
@@ -613,6 +681,20 @@ def _make_result_plots(raw: pd.DataFrame, cb_disc: pd.DataFrame, records: dict,
             print(f"  [plot] cross-type top-{n} overview...")
             _charts_map_combined(top, f"top_{n}", ranked_dir, ranked_combined_dir)
 
+    # Top-4 per type, grouped by type then ranked within (one combined set).
+    nb_by_dev = data.groupby('development')['total_net_benefit'].mean()
+    top4 = []
+    for tag in ('ext', 'ndc', 'frq', 'stp'):
+        devs = [d for d in nb_by_dev.index if _svc_int_type(d) == tag]
+        top4 += sorted(devs, key=lambda d: nb_by_dev[d], reverse=True)[:4]
+    sub = data[data['development'].isin(top4)]
+    if not sub.empty:
+        print("  [plot] top-4 per type (grouped)...")
+        _charts_map_combined(sub, 'top4_per_type', ranked_dir,
+                             ranked_combined_dir,
+                             order=[svc_int_label(d) for d in top4],
+                             title='Best 4 candidates per svc intervention type')
+
     print("  [plot] overview network maps...")
     for sub, name in ((ext, 'developments_ext'), (ndc, 'developments_ndc'),
                       (frq, 'developments_frq'), (stp, 'developments_stp')):
@@ -635,6 +717,8 @@ def _make_result_plots(raw: pd.DataFrame, cb_disc: pd.DataFrame, records: dict,
 
     print(f"  [plot] {len(devs)} per-svc-int factsheets...")
     name_ctx = _load_name_context(combo, base_infra)
+    pct_pos = (data.groupby('development')['total_net_benefit']
+               .apply(lambda s: 100.0 * (s > 0).mean()))
     for iid in devs:
         sub = geo[geo['development'] == iid]
         if sub.empty:
@@ -642,6 +726,7 @@ def _make_result_plots(raw: pd.DataFrame, cb_disc: pd.DataFrame, records: dict,
         try:
             _plot_factsheet(iid, sub.iloc[0], records.get(iid), combo,
                             base_infra, svc_version, waterfall_dir, name_ctx,
+                            float(pct_pos.get(iid, 0.0)),
                             paths.get_factsheet_path(combo, iid))
         except Exception as exc:
             print(f"  [plot] factsheet {iid} failed: {exc}")
@@ -738,7 +823,9 @@ def _plot_network_map(labels, geom_by_label: dict, color_dict: dict,
                    linewidths=0.8, marker='o', zorder=6)
         ax.annotate(code, xy=xy, ha='center', va='bottom', xytext=(0, 5),
                     textcoords='offset points', fontsize=8, fontweight='bold',
-                    color='black', zorder=7)
+                    color='black', zorder=7,
+                    bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
+                              edgecolor='none', alpha=0.7))
 
     ax.set_xlabel('E [m]', fontsize=10)
     ax.set_ylabel('N [m]', fontsize=10)
@@ -786,49 +873,66 @@ def _combine_images(chart_path: str, map_path: str, combined_path: str) -> None:
 
 
 def _plot_basic_charts(data: pd.DataFrame, filename_prefix: str,
-                       plot_directory: str, line_colors: dict = None) -> dict:
+                       plot_directory: str, records: dict, combo: str,
+                       base_infra: str, line_colors: dict = None,
+                       order: list = None) -> dict:
     """Six charts per group (legacy plot_basic_charts, plots.py:2046): boxplot/
     violin savings, net-benefit boxplot, BCR boxplot, stacked costs-vs-benefits,
-    cumulative distribution. Group key = line_name (the svc-int label)."""
+    cumulative distribution. Group key = line_name (the svc-int label). The box/
+    violin legends sit inside the axes; the per-svc-int intervention list sits
+    beside (box/violin) or below (cost/cumulative) as a matching legend with a
+    coloured-line mark. Order defaults to descending mean net benefit; pass an
+    explicit order to keep e.g. the type-grouped top-4 arrangement."""
     import matplotlib.lines as mlines
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
     import seaborn as sns
+    from matplotlib.gridspec import GridSpecFromSubplotSpec
 
     import plot_parameter as pp
 
-    order = (data.groupby('line_name')['total_net_benefit'].mean()
-             .sort_values(ascending=False).index.tolist())
+    if order is None:
+        order = (data.groupby('line_name')['total_net_benefit'].mean()
+                 .sort_values(ascending=False).index.tolist())
     n_lines = len(order)
     if line_colors is None:
         line_colors = {name: pp.zvv_colors[i % len(pp.zvv_colors)]
                        for i, name in enumerate(order)}
     colors = [line_colors[line] for line in order]
+    label_to_dev = dict(zip(data['line_name'], data['development']))
+    height = max(5.4, 0.42 * n_lines + 2.7)
+    list_fs = 8.0 if n_lines <= 8 else 7.0
+
+    def _namelist(axn):
+        _draw_namelist(axn, order, label_to_dev, records, combo, base_infra,
+                       line_colors, fontsize=list_fs)
 
     def _boxplot(y, ylabel, hline, fname):
-        plt.figure(figsize=(7, 5), dpi=300)
-        ax = sns.boxplot(data=data, x='line_name', y=y, order=order,
-                         palette=colors, width=0.4, linewidth=0.8,
-                         showmeans=True,
-                         meanprops={"marker": "o", "markerfacecolor": "black",
-                                    "markeredgecolor": "black", "markersize": 5},
-                         fliersize=3, showfliers=True)
+        fig = plt.figure(figsize=(12, height), dpi=300)
+        g = fig.add_gridspec(1, 2, width_ratios=[2.15, 1.0], wspace=0.04)
+        ax, axn = fig.add_subplot(g[0]), fig.add_subplot(g[1])
+        sns.boxplot(data=data, x='line_name', y=y, order=order, palette=colors,
+                    width=0.4, linewidth=0.8, showmeans=True,
+                    meanprops={"marker": "o", "markerfacecolor": "black",
+                               "markeredgecolor": "black", "markersize": 5},
+                    fliersize=3, showfliers=True, ax=ax)
         ax.set_xlim(-0.5, n_lines - 0.5)
-        plt.xlabel('Line', fontsize=12)
-        plt.ylabel(ylabel, fontsize=12)
+        ax.set_xlabel('Line', fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
         if hline is not None:
-            plt.axhline(y=hline, color='red', linestyle='-', alpha=0.5)
-        plt.xticks(rotation=90)
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
+            ax.axhline(y=hline, color='red', linestyle='-', alpha=0.5)
+        ax.tick_params(axis='x', rotation=90)
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
         handles = [mlines.Line2D([0], [0], marker='o', color='black',
-                                 label='Mean', markersize=5),
-                   mpatches.Patch(color=colors[0], label='Line Colour')]
-        plt.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.01, 1),
-                   frameon=False)
-        plt.tight_layout(rect=[0, 0, 0.95, 1])
-        plt.savefig(os.path.join(plot_directory,
-                                 f"{filename_prefix}_{fname}.png"), dpi=600)
-        plt.close()
+                                 label='Mean', markersize=5, linestyle='None'),
+                   mpatches.Patch(color=colors[0], label='Line colour')]
+        ax.legend(handles=handles, loc='upper right', frameon=True,
+                  edgecolor='black', framealpha=0.9)
+        _namelist(axn)
+        fig.savefig(os.path.join(plot_directory,
+                                 f"{filename_prefix}_{fname}.png"), dpi=300,
+                    bbox_inches='tight')
+        plt.close(fig)
 
     _boxplot(data['monetized_savings_total'] / 1e6,
              'Monetised travel time savings in million CHF', None,
@@ -837,70 +941,79 @@ def _plot_basic_charts(data: pd.DataFrame, filename_prefix: str,
              'boxplot_net_benefit')
     _boxplot(data['cba_ratio'], 'Cost-benefit ratio', 1, 'boxplot_cba')
 
-    # Violin + scenario stripplot
-    plt.figure(figsize=(7, 5), dpi=300)
-    ax = sns.violinplot(data=data, x='line_name',
-                        y=data['monetized_savings_total'] / 1e6, order=order,
-                        palette=colors, width=0.7, inner=None, linewidth=0.8,
-                        cut=0, scale='width')
+    # Violin + scenario stripplot (legend inside, intervention list beside)
+    fig = plt.figure(figsize=(12, height), dpi=300)
+    g = fig.add_gridspec(1, 2, width_ratios=[2.15, 1.0], wspace=0.04)
+    ax, axn = fig.add_subplot(g[0]), fig.add_subplot(g[1])
+    sns.violinplot(data=data, x='line_name',
+                   y=data['monetized_savings_total'] / 1e6, order=order,
+                   palette=colors, width=0.7, inner=None, linewidth=0.8, cut=0,
+                   density_norm='width', ax=ax)
     unique_data = data.drop_duplicates(
         subset=['line_name', 'scenario', 'monetized_savings_total'])
     sns.stripplot(data=unique_data, x='line_name',
                   y=unique_data['monetized_savings_total'] / 1e6, order=order,
-                  color='black', alpha=0.4, jitter=True, size=2, dodge=False)
+                  color='black', alpha=0.4, jitter=True, size=2, dodge=False,
+                  ax=ax)
     ax.set_xlim(-0.5, n_lines - 0.5)
-    plt.xlabel('Line', fontsize=12)
-    plt.ylabel('Monetised travel time savings in million CHF', fontsize=12)
-    plt.xticks(rotation=90)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    ax.set_xlabel('Line', fontsize=12)
+    ax.set_ylabel('Monetised travel time savings in million CHF', fontsize=12)
+    ax.tick_params(axis='x', rotation=90)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
     handles = [mlines.Line2D([], [], marker='o', color='black', alpha=0.4,
                              linestyle='None', markersize=3,
                              label='Individual Values'),
-               mpatches.Patch(color=colors[0], label='Line Colour')]
-    plt.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.01, 1),
-               frameon=False)
-    plt.tight_layout(rect=[0, 0, 0.95, 1])
-    plt.savefig(os.path.join(plot_directory,
+               mpatches.Patch(color=colors[0], label='Line colour')]
+    ax.legend(handles=handles, loc='upper right', frameon=True,
+              edgecolor='black', framealpha=0.9)
+    _namelist(axn)
+    fig.savefig(os.path.join(plot_directory,
                              f"{filename_prefix}_violinplot_savings.png"),
-                dpi=600)
-    plt.close()
+                dpi=300, bbox_inches='tight')
+    plt.close(fig)
 
-    # Stacked costs-vs-benefits (means per line)
+    # Stacked costs-vs-benefits (legend outside top, intervention list below it)
     grouped = data.groupby('line_name').agg(
         {'TotalConstructionCost': 'mean', 'TotalMaintenanceCost': 'mean',
          'TotalUncoveredOperatingCost': 'mean', 'TotalTtLossCost': 'mean',
          'monetized_savings_total': 'mean'}).loc[order]
     x_pos = np.arange(n_lines)
     bar_width = 0.6
-    plt.figure(figsize=(7, 5), dpi=300)
-    plt.bar(x_pos, -grouped['TotalConstructionCost'] / 1e6, width=bar_width,
-            color=_COST_COLORS['TotalConstructionCost'],
-            label='Construction costs')
-    plt.bar(x_pos, -grouped['TotalMaintenanceCost'] / 1e6, width=bar_width,
-            bottom=-grouped['TotalConstructionCost'] / 1e6,
-            color=_COST_COLORS['TotalMaintenanceCost'],
-            label='Uncovered maintenance costs')
-    plt.bar(x_pos, -grouped['TotalUncoveredOperatingCost'] / 1e6,
-            width=bar_width,
-            bottom=-(grouped['TotalConstructionCost']
-                     + grouped['TotalMaintenanceCost']) / 1e6,
-            color=_COST_COLORS['TotalUncoveredOperatingCost'],
-            label='Uncovered operating costs')
-    plt.bar(x_pos, -grouped['TotalTtLossCost'] / 1e6, width=bar_width,
-            bottom=-(grouped['TotalConstructionCost']
-                     + grouped['TotalMaintenanceCost']
-                     + grouped['TotalUncoveredOperatingCost']) / 1e6,
-            color=_COST_COLORS['TotalTtLossCost'], label='Travel time loss')
+    fig = plt.figure(figsize=(12, height + 0.4), dpi=300)
+    g = fig.add_gridspec(1, 2, width_ratios=[2.15, 1.0], wspace=0.04)
+    ax = fig.add_subplot(g[0])
+    rcol = GridSpecFromSubplotSpec(2, 1, subplot_spec=g[1], hspace=0.05,
+                                   height_ratios=[1.0, 1.8])
+    ax_leg, ax_list = fig.add_subplot(rcol[0]), fig.add_subplot(rcol[1])
+    ax.bar(x_pos, -grouped['TotalConstructionCost'] / 1e6, width=bar_width,
+           color=_COST_COLORS['TotalConstructionCost'],
+           label='Construction costs')
+    ax.bar(x_pos, -grouped['TotalMaintenanceCost'] / 1e6, width=bar_width,
+           bottom=-grouped['TotalConstructionCost'] / 1e6,
+           color=_COST_COLORS['TotalMaintenanceCost'],
+           label='Uncovered maintenance costs')
+    ax.bar(x_pos, -grouped['TotalUncoveredOperatingCost'] / 1e6,
+           width=bar_width,
+           bottom=-(grouped['TotalConstructionCost']
+                    + grouped['TotalMaintenanceCost']) / 1e6,
+           color=_COST_COLORS['TotalUncoveredOperatingCost'],
+           label='Uncovered operating costs')
+    ax.bar(x_pos, -grouped['TotalTtLossCost'] / 1e6, width=bar_width,
+           bottom=-(grouped['TotalConstructionCost']
+                    + grouped['TotalMaintenanceCost']
+                    + grouped['TotalUncoveredOperatingCost']) / 1e6,
+           color=_COST_COLORS['TotalTtLossCost'], label='Travel time loss')
     for i, line_name in enumerate(order):
-        plt.bar(x_pos[i], grouped.loc[line_name, 'monetized_savings_total'] / 1e6,
-                width=bar_width, color=line_colors[line_name], hatch='////',
-                edgecolor='black')
-    plt.axhline(y=0, color='black', linestyle='-')
-    plt.xticks(x_pos, order, rotation=90)
-    plt.xlabel('Line', fontsize=12)
-    plt.ylabel('Value in CHF million', fontsize=12)
-    plt.title('Costs and benefits per modification', fontsize=14)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
+        ax.bar(x_pos[i], grouped.loc[line_name, 'monetized_savings_total'] / 1e6,
+               width=bar_width, color=line_colors[line_name], hatch='////',
+               edgecolor='black')
+    ax.axhline(y=0, color='black', linestyle='-')
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(order, rotation=90)
+    ax.set_xlabel('Line', fontsize=12)
+    ax.set_ylabel('Value in CHF million', fontsize=12)
+    ax.set_title('Costs and benefits per modification', fontsize=14)
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
     handles = [
         mpatches.Patch(color=_COST_COLORS['TotalConstructionCost'],
                        label='Construction costs'),
@@ -912,66 +1025,101 @@ def _plot_basic_charts(data: pd.DataFrame, filename_prefix: str,
                        label='Travel time loss'),
         mpatches.Patch(facecolor="none", hatch='////', edgecolor='black',
                        label='Travel time savings')]
-    plt.legend(handles=handles, bbox_to_anchor=(1.01, 1))
-    plt.tight_layout(rect=[0, 0, 0.95, 1])
-    plt.savefig(os.path.join(plot_directory,
-                             f"{filename_prefix}_cost_savings.png"), dpi=600)
-    plt.close()
+    ax_leg.axis('off')
+    ax_leg.legend(handles=handles, loc='upper left', bbox_to_anchor=(0.0, 1.0),
+                  frameon=True, edgecolor='black', fontsize=8.5)
+    _draw_namelist(ax_list, order, label_to_dev, records, combo, base_infra,
+                   line_colors, fontsize=list_fs)
+    fig.savefig(os.path.join(plot_directory,
+                             f"{filename_prefix}_cost_savings.png"), dpi=300,
+                bbox_inches='tight')
+    plt.close(fig)
 
     _plot_cumulative(
         data,
         os.path.join(plot_directory,
                      f"{filename_prefix}_cumulative_cost_distribution.png"),
-        color_dict=line_colors, group_by='line_name')
+        color_dict=line_colors, group_by='line_name', order=order,
+        records=records, combo=combo, base_infra=base_infra,
+        label_to_dev=label_to_dev, list_fs=list_fs)
     return line_colors
 
 
 def _plot_cumulative(df: pd.DataFrame, output_path: str, color_dict: dict = None,
-                     group_by: str = 'line_name') -> None:
+                     group_by: str = 'line_name', order: list = None,
+                     records: dict = None, combo: str = None,
+                     base_infra: str = None, label_to_dev: dict = None,
+                     list_fs: float = 8.0) -> None:
     """Cumulative probability of monetised savings per group (legacy
-    plot_cumulative_cost_distribution, plots.py:3620)."""
+    plot_cumulative_cost_distribution, plots.py:3620). When the namelist context
+    (records + label_to_dev) is supplied the per-line legend moves to the top of
+    a right-hand column with the intervention list below it; without it (the
+    overall all-developments chart) the legend stays as a single right-side
+    list."""
     import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpecFromSubplotSpec
 
-    mean_by_dev = (df.groupby(group_by)['monetized_savings_total'].mean()
-                   .sort_values(ascending=False))
-    dev_ids_sorted = mean_by_dev.index.tolist()
-
-    plt.figure(figsize=(10, 6))
+    if order is None:
+        order = (df.groupby(group_by)['monetized_savings_total'].mean()
+                 .sort_values(ascending=False).index.tolist())
     if color_dict is None:
         cmap = plt.get_cmap('tab20')
-        color_dict = {dev_id: cmap(i % 20)
-                      for i, dev_id in enumerate(dev_ids_sorted)}
+        color_dict = {dev_id: cmap(i % 20) for i, dev_id in enumerate(order)}
 
-    for i, dev_id in enumerate(dev_ids_sorted):
+    has_namelist = records is not None and label_to_dev is not None
+    n = len(order)
+    if has_namelist:
+        fig = plt.figure(figsize=(12, max(6.0, 0.42 * n + 2.7)))
+        g = fig.add_gridspec(1, 2, width_ratios=[2.15, 1.0], wspace=0.04)
+        ax = fig.add_subplot(g[0])
+        rcol = GridSpecFromSubplotSpec(2, 1, subplot_spec=g[1], hspace=0.05,
+                                       height_ratios=[1.0, 1.8])
+        ax_leg, ax_list = fig.add_subplot(rcol[0]), fig.add_subplot(rcol[1])
+    else:
+        fig = plt.figure(figsize=(10, 6))
+        ax = fig.add_subplot(1, 1, 1)
+
+    line_handles = []
+    for i, dev_id in enumerate(order):
         values = np.sort(df.loc[df[group_by] == dev_id,
                                 'monetized_savings_total'].dropna().values / 1e6)
         if not len(values):
             continue
         y_values = np.arange(1, len(values) + 1) / len(values)
-        plt.plot(values, y_values, '-',
-                 color=color_dict.get(dev_id, f"C{i % 10}"), linewidth=2,
-                 label=f"Line {dev_id}: {values.mean():.1f} Mio. CHF")
+        ln, = ax.plot(values, y_values, '-',
+                      color=color_dict.get(dev_id, f"C{i % 10}"), linewidth=2,
+                      label=f"{dev_id}: {values.mean():.1f} Mio. CHF")
+        line_handles.append(ln)
 
-    plt.axvline(x=0, color='lightgray', linestyle='-', linewidth=1)
-    plt.xlabel('Monetised travel time savings [CHF million]', fontsize=12)
-    plt.ylabel('Cumulative probability', fontsize=12)
-    plt.title('Cumulative probability distribution of the net benefit \n'
-              'of all developments considered', fontsize=14)
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(title='Lines with moderate utility', fontsize=9,
-               title_fontsize=10, loc='center left', bbox_to_anchor=(1, 0.5))
-    plt.ylim(0, 1.05)
+    ax.axvline(x=0, color='lightgray', linestyle='-', linewidth=1)
+    ax.set_xlabel('Monetised travel time savings [CHF million]', fontsize=12)
+    ax.set_ylabel('Cumulative probability', fontsize=12)
+    ax.set_title('Cumulative probability distribution of the net benefit \n'
+                 'of all developments considered', fontsize=14)
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.set_ylim(0, 1.05)
     x_min = df['monetized_savings_total'].min() / 1e6
     x_max = df['monetized_savings_total'].max() / 1e6
-    plt.xlim(x_min - 5, x_max + 5)
+    ax.set_xlim(x_min - 5, x_max + 5)
     for q in [0.25, 0.5, 0.75]:
-        plt.axhline(y=q, color='darkgray', linestyle=':', alpha=0.7)
-        plt.text(x_max + 3, q, f'{int(q * 100)}%', va='center', fontsize=9,
-                 color='darkgray')
-    plt.tight_layout()
+        ax.axhline(y=q, color='darkgray', linestyle=':', alpha=0.7)
+        ax.text(x_max + 3, q, f'{int(q * 100)}%', va='center', fontsize=9,
+                color='darkgray')
+
+    if has_namelist:
+        ax_leg.axis('off')
+        ax_leg.legend(handles=line_handles, loc='upper left',
+                      bbox_to_anchor=(0.0, 1.0), frameon=True, edgecolor='black',
+                      fontsize=max(6.5, list_fs - 0.4))
+        _draw_namelist(ax_list, order, label_to_dev, records, combo, base_infra,
+                       color_dict, fontsize=list_fs)
+    else:
+        ax.legend(handles=line_handles, title='Lines', fontsize=9,
+                  title_fontsize=10, loc='center left', bbox_to_anchor=(1, 0.5))
+        fig.tight_layout()
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    fig.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
 
 
 _WF_FONT = 'serif'
@@ -1103,8 +1251,9 @@ def _plot_waterfall(cb_disc: pd.DataFrame, svc_int_id: str, output_dir: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Per-svc-int A4 factsheet — assembles the existing 5B/6C/6D/waterfall plots on
-# one page plus a cost-benefit summary table with named infra/cap interventions.
+# Per-svc-int A0 factsheet — assembles the existing 5B/6C/6D/waterfall plots on
+# one page plus a reproducible description band and a cost-benefit summary table
+# with named infra/cap interventions and the share of scenarios that pay off.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_name_context(combo: str, base_infra: str) -> dict:
@@ -1184,31 +1333,57 @@ def _cap_names(svc_int_id: str, combo: str, ctx: dict) -> list:
     return out
 
 
-def _int_description(rec: dict) -> str:
-    """One-line plain description of what the svc-int does, from its operations."""
-    rec = rec or {}
-    itype = rec.get('int_type')
-    route = rec.get('route_id', '?')
-    ops = rec.get('operations') or [{}]
-    op, params = ops[0].get('op'), ops[0].get('params', {})
+def _plural(k: int, noun: str) -> str:
+    return f"{k} {noun}{'s' if k != 1 else ''}"
+
+
+def _action(svc_int_id: str, rec: dict, combo: str, base_infra: str) -> str:
+    """Type-specific action sentence using the readable base line name (the part
+    of line_short_name before the '_TYPE' suffix) and the affected stations."""
+    itype = _svc_int_type(svc_int_id)
     stations = rec.get('affected_stations') or []
+    base = (rec.get('line_short_name') or svc_int_id).split('_')[0]
+    a = stations[0] if stations else '?'
+    b = stations[-1] if stations else '?'
     if itype == 'ext':
-        start = params.get('endpoint') or (stations[0] if stations else '?')
-        end = (params.get('stops') or stations[-1:] or ['?'])[-1]
-        return f"Extended line {route} from {start} to {end}"
+        return f"Extension of line {base} from {a} to {b}"
     if itype == 'ndc':
-        return (f"New direct connection {stations[0]} - {stations[-1]}"
-                if stations else f"New direct line {route}")
+        mids = max(len(stations) - 2, 0)
+        return (f"New direct connection {a} – {b} via "
+                f"{_plural(mids, 'intermediate stop')}")
     if itype == 'frq':
-        if op in ('factor', 'double', 'multiply', 'set_frequency'):
-            return f"Increased frequency of line {route}"
-        tgt = (params.get('stops') or stations[-1:] or ['?'])[-1]
-        return f"Frequency homogenisation: line {route} extended to {tgt}"
+        if _frq_flavour(rec) == 'double':
+            return f"Frequency increase on line {base} ({a} – {b})"
+        return f"Frequency homogenisation: line {base} extended to {b}"
     if itype == 'stp':
-        return (f"Modified stop pattern on line {route} "
-                f"({stations[0]} - {stations[-1]})" if stations
-                else f"Modified stop pattern on line {route}")
-    return rec.get('line_short_name', '?')
+        _, body = _namelist_entry(svc_int_id, rec, combo, base_infra)
+        return f"Stop-pattern change on line {base} — {body}"
+    return base
+
+
+def build_description(svc_int_id: str, rec: dict, ctx: dict, combo: str,
+                      base_infra: str, width: int = 58) -> str:
+    """A reproducible factsheet description from fields present for every svc-int
+    type: the action (type verb + readable line + stations), the planned service
+    intensity (total_dep over the 14 h whole-day window), and the fixed-infra
+    footprint (connecting curves + capacity upgrades)."""
+    rec = rec or {}
+    total_dep = rec.get('total_dep')
+    svc = (f"Operated at ~{total_dep / 14.0:.1f} departures/h whole-day "
+           f"({int(total_dep)} dep/day)."  # GK_WINDOW_MIN/60 = 840/60 = 14 h
+           if total_dep else '')
+    infra = [_cc_name(c, ctx) for c in (rec.get('requires_infra') or [])]
+    caps = _cap_names(svc_int_id, combo, ctx)
+    parts = []
+    if infra:
+        parts.append(_plural(len(infra), 'new connecting curve'))
+    if caps:
+        parts.append(_plural(len(caps), 'capacity upgrade'))
+    foot = ("Fixed infrastructure: " + ", ".join(parts) + "."
+            if parts else "No new fixed infrastructure or capacity works.")
+    text = ' '.join(s for s in (_action(svc_int_id, rec, combo, base_infra)
+                                + '.', svc, foot) if s)
+    return '\n'.join(textwrap.wrap(text, width))
 
 
 def _fs_img(path):
@@ -1216,7 +1391,7 @@ def _fs_img(path):
     if str(path).lower().endswith('.pdf'):
         import fitz
         doc = fitz.open(path)
-        pix = doc[0].get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
+        pix = doc[0].get_pixmap(matrix=fitz.Matrix(6.0, 6.0), alpha=False)
         arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
             pix.height, pix.width, pix.n)
         doc.close()
@@ -1243,8 +1418,8 @@ def _fs_frame(ax, caption=None):
     ax.set_xticks([])
     ax.set_yticks([])
     if caption:
-        ax.set_title(caption, fontsize=9.5, fontweight='bold', color='black',
-                     pad=3)
+        ax.set_title(caption, fontsize=16, fontweight='bold', color='black',
+                     pad=5)
 
 
 def _fs_panel(ax, path, caption=None):
@@ -1254,11 +1429,20 @@ def _fs_panel(ax, path, caption=None):
         ax.imshow(_fs_trim(_fs_img(path)))
     else:
         ax.text(0.5, 0.5, f"missing:\n{os.path.basename(str(path))}",
-                ha='center', va='center', fontsize=7, color='red',
+                ha='center', va='center', fontsize=11, color='red',
                 transform=ax.transAxes)
 
 
-def _fs_table(ax, row, rec, combo, base_infra, ctx):
+def _fs_desc(ax, text):
+    """Reproducible plain-language description block, placed beside the waterfall."""
+    ax.axis('off')
+    ax.set_title('Description', fontsize=16, fontweight='bold', pad=5,
+                 loc='left')
+    ax.text(0.0, 0.95, text, transform=ax.transAxes, fontsize=15, va='top',
+            ha='left', color='#222222')
+
+
+def _fs_table(ax, row, rec, combo, base_infra, ctx, pct_beneficial):
     ax.axis('off')
     infra = [_cc_name(c, ctx) for c in ((rec or {}).get('requires_infra') or [])]
     caps = _cap_names(row['development'], combo, ctx)
@@ -1271,44 +1455,49 @@ def _fs_table(ax, row, rec, combo, base_infra, ctx):
                          for it in items)
 
     cells = [
-        ('Description', '\n'.join(textwrap.wrap(_int_description(rec), 30))),
-        ('Infrastructure interventions', _wrap_list(infra, 26)),
-        ('Capacity interventions', _wrap_list(caps, 26)),
-        ('Travel-time savings',
+        ('Infrastructure interventions', _wrap_list(infra, 38)),
+        ('Capacity interventions', _wrap_list(caps, 38)),
+        ('Travel-time savings (mean)',
          f"{row['Monetized Savings Mean [in Mio. CHF]']:.1f} Mio. CHF"),
         ('Total costs', f"{row['Total Costs [in Mio. CHF]']:.1f} Mio. CHF"),
         ('Net benefit (NPV)', f"{row['Net Benefit [in Mio. CHF]']:.1f} Mio. CHF"),
         ('Benefit-cost ratio', f"{row['CBA Ratio']:.2f}"),
+        ('Scenarios with positive net benefit', f"{pct_beneficial:.0f} %"),
     ]
-    text = [['\n'.join(textwrap.wrap(k, 15)), v] for k, v in cells]
+    text = [['\n'.join(textwrap.wrap(k, 24)), v] for k, v in cells]
     nlines = [max(k.count('\n') + 1, v.count('\n') + 1) for k, v in text]
     total = sum(nlines)
-
-    tbl = ax.table(cellText=text, colWidths=[0.42, 0.58], cellLoc='left',
+    # Compact rows top-aligned (fixed per-line unit, clamped so a content-heavy
+    # table still fits) -> the table sits at the top with room to expand below.
+    unit = min(0.075, 0.96 / total)
+    tbl = ax.table(cellText=text, colWidths=[0.25, 0.75], cellLoc='left',
                    loc='upper center')
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(8)
+    tbl.set_fontsize(15)
     for (r, c), cell in tbl.get_celld().items():
         cell.set_edgecolor('#cccccc')
-        cell.set_linewidth(0.5)
-        cell.set_height(nlines[r] / total)
+        cell.set_linewidth(0.6)
+        cell.set_height(nlines[r] * unit)
         cell.set_text_props(va='center')
         if c == 0:
             cell.set_text_props(fontweight='bold', va='center')
-        if r == len(cells) - 1:
+        if r >= len(cells) - 2:
             cell.set_facecolor('#f3f3f3')
             cell.set_text_props(fontweight='bold')
-    ax.set_title('Cost-benefit summary', fontsize=9.5, fontweight='bold',
-                 color='black', pad=3)
+    ax.set_title('Cost-benefit summary', fontsize=17, fontweight='bold',
+                 color='black', pad=5)
 
 
 def _plot_factsheet(svc_int_id: str, row, rec, combo: str, base_infra: str,
                     svc_version: str, waterfall_dir: str, ctx: dict,
-                    output_path: str) -> None:
-    """One A4-portrait factsheet per svc-int, embedding the existing plots:
-    5B service-intervention map + cost-benefit table & discounted waterfall (top),
-    6C travel-time / interchange delta matrices (middle), 6D passenger-flow change
-    + 6C cell-accessibility change (bottom)."""
+                    pct_beneficial: float, output_path: str) -> None:
+    """One A0-portrait factsheet per svc-int, embedding the existing plots with
+    balanced equal-sized columns: service-intervention map (top-left) and a
+    waterfall + reproducible description band above the cost-benefit table
+    (top-right); 6C travel-time / interchange delta matrices (middle); 6D
+    passenger-flow change + 6C cell-accessibility change (bottom). The 1:3 ratio
+    lives inside the cost-benefit table (label : value) only. Embedded raster
+    panels are sampled at 6x for A0 sharpness."""
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 
@@ -1324,22 +1513,35 @@ def _plot_factsheet(svc_int_id: str, row, rec, combo: str, base_infra: str,
     p_flow = paths.get_passenger_flow_plot_path(net, 'diff')
     p_wf = os.path.join(waterfall_dir, f"cost_benefit_{svc_int_id}.png")
 
-    label = _dev_label(svc_int_id, rec, combo, base_infra)
-    fig = plt.figure(figsize=(8.27, 11.69))
-    fig.suptitle(f"Factsheet: {label}", fontsize=14, fontweight='bold', y=0.985)
-    gs = GridSpec(3, 2, figure=fig, left=0.035, right=0.965, top=0.935,
-                  bottom=0.015, hspace=0.16, wspace=0.06,
-                  height_ratios=[1.08, 0.62, 1.45])
+    short = (rec or {}).get('line_short_name') or svc_int_id
+    fig = plt.figure(figsize=(33.11, 46.81))  # A0 portrait
+    fig.suptitle(f"Factsheet: {short}", fontsize=32, fontweight='bold', y=0.992)
 
-    _fs_panel(fig.add_subplot(gs[0, 0]), p_5b, 'Service intervention')
-    inner = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs[0, 1], hspace=0.22,
-                                    height_ratios=[1.25, 1.0])
-    _fs_table(fig.add_subplot(inner[0, 0]), row, rec, combo, base_infra, ctx)
-    _fs_panel(fig.add_subplot(inner[1, 0]), p_wf, 'Discounted costs & benefits')
-    _fs_panel(fig.add_subplot(gs[1, 0]), p_tt, 'Travel-time change [min]')
-    _fs_panel(fig.add_subplot(gs[1, 1]), p_fq, 'Interchange change')
-    _fs_panel(fig.add_subplot(gs[2, 0]), p_flow, 'Passenger-flow change')
-    _fs_panel(fig.add_subplot(gs[2, 1]), p_cell, 'Accessibility change')
+    outer = GridSpec(3, 1, figure=fig, left=0.03, right=0.97, top=0.965,
+                     bottom=0.015, hspace=0.09, height_ratios=[1.25, 0.72, 1.45])
+    # row 0: service map | right column [waterfall + description, table]
+    r0 = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[0], width_ratios=[1, 1],
+                                 wspace=0.05)
+    _fs_panel(fig.add_subplot(r0[0]), p_5b, 'Service intervention')
+    r0r = GridSpecFromSubplotSpec(2, 1, subplot_spec=r0[1], hspace=0.16,
+                                  height_ratios=[1.0, 0.95])
+    top = GridSpecFromSubplotSpec(1, 2, subplot_spec=r0r[0], wspace=0.06,
+                                  width_ratios=[1.0, 1.0])
+    _fs_panel(fig.add_subplot(top[0]), p_wf, 'Discounted costs & benefits')
+    _fs_desc(fig.add_subplot(top[1]),
+             build_description(svc_int_id, rec, ctx, combo, base_infra))
+    _fs_table(fig.add_subplot(r0r[1]), row, rec, combo, base_infra, ctx,
+              pct_beneficial)
+    # row 1: travel-time | interchange
+    r1 = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[1], width_ratios=[1, 1],
+                                 wspace=0.05)
+    _fs_panel(fig.add_subplot(r1[0]), p_tt, 'Travel-time change [min]')
+    _fs_panel(fig.add_subplot(r1[1]), p_fq, 'Interchange change')
+    # row 2: passenger flow | accessibility
+    r2 = GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[2], width_ratios=[1, 1],
+                                 wspace=0.05)
+    _fs_panel(fig.add_subplot(r2[0]), p_flow, 'Passenger-flow change')
+    _fs_panel(fig.add_subplot(r2[1]), p_cell, 'Accessibility change')
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     fig.savefig(output_path)

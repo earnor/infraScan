@@ -42,6 +42,7 @@ from capacity_calculator import (
     build_capacity_tables,
     build_capacity_tables_sa,
     build_capacity_tables_ca,
+    true_termini,
 )
 from capacity_interventions import (
     run_phase_four,
@@ -491,7 +492,7 @@ def capacity_on_composed(
     """
     from capacity_interventions import (
         design_section_intervention, calculate_intervention_cost,
-        identify_capacity_constrained_sections, _alias_cols, _target_key,
+        identify_capacity_constrained_sections, _alias_cols,
     )
 
     if grouping_strategy is None:
@@ -558,61 +559,60 @@ def capacity_on_composed(
     else:
         print(f"  [cap-composed] evaluating all {len(sections_df)} composed section(s)")
 
-    interventions: list = []
-    treated: set = set()
-    counter = 1
-    # Station turnback CAPs first (requirement-based, no local resolve, independent of
-    # whether any line section is constrained); their targets enter the dedup set so a
-    # line-triggered station CAP at the same node is skipped.
-    for interv in _turnback_candidates(termini, sta_peak, seg_peak, mod_nodes, counter):
-        key = _target_key(interv)
-        if key in treated:
-            continue
-        treated.add(key)
-        calculate_intervention_cost(interv, composition=composition)
-        interventions.append(interv)
-        counter += 1
-    if interventions:
-        print(f"  [cap-composed] {len(interventions)} station turnback CAP(s)")
+    # Station tracks are composed max-per-node across three producers (junctions never
+    # receive platform tracks — they only split sections); sidings are emitted directly.
+    sta_class = {int(r['NR']): str(r.get('Node_Class', ''))
+                 for _, r in sta_peak.iterrows() if pd.notna(r.get('NR'))}
+    station_cands: dict = {}   # nr -> CapacityIntervention with the largest tracks_added
 
-    # 5. Capacity-constrained sections (available_capacity < threshold; reactive margin,
-    #    default ~1.0 tphpd — one-train recovery buffer; catches sections at/near saturation).
+    def _offer_station(interv) -> None:
+        if interv is None or interv.node_id is None:
+            return
+        nr = int(interv.node_id)
+        if sta_class.get(nr) != 'station':      # Fix 4: junction → no platform track
+            return
+        prev = station_cands.get(nr)
+        if prev is None or float(interv.tracks_added or 0) > float(prev.tracks_added or 0):
+            station_cands[nr] = interv
+
+    # Rule A — through/platform tracks (capacity-independent).
+    for interv in _through_track_candidates(modified_segment_ids, sta_peak, seg_peak):
+        _offer_station(interv)
+    # Rule B — turnback tracks (gated on an adjacent over-capacity section).
+    for interv in _turnback_candidates(termini, sta_peak, seg_peak, mod_nodes,
+                                       sections_df, threshold_tphpd):
+        _offer_station(interv)
+
+    interventions: list = []
+    # 5. Capacity-constrained sections (available_capacity < threshold; strict). Single-
+    #    segment → siding (emitted directly); multi-segment → station_track (offered to the
+    #    max-per-node accumulator alongside Rules A/B).
     constrained = identify_capacity_constrained_sections(
         sections_df, threshold_tphpd=threshold_tphpd)
-    if constrained.empty:
-        # No constrained line section. Fall through with turnback-only CAP when the caller
-        # scoped explicit termini (STP: a split's new endpoint needs a turnback track even
-        # where no section is over capacity). Otherwise (EXT/FRQ/NDC) preserve the original
-        # behaviour: no section + nothing else → no CAP.
-        if not (modified_termini is not None and interventions):
-            print("  [cap-composed] no capacity-constrained sections — no CAP needed")
-            return []
-        print(f"  [cap-composed] designed {len(interventions)} resolving CAP intervention(s)")
-        return interventions
-    print(f"  [cap-composed] {len(constrained)} over-capacity section(s) to resolve")
+    if not constrained.empty:
+        print(f"  [cap-composed] {len(constrained)} over-capacity section(s) to resolve")
+        sta_aliased = _alias_cols(sta_peak, {'tracks': 'Track_Count', 'platforms': 'Platform_Count'})
+        seg_aliased = _alias_cols(seg_peak, {'length_m': 'Length', 'tracks': 'Num_Tracks',
+                                             'speed': 'Average_Speed'})
+        for _, section in constrained.iterrows():
+            interv = _resolve_section_locally(
+                section, seg_aliased, sta_aliased, sta_peak, seg_peak, seg_off,
+                junction_numbers, 1, grouping_strategy, threshold_tphpd,
+                termini_nodes=termini, capacity_mode=capacity_mode, set_value=set_value)
+            if interv is None:
+                continue
+            if interv.type == 'station_track':
+                _offer_station(interv)
+            else:
+                interventions.append(interv)
 
-    # design_section_intervention reads tracks/length_m/speed/platforms — alias the
-    # aggregate peak tables (non-destructive; Track_Count/Num_Tracks kept for rebuilds).
-    sta_aliased = _alias_cols(sta_peak, {'tracks': 'Track_Count', 'platforms': 'Platform_Count'})
-    seg_aliased = _alias_cols(seg_peak, {'length_m': 'Length', 'tracks': 'Num_Tracks',
-                                         'speed': 'Average_Speed'})
-
-    for _, section in constrained.iterrows():
-        interv = _resolve_section_locally(
-            section, seg_aliased, sta_aliased, sta_peak, seg_peak, seg_off,
-            junction_numbers, counter, grouping_strategy, threshold_tphpd,
-            termini_nodes=termini, capacity_mode=capacity_mode, set_value=set_value)
-        if interv is None:
-            continue
-        key = _target_key(interv)
-        if key in treated:
-            print(f"    skip section {section.get('section_id')}: target {key} already treated")
-            continue
-        treated.add(key)
+    interventions.extend(station_cands.values())
+    if not interventions:
+        print("  [cap-composed] no CAP needed")
+        return []
+    for i, interv in enumerate(interventions, 1):
+        interv.intervention_id = f"INT_{i:04d}"
         calculate_intervention_cost(interv, composition=composition)
-        interventions.append(interv)
-        counter += 1
-
     print(f"  [cap-composed] designed {len(interventions)} resolving CAP intervention(s)")
     return interventions
 
@@ -777,38 +777,109 @@ def write_sa_composed_capacity_workbook(base_infra, composed_infra, projected_se
 
 
 def _termini_nodes(service_links: pd.DataFrame) -> set:
-    """BAV node Numbers where any service of the supply terminates/originates."""
-    if service_links is None or service_links.empty:
-        return set()
-    out: set = set()
-    if 'is_origin' in service_links.columns:
-        m = service_links['is_origin'].astype(bool)
-        out |= set(pd.to_numeric(service_links.loc[m, 'from_stop_nr'],
-                                 errors='coerce').dropna().astype(int))
-    if 'is_destination' in service_links.columns:
-        m = service_links['is_destination'].astype(bool)
-        out |= set(pd.to_numeric(service_links.loc[m, 'to_stop_nr'],
-                                 errors='coerce').dropna().astype(int))
+    """BAV node Numbers where any service of the supply truly terminates/originates.
+
+    Leg-graph termini (true line endpoints), not the per-leg is_origin/is_destination
+    flags which mark every scheduled stop. See capacity_calculator.true_termini.
+    """
+    return true_termini(service_links)
+
+
+def _through_track_candidates(modified_segment_ids, sta_peak: pd.DataFrame,
+                              seg_peak: pd.DataFrame) -> list:
+    """Rule A — through/platform tracks, capacity-INDEPENDENT.
+
+    For a STATION touched by the svc-int (endpoint of a changed-load modified segment),
+    add one track when it is under-tracked versus its busiest neighbour
+    (current < busiest-adjacent track count) or single-tracked (current == 1). Junctions
+    are section splitters only and never receive platform tracks. A None scope
+    (standalone evaluate-everything) yields no Rule A candidates.
+    """
+    from capacity_interventions import CapacityIntervention, _connected_equivalent
+
+    if modified_segment_ids is None:
+        return []
+    touched: set = set()
+    for sid in modified_segment_ids:
+        for n in _seg_key(sid):
+            try:
+                touched.add(int(float(n)))
+            except (TypeError, ValueError):
+                continue
+    by_nr = {int(r['NR']): r for _, r in sta_peak.iterrows() if pd.notna(r.get('NR'))}
+
+    out: list = []
+    for nr in sorted(touched):
+        row = by_nr.get(nr)
+        if row is None or str(row.get('Node_Class', '')) != 'station':
+            continue
+        current = pd.to_numeric(pd.Series([row.get('Track_Count')]), errors='coerce').iloc[0]
+        if pd.isna(current):
+            continue
+        current = int(current)
+        equiv = _connected_equivalent(nr, seg_peak)
+        if not (current < equiv or current == 1):
+            continue
+        platforms = pd.to_numeric(pd.Series([row.get('Platform_Count')]), errors='coerce').iloc[0]
+        out.append(CapacityIntervention(
+            intervention_id=f"INT_TH_{len(out):04d}",
+            section_id=f"through@{nr}",
+            type='station_track',
+            node_id=int(nr),
+            segment_id=None,
+            tracks_added=1.0,
+            affected_segments=[],
+            construction_cost_chf=0.0,
+            maintenance_cost_annual_chf=0.0,
+            length_m=None,
+            current_tracks=float(current),
+            iteration=1,
+            current_platforms=None if pd.isna(platforms) else float(platforms),
+            platforms_added=(1.0 if not pd.isna(platforms) and platforms < 2 else None),
+        ))
+        print(f"    through-track at {row.get('Name', nr)} ({nr}): {current} track(s) "
+              f"< busiest neighbour {int(equiv)} (or single-track) -> +1 track")
     return out
 
 
 def _turnback_candidates(termini: set, sta_peak: pd.DataFrame, seg_peak: pd.DataFrame,
-                         mod_nodes, counter: int) -> list:
-    """Station turnback CAPs: a terminating train needs a track clear of through traffic.
+                         mod_nodes, sections_df: pd.DataFrame,
+                         threshold_tphpd: float) -> list:
+    """Rule B — turnback CAP, gated on an adjacent over-capacity section.
 
-    For every terminus station within the modified scope:
-    required = _required_station_tracks(connected_equivalent, terminating=True) —
-    i.e. equiv + 1, the turnback track; no overtaking stacking (user decision
-    2026-06-11). Track_Count short of that → station_track CAP with the shortfall as
-    tracks_added. Line sections cannot see this constraint (a turnback at a station
-    inside a high-capacity block moves no section load), so it is checked at the node.
+    For every TRUE terminus station within the modified scope whose Track_Count is short
+    of equiv+1 (the turnback track clear of through traffic), fire a station_track ONLY
+    when a section the terminating service traverses — one whose node sequence includes
+    the station — is over capacity: available_capacity < threshold + 1 (deliberately one
+    tphpd more generous than the strict siding rule, user-confirmed). Stations only;
+    junctions never receive platform tracks.
     """
     from capacity_interventions import (
         CapacityIntervention, _connected_equivalent, _required_station_tracks)
 
+    cls_of = {int(r['NR']): str(r.get('Node_Class', ''))
+              for _, r in sta_peak.iterrows() if pd.notna(r.get('NR'))}
+    has_sec = sections_df is not None and not sections_df.empty
+    avail = (pd.to_numeric(sections_df.get('Capacity_peak'), errors='coerce')
+             - pd.to_numeric(sections_df.get('total_tphpd_peak'), errors='coerce')) \
+        if has_sec else pd.Series(dtype=float)
+
+    def _adjacent_over_capacity(nr) -> bool:
+        if not has_sec:
+            return False
+        token = str(int(nr))
+        for idx, seq in sections_df['node_sequence'].items():
+            if token in str(seq).split() and float(avail.get(idx, 1e9)) < threshold_tphpd + 1:
+                return True
+        return False
+
     out: list = []
     for nr in sorted(termini):
         if mod_nodes is not None and nr not in mod_nodes:
+            continue
+        if cls_of.get(int(nr)) != 'station':
+            continue
+        if not _adjacent_over_capacity(nr):
             continue
         row = sta_peak[pd.to_numeric(sta_peak['NR'], errors='coerce') == float(nr)]
         if row.empty:
@@ -826,7 +897,7 @@ def _turnback_candidates(termini: set, sta_peak: pd.DataFrame, seg_peak: pd.Data
         platforms = pd.to_numeric(pd.Series([row.get('Platform_Count')]),
                                   errors='coerce').iloc[0]
         out.append(CapacityIntervention(
-            intervention_id=f"INT_TB_{counter + len(out):04d}",
+            intervention_id=f"INT_TB_{len(out):04d}",
             section_id=f"turnback@{nr}",
             type='station_track',
             node_id=int(nr),
@@ -843,7 +914,7 @@ def _turnback_candidates(termini: set, sta_peak: pd.DataFrame, seg_peak: pd.Data
         ))
         name = row.get('Name', nr)
         print(f"    turnback at {name} ({nr}): {int(current)} track(s) < required "
-              f"{required} -> +{add} track(s)")
+              f"{required} (adjacent section over capacity) -> +{add} track(s)")
     return out
 
 

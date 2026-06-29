@@ -2307,6 +2307,18 @@ def plot_service_matrix_delta(base_skims: dict, dev_skims: dict, base_paths,
 _CELL_PLOT_BASE_CACHE: dict = {}   # (base_svc_network, infra) -> base alloc + map base layers
 
 
+def _cell_pt_feeder_allocation(network_name: str) -> pd.DataFrame:
+    """Load a network's PT-Feeder cell allocation (RELI, cell coords, chosen
+    station, access time); None when absent."""
+    p = os.path.join(catchment_base.CATCHMENT_DATA_DIR, network_name,
+                     'PT_Feeder', 'allocation_pt_feeder.parquet')
+    if not os.path.exists(p):
+        return None
+    a = pd.read_parquet(p)
+    a['id_point'] = a['id_point'].astype(int)
+    return a[['RELI', 'E_KOORD', 'N_KOORD', 'id_point', 'access_time_sec']]
+
+
 def _cell_skim_col() -> str:
     return 'gc_min' if settings.TRAVEL_COST_METHOD == 'calibrated' else 'journey_time_min'
 
@@ -2330,32 +2342,77 @@ def _cell_onward_mean(od: pd.DataFrame) -> pd.Series:
         if d['trips'].sum() > 0 else np.nan)
 
 
-def _cell_onward_floored(base_od: pd.DataFrame, dev_od: pd.DataFrame) -> pd.Series:
-    """T_onward(s) with BASE demand weights and DEV skims FLOORED at base.
-
-    Floor = min(dev, base) per pair: added/extended/more-frequent service cannot
-    worsen the best achievable onward path on a superset network, so any rise is
-    a routing candidate-generation artifact and is clamped away."""
+def _cell_onward_dev(base_od: pd.DataFrame, dev_od: pd.DataFrame) -> pd.Series:
+    """Onward skim with BASE demand weights and the DEV skim (no floor), so the
+    cell-GC delta isolates the intervention's travel-cost change at fixed demand.
+    Pairs absent from the dev skim fall back to the base skim."""
     if base_od.empty:
         return pd.Series(dtype=float)
     m = base_od.merge(dev_od[['origin_id', 'dest_id', 'skim']].rename(
         columns={'skim': 'skim_dev'}), on=['origin_id', 'dest_id'], how='left')
-    m['skim_dev'] = np.minimum(m['skim_dev'].fillna(m['skim']), m['skim'])
+    m['skim_dev'] = m['skim_dev'].fillna(m['skim'])
     return m.groupby('origin_id').apply(
         lambda d: np.average(d['skim_dev'], weights=d['trips'])
         if d['trips'].sum() > 0 else np.nan)
 
 
-def _cell_pt_feeder_allocation(network_name: str) -> pd.DataFrame:
-    """Load a network's PT-Feeder cell allocation (RELI, cell coords, chosen
-    station, access time); None when absent."""
-    p = os.path.join(catchment_base.CATCHMENT_DATA_DIR, network_name,
-                     'PT_Feeder', 'allocation_pt_feeder.parquet')
-    if not os.path.exists(p):
-        return None
-    a = pd.read_parquet(p)
-    a['id_point'] = a['id_point'].astype(int)
-    return a[['RELI', 'E_KOORD', 'N_KOORD', 'id_point', 'access_time_sec']]
+def _service_station_set(rail_dir: str, route_ids: set) -> set:
+    """Station Numbers served by any of `route_ids` in a rail network dir
+    (rail_segments from_stop_nr / to_stop_nr where GTFS_ID == route_id)."""
+    if not route_ids:
+        return set()
+    import fiona
+    sp = os.path.join(rail_dir, 'rail_segments.gpkg')
+    if not os.path.exists(sp):
+        return set()
+    sg = pd.concat([gpd.read_file(sp, layer=L) for L in fiona.listlayers(sp)],
+                   ignore_index=True)
+    sel = sg[sg['GTFS_ID'].astype(str).isin({str(r) for r in route_ids})]
+    return (set(pd.to_numeric(sel['from_stop_nr'], errors='coerce').dropna().astype(int))
+            | set(pd.to_numeric(sel['to_stop_nr'], errors='coerce').dropna().astype(int)))
+
+
+_CELL_DEP_CACHE: dict = {}
+
+
+def _station_total_dep(rail_dir: str) -> dict:
+    """Whole-day stopping departures per station Number for a rail network dir.
+
+    station_total_dep(S) = Σ rail_lines.total_dep over every
+    (route_id, direction_id, variant_rank) whose rail_segments call at S
+    (from_stop_nr / to_stop_nr). Mirrors the station_total_dep measure in
+    catchment_allocate._compute_station_freq_penalties — the segment key
+    `GTFS_ID` equals rail_lines `route_id`. Returns {} when files are absent."""
+    import fiona
+    lp = os.path.join(rail_dir, 'rail_lines.gpkg')
+    sp = os.path.join(rail_dir, 'rail_segments.gpkg')
+    if not (os.path.exists(lp) and os.path.exists(sp)):
+        return {}
+    ln = pd.concat([gpd.read_file(lp, layer=L) for L in fiona.listlayers(lp)],
+                   ignore_index=True)
+    sg = pd.concat([gpd.read_file(sp, layer=L) for L in fiona.listlayers(sp)],
+                   ignore_index=True)
+    ln['route_id'] = ln['route_id'].astype(str)
+    ln['total_dep'] = pd.to_numeric(ln['total_dep'], errors='coerce').fillna(0.0)
+    sg['GTFS_ID'] = sg['GTFS_ID'].astype(str)
+    for df in (ln, sg):
+        df['direction_id'] = pd.to_numeric(df['direction_id'], errors='coerce')
+        df['variant_rank'] = pd.to_numeric(df['variant_rank'], errors='coerce')
+    key = ['direction_id', 'variant_rank']
+    fr = sg[['from_stop_nr', 'GTFS_ID'] + key].rename(columns={'from_stop_nr': 'nr'})
+    to = sg[['to_stop_nr', 'GTFS_ID'] + key].rename(columns={'to_stop_nr': 'nr'})
+    pairs = pd.concat([fr, to], ignore_index=True).drop_duplicates()
+    pairs = pairs.merge(ln[['route_id'] + key + ['total_dep']],
+                        left_on=['GTFS_ID'] + key, right_on=['route_id'] + key,
+                        how='left').dropna(subset=['total_dep'])
+    dep = pairs.groupby('nr')['total_dep'].sum()
+    return {int(k): float(v) for k, v in dep.items() if pd.notna(k)}
+
+
+def _station_total_dep_cached(rail_dir: str) -> dict:
+    if rail_dir not in _CELL_DEP_CACHE:
+        _CELL_DEP_CACHE[rail_dir] = _station_total_dep(rail_dir)
+    return _CELL_DEP_CACHE[rail_dir]
 
 
 def plot_cell_accessibility_delta(base_prim: dict, dev_prim: dict,
@@ -2364,14 +2421,19 @@ def plot_cell_accessibility_delta(base_prim: dict, dev_prim: dict,
                                   combo: str, method: str) -> None:
     """Phase-6C per-cell accessibility improve/decline map (PT-Feeder).
 
-    metric(cell) = access(cell -> chosen station) [access_time_sec, already
-    GC-weighted under settings.TRAVEL_COST_METHOD] + demand-weighted onward
-    Sigma_d w_base(s,d)*skim(s,d), the onward skim being the BEST-path skim
-    (gc / travel time per TRAVEL_COST_METHOD) FLOORED at baseline. The signed
-    delta(dev-base) drives a 3-colour fill (improved / declined / unchanged at
-    +-0.5 min); cells whose chosen station changed are outlined, and the svc-int
-    line is drawn to full extent in its type colour. Whole-catchment extent.
-    Needs the dev 6A allocation (written before 6C runs) and skips otherwise."""
+    Service-scoped generalised-cost colouring (decision 2026-06-23): only cells
+    that route to a station served by the AFFECTED SERVICE(S) — every stop up- and
+    down-line of the intervention, base ∪ dev, not just the touched stop — are
+    coloured. Such a cell is GREEN when its generalised cost (access + demand-
+    weighted onward skim, GC-min) FALLS dev vs base, RED when it RISES (±0.5-min
+    tolerance), so frequency, in-vehicle time and transfers are all captured (e.g.
+    a new direct connection's removed transfer, an extension's shorter ride, an
+    express drop's penalty at the dropped stop and benefit to through-riders).
+    Cells whose chosen station CHANGED are a distinct 're-assigned' category;
+    cells gaining / losing all rail access are green / red; out-of-scope cells are
+    unchanged. The directly touched stops are drawn as coloured circles by their
+    whole-day departure change. Needs the routing primitives (base_prim, dev_prim)
+    and the dev 6A allocation; skips when the dev allocation is absent."""
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
     from shapely.geometry import box
@@ -2393,16 +2455,51 @@ def plot_cell_accessibility_delta(base_prim: dict, dev_prim: dict,
         _CELL_PLOT_BASE_CACHE[bkey] = (
             _cell_pt_feeder_allocation(base_svc_network), boundary,
             catchment_allocate._load_lakes_for_extent(boundary, scope='ca'),
-            {int(n): g for n, g in zip(nodes['Number'], nodes.geometry)})
-    base_alloc, boundary, lakes, node_pts = _CELL_PLOT_BASE_CACHE[bkey]
+            {int(n): g for n, g in zip(nodes['Number'], nodes.geometry)},
+            {str(nm): int(n) for nm, n in zip(nodes['Name'], nodes['Number'])
+             if pd.notna(nm)})
+    base_alloc, boundary, lakes, node_pts, name_to_nr = _CELL_PLOT_BASE_CACHE[bkey]
     if base_alloc is None:
         print("    cell accessibility delta: no baseline allocation — skipped")
         return
 
     no_pt = catchment_allocate.NO_PT_ID
+    int_type = svc_int_id.split('_')[0]
+    try:
+        _rec = so.read_record(int_type, svc_int_id, network=combo)
+    except Exception:
+        _rec = None
+
+    # Directly touched stops (for the coloured-circle markers).
+    _aff = (_rec or {}).get('affected_stations') or []
+    if isinstance(_aff, str):
+        _aff = _aff.split(',')
+    aff_names = [str(s).strip() for s in _aff if str(s).strip()]
+    aff_nodes = {name_to_nr[n] for n in aff_names if n in name_to_nr}
+
+    base_rail = os.path.join(paths.RAIL_LINES_DIR, base_svc_network, infra_version)
+    dev_rail = os.path.join(str(paths.get_svc_int_network_dir(svc_int_id, combo)), 'Merged')
+
+    # Colouring scope = every station served by the affected service(s), base ∪ dev,
+    # so up-/down-line stations (not just the touched stop) are included.
+    _svc = (_rec or {}).get('affected_services') or []
+    if isinstance(_svc, str):
+        _svc = _svc.split(',')
+    routes = {str(s).strip() for s in _svc if str(s).strip()}
+    if (_rec or {}).get('route_id'):
+        routes.add(str(_rec['route_id']))
+    scope = (_service_station_set(base_rail, routes)
+             | _service_station_set(dev_rail, routes))
+
+    # Departure change at the directly-touched stops (for the circle colour).
+    base_dep = _station_total_dep_cached(base_rail)
+    dev_dep = _station_total_dep(dev_rail)
+    dep_sign = {nr: dev_dep.get(nr, 0.0) - base_dep.get(nr, 0.0) for nr in aff_nodes}
+
+    # Per-cell generalised-cost change (access + onward), base vs dev, at fixed demand.
     base_od = _cell_best_path_od(base_prim)
     base_onward = _cell_onward_mean(base_od)
-    dev_onward = _cell_onward_floored(base_od, _cell_best_path_od(dev_prim))
+    dev_onward = _cell_onward_dev(base_od, _cell_best_path_od(dev_prim))
     tol = 0.5
 
     def _metric(alloc, onward):
@@ -2416,38 +2513,38 @@ def plot_cell_accessibility_delta(base_prim: dict, dev_prim: dict,
     d = _metric(dev_alloc, dev_onward).rename(columns={'id_point': 'sd', 'metric': 'md'})
     c = b[['RELI', 'E_KOORD', 'N_KOORD', 'sb', 'mb']].merge(
         d[['RELI', 'sd', 'md']], on='RELI', how='inner')
-    gained = (c['sb'] == no_pt) & (c['sd'] != no_pt)
-    lost = (c['sb'] != no_pt) & (c['sd'] == no_pt)
     both = (c['sb'] != no_pt) & (c['sd'] != no_pt)
-    delta = c['md'] - c['mb']
+    c['switched'] = both & (c['sb'] != c['sd'])
+    c['delta'] = c['md'] - c['mb']
+    # Only cells routing to a station of the affected service(s) are coloured.
+    in_scope = c['sb'].isin(scope) | c['sd'].isin(scope)
+    # 1 improved (GC down) / -1 declined (GC up) / 2 re-assigned (blue) / 0 unchanged
     cat = np.zeros(len(c), dtype=int)
-    cat = np.where(both & (delta < -tol), 1, cat)
-    cat = np.where(both & (delta > tol), -1, cat)
-    cat = np.where(gained, 1, cat)
-    cat = np.where(lost, -1, cat)
+    gc_cell = in_scope & both & (~c['switched'])
+    cat = np.where(gc_cell & (c['delta'] < -tol), 1, cat)
+    cat = np.where(gc_cell & (c['delta'] > tol), -1, cat)
+    cat = np.where(in_scope & (c['sb'] == no_pt) & (c['sd'] != no_pt), 1, cat)
+    cat = np.where(in_scope & (c['sb'] != no_pt) & (c['sd'] == no_pt), -1, cat)
+    cat = np.where(in_scope & c['switched'], 2, cat)
     c['cat'] = cat
-    c['switched'] = c['sb'] != c['sd']
 
     gdf = gpd.GeoDataFrame(
         c, geometry=[box(e, n, e + 100, n + 100)
                      for e, n in zip(c['E_KOORD'], c['N_KOORD'])], crs=_CODEBASE_CRS)
-    green, red, grey = (0.62, 0.85, 0.62), (0.95, 0.70, 0.70), (0.86, 0.86, 0.86)
+    green, red, grey, blue = ((0.62, 0.85, 0.62), (0.95, 0.70, 0.70),
+                              (0.86, 0.86, 0.86), (0.40, 0.55, 0.80))
     fig, ax = plt.subplots(figsize=(13, 11))
     ax.set_facecolor('#E8E8E8')
     bnd = gpd.GeoDataFrame(geometry=[boundary], crs=_CODEBASE_CRS)
     bnd.plot(ax=ax, color='white', edgecolor='none', zorder=0)
-    for val, col in ((0, grey), (1, green), (-1, red)):
+    for val, col in ((0, grey), (1, green), (-1, red), (2, blue)):
         sub = gdf[gdf['cat'] == val]
         if not sub.empty:
             sub.plot(ax=ax, color=col, edgecolor='none', zorder=2)
     if lakes is not None and not lakes.empty:
         lakes.plot(ax=ax, color='#A8D8EA', edgecolor='none', zorder=3)
-    sw = gdf[gdf['switched']]
-    if not sw.empty:
-        sw.boundary.plot(ax=ax, color='#1a1a8a', linewidth=0.5, zorder=4)
     bnd.boundary.plot(ax=ax, color='black', linewidth=1.8, linestyle='--', zorder=5)
 
-    int_type = svc_int_id.split('_')[0]
     icol = so._TYPE_COLOR.get(int_type, '#000000')
     iseg = so._load_delta_segments(
         Path(paths.get_svc_int_network_dir(svc_int_id, combo)) / infra_version
@@ -2457,10 +2554,19 @@ def plot_cell_accessibility_delta(base_prim: dict, dev_prim: dict,
         iseg.plot(ax=ax, color=icol, linewidth=2.8, zorder=5, alpha=0.95)
 
     chosen = set(c.loc[c['sd'] != no_pt, 'sd']) | set(c.loc[c['sb'] != no_pt, 'sb'])
-    ax.scatter([node_pts[s].x for s in chosen if s in node_pts],
-               [node_pts[s].y for s in chosen if s in node_pts],
+    other = [s for s in chosen if s not in aff_nodes and s in node_pts]
+    ax.scatter([node_pts[s].x for s in other], [node_pts[s].y for s in other],
                s=22, c='white', edgecolors='black', linewidths=0.8,
                marker='o', zorder=6)
+    # Affected station(s): same circle as every other station, just filled by its
+    # whole-day departure change (green +dep / red -dep), drawn on top.
+    for s in sorted(aff_nodes):
+        if s not in node_pts:
+            continue
+        ds = dep_sign.get(s, 0.0)
+        scol = ('#1a8a1a' if ds > 0 else '#c0392b' if ds < 0 else '#555555')
+        ax.scatter([node_pts[s].x], [node_pts[s].y], s=22, c=scol,
+                   edgecolors='black', linewidths=0.8, marker='o', zorder=7)
     bx0, by0, bx1, by1 = boundary.bounds
     ax.set_xlim(bx0 - 200, bx1 + 200)
     ax.set_ylim(by0 - 200, by1 + 200)
@@ -2470,12 +2576,15 @@ def plot_cell_accessibility_delta(base_prim: dict, dev_prim: dict,
     catchment_allocate._add_map_elements(ax)
     ax.set_title(f'Accessibility change — {svc_int_id}', fontsize=14)
     ax.legend(handles=[
-        Patch(facecolor=green, label='Improved'),
-        Patch(facecolor=red, label='Declined'),
-        Patch(facecolor=grey, label='Unchanged'),
-        Line2D([0], [0], color='#1a1a8a', lw=1.2, label='Chosen station switched'),
+        Patch(facecolor=green, label='Improved (lower generalised cost)'),
+        Patch(facecolor=red, label='Declined (higher generalised cost)'),
+        Patch(facecolor=blue, label='Re-assigned station'),
+        Patch(facecolor=grey, label='Unchanged / out of scope'),
         Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
                markeredgecolor='black', markersize=8, label='Rail station'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor=grey,
+               markeredgecolor='black', markersize=8,
+               label='Affected stop (green +dep / red −dep)'),
         Line2D([0], [0], color=icol, lw=2.8,
                label=f'Service intervention ({int_type})'),
     ], loc='upper right', fontsize=9, framealpha=0.9)
@@ -2486,8 +2595,8 @@ def plot_cell_accessibility_delta(base_prim: dict, dev_prim: dict,
     fig.savefig(out, bbox_inches='tight')
     plt.close(fig)
     print(f"    cell accessibility delta: {int((cat == 1).sum()):,} improved / "
-          f"{int((cat == -1).sum()):,} declined / {int(c['switched'].sum()):,} "
-          f"switched -> {out}")
+          f"{int((cat == -1).sum()):,} declined / {int((cat == 2).sum()):,} "
+          f"re-assigned -> {out}")
 
 
 def _write_reports(prim: dict, skims: dict, rail_segs_tt: pd.DataFrame,

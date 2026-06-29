@@ -121,13 +121,11 @@ def phase_5c_capacity_on_matched(
             continue
         merged_path = _build_merged_services(rec, base_infra, base_svc, delta_path, use_cache)
         mod = _changed_load_segments(base_svc, base_infra, composed, merged_path)
-        # STP changes which stations a line calls at / where it turns back, not segment
-        # load — its genuine capacity trigger is a new terminus, not a busier section. Scope
-        # its turnback check to the stations whose terminating-train count actually rose
-        # (the load-segment scope is empty for a pure stop-pattern change). EXT/FRQ/NDC keep
-        # the segment-derived turnback scope (mod_term=None) so their attribution is unchanged.
-        mod_term = (_changed_termini_nodes(base_svc, base_infra, composed, merged_path)
-                    if int_type == 'stp' else None)
+        # All types scope the turnback check to stations whose terminating-train count
+        # actually rose (_changed_termini_nodes detects only true new/increased termini,
+        # not through-stops) — this lets a stub-end terminus fire a turnback CAP even when
+        # no line section is over capacity, consistent with the full-attribution model.
+        mod_term = _changed_termini_nodes(base_svc, base_infra, composed, merged_path)
         mod_union |= mod
         prepped.append({'int_type': int_type, 'id': iid, 'rec': rec, 'req': req,
                         'composed': composed, 'merged': merged_path, 'mod': mod,
@@ -385,19 +383,22 @@ def _changed_termini_nodes(base_svc, base_infra, composed_infra, merged_path) ->
     deficit (current Track_Count < equiv+1) is decided downstream in _turnback_candidates;
     this only scopes WHICH stations are checked.
     """
-    from capacity_calculator import load_projected_services
+    from capacity_calculator import load_projected_services, true_termini
 
     def _term_by_node(links) -> dict:
+        """Terminating-train freq per TRUE terminus node (leg-graph endpoints).
+
+        Restricted to true termini so a frequency/stop change at an intermediate stop
+        no longer registers as raised terminating load (the over-firing source).
+        """
         if links is None or links.empty:
             return {}
-        out: dict = {}
-        org = links[links['is_origin'].astype(bool)]
-        dst = links[links['is_destination'].astype(bool)]
-        for nr, f in org.groupby(org['from_stop_nr'].astype(int))['freq_peak'].sum().items():
-            out[int(nr)] = out.get(int(nr), 0.0) + float(f)
-        for nr, f in dst.groupby(dst['to_stop_nr'].astype(int))['freq_peak'].sum().items():
-            out[int(nr)] = out.get(int(nr), 0.0) + float(f)
-        return out
+        T = true_termini(links)
+        if not T:
+            return {}
+        fr = links.groupby(links['from_stop_nr'].astype(int))['freq_peak'].sum()
+        to = links.groupby(links['to_stop_nr'].astype(int))['freq_peak'].sum()
+        return {int(nr): float(fr.get(nr, 0.0)) + float(to.get(nr, 0.0)) for nr in T}
 
     base = _term_by_node(load_projected_services(base_svc, base_infra))
     merged = _term_by_node(load_projected_services(

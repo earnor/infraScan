@@ -461,6 +461,7 @@ def load_projected_services(svc_version: str, infra_version: str,
         n_pairs = len(path) - 1
         svc       = str(row.get("Service") or row.get("GTFS_ID") or "")
         direction = str(row.get("direction_id") or "")
+        variant   = row.get("variant_rank")
         try:
             from_stop_nr = int(float(row.get("from_stop_nr") or row.get("node_id_from") or 0))
             to_stop_nr   = int(float(row.get("to_stop_nr")   or row.get("node_id_to")   or 0))
@@ -478,6 +479,7 @@ def load_projected_services(svc_version: str, infra_version: str,
             expanded_rows.append({
                 "service":        svc,
                 "direction_id":   direction,
+                "variant_rank":   variant,
                 "from_stop_nr":   from_stop_nr,
                 "to_stop_nr":     to_stop_nr,
                 "from_stop_name": from_stop_name,
@@ -495,7 +497,7 @@ def load_projected_services(svc_version: str, infra_version: str,
     result = pd.DataFrame(expanded_rows)
     if result.empty:
         result = pd.DataFrame(columns=[
-            "service", "direction_id", "from_stop_nr", "to_stop_nr",
+            "service", "direction_id", "variant_rank", "from_stop_nr", "to_stop_nr",
             "from_stop_name", "to_stop_name", "seg_from_node", "seg_to_node",
             "freq_am_peak", "freq_pm_peak", "freq_peak", "freq_offpeak",
             "is_origin", "is_destination",
@@ -718,6 +720,7 @@ def load_projected_services_sa(
         n_pairs = len(clipped) - 1
         svc       = str(row.get("Service") or row.get("GTFS_ID") or "")
         direction = str(row.get("direction_id") or "")
+        variant   = row.get("variant_rank")
         try:
             from_stop_nr = int(float(row.get("from_stop_nr") or row.get("node_id_from") or 0))
             to_stop_nr   = int(float(row.get("to_stop_nr")   or row.get("node_id_to")   or 0))
@@ -737,6 +740,7 @@ def load_projected_services_sa(
             expanded_rows.append({
                 "service":        svc,
                 "direction_id":   direction,
+                "variant_rank":   variant,
                 "from_stop_nr":   from_stop_nr,
                 "to_stop_nr":     to_stop_nr,
                 "from_stop_name": from_stop_name,
@@ -754,7 +758,7 @@ def load_projected_services_sa(
     result = pd.DataFrame(expanded_rows)
     if result.empty:
         result = pd.DataFrame(columns=[
-            "service", "direction_id", "from_stop_nr", "to_stop_nr",
+            "service", "direction_id", "variant_rank", "from_stop_nr", "to_stop_nr",
             "from_stop_name", "to_stop_name", "seg_from_node", "seg_to_node",
             "freq_am_peak", "freq_pm_peak", "freq_peak", "freq_offpeak",
             "is_origin", "is_destination",
@@ -1183,6 +1187,28 @@ def aggregate_station_metrics(
     ]
     available = [c for c in out_cols if c in result.columns]
     return result[available].sort_values("NR").reset_index(drop=True)
+
+
+def true_termini(service_links: pd.DataFrame) -> set:
+    """BAV node Numbers where a line actually starts/ends, from the leg graph.
+
+    Per (service, direction_id, variant_rank): a stop that is a leg from_stop but never a
+    leg to_stop is an origin; a to_stop but never a from_stop is a destination. Interior
+    stops are both and excluded. Grouping by variant_rank keeps short-turn variants
+    distinct (e.g. a Forch short-turn vs an Esslingen full run on the same line+direction),
+    which is why is_origin/is_destination cannot be used here — those flag every scheduled
+    stop, not the line endpoints.
+    """
+    if service_links is None or service_links.empty:
+        return set()
+    keys = [c for c in ('service', 'direction_id', 'variant_rank')
+            if c in service_links.columns]
+    out: set = set()
+    for _, g in service_links.groupby(keys, dropna=False):
+        fr = set(pd.to_numeric(g['from_stop_nr'], errors='coerce').dropna().astype(int))
+        to = set(pd.to_numeric(g['to_stop_nr'],   errors='coerce').dropna().astype(int))
+        out |= (fr - to) | (to - fr)
+    return out
 
 
 def build_stop_lookup(service_links_df: pd.DataFrame, period: str) -> set:

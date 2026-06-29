@@ -305,6 +305,32 @@ def get_rail_stops_sa(svc_network: str, infra_version: str) -> str:
     """
     return os.path.join(MAIN, RAIL_LINES_DIR, svc_network, infra_version, 'rail_stops_sa.gpkg')
 
+def get_rail_stops(svc_network: str, infra_version: str) -> str:
+    """Return absolute path to the full rail-stops GPKG for a svc/infra pair
+    (data/Network/Rail_Lines/<svc_network>/<infra_version>/rail_stops.gpkg).
+
+    All network stops with 'Number' (UIC) and geometry (EPSG:2056); the
+    catchment-wide superset of rail_stops_sa.gpkg.
+
+    Args:
+        svc_network:   service version folder name WITH the '_network' suffix.
+        infra_version: infrastructure version subfolder, e.g. 'AS_2026_ZH_enhanced'.
+    """
+    return os.path.join(MAIN, RAIL_LINES_DIR, svc_network, infra_version, 'rail_stops.gpkg')
+
+def get_rail_lines(svc_network: str, infra_version: str) -> str:
+    """Return absolute path to the rail_lines GPKG for a svc/infra pair
+    (data/Network/Rail_Lines/<svc_network>/<infra_version>/rail_lines.gpkg).
+
+    Carries one row per route variant with route_id and line_short_name (the
+    S-Bahn/IR/IC line label), used to collapse GTFS route variants to lines.
+
+    Args:
+        svc_network:   service version folder name WITH the '_network' suffix.
+        infra_version: infrastructure version subfolder, e.g. 'AS_2026_ZH_enhanced'.
+    """
+    return os.path.join(MAIN, RAIL_LINES_DIR, svc_network, infra_version, 'rail_lines.gpkg')
+
 def get_od_version_dir(svc_network: str) -> str:
     """Return absolute path to the versioned OD output dir for a svc version.
 
@@ -824,7 +850,8 @@ def get_rail_services_path(version: str) -> str:
 # pipeline outputs and write under infraScanRail/validation/ (sibling of data/
 # and plots/; plots nest INSIDE each check dir per the 2026-06-12 decision).
 VALIDATION_DIR = r"validation"
-_VALIDATION_CHECKS = ('v1_station_numbers', 'v2_link_flows', 'v3_sensitivity')
+_VALIDATION_CHECKS = ('v1_station_numbers', 'v2_link_flows', 'v3_sensitivity',
+                      'single_service')
 
 # Observed reference datasets (V1 SBB Ein-/Aussteigende; V2 NPVM link loads)
 SBB_STATION_NUMBERS_XLSX = r"data/Spatial_Data/Transit_Network/SBB_Station_Flows/SBB_Station_Numbers.xlsx"

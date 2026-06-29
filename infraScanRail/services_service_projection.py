@@ -5987,7 +5987,7 @@ def _plot_gazette_style(
             continue  # suppress tram/funicular terminus circles and labels in CA
 
         # Filled circle — feeder termini at 1/3 the size of rail. The terminating
-        # service names are listed at the station code (to its right), not here.
+        # service names are listed below the station code, not here.
         _t_ms = 6 if t_mode == "rail" else 2
         ax.plot(te, tn_, marker='o', markersize=_t_ms, color=colour,
                 markeredgecolor='white', markeredgewidth=0.8, zorder=8)
@@ -6040,16 +6040,16 @@ def _plot_gazette_style(
             bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
                       edgecolor='none', alpha=0.7),
         )
-        # Terminating suburban + RegioExpress services, listed to the right of the
-        # station code (bold, same colour as the code).
+        # Terminating suburban + RegioExpress services, listed directly below the
+        # station code, left-aligned to the code (bold, same colour as the code).
         _term = terminus_services.get(bpnr) if bpnr is not None else None
         if _term:
             ax.annotate(
                 ", ".join(sorted(_term)),
                 xy=(row.geometry.x, row.geometry.y),
-                xytext=(30, 5), textcoords="offset points",
+                xytext=(5, 1), textcoords="offset points",
                 fontsize=5, fontweight='bold', color="#333333",
-                ha="left", va="center", zorder=7,
+                ha="left", va="top", zorder=7,
                 bbox=dict(boxstyle='round,pad=0.12', facecolor='white',
                           edgecolor='none', alpha=0.7),
             )
