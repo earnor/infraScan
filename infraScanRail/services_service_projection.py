@@ -1,15 +1,16 @@
 """
 Service Projection Module
+Last modified: 2026-06-20
 
 Maps rail, tram, and funicular services onto the BAV infrastructure network.
 Routes GTFS-derived service links along shortest paths on the BAV graph,
 enriching existing service files with real segment geometry and via-node annotations.
 
 Workflow (interactive):
-  Phase 0 — CLI setup: choose infra version + service version
-  Phase 1 — Projection: match stops → route paths → enrich geopackages
-  Phase 2 — Corrections: inspect combined lines, reroute services interactively
-  Phase 3 — Plotting: overview plots for study area and catchment area
+  Stage 0 — CLI setup: choose infra version + service version
+  Stage 1 — Projection: match stops → route paths → enrich geopackages
+  Stage 2 — Corrections: inspect combined lines, reroute services interactively
+  Stage 3 — Plotting: overview plots for study area and catchment area
 
 Usage:
     python services_service_projection.py
@@ -52,6 +53,15 @@ import settings
 
 SWISS_CRS = "EPSG:2056"
 
+
+def _can_prompt() -> bool:
+    """True when an interactive terminal is attached (stdin is a real TTY)."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        return False
+
+
 NAME_MATCH_THRESHOLD = 0.85
 SPATIAL_MATCH_THRESHOLD = 200  # metres
 
@@ -89,25 +99,8 @@ _FEEDER_BG_COLOURS: Dict[str, str] = {
 }
 _FEEDER_BG_LW = 0.225  # one quarter of tram solid linewidth (0.9 / 4)
 
-# Rail frequency bins: (lo_services, hi_services, hex_colour, linewidth, legend_label)
-_FREQ_BINS: List[Tuple[int, int, str, float, str]] = [
-    (1, 2, "#91bdd9", 1.0, "1–2"),
-    (3, 4, "#4a8bbf", 2.0, "3–4"),
-    (5, 8, "#1e5fa3", 3.5, "5–8"),
-    (9, 9999, "#0c2d6b", 5.5, "9+"),
-]
-
-# Diff-plot bins: (lo_delta, hi_delta, hex_colour, linewidth, legend_label)
-# Negative = loss in peak vs off-peak (red); positive = gain (green).
-# Delta == 0 is drawn as unchanged (thin grey) and not listed here.
-_DIFF_BINS: List[Tuple[int, int, str, float, str]] = [
-    (-9999, -5, "#7b241c", 5.5, "≤ −5"),
-    (   -4, -3, "#c0392b", 3.5, "−3 to −4"),
-    (   -2, -1, "#e74c3c", 2.0, "−1 to −2"),
-    (    1,  2, "#1a9850", 2.0, "+1 to +2"),
-    (    3,  4, "#006837", 3.5, "+3 to +4"),
-    (    5, 9999, "#003d1c", 5.5, "≥ +5"),
-]
+# Rail frequency bins (_FREQ_BINS/_DIFF_BINS) moved to svc_ints_frequency.py
+# together with the frequency plots (2026-06-11).
 
 # Maximum extra travel time (seconds) to still prefer a dead-end terminal hub node
 # over a cheaper through-running child.  If the cheapest terminal node costs
@@ -144,7 +137,7 @@ _DECEL_A:         float        = settings.SERVICE_BRAKE_DECEL_MS2
 _BUFFER:          float        = settings.TT_OPERATIONAL_BUFFER
 _STATION_CLASSES: frozenset    = frozenset({'station'})
 
-# Layers subject to boundary gateway rerouting (Phase 1.5).
+# Layers subject to boundary gateway rerouting (Stage 1.5).
 # Services in these layers that start/end outside the buffer are re-routed
 # via the nearest confirmed boundary station.
 _GATEWAY_LAYERS: frozenset = frozenset({
@@ -268,7 +261,7 @@ class ProjectionConfig:
     raw_infra_dir: Path      # data/Infrastructure/Raw/
     auto_mode: bool = False             # when True, skip all interactive prompts
     include_feeder_plots: bool = True   # when False, skip _with_feeders plot variant
-    include_plots: bool = True          # when False, skip Phase 3 entirely (PLOT_SERVICES=False)
+    include_plots: bool = True          # when False, skip Stage 3 entirely (PLOT_SERVICES=False)
 
 
 # =============================================================================
@@ -1242,7 +1235,7 @@ def _build_gauge_graphs(G: nx.Graph) -> Dict[int, nx.Graph]:
 
     Each view includes edges whose gauge matches the key plus all edges with
     null/missing gauge (permissive — treated as compatible with any gauge).
-    Built once per Phase 1 run; O(1) per routing call thereafter.
+    Built once per Stage 1 run; O(1) per routing call thereafter.
     """
     gauge_values: set = set()
     for _, _, edata in G.edges(data=True):
@@ -1829,6 +1822,13 @@ def _tier4_raw_bav_fallback(
     print(f"    Code:   {raw_row.get('Code', '?')}")
     print(f"    Match:  {raw_result.method}  (confidence {raw_result.confidence:.2f})")
 
+    # No interactive terminal (e.g. a background main_new run): take the default
+    # ('n' → skip add, use straight-line geometry) rather than EOFError.
+    if not _can_prompt():
+        print(f"  [Tier 4] No interactive terminal — skipping add for "
+              f"'{stop_name}'; will use straight-line geometry.")
+        return None, working_nodes, working_segments
+
     ans = input(
         f"  Add this node and its connecting segments to the working version? (y/n) [n]: "
     ).strip().lower() or "n"
@@ -2193,7 +2193,7 @@ _NEW_COLS = [
 # Rename internal processing column names → final output column names.
 # Applied at every write to edges_in_corridor.gpkg so the file on disk
 # uses the agreed schema while rail_enriched keeps internal names for
-# downstream Phase 1.5 / correction processing.
+# downstream Stage 1.5 / correction processing.
 _OUTPUT_RENAME: Dict[str, str] = {
     "Service":     "GTFS_ID",
     "TrainType":   "Service",
@@ -2223,6 +2223,21 @@ _OUTPUT_DROP: List[str] = [
     "NR_x", "NR_y", "Link NR", "FromNode", "ToNode", "Via",
     "FromEnd", "ToEnd", "TotalPeakCapacity", "Frequency", "PeakTrainLength",
 ]
+
+
+def base_reuse_key(service, direction, variant_rank, from_name, to_name) -> tuple:
+    """Lookup key for reusing a base-projected row on an unchanged delta stop-pair.
+
+    Shared by the per-svc-int delta projection (enrich_rail_links bypass) and the
+    cache builder in svc_ints_orchestrator so both sides normalise identically.
+    """
+    def _n(v):
+        try:
+            return str(int(float(v)))
+        except (TypeError, ValueError):
+            return str(v).strip()
+    return (str(service).strip(), _n(direction), _n(variant_rank),
+            str(from_name).strip(), str(to_name).strip())
 
 
 def _make_via_cols(path_nodes_str: str) -> tuple:
@@ -2469,7 +2484,7 @@ def _apply_enrichment(
     # instead of GTFS. Internal column; dropped at file write.
     path_tt_min = path_weight_s / 60.0 if path_weight_s > 0 else 0.0
     enrichment = {
-        # Internal columns (kept for Phase 1.5 rerouting; dropped at file write)
+        # Internal columns (kept for Stage 1.5 rerouting; dropped at file write)
         "node_id_from": node_id_from,
         "node_id_to":   node_id_to,
         "match_method_from": match_from.method,
@@ -2479,7 +2494,7 @@ def _apply_enrichment(
         "to_code":   _lookup_node_code(node_id_to,   nodes),
         "Via_Nodes":    _via_nodes,
         "Via_Segment":  _via_segment,
-        # Internal via/path columns kept for Phase 1.5; dropped at file write
+        # Internal via/path columns kept for Stage 1.5; dropped at file write
         "Via_Station":      via_st,
         "Via_Junction":     via_jn,
         "path_nodes":       path_nodes_str,
@@ -3064,6 +3079,7 @@ def _postprocess_inter_leg_backtracking(
     node_attrs: Dict,
     hub_topology: Dict,
     gauge_graphs: Optional[Dict] = None,
+    reversal_exempt_stops: Optional[set] = None,
 ) -> gpd.GeoDataFrame:
     """Fix 1 post-pass: veto inter-leg same-edge re-use (symmetric).
 
@@ -3139,6 +3155,12 @@ def _postprocess_inter_leg_backtracking(
                 if _is_boundary_terminal(boundary, hub_topology):
                     skipped_exempt += 1
                     continue  # legit reversal — keep original
+                # Flagged extension terminus (reversal_at_endpoint): the reversal is
+                # allowed by design and penalised via IVWT — never rerouted away.
+                if reversal_exempt_stops and \
+                        str(getattr(row_a, "ToStation", "")).strip() in reversal_exempt_stops:
+                    skipped_exempt += 1
+                    continue
 
                 forbidden = (p1[-2], p1[-1])
                 len_a_orig = float(enriched.at[row_a.Index, "path_length_m"] or 0.0)
@@ -3200,10 +3222,21 @@ def enrich_rail_links(
     infra_version_dir: Optional[Path],
     hub_topology: Optional[Dict] = None,
     gauge_graphs: Optional[Dict] = None,
+    base_projection_lookup: Optional[Dict] = None,
+    reversal_exempt_stops: Optional[set] = None,
 ) -> gpd.GeoDataFrame:
     """
     Enrich edges_in_corridor.gpkg with real infrastructure geometry.
     Returns the input GeoDataFrame with new columns appended and geometry replaced.
+
+    base_projection_lookup (per-svc-int delta projection only): rows whose
+    tt_source is 'gtfs' (unchanged stop-pairs carried over from the base) take
+    their enrichment verbatim from this base-projected cache instead of being
+    re-routed — equal-weight Dijkstra ties must never flip an unchanged hop
+    between delta networks (determinism fix, 2026-06-11).
+    reversal_exempt_stops: station names where a same-edge inter-leg reversal is
+    allowed by design (flagged extension termini) — passed to the backtracking
+    post-pass so it never reroutes the approach leg away from them.
     """
     stop_overrides_by_service = _preselect_rail_stop_nodes(
         edges, G, lookups, nodes, hub_topology or {}
@@ -3212,8 +3245,21 @@ def enrich_rail_links(
     enriched_rows = []
     match_cache: Dict[str, MatchResult] = {}
     _has_variant = "variant_rank" in edges.columns
+    n_reused = 0
 
     for idx, row in edges.iterrows():
+        if base_projection_lookup and \
+                str(row.get('tt_source', '')).strip().lower() == 'gtfs':
+            cached = base_projection_lookup.get(base_reuse_key(
+                row.get('Service', ''), row.get('Direction', ''),
+                row.get('variant_rank', ''),
+                row.get('FromStation', ''), row.get('ToStation', '')))
+            if cached is not None:
+                new_row = row.to_dict()
+                new_row.update(cached)
+                enriched_rows.append(new_row)
+                n_reused += 1
+                continue
         if _has_variant:
             svc_key = (
                 str(row.get("Service", "")),
@@ -3248,9 +3294,13 @@ def enrich_rail_links(
                 new_row['tt_source']  = 'formula'
         enriched_rows.append(new_row)
 
+    if n_reused:
+        print(f"  [project] {n_reused}/{len(edges)} unchanged stop-pair(s) reuse the "
+              f"base projection")
     result = gpd.GeoDataFrame(enriched_rows, crs=SWISS_CRS)
     result = _postprocess_inter_leg_backtracking(
         result, G, seg_lookup, node_attrs, hub_topology or {}, gauge_graphs,
+        reversal_exempt_stops=reversal_exempt_stops,
     )
     return result
 
@@ -3560,7 +3610,7 @@ def _collect_qgz_stop_layers(
 
 
 # =============================================================================
-# Phase 0 — CLI Setup
+# Stage 0 — CLI Setup
 # =============================================================================
 
 def _check_prerequisites() -> bool:
@@ -3708,11 +3758,11 @@ def _run_phase0() -> Optional[Tuple[ProjectionConfig, str]]:
         None if user cancels.
     """
     main = Path(paths.MAIN)
-    print("\n" + "─" * 60)
+    print("\n" + "─" * 160)
     print("  Service Projection")
-    print("─" * 60)
+    print("─" * 160)
 
-    # Raw folder — used by Phase 1.5 boundary rerouting to fill in junction
+    # Raw folder — used by Stage 1.5 boundary rerouting to fill in junction
     # nodes that were dropped during macro-simplification. Mirrors the
     # selection pattern in infrabuild_network_builder.py.
     raw_dirs = _list_raw_dirs()
@@ -3740,9 +3790,9 @@ def _run_phase0() -> Optional[Tuple[ProjectionConfig, str]]:
 
     # Q1 — operation mode
     print("\n  What do you want to do?")
-    print("    1) Map services (full pipeline: Phase 1 → 2 → 3)")
-    print("    2) Correct an existing projection (Phase 2 onwards)")
-    print("    3) Re-plot only (load existing projection, Phase 3 only)")
+    print("    1) Map services (full pipeline: Stage 1 → 2 → 3)")
+    print("    2) Correct an existing projection (Stage 2 onwards)")
+    print("    3) Re-plot only (load existing projection, Stage 3 only)")
     while True:
         choice = input("  Select (1/2/3): ").strip()
         if choice in ("1", "2", "3"):
@@ -3934,6 +3984,71 @@ def _write_stops_sa(src: Path, dst: Path, sa_poly) -> None:
         if not within.empty:
             within.to_file(dst, driver="GPKG", layer=layer_name)
     print(f"  Written: {dst.name}")
+
+
+# Canonical nodes.gpkg attribute order (see infrabuild_filter_network.process_bav).
+_NODES_SCHEMA = ["Node_ID", "Number", "Name", "Code", "E", "N",
+                 "Node_Class", "Transport_Mode", "Track_Count",
+                 "Platform_Count", "Parent_Node"]
+
+
+def _enrich_stops_with_nodes(src: Path, dst: Path, nodes_path: Path) -> None:
+    """Rewrite a multi-layer rail-stops GPKG so every layer carries the exact
+    nodes.gpkg column set, joining each stop to its infrastructure node on the
+    numeric station id (rail_stops 'Number' == nodes 'Number').
+
+    Matched stops adopt the node's attributes, coordinates and geometry. Stops
+    with no matching node keep their GTFS geometry and stop_name (-> 'Name') with
+    the infra-only columns left null. No stop is dropped.
+    """
+    import pyogrio as _pyogrio
+    if not src.exists():
+        print(f"  WARNING: {src.name} not found — cannot enrich with nodes.gpkg")
+        return
+    if not nodes_path.exists():
+        print(f"  WARNING: nodes.gpkg missing at {nodes_path} — copying stops unchanged")
+        _copy_multilayer_gpkg(src, dst)
+        return
+
+    nodes = gpd.read_file(nodes_path)
+    nodes["_num"] = pd.to_numeric(nodes["Number"], errors="coerce")
+    nodes = nodes.dropna(subset=["_num"]).drop_duplicates("_num")
+    nodes["_num"] = nodes["_num"].astype("int64")
+    nodes = nodes.set_index("_num")
+    attr_cols = [c for c in _NODES_SCHEMA if c != "Number"]
+
+    if dst.exists():
+        dst.unlink()
+
+    n_match = n_miss = 0
+    for layer_name, _ in _pyogrio.list_layers(str(src)):
+        stops = gpd.read_file(src, layer=layer_name)
+        recs, geoms = [], []
+        for s in stops.itertuples(index=False):
+            num = pd.to_numeric(getattr(s, "Number", None), errors="coerce")
+            rec = {c: None for c in _NODES_SCHEMA}
+            if pd.notna(num) and int(num) in nodes.index:
+                node = nodes.loc[int(num)]
+                rec["Number"] = int(num)
+                for c in attr_cols:
+                    rec[c] = node[c]
+                geoms.append(node["geometry"])
+                n_match += 1
+            else:
+                rec["Number"] = int(num) if pd.notna(num) else None
+                rec["Name"] = getattr(s, "stop_name", None)
+                geom = s.geometry
+                rec["E"] = geom.x if geom is not None else None
+                rec["N"] = geom.y if geom is not None else None
+                geoms.append(geom)
+                n_miss += 1
+            recs.append(rec)
+        out = gpd.GeoDataFrame(recs, geometry=geoms, crs=stops.crs)
+        out = out[_NODES_SCHEMA + ["geometry"]]
+        out.to_file(dst, driver="GPKG", layer=layer_name)
+
+    print(f"  Written: {dst.name} (nodes.gpkg schema; {n_match} stops matched to "
+          f"nodes, {n_miss} unmatched → GTFS fallback)")
 
 
 def _write_stops_filtered(src: Path, dst: Path, keep_numbers: set) -> None:
@@ -4298,7 +4413,7 @@ def _write_rail_outputs(
       rail_segments.gpkg       — all projected segments, multi-layer by route type
       rail_segments_sa.gpkg    — both endpoints within SA, multi-layer
       rail_lines.gpkg          — one row per (GTFS_ID, direction_id, variant_rank)
-      rail_stops.gpkg          — copied from Unprojected (unchanged by projection)
+      rail_stops.gpkg          — Unprojected stops enriched to the nodes.gpkg schema
       rail_stops_sa.gpkg       — stops within SA boundary
       rail_segments.qgz, rail_lines.qgz
       All_Day/, Peak/, Off_Peak/ subfolders with the above set at each time slice
@@ -4322,11 +4437,11 @@ def _write_rail_outputs(
     _write_multilayer_gpkg(sa_gdf, out_dir / "rail_segments_sa.gpkg", drop_all, rename_map)
     print(f"  Written: rail_segments_sa.gpkg ({len(sa_gdf)} edges)")
 
-    _copy_multilayer_gpkg(
+    _enrich_stops_with_nodes(
         src=config.rail_input.parent / "rail_stops.gpkg",
         dst=out_dir / "rail_stops.gpkg",
+        nodes_path=config.infra_dir / "nodes.gpkg",
     )
-    print("  Written: rail_stops.gpkg")
     _write_stops_sa(
         src=out_dir / "rail_stops.gpkg",
         dst=out_dir / "rail_stops_sa.gpkg",
@@ -4362,27 +4477,77 @@ def _write_rail_outputs(
 
 
 # =============================================================================
-# Phase 1 — Projection Orchestrator
+# Stage 1 — Projection Orchestrator
 # =============================================================================
 
-def _run_phase1(
-    config: ProjectionConfig,
-) -> Tuple[gpd.GeoDataFrame, Dict[str, gpd.GeoDataFrame], Dict[str, gpd.GeoDataFrame]]:
+@dataclass
+class ProjectionContext:
+    """Infrastructure-side state shared by full and per-line rail projection.
+
+    Built once by ``build_projection_context`` from the resolved (or in-memory
+    composed) infra; consumed by ``_run_phase1`` (full 3B projection) and by
+    ``project_lines`` (per-svc-int delta re-projection, Phase 5B).
     """
-    Phase 1: load data, match stops, route paths.
+    nodes: gpd.GeoDataFrame
+    bav_segments: gpd.GeoDataFrame
+    raw_nodes: Optional[gpd.GeoDataFrame]
+    raw_segs: Optional[gpd.GeoDataFrame]
+    G: nx.Graph
+    seg_lookup: Dict
+    node_attrs: Dict
+    lookups: Dict
+    gauge_graphs: Dict
+    hub_topology: Dict
+    buffer_geom: object
+    zvv_available: bool
+
+
+# Pre-projection rail-input column names → internal processing names.
+_RAIL_INPUT_COL_MAPPING: Dict[str, str] = {
+    'GTFS_ID':        'Service',      # route_id (GTFS identifier)
+    'Service':        'TrainType',    # line_short_name (human-readable)
+    'direction_id':   'Direction',
+    'from_stop_nr':   'FromCode',     # BAV parent station integer
+    'to_stop_nr':     'ToCode',
+    'from_stop_name': 'FromStation',
+    'to_stop_name':   'ToStation',
+    'from_stop_E':    'x_origin',
+    'from_stop_N':    'y_origin',
+    'to_stop_E':      'x_dest',
+    'to_stop_N':      'y_dest',
+    'TT':             'TravelTime',
+    'IVWT':           'InVehWait',
+}
+
+
+def build_projection_context(
+    config: ProjectionConfig,
+    infra_nodes: Optional[gpd.GeoDataFrame] = None,
+    infra_segments: Optional[gpd.GeoDataFrame] = None,
+) -> ProjectionContext:
+    """Build the infra-side projection state (graph, lookups, hubs, ZVV, stop_coord).
+
+    Identical setup to the original ``_run_phase1`` 1a–1d block; extracted so the
+    full 3B projection and the per-svc-int delta projection (Phase 5B) share one
+    code path. When ``infra_nodes`` / ``infra_segments`` are supplied (e.g. a
+    composed base+CC network), they are used in place of ``config.infra_dir``; the
+    raw-infra Tier-4 fallback, buffer, stop_coord and ZVV load are unchanged.
 
     Returns:
-        (rail_enriched, track_feeder_enriched, non_track_feeder_processed)
+        ProjectionContext bundling everything ``enrich_rail_links`` /
+        ``enrich_feeder_segments`` need.
     """
     main = Path(paths.MAIN)
-    print("\n" + "─" * 60)
-    print("  Phase 1 — Service Projection")
-    print("─" * 60)
 
     # 1a. Load infrastructure
-    print("\n  Loading infrastructure...")
-    nodes = gpd.read_file(config.infra_dir / "nodes.gpkg").reset_index(drop=True)
-    bav_segments = gpd.read_file(config.infra_dir / "segments.gpkg").reset_index(drop=True)
+    if infra_nodes is not None and infra_segments is not None:
+        print("\n  Using in-memory (composed) infrastructure...")
+        nodes = infra_nodes.reset_index(drop=True)
+        bav_segments = infra_segments.reset_index(drop=True)
+    else:
+        print("\n  Loading infrastructure...")
+        nodes = gpd.read_file(config.infra_dir / "nodes.gpkg").reset_index(drop=True)
+        bav_segments = gpd.read_file(config.infra_dir / "segments.gpkg").reset_index(drop=True)
     print(f"  {len(nodes)} nodes, {len(bav_segments)} segments loaded.")
 
     # Load raw infrastructure for Tier 4 fallback
@@ -4428,9 +4593,104 @@ def _run_phase1(
     _zvv_chain_index.clear()
     _zvv_sbahn_index.clear()
     _zvv_sbahn_jgraph.clear()
-    _zvv_geometry_available = _load_zvv_geometry()
-    if not _zvv_geometry_available:
+    zvv_available = _load_zvv_geometry()
+    if not zvv_available:
         print("  ZVV geometry unavailable — straight-line fallback for non-track modes.")
+
+    return ProjectionContext(
+        nodes=nodes, bav_segments=bav_segments, raw_nodes=raw_nodes, raw_segs=raw_segs,
+        G=G, seg_lookup=seg_lookup, node_attrs=node_attrs, lookups=lookups,
+        gauge_graphs=gauge_graphs, hub_topology=hub_topology,
+        buffer_geom=buffer_geom, zvv_available=zvv_available,
+    )
+
+
+def project_lines(
+    lines_gdf: gpd.GeoDataFrame,
+    config: ProjectionConfig,
+    *,
+    infra_nodes: Optional[gpd.GeoDataFrame] = None,
+    infra_segments: Optional[gpd.GeoDataFrame] = None,
+    run_zvv: bool = True,
+    context: Optional[ProjectionContext] = None,
+    base_projection_lookup: Optional[Dict] = None,
+    reversal_exempt_stops: Optional[set] = None,
+) -> gpd.GeoDataFrame:
+    """Project a subset of rail lines onto the (possibly composed) infra graph.
+
+    The per-svc-int counterpart of ``_run_phase1``'s rail block: takes the changed/
+    added stop-pair rows directly (pre-projection ``rail_segments`` schema — GTFS_ID,
+    direction_id, from_stop_nr, …) instead of reading the full ``rail_segments.gpkg``,
+    enriches them with real infrastructure geometry + travel time, and (optionally)
+    applies the ZVV post-pass — so a svc-int's new segments get true infra TT, never a
+    speed/length default.
+
+    Args:
+        lines_gdf: changed/added segments in the pre-projection schema.
+        config: paths (svc_dir, raw_infra_dir, infra_dir) for context building.
+        infra_nodes/infra_segments: in-memory composed infra (else load config.infra_dir).
+        run_zvv: apply the ZVV geometry post-pass (matches the full pipeline default).
+        context: reuse a pre-built ProjectionContext instead of rebuilding it.
+        base_projection_lookup: base-projected rows keyed by ``base_reuse_key`` —
+            unchanged stop-pairs (tt_source='gtfs') reuse them instead of re-routing.
+        reversal_exempt_stops: station names where a flagged terminus reversal is
+            allowed — the inter-leg backtracking post-pass keeps it.
+
+    Returns:
+        The enriched (projected) segments GeoDataFrame.
+    """
+    if lines_gdf is None or lines_gdf.empty:
+        return gpd.GeoDataFrame()
+    ctx = context or build_projection_context(config, infra_nodes, infra_segments)
+
+    rail_edges = lines_gdf.rename(columns=_RAIL_INPUT_COL_MAPPING)
+    if "_source_layer" not in rail_edges.columns:
+        rail_edges["_source_layer"] = rail_edges.get("mode_label", "rail")
+    if 'TrainType' in rail_edges.columns:
+        rail_edges['line_short_name'] = rail_edges['TrainType']
+
+    rail_enriched = enrich_rail_links(
+        rail_edges, ctx.nodes, ctx.bav_segments, ctx.G, ctx.seg_lookup, ctx.node_attrs,
+        ctx.lookups, ctx.buffer_geom, ctx.raw_nodes, ctx.raw_segs, config.infra_dir,
+        hub_topology=ctx.hub_topology, gauge_graphs=ctx.gauge_graphs,
+        base_projection_lookup=base_projection_lookup,
+        reversal_exempt_stops=reversal_exempt_stops,
+    )
+    if run_zvv and ctx.zvv_available:
+        rail_enriched = _apply_zvv_postpass(
+            rail_enriched, "rail", is_track_based=True, buffer_geom=ctx.buffer_geom
+        )
+    return rail_enriched
+
+
+def _run_phase1(
+    config: ProjectionConfig,
+) -> Tuple[gpd.GeoDataFrame, Dict[str, gpd.GeoDataFrame], Dict[str, gpd.GeoDataFrame]]:
+    """
+    Stage 1: load data, match stops, route paths.
+
+    Returns:
+        (rail_enriched, track_feeder_enriched, non_track_feeder_processed)
+    """
+    main = Path(paths.MAIN)
+    print("\n" + "─" * 160)
+    print("  Stage 1 — Service Projection")
+    print("─" * 160)
+
+    # 1a–1d. Infrastructure-side setup (shared with project_lines)
+    ctx = build_projection_context(config)
+    nodes = ctx.nodes
+    bav_segments = ctx.bav_segments
+    raw_nodes = ctx.raw_nodes
+    raw_segs = ctx.raw_segs
+    G = ctx.G
+    seg_lookup = ctx.seg_lookup
+    node_attrs = ctx.node_attrs
+    lookups = ctx.lookups
+    gauge_graphs = ctx.gauge_graphs
+    hub_topology = ctx.hub_topology
+    buffer_geom = ctx.buffer_geom
+    _zvv_geometry_available = ctx.zvv_available
 
     # 1e. Load service data (all feeder layers dynamically)
     print("\n  Loading service data...")
@@ -4444,23 +4704,7 @@ def _run_phase1(
         rail_gdfs.append(gdf)
     rail_segments = pd.concat(rail_gdfs, ignore_index=True) if rail_gdfs else gpd.GeoDataFrame()
 
-    col_mapping = {
-        # New pre-projection names → internal processing names (unchanged)
-        'GTFS_ID':        'Service',      # route_id (GTFS identifier)
-        'Service':        'TrainType',    # line_short_name (human-readable)
-        'direction_id':   'Direction',
-        'from_stop_nr':   'FromCode',     # BAV parent station integer
-        'to_stop_nr':     'ToCode',
-        'from_stop_name': 'FromStation',
-        'to_stop_name':   'ToStation',
-        'from_stop_E':    'x_origin',
-        'from_stop_N':    'y_origin',
-        'to_stop_E':      'x_dest',
-        'to_stop_N':      'y_dest',
-        'TT':             'TravelTime',
-        'IVWT':           'InVehWait',
-    }
-    rail_edges = rail_segments.rename(columns=col_mapping)
+    rail_edges = rail_segments.rename(columns=_RAIL_INPUT_COL_MAPPING)
     if 'TrainType' in rail_edges.columns:
         rail_edges['line_short_name'] = rail_edges['TrainType']
 
@@ -4527,12 +4771,12 @@ def _run_phase1(
             processed = _apply_zvv_postpass(segs, layer_name, is_track_based=False)
             non_track_feeder_processed[layer_name] = processed
 
-    # 1j. Rail and feeder outputs are written after Phase 1.5 completes (in main())
-    print(f"\n  Phase 1 complete.")
+    # 1j. Rail and feeder outputs are written after Stage 1.5 completes (in main())
+    print(f"\n  Stage 1 complete.")
     return rail_enriched, track_feeder_enriched, non_track_feeder_processed
 
 # =============================================================================
-# Phase 1.5 — Boundary Station Routing
+# Stage 1.5 — Boundary Station Routing
 # =============================================================================
 
 def _collect_outside_stops_gateway(
@@ -4741,7 +4985,7 @@ def _apply_boundary_rerouting(
             updated += 1
             continue
 
-        # Route between the two effective endpoints on the BAV graph (Phase 1.5
+        # Route between the two effective endpoints on the BAV graph (Stage 1.5
         # boundary rerouting). The reroute is purely geometric — we don't need
         # the per-service weight here, so service_stops carries just the two
         # effective endpoints. Both will be in service_stops, so n_decel
@@ -4800,7 +5044,7 @@ def _run_phase1_5(
     rail_enriched: gpd.GeoDataFrame,
 ) -> gpd.GeoDataFrame:
     """
-    Phase 1.5: Boundary station detection and outside-destination rerouting.
+    Stage 1.5: Boundary station detection and outside-destination rerouting.
 
     Workflow
     --------
@@ -4813,7 +5057,7 @@ def _run_phase1_5(
     d) Re-route affected links: straight_line(outside→boundary) + graph route
        (boundary→inside stop), replacing the Phase-1 straight-line geometry.
     e) Updated rail_enriched is saved to disk, overwriting the Phase-1 output
-       so Phase 2 and QGIS inspection see the improved geometry.
+       so Stage 2 and QGIS inspection see the improved geometry.
 
     Returns the updated rail_enriched GeoDataFrame.
     """
@@ -4821,11 +5065,11 @@ def _run_phase1_5(
     bs_path   = config.rail_output_dir / "boundary_stations.json"
     bm_path   = config.rail_output_dir / "boundary_mapping.json"
 
-    print("\n" + "─" * 60)
-    print("  Phase 1.5 — Boundary Station Mapping")
-    print("─" * 60)
+    print("\n" + "─" * 160)
+    print("  Stage 1.5 — Boundary Station Mapping")
+    print("─" * 160)
 
-    # Re-load infrastructure (may have been updated by Tier 4 during Phase 1).
+    # Re-load infrastructure (may have been updated by Tier 4 during Stage 1).
     # raw_nodes must be passed so missing junction nodes (e.g. Winterthur Nord)
     # are healed into the graph — without them boundary rerouting takes long
     # detours on severed corridors.
@@ -4837,7 +5081,7 @@ def _run_phase1_5(
     seg_lookup = build_segment_lookup(nodes, bav_segs, raw_nodes_1_5)
     node_attrs = build_node_attrs(nodes)
 
-    # Load buffer geometry (same source as Phase 1)
+    # Load buffer geometry (same source as Stage 1)
     buffer_geom = None
     buf_path    = main_dir / paths.CATCHMENT_AREA_BUFFER_GPKG
     if buf_path.exists():
@@ -4848,8 +5092,20 @@ def _run_phase1_5(
     existing_bs = _load_boundary_stations(bs_path)
     if existing_bs is not None:
         print(f"\n  Loaded {len(existing_bs)} boundary station(s) from {bs_path.name}.")
-        ans = input("  Re-detect and re-confirm? (y/n) [n]: ").strip().lower() or "n"
-        confirmed_bs: Optional[List[int]] = existing_bs if ans != "y" else None
+        confirmed_bs: Optional[List[int]] = existing_bs
+        # main_new path (auto_mode) or a non-interactive run inherits the
+        # persisted choice silently — never re-prompt per svc-int. Only a
+        # standalone TTY run offers a re-detect.
+        if not config.auto_mode and _can_prompt():
+            ans = input("  Re-detect and re-confirm? (y/n) [n]: ").strip().lower() or "n"
+            if ans == "y":
+                confirmed_bs = None
+    elif not _can_prompt():
+        raise FileNotFoundError(
+            f"No boundary station list at {bs_path} and no interactive terminal "
+            f"to create one. Run services_service_projection standalone "
+            f"(python services_service_projection.py) to detect and confirm "
+            f"boundary stations first.")
     else:
         confirmed_bs = None
 
@@ -4857,42 +5113,50 @@ def _run_phase1_5(
         candidates = detect_boundary_station_candidates(G, nodes, buffer_geom)
         print(f"\n  {len(candidates)} candidate boundary station(s) detected.")
         if not candidates:
-            print("  No candidates found — Phase 1.5 skipped.")
+            print("  No candidates found — Stage 1.5 skipped.")
             return rail_enriched
         confirmed_bs = _run_boundary_station_confirmation_cli(candidates, node_attrs)
         _save_boundary_stations(confirmed_bs, bs_path)
         print(f"  Boundary stations saved to {bs_path.name}.")
 
     if not confirmed_bs:
-        print("  No boundary stations confirmed — Phase 1.5 skipped.")
+        print("  No boundary stations confirmed — Stage 1.5 skipped.")
         return rail_enriched
 
     # ── b. Collect outside stops from gateway-layer services ─────────────────
     outside_stops = _collect_outside_stops_gateway(rail_enriched, buffer_geom)
     print(f"\n  {len(outside_stops)} unique outside stop(s) found on gateway-layer services.")
     if not outside_stops:
-        print("  Nothing to map — Phase 1.5 skipped.")
+        print("  Nothing to map — Stage 1.5 skipped.")
         return rail_enriched
 
     # ── c. Destination → boundary station mapping ─────────────────────────────
     existing_bm = _load_boundary_mapping(bm_path)
     if existing_bm is not None:
         print(f"  Loaded {len(existing_bm)} mapping(s) from {bm_path.name}.")
-        ans = input("  Edit existing mapping? (y/n) [n]: ").strip().lower() or "n"
-        if ans == "y":
-            boundary_mapping = _run_destination_mapping_cli(
-                outside_stops, confirmed_bs, node_attrs,
-                existing_mapping=existing_bm,
-            )
-        else:
-            boundary_mapping = existing_bm
+        boundary_mapping = existing_bm
+        # As with the boundary list: silent inherit on the main_new path / no TTY;
+        # only a standalone TTY run offers an edit.
+        if not config.auto_mode and _can_prompt():
+            ans = input("  Edit existing mapping? (y/n) [n]: ").strip().lower() or "n"
+            if ans == "y":
+                boundary_mapping = _run_destination_mapping_cli(
+                    outside_stops, confirmed_bs, node_attrs,
+                    existing_mapping=existing_bm,
+                )
+    elif not _can_prompt():
+        raise FileNotFoundError(
+            f"No boundary mapping at {bm_path} and no interactive terminal to "
+            f"create one. Run services_service_projection standalone "
+            f"(python services_service_projection.py) to map outside stops to "
+            f"boundary stations first.")
     else:
         boundary_mapping = _run_destination_mapping_cli(
             outside_stops, confirmed_bs, node_attrs,
         )
 
     if not boundary_mapping:
-        print("  No mappings provided — Phase 1.5 skipped.")
+        print("  No mappings provided — Stage 1.5 skipped.")
         return rail_enriched
 
     _save_boundary_mapping(boundary_mapping, bm_path)
@@ -4904,12 +5168,12 @@ def _run_phase1_5(
         rail_enriched, boundary_mapping, node_attrs, G, seg_lookup, buffer_geom,
     )
 
-    print("\n  Phase 1.5 complete.")
+    print("\n  Stage 1.5 complete.")
     return rail_enriched
 
 
 # =============================================================================
-# Phase 2a — QGIS Projects and Clipped Segment Geopackages
+# Stage 2a — QGIS Projects and Clipped Segment Geopackages
 # =============================================================================
 
 def _save_phase2_outputs(
@@ -4919,7 +5183,7 @@ def _save_phase2_outputs(
     func_enriched: gpd.GeoDataFrame,
 ) -> None:
     """
-    Rebuild the PT-Feeder QGIS project file (.qgz) from disk after Phase 2 corrections.
+    Rebuild the PT-Feeder QGIS project file (.qgz) from disk after Stage 2 corrections.
 
     Reads the pt_feeder_segments.gpkg and pt_feeder_stops.gpkg that were written
     by _write_feeder_outputs() (or updated in-place by tram/funicular corrections
@@ -4933,7 +5197,7 @@ def _save_phase2_outputs(
     orig_seg_path   = config.feeder_output_dir / "pt_feeder_segments.gpkg"
     orig_stops_path = config.feeder_output_dir / "pt_feeder_stops.gpkg"
 
-    # Enriched modes written by Phase 1
+    # Enriched modes written by Stage 1
     enriched_feeder_by_type: Dict[int, gpd.GeoDataFrame] = {
         900:  tram_enriched,
         1400: func_enriched,
@@ -4975,7 +5239,7 @@ def _save_phase2_outputs(
 
 
 # =============================================================================
-# Phase 2b — Corrections TUI
+# Stage 2b — Corrections TUI
 # =============================================================================
 
 def _show_service_stops(
@@ -5140,12 +5404,12 @@ def _run_phase2(
     func_enriched: gpd.GeoDataFrame,
 ) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
-    Phase 2: build combined-line outputs for QGIS inspection, then run rerouting TUI.
+    Stage 2: build combined-line outputs for QGIS inspection, then run rerouting TUI.
     Returns updated (rail_enriched, tram_enriched, func_enriched).
     """
-    print("\n" + "─" * 60)
-    print("  Phase 2 — Corrections")
-    print("─" * 60)
+    print("\n" + "─" * 160)
+    print("  Stage 2 — Corrections")
+    print("─" * 160)
 
     _save_phase2_outputs(config, rail_enriched, tram_enriched, func_enriched)
 
@@ -5249,7 +5513,7 @@ def _run_phase2(
     return rail_enriched, tram_enriched, func_enriched
 
 # =============================================================================
-# Phase 3 — Plotting
+# Stage 3 — Plotting
 # =============================================================================
 
 _SCALE_BAR_NICE_KM = [1, 2, 5, 10, 20, 50, 100, 200, 500]
@@ -5281,6 +5545,21 @@ def _add_scale_bar(ax, location=(0.72, 0.04)):
         ax.text(x0 + i * cell_m, y0 + bar_h * 1.6, label, ha='center', va='bottom', fontsize=7, zorder=7)
 
 
+def _is_suburban_or_re(svc: str, src_layer) -> bool:
+    """True for S-Bahn or RegioExpress; False for InterRegio / InterCity / long-distance.
+
+    Uses the segment's source layer when present (the plot-only load tags rows with it);
+    otherwise falls back to the service-id prefix (IR_*/IC_* are the excluded higher orders).
+    """
+    s = str(src_layer)
+    if s in ("sbahn", "regional_rail"):
+        return True
+    if s in ("inter_regional_rail", "long_distance_rail"):
+        return False
+    sv = str(svc)
+    return not (sv.startswith("IC") or sv.startswith("IR"))
+
+
 def _plot_gazette_style(
     config: ProjectionConfig,
     rail_enriched: gpd.GeoDataFrame,
@@ -5290,14 +5569,14 @@ def _plot_gazette_style(
     boundary_name: str,
     feeder_bg_gdfs: Optional[Dict[str, gpd.GeoDataFrame]] = None,
 ) -> None:
-    """Railway Gazette style plot.
+    """"Network Services" map (railway-gazette style).
 
     For each service/direction within the boundary:
     - Draws inside links in mode colour.
-    - Exiting links are clipped to the boundary; a stub continues beyond it
-      labelled "{Service} → {next stop outside}".
-    - Terminated services get a filled circle at the terminus plus the service
-      label placed alongside the last inside segment.
+    - Exiting links are clipped to the boundary; a stub continues beyond it, labelled with
+      all exiting services grouped by destination ("svc1, svc2 → next stop outside").
+    - Terminated services get a filled circle at the terminus; the terminating suburban /
+      RegioExpress services are listed to the right of the station code (bold, code colour).
     """
     if not boundary_gpkg.exists():
         print(f"  Skipping gazette plot ({boundary_name}) — boundary file not found.")
@@ -5472,7 +5751,7 @@ def _plot_gazette_style(
             )
 
     # Normalize rail column names to output schema.
-    # Phase 1 ("map" mode) delivers internal names (TrainType, Direction, x_origin, …);
+    # Stage 1 ("map" mode) delivers internal names (TrainType, Direction, x_origin, …);
     # "plot" / correction mode loads from the already-written file where _OUTPUT_RENAME
     # has been applied (Service, direction_id, from_stop_E, …).
     if rail_enriched is not None and not rail_enriched.empty and "TrainType" in rail_enriched.columns:
@@ -5521,6 +5800,7 @@ def _plot_gazette_style(
     exit_labels:  Dict = {}
     terminus_pts: list = []
     terminus_bpnr: set = set()
+    terminus_services: Dict = {}   # node Number -> set(svc): suburban + RE terminating here
     _geom_batches: Dict[Tuple[str, float], List] = defaultdict(list)
 
     for mode, mc in _MC.items():
@@ -5633,7 +5913,10 @@ def _plot_gazette_style(
                     continue
                 terminus_pts.append((te, tn_, colour, svc_label, mode, last_inside_geom))
                 try:
-                    terminus_bpnr.add(int(float(to_id_str)))
+                    _bpn = int(float(to_id_str))
+                    terminus_bpnr.add(_bpn)
+                    if mode == "rail" and _is_suburban_or_re(svc_label, row.get("_source_layer", "")):
+                        terminus_services.setdefault(_bpn, set()).add(svc_label)
                 except (ValueError, TypeError):
                     pass
 
@@ -5673,9 +5956,18 @@ def _plot_gazette_style(
         ox = (-4 if ux < 0 else (0 if abs(ux) < abs(uy) else 4))
         oy = (-4 if uy < 0 else (0 if abs(uy) < abs(ux) else 4))
 
-        sorted_texts = sorted(set(cp_info["texts"]))
+        # Group services sharing a destination → "svc1, svc2 → dest" (fewer lines,
+        # less overlap); all services exiting the boundary are kept.
+        _by_dest: Dict[str, set] = {}
+        for _t in set(cp_info["texts"]):
+            _s, _, _d = _t.partition(" → ")
+            _by_dest.setdefault(_d, set()).add(_s.strip())
+        _lines = []
+        for _d in sorted(_by_dest):
+            _svcs = ", ".join(sorted(_by_dest[_d]))
+            _lines.append(f"{_svcs} → {_d}" if _d else _svcs)
         ax.annotate(
-            "\n".join(sorted_texts),
+            "\n".join(_lines),
             xy=(stub_end.x, stub_end.y),
             xytext=(ox, oy), textcoords="offset points",
             fontsize=5, color="#333333", va=va, ha=ha,
@@ -5694,41 +5986,11 @@ def _plot_gazette_style(
         if not is_sa and t_mode != "rail":
             continue  # suppress tram/funicular terminus circles and labels in CA
 
-        # Filled circle — feeder termini at 1/3 the size of rail
+        # Filled circle — feeder termini at 1/3 the size of rail. The terminating
+        # service names are listed below the station code, not here.
         _t_ms = 6 if t_mode == "rail" else 2
         ax.plot(te, tn_, marker='o', markersize=_t_ms, color=colour,
                 markeredgecolor='white', markeredgewidth=0.8, zorder=8)
-
-        # Service label alongside last inside segment — suppressed for funiculars
-        if t_mode == "funicular":
-            continue
-        if seg_geom is not None and not seg_geom.is_empty:
-            try:
-                coords = list(seg_geom.coords) if seg_geom.geom_type == "LineString" \
-                    else list(seg_geom.geoms[0].coords)
-                if len(coords) >= 2:
-                    frac  = 0.60
-                    idx_f = int(frac * (len(coords) - 1))
-                    lx = coords[idx_f][0]
-                    ly = coords[idx_f][1]
-                    p1 = coords[max(0, idx_f - 1)]
-                    p2 = coords[min(len(coords) - 1, idx_f + 1)]
-                    sdx, sdy = p2[0] - p1[0], p2[1] - p1[1]
-                    slen = (sdx**2 + sdy**2) ** 0.5
-                    if slen > 0:
-                        px, py = -sdy / slen, sdx / slen
-                        lx += px * 350
-                        ly += py * 350
-                    ax.annotate(
-                        svc_label,
-                        xy=(lx, ly),
-                        fontsize=5, fontweight='bold', color=colour,
-                        ha='center', va='center', zorder=8,
-                        bbox=dict(boxstyle='round,pad=0.15', fc='white',
-                                  ec='none', alpha=0.75),
-                    )
-            except Exception:
-                pass
 
     # ── Train stations ────────────────────────────────────────────────────────
     train_gdf_inside = gpd.clip(train_stations, boundary_gdf)
@@ -5764,14 +6026,12 @@ def _plot_gazette_style(
         code = str(row.get("Code", "")).strip()
         if not code:
             continue
-        if not is_sa:
-            # CA: only label where a service terminates
-            try:
-                bpnr = int(float(row.get("Number", 0)))
-            except (TypeError, ValueError):
-                continue
-            if bpnr not in terminus_bpnr:
-                continue
+        try:
+            bpnr = int(float(row.get("Number", 0)))
+        except (TypeError, ValueError):
+            bpnr = None
+        if not is_sa and (bpnr is None or bpnr not in terminus_bpnr):
+            continue  # CA: only label where a service terminates
         ax.annotate(
             code,
             xy=(row.geometry.x, row.geometry.y),
@@ -5780,6 +6040,19 @@ def _plot_gazette_style(
             bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
                       edgecolor='none', alpha=0.7),
         )
+        # Terminating suburban + RegioExpress services, listed directly below the
+        # station code, left-aligned to the code (bold, same colour as the code).
+        _term = terminus_services.get(bpnr) if bpnr is not None else None
+        if _term:
+            ax.annotate(
+                ", ".join(sorted(_term)),
+                xy=(row.geometry.x, row.geometry.y),
+                xytext=(5, 1), textcoords="offset points",
+                fontsize=5, fontweight='bold', color="#333333",
+                ha="left", va="top", zorder=7,
+                bbox=dict(boxstyle='round,pad=0.12', facecolor='white',
+                          edgecolor='none', alpha=0.7),
+            )
 
     # ── Legend ────────────────────────────────────────────────────────────────
     legend_handles = [
@@ -5804,8 +6077,7 @@ def _plot_gazette_style(
     ax.legend(handles=legend_handles, loc="upper right", fontsize=7)
 
     ax.set_title(
-        f"Service Projection — {config.svc_version} on {config.infra_version}"
-        f"\nBoundary: {boundary_name}",
+        "Network Services",
         fontsize=14, fontweight='bold',
     )
     if extent is not None:
@@ -5828,376 +6100,8 @@ def _plot_gazette_style(
     print(f"  Plot saved → {out_path}")
 
 
-def _compute_seg_freq(
-    rail_enriched: gpd.GeoDataFrame,
-    freq_type: str,
-) -> Dict[Tuple[int, int], float]:
-    """Accumulate frequency (dep/hr) per undirected BAV segment edge.
-
-    Direction-deduplicates rail_enriched: prefers direction_id == "0"; includes
-    direction "1" only for variants absent from direction 0, so bidirectional
-    services are never double-counted.
-
-    Returns {(min_id, max_id): dep_hr}. Only edges with freq > 0 are included.
-    """
-    pn_col = "path_nodes" if "path_nodes" in rail_enriched.columns else None
-    if freq_type == "peak":
-        am_col   = "freq_am_peak_dep_hr"
-        pm_col   = "freq_pm_peak_dep_hr"
-        has_freq = am_col in rail_enriched.columns or pm_col in rail_enriched.columns
-    else:
-        op_col   = "freq_offpeak_dep_hr"
-        has_freq = op_col in rail_enriched.columns
-
-    seg_freq: Dict[Tuple[int, int], float] = {}
-    if not pn_col or not has_freq:
-        return seg_freq
-
-    freq_source = rail_enriched
-    if "direction_id" in rail_enriched.columns:
-        key_cols = [c for c in ["Service", "variant_rank"] if c in rail_enriched.columns]
-        if key_cols:
-            dir0      = rail_enriched[rail_enriched["direction_id"].astype(str) == "0"]
-            dir0_keys = set(map(tuple, dir0[key_cols].drop_duplicates().values.tolist()))
-            dir1_only = rail_enriched[
-                (rail_enriched["direction_id"].astype(str) != "0") &
-                (~rail_enriched[key_cols].apply(tuple, axis=1).isin(dir0_keys))
-            ]
-            freq_source = pd.concat([dir0, dir1_only], ignore_index=True)
-
-    for _, row in freq_source.iterrows():
-        pn = str(row.get(pn_col, "") or "")
-        if not pn:
-            continue
-        if freq_type == "peak":
-            fam  = row.get(am_col)
-            fpm  = row.get(pm_col)
-            vals = [v for v in [fam, fpm] if v is not None and pd.notna(v) and float(v) > 0]
-            fval = float(sum(vals) / len(vals)) if vals else 0.0
-        else:
-            fv   = row.get(op_col)
-            fval = float(fv) if (fv is not None and pd.notna(fv) and float(fv) > 0) else 0.0
-        if fval <= 0:
-            continue
-        try:
-            nids = [int(n) for n in pn.split(";") if n.strip()]
-        except ValueError:
-            continue
-        for i in range(len(nids) - 1):
-            ekey = (min(nids[i], nids[i + 1]), max(nids[i], nids[i + 1]))
-            seg_freq[ekey] = seg_freq.get(ekey, 0.0) + fval
-
-    return seg_freq
-
-
-def _plot_frequency_map(
-    config: ProjectionConfig,
-    rail_enriched: gpd.GeoDataFrame,
-    boundary_gpkg: Path,
-    boundary_name: str,
-    freq_type: str = "offpeak",
-) -> None:
-    """Rail service frequency map — segment width scaled by departures/hr.
-
-    freq_type: 'offpeak' uses freq_offpeak_dep_hr;
-               'peak'    uses mean(freq_am_peak_dep_hr, freq_pm_peak_dep_hr).
-    Segment frequencies are summed across all services routing through each edge.
-    Raw infrastructure nodes are used as a fallback so that nodes absent from the
-    working version (e.g. operational yards healed during projection) are resolved.
-    """
-    if not boundary_gpkg.exists():
-        print(f"  Skipping frequency map ({boundary_name}, {freq_type}) — boundary not found.")
-        return
-
-    main_path    = Path(paths.MAIN)
-    boundary_gdf = gpd.read_file(boundary_gpkg)
-    is_sa        = boundary_name == "study_area"
-    extent       = _extent_from_gdf(boundary_gdf, margin_m=2000)
-
-    # ── Infrastructure — extend lookup with raw nodes so healed nodes resolve ──
-    nodes_gdf = gpd.read_file(config.infra_dir / "nodes.gpkg")
-    segs_gdf  = gpd.read_file(config.infra_dir / "segments.gpkg")
-
-    name_to_id = _build_name_to_id(nodes_gdf)
-
-    # Fallback: raw nodes carry real BAV Numbers for nodes not in the working version
-    _raw_nodes_path = config.raw_infra_dir / "nodes.gpkg"
-    if _raw_nodes_path.exists():
-        _raw_nodes = gpd.read_file(_raw_nodes_path)
-        for _, _rn in _raw_nodes.iterrows():
-            _rname = _rn.get("Name", "")
-            if _rname and _rname not in name_to_id and pd.notna(_rn.get("Number")):
-                name_to_id[_rname] = int(_rn["Number"])
-
-    # Build (min_id, max_id) → segment geometry lookup
-    seg_geom_lookup: Dict[Tuple[int, int], object] = {}
-    for _, _seg in segs_gdf.iterrows():
-        _fn = name_to_id.get(_seg.get("From_Name"))
-        _tn = name_to_id.get(_seg.get("To_Name"))
-        if _fn is not None and _tn is not None and _seg.geometry is not None:
-            _key = (min(_fn, _tn), max(_fn, _tn))
-            if _key not in seg_geom_lookup:
-                seg_geom_lookup[_key] = _seg.geometry
-
-    # ── Sum frequency per segment edge ─────────────────────────────────────────
-    seg_freq = _compute_seg_freq(rail_enriched, freq_type)
-
-    # ── Assign frequency bins ──────────────────────────────────────────────────
-    def _bin(val: float) -> Tuple[str, float, str]:
-        _iv = int(val)
-        for _lo, _hi, _bc, _blw, _blbl in _FREQ_BINS:
-            if _lo <= _iv <= _hi:
-                return _bc, _blw, _blbl
-        return _FREQ_BINS[-1][2], _FREQ_BINS[-1][3], _FREQ_BINS[-1][4]
-
-    bin_geoms: Dict[str, List] = defaultdict(list)
-    bin_props: Dict[str, Tuple[str, float]] = {}
-
-    for _ekey, _fval in seg_freq.items():
-        _geom = seg_geom_lookup.get(_ekey)
-        if _geom is None or _geom.is_empty:
-            continue
-        _bc, _blw, _blbl = _bin(_fval)
-        bin_geoms[_blbl].append(_geom)
-        bin_props[_blbl] = (_bc, _blw)
-
-    # ── Figure ─────────────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(16, 12))
-    ax.set_aspect("equal")
-    ax.set_xlabel("E [m]", fontsize=10)
-    ax.set_ylabel("N [m]", fontsize=10)
-    ax.grid(True, alpha=0.3)
-    boundary_gdf.plot(ax=ax, facecolor="none", edgecolor="black",
-                      linewidth=1.5, linestyle="--", alpha=0.6)
-
-    _lakes_path = main_path / paths.LAKES_SHP
-    if _lakes_path.exists():
-        try:
-            _lakes = gpd.read_file(_lakes_path)
-            if is_sa and extent is not None:
-                from shapely.geometry import box as _sbox_fm
-                _clip_box = gpd.GeoDataFrame(
-                    geometry=[_sbox_fm(extent[0], extent[2], extent[1], extent[3])],
-                    crs=SWISS_CRS)
-                _lakes_clip = gpd.clip(_lakes, _clip_box)
-            else:
-                _lakes_clip = gpd.clip(_lakes, boundary_gdf)
-            if not _lakes_clip.empty:
-                _lakes_clip.plot(ax=ax, color="#c8e8f5", linewidth=0.3, edgecolor="#99c4d8")
-        except Exception:
-            pass
-
-    try:
-        if is_sa and extent is not None:
-            from shapely.geometry import box as _sbox_fm2
-            _bg_box = gpd.GeoDataFrame(
-                geometry=[_sbox_fm2(extent[0], extent[2], extent[1], extent[3])],
-                crs=segs_gdf.crs if segs_gdf.crs else SWISS_CRS)
-            _bg = gpd.clip(segs_gdf, _bg_box)
-        else:
-            _bg = gpd.clip(segs_gdf, boundary_gdf)
-        if not _bg.empty:
-            _bg.plot(ax=ax, color="#d4d4d4", linewidth=0.4, alpha=0.5, zorder=1)
-    except Exception:
-        segs_gdf.plot(ax=ax, color="#d4d4d4", linewidth=0.4, alpha=0.5, zorder=1)
-
-    for _blbl, _geoms in bin_geoms.items():
-        _bc, _blw = bin_props[_blbl]
-        gpd.GeoDataFrame({"geometry": _geoms}, crs=SWISS_CRS).plot(
-            ax=ax, color=_bc, linewidth=_blw, zorder=3,
-        )
-
-    # ── Legend ─────────────────────────────────────────────────────────────────
-    _period_label = "Off-peak" if freq_type == "offpeak" else "Peak"
-    _legend_handles = [
-        Line2D([0], [0], color="#d4d4d4", linewidth=1.5, label="Infrastructure (no service)"),
-    ]
-    for _, _, _bc, _blw, _blbl in _FREQ_BINS:
-        _legend_handles.append(
-            Line2D([0], [0], color=_bc, linewidth=_blw * 0.7,
-                   label=f"{_blbl} dep / hr")
-        )
-    ax.legend(handles=_legend_handles, loc="upper right", fontsize=8,
-              title=f"Rail frequency\n{_period_label}", title_fontsize=8)
-
-    ax.set_title(
-        f"Rail Service Frequency ({_period_label}) — "
-        f"{config.svc_version} on {config.infra_version}"
-        f"\nBoundary: {boundary_name}",
-        fontsize=14, fontweight="bold",
-    )
-    if extent is not None:
-        ax.set_xlim(extent[0], extent[1])
-        ax.set_ylim(extent[2], extent[3])
-
-    _add_north_arrow(ax, location="upper left", scale=0.5)
-    _add_scale_bar(ax, location=(0.755, 0.012))
-    plt.tight_layout()
-
-    _out_dir = (main_path / paths.NETWORK_PLOTS_DIR / "Rail_Lines"
-                / config.svc_version / config.infra_version)
-    _out_dir.mkdir(parents=True, exist_ok=True)
-    _fname    = (f"frequency_{freq_type}_{config.svc_version}_"
-                 f"{config.infra_version}_{boundary_name}.pdf")
-    _out_path = _out_dir / _fname
-    fig.savefig(_out_path, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Frequency plot saved → {_out_path}")
-
-
-def _plot_frequency_diff(
-    config: ProjectionConfig,
-    rail_enriched: gpd.GeoDataFrame,
-    boundary_gpkg: Path,
-    boundary_name: str,
-) -> None:
-    """Peak vs off-peak frequency difference map.
-
-    Computes (peak − off-peak) dep/hr per segment. Base is off-peak.
-    Green segments gained frequency in peak; red segments lost frequency.
-    Unchanged segments (delta = 0) are shown as thin grey for context.
-    """
-    if not boundary_gpkg.exists():
-        print(f"  Skipping frequency diff ({boundary_name}) — boundary not found.")
-        return
-
-    main_path    = Path(paths.MAIN)
-    boundary_gdf = gpd.read_file(boundary_gpkg)
-    is_sa        = boundary_name == "study_area"
-    extent       = _extent_from_gdf(boundary_gdf, margin_m=2000)
-
-    # ── Infrastructure ────────────────────────────────────────────────────────
-    nodes_gdf = gpd.read_file(config.infra_dir / "nodes.gpkg")
-    segs_gdf  = gpd.read_file(config.infra_dir / "segments.gpkg")
-
-    name_to_id = _build_name_to_id(nodes_gdf)
-    _raw_nodes_path = config.raw_infra_dir / "nodes.gpkg"
-    if _raw_nodes_path.exists():
-        _raw_nodes = gpd.read_file(_raw_nodes_path)
-        for _, _rn in _raw_nodes.iterrows():
-            _rname = _rn.get("Name", "")
-            if _rname and _rname not in name_to_id and pd.notna(_rn.get("Number")):
-                name_to_id[_rname] = int(_rn["Number"])
-
-    seg_geom_lookup: Dict[Tuple[int, int], object] = {}
-    for _, _seg in segs_gdf.iterrows():
-        _fn = name_to_id.get(_seg.get("From_Name"))
-        _tn = name_to_id.get(_seg.get("To_Name"))
-        if _fn is not None and _tn is not None and _seg.geometry is not None:
-            _key = (min(_fn, _tn), max(_fn, _tn))
-            if _key not in seg_geom_lookup:
-                seg_geom_lookup[_key] = _seg.geometry
-
-    # ── Compute per-segment frequencies ──────────────────────────────────────
-    seg_offpeak = _compute_seg_freq(rail_enriched, "offpeak")
-    seg_peak    = _compute_seg_freq(rail_enriched, "peak")
-
-    all_keys = set(seg_offpeak) | set(seg_peak)
-    seg_delta: Dict[Tuple[int, int], float] = {
-        k: seg_peak.get(k, 0.0) - seg_offpeak.get(k, 0.0)
-        for k in all_keys
-    }
-
-    # ── Classify into bins ────────────────────────────────────────────────────
-    def _diff_bin(val: float):
-        iv = int(val)
-        for lo, hi, col, lw, lbl in _DIFF_BINS:
-            if lo <= iv <= hi:
-                return col, lw, lbl
-        return None, None, None
-
-    unchanged_geoms = []
-    bin_geoms: Dict[str, list] = defaultdict(list)
-    bin_props: Dict[str, Tuple[str, float]] = {}
-
-    for ekey, delta in seg_delta.items():
-        geom = seg_geom_lookup.get(ekey)
-        if geom is None or geom.is_empty:
-            continue
-        if abs(delta) < 0.5:
-            unchanged_geoms.append(geom)
-        else:
-            col, lw, lbl = _diff_bin(delta)
-            if lbl is not None:
-                bin_geoms[lbl].append(geom)
-                bin_props[lbl] = (col, lw)
-
-    # ── Figure ─────────────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(16, 12))
-    ax.set_aspect("equal")
-    ax.set_xlabel("E [m]", fontsize=10)
-    ax.set_ylabel("N [m]", fontsize=10)
-    ax.grid(True, alpha=0.3)
-    boundary_gdf.plot(ax=ax, facecolor="none", edgecolor="black",
-                      linewidth=1.5, linestyle="--", alpha=0.6)
-
-    _lakes_path = main_path / paths.LAKES_SHP
-    if _lakes_path.exists():
-        try:
-            _lakes = gpd.read_file(_lakes_path)
-            if is_sa and extent is not None:
-                from shapely.geometry import box as _sbox_fd
-                _clip_box = gpd.GeoDataFrame(
-                    geometry=[_sbox_fd(extent[0], extent[2], extent[1], extent[3])],
-                    crs=SWISS_CRS)
-                _lakes_clipped = gpd.clip(_lakes, _clip_box)
-            else:
-                _lakes_clipped = gpd.clip(_lakes, boundary_gdf)
-            if not _lakes_clipped.empty:
-                _lakes_clipped.plot(ax=ax, color="#c8e8f5", linewidth=0.3, edgecolor="#99c4d8")
-        except Exception:
-            pass
-
-    # Unchanged (grey background context)
-    if unchanged_geoms:
-        gpd.GeoDataFrame({"geometry": unchanged_geoms}, crs=SWISS_CRS).plot(
-            ax=ax, color="#cccccc", linewidth=0.6, alpha=0.7, zorder=2)
-
-    # Changed segments by bin (losses drawn before gains so gains sit on top)
-    _legend_handles = []
-    loss_labels = [lbl for lo, _, _, _, lbl in _DIFF_BINS if lo < 0]
-    gain_labels = [lbl for lo, _, _, _, lbl in _DIFF_BINS if lo > 0]
-
-    for lbl in loss_labels + gain_labels:
-        if lbl not in bin_geoms:
-            continue
-        col, lw = bin_props[lbl]
-        gpd.GeoDataFrame({"geometry": bin_geoms[lbl]}, crs=SWISS_CRS).plot(
-            ax=ax, color=col, linewidth=lw, zorder=3)
-        _legend_handles.append(
-            Line2D([0], [0], color=col, linewidth=lw, label=f"{lbl} dep/hr"))
-
-    # Legend: losses first, then gains
-    _legend_handles = (
-        [Line2D([0], [0], color="#cccccc", linewidth=0.6, label="0 (unchanged)")]
-        + _legend_handles
-    )
-    ax.legend(handles=_legend_handles, loc="upper right", fontsize=8,
-              title="Δ dep/hr (peak − off-peak)", title_fontsize=8)
-
-    ax.set_title(
-        f"Rail Frequency Change: Peak vs Off-Peak — "
-        f"{config.svc_version} on {config.infra_version}"
-        f"\nBoundary: {boundary_name}",
-        fontsize=14, fontweight="bold",
-    )
-    if extent is not None:
-        ax.set_xlim(extent[0], extent[1])
-        ax.set_ylim(extent[2], extent[3])
-
-    _add_north_arrow(ax, location="upper left", scale=0.5)
-    _add_scale_bar(ax, location=(0.755, 0.012))
-    plt.tight_layout()
-
-    _out_dir = (main_path / paths.NETWORK_PLOTS_DIR / "Rail_Lines"
-                / config.svc_version / config.infra_version)
-    _out_dir.mkdir(parents=True, exist_ok=True)
-    _fname    = (f"frequency_diff_{config.svc_version}_"
-                 f"{config.infra_version}_{boundary_name}.pdf")
-    _out_path = _out_dir / _fname
-    fig.savefig(_out_path, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Frequency diff plot saved → {_out_path}")
+# _compute_seg_freq / _plot_frequency_map / _plot_frequency_diff moved to
+# svc_ints_frequency.py (2026-06-11) — _run_phase3 delegates below.
 
 
 def _run_phase3(
@@ -6206,10 +6110,10 @@ def _run_phase3(
     tram_enriched: gpd.GeoDataFrame,
     func_enriched: gpd.GeoDataFrame,
 ) -> None:
-    """Phase 3: produce overview plots for study area and catchment area."""
-    print("\n" + "─" * 60)
-    print("  Phase 3 — Plotting")
-    print("─" * 60)
+    """Stage 3: produce overview plots for study area and catchment area."""
+    print("\n" + "─" * 160)
+    print("  Stage 3 — Plotting")
+    print("─" * 160)
 
     main = Path(paths.MAIN)
 
@@ -6245,25 +6149,34 @@ def _run_phase3(
                 boundary_path, label,
                 feeder_bg_gdfs=_feeder_bg,
             )
-        _plot_frequency_map(config, rail_enriched, boundary_path, label, freq_type="offpeak")
-        _plot_frequency_map(config, rail_enriched, boundary_path, label, freq_type="peak")
-        _plot_frequency_diff(config, rail_enriched, boundary_path, label)
+        import svc_ints_frequency as _frq   # lazy — breaks the import cycle
+        _frq.plot_frequency_map(config.infra_dir, config.raw_infra_dir,
+                                config.svc_version, config.infra_version,
+                                rail_enriched, boundary_path, label,
+                                freq_type="offpeak")
+        _frq.plot_frequency_map(config.infra_dir, config.raw_infra_dir,
+                                config.svc_version, config.infra_version,
+                                rail_enriched, boundary_path, label,
+                                freq_type="peak")
+        _frq.plot_frequency_diff(config.infra_dir, config.raw_infra_dir,
+                                 config.svc_version, config.infra_version,
+                                 rail_enriched, boundary_path, label)
 
-    print("\n  Phase 3 complete.")
+    print("\n  Stage 3 complete.")
 
 # =============================================================================
 # Main
 # =============================================================================
 
 def _run_phase0_auto(svc_version: str, infra_version: str, include_feeder_plots: bool = True, include_plots: bool = True, plot_only: bool = False) -> Optional[Tuple[ProjectionConfig, str]]:
-    """Non-interactive Phase 0: mode=map, source=Unprojected.
+    """Non-interactive Stage 0: mode=map, source=Unprojected.
 
     Args:
         svc_version:           Service version name WITHOUT '_network' suffix.
         infra_version:         Infrastructure version name (e.g. 'AS_2026_ZH').
         include_feeder_plots:  When False, skip the _with_feeders plot variant.
-        include_plots:         When False, skip Phase 3 entirely (driven by PLOT_SERVICES).
-        plot_only:             When True, load existing projected data and run Phase 3 only.
+        include_plots:         When False, skip Stage 3 entirely (driven by PLOT_SERVICES).
+        plot_only:             When True, load existing projected data and run Stage 3 only.
     """
     main = Path(paths.MAIN)
     svc_folder = svc_version + '_network'
@@ -6332,9 +6245,9 @@ def main() -> None:
     parser.add_argument('--no-feeder-plots',  action='store_true', default=False,
                         help='Skip the _with_feeders plot variant')
     parser.add_argument('--no-plots',         action='store_true', default=False,
-                        help='Skip Phase 3 plots entirely (set by main_new when PLOT_SERVICES=False)')
+                        help='Skip Stage 3 plots entirely (set by main_new when PLOT_SERVICES=False)')
     parser.add_argument('--plot-only',        action='store_true', default=False,
-                        help='Load existing projected data and run Phase 3 only; skip projection')
+                        help='Load existing projected data and run Stage 3 only; skip projection')
     args, _ = parser.parse_known_args()
 
     if not _check_prerequisites():
@@ -6403,13 +6316,13 @@ def main() -> None:
     if config.include_plots:
         _run_phase3(config, rail_enriched, tram_enriched, func_enriched)
     else:
-        print("\n  Phase 3 — Plotting skipped (PLOT_SERVICES = False).")
+        print("\n  Stage 3 — Plotting skipped (PLOT_SERVICES = False).")
 
-    print("\n" + "─" * 60)
+    print("\n" + "─" * 160)
     print("  Service projection complete.")
     print(f"  Rail output    : {config.rail_output_dir}")
     print(f"  Feeder output  : {config.feeder_output_dir}")
-    print("─" * 60)
+    print("─" * 160)
 
 
 if __name__ == "__main__":

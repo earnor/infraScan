@@ -1,16 +1,700 @@
+"""Demand-growth scenario engine: Phase 7 factor store + legacy full-OD pickles.
+Last modified: 2026-06-20
+
+Phase 7 (main_new) builds a factor store instead of materialised ODs: baseline
+per-station growth-factor vectors (scenario x year) weighted by the allocated
+pop_in_station from the 4A/6A breakdown, with gateway and weightless stations
+on the Swiss national (CH) trajectory, plus station-independent modal-split /
+distance-per-person scalars. Scenario ODs are composed on demand
+(compose_scenario_od). The LHS draws are seeded (42/43), so baseline and every
+svc-int see identical stochastic paths.
+
+The legacy path (get_random_scenarios -> full-OD pickles under
+RANDOM_SCENARIO_CACHE_PATH, OD_STATIONS_* / COMMUNE_TO_STATION_PATH inputs) is
+kept untouched below for main.py / main_cap.py.
+"""
+import json
+import os
+import pickle
+from typing import Dict, List
+
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
+from matplotlib.ticker import EngFormatter
+from scipy.stats import norm, qmc
+from tqdm import tqdm
+
+import cache_manifest
+import catchment_base
 import paths
 import settings
-import catchment_base
-import matplotlib.pyplot as plt
-from matplotlib.ticker import EngFormatter
-from tqdm import tqdm
-from scipy.stats import norm, qmc
-import numpy as np
-from typing import Dict, List
-from joblib import Parallel, delayed
-import pickle
-import os
+
+_CH_DISTRICT = '__CH__'
+_DISTRICT_FACTOR_MEMO: Dict[tuple, pd.DataFrame] = {}
+_MODAL_DISTANCE_MEMO: Dict[tuple, pd.DataFrame] = {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 7 factor store (main_new path)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def build_scenario_factor_store(svc_version: str, base_infra: str, method: str,
+                                attribution: str, n_scenarios: int,
+                                start_year: int, end_year: int,
+                                make_plots: bool = False,
+                                use_cache: bool = False) -> dict:
+    """Build + persist the baseline Phase-7 factor store for a svc network.
+
+    Writes growth_factors.parquet (scenario, year, station_id, factor) and
+    modal_distance_factors.csv (scenario, year, modal_factor, distance_factor)
+    under data/Scenario/<svc_version>_network/. Station universe = the 4B long
+    OD's origins + destinations; weights = allocated pop_in_station from the
+    4A breakdown; gateway and weightless stations follow the CH trajectory.
+
+    Args:
+        svc_version: service version WITHOUT the '_network' suffix.
+        base_infra:  infrastructure version (gateway JSON lookup).
+        method:      'pt_feeder' | 'municipal'.
+        attribution: long-OD file key ('specific' | 'blended' | 'municipal').
+        n_scenarios: number of LHS scenarios (seeded 42/43 — deterministic).
+        start_year:  base year (factor 1.0) and trajectory origin.
+        end_year:    last scenario year.
+        make_plots:  population/modal/distance fan plots into plots/scenarios.
+        use_cache:   skip the build when both outputs already exist.
+
+    Returns:
+        Summary dict: output paths, station classification, 'cached' flag.
+    """
+    svc_network = f'{svc_version}_network'
+    parquet_path = paths.get_growth_factors_parquet(svc_network, method)
+    md_path = paths.get_modal_distance_factors_csv(svc_network)
+    if (use_cache and os.path.exists(parquet_path) and os.path.exists(md_path)
+            and cache_manifest.check_manifest(
+                os.path.dirname(parquet_path), 'scenarios_7',
+                {'svc_network': svc_network, 'infra_version': base_infra})):
+        print(f"  use_cache_scenarios: baseline factor store present — "
+              f"skipping build\n    {parquet_path}")
+        return {'factors_path': parquet_path, 'modal_distance_path': md_path,
+                'cached': True}
+
+    print(f"\n=== Building baseline factor store ({svc_network}, {method}, "
+          f"{n_scenarios} scenarios, {start_year}-{end_year}) ===")
+    od_long = pd.read_csv(
+        paths.get_station_od_long_csv(svc_network, method, attribution))
+    station_ids = _od_station_universe(od_long)
+    gateway_ids = _load_gateway_ids(svc_network, base_infra)
+
+    district_factors = _district_factor_table(n_scenarios, start_year, end_year)
+    bd = _read_breakdown_weights(
+        paths.get_station_commune_breakdown_csv(svc_network, method))
+    W, classification = _station_weight_matrix(
+        bd, station_ids, gateway_ids,
+        set(district_factors['district'].unique()))
+    factors = _station_factor_frame(W, district_factors, start_year)
+    modal_distance = _modal_distance_table(n_scenarios, start_year, end_year)
+
+    os.makedirs(os.path.dirname(parquet_path), exist_ok=True)
+    factors.to_parquet(parquet_path, index=False)
+    modal_distance.to_csv(md_path, index=False, encoding='utf-8-sig')
+    cache_manifest.write_manifest(os.path.dirname(parquet_path), 'scenarios_7',
+                                  {'svc_network': svc_network,
+                                   'infra_version': base_infra})
+
+    print(f"  Stations: {len(station_ids)} in OD — "
+          f"{len(classification['weighted'])} pop-weighted, "
+          f"{len(classification['gateway'])} gateway (CH trajectory), "
+          f"{len(classification['fallback'])} CH-fallback")
+    print(f"  Factors : {factors['scenario'].nunique()} scenarios x "
+          f"{factors['year'].nunique()} years x {len(station_ids)} stations "
+          f"-> {len(factors):,} rows")
+    print(f"    {parquet_path}\n    {md_path}")
+
+    if make_plots:
+        _plot_factor_store_inputs(
+            n_scenarios, start_year, end_year,
+            districts=[d for d in W.columns if d != _CH_DISTRICT])
+
+    return {'factors_path': parquet_path, 'modal_distance_path': md_path,
+            'classification': classification, 'cached': False}
+
+
+def build_svc_int_factor_overrides(svc_int_id: str, svc_version: str,
+                                   base_infra: str, method: str,
+                                   attribution: str, n_scenarios: int,
+                                   start_year: int, end_year: int,
+                                   use_cache: bool = False) -> dict:
+    """Build the per-svc-int growth-factor override table (PT_Feeder path).
+
+    Recomputes factors from the 6A developed breakdown for exactly the
+    stations whose {commune: pop_in_station} rows changed vs the baseline
+    breakdown, plus stations new to the 6B dev OD that the baseline store
+    does not cover (CH fallback, warned). Gateways never enter — their growth
+    is weight-free (CH trajectory) and 6B gateway-split changes alter trips,
+    not growth factors. Writes growth_factor_overrides.csv (same columns as
+    the baseline parquet); an empty changed set writes no file (compose then
+    falls through to the baseline vectors).
+
+    Args:
+        svc_int_id:  svc-int id (e.g. 'ext_100001'), WITHOUT '_network'.
+        svc_version: baseline service version WITHOUT '_network'.
+        (remaining args as build_scenario_factor_store)
+
+    Returns:
+        Summary dict: 'overrides_path' (None if nothing changed),
+        'changed_stations', 'new_stations', 'cached' flag.
+    """
+    int_network = paths.svc_int_network_name(svc_int_id,
+                                             f'{base_infra}__{svc_version}')
+    svc_network = f'{svc_version}_network'
+    out_csv = paths.get_growth_factor_overrides_csv(int_network, method)
+    if (use_cache and os.path.exists(out_csv)
+            and cache_manifest.check_manifest(
+                os.path.dirname(out_csv), 'scenarios_7',
+                {'svc_network': int_network, 'infra_version': base_infra,
+                 'svc_int_id': svc_int_id})):
+        print(f"  [{svc_int_id}] use_cache_scenarios: override table present "
+              f"— skipping\n    {out_csv}")
+        return {'overrides_path': out_csv, 'cached': True}
+
+    print(f"\n--- Factor overrides [{svc_int_id}] ({method}) ---")
+    dev_bd_csv = paths.get_station_commune_breakdown_csv(int_network, method)
+    if not os.path.exists(dev_bd_csv):
+        print(f"  No 6A breakdown at {dev_bd_csv} — no overrides "
+              f"(allocation unchanged or 6A not run).")
+        return {'overrides_path': None, 'changed_stations': [],
+                'new_stations': [], 'cached': False}
+    base_bd = _read_breakdown_weights(
+        paths.get_station_commune_breakdown_csv(svc_network, method))
+    dev_bd = _read_breakdown_weights(dev_bd_csv)
+    changed = _changed_stations(base_bd, dev_bd)
+
+    baseline_parquet = paths.get_growth_factors_parquet(svc_network, method)
+    if not os.path.exists(baseline_parquet):
+        raise FileNotFoundError(
+            f"Baseline factor store missing at {baseline_parquet} — run "
+            f"build_scenario_factor_store first.")
+    base_station_ids = set(pd.read_parquet(
+        baseline_parquet, columns=['station_id'])['station_id'].unique())
+    dev_od = pd.read_csv(
+        paths.get_station_od_long_csv(int_network, method, attribution))
+    new_stations = sorted(set(_od_station_universe(dev_od))
+                          - base_station_ids - set(changed))
+    if new_stations:
+        print(f"  {len(new_stations)} station(s) new to the dev OD without "
+              f"baseline factors: {new_stations}")
+
+    override_ids = sorted(set(changed) | set(new_stations))
+    print(f"  Changed allocation: {len(changed)} station(s): {changed}")
+    if not override_ids:
+        if os.path.exists(out_csv):
+            os.remove(out_csv)
+            print(f"  Removed stale override file {out_csv}")
+        print(f"  [{svc_int_id}] breakdown identical to baseline — no "
+              f"override file (compose uses baseline factors).")
+        return {'overrides_path': None, 'changed_stations': [],
+                'new_stations': [], 'cached': False}
+
+    gateway_ids = _load_gateway_ids(svc_network, base_infra)
+    district_factors = _district_factor_table(n_scenarios, start_year, end_year)
+    W, _ = _station_weight_matrix(
+        dev_bd, override_ids, gateway_ids,
+        set(district_factors['district'].unique()))
+    overrides = _station_factor_frame(W, district_factors, start_year)
+
+    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+    overrides.to_csv(out_csv, index=False, encoding='utf-8-sig')
+    cache_manifest.write_manifest(os.path.dirname(out_csv), 'scenarios_7',
+                                  {'svc_network': int_network,
+                                   'infra_version': base_infra,
+                                   'svc_int_id': svc_int_id})
+    print(f"  Overrides: {len(override_ids)} station(s) x "
+          f"{overrides['scenario'].nunique()} scenarios x "
+          f"{overrides['year'].nunique()} years -> {len(overrides):,} rows\n"
+          f"    {out_csv}")
+    return {'overrides_path': out_csv, 'changed_stations': changed,
+            'new_stations': new_stations, 'cached': False}
+
+
+def load_factor_store(svc_version: str, method: str, attribution: str,
+                      svc_int_id: str = None, combo: str = '') -> dict:
+    """Load the factor store + matching long OD for (baseline | one svc-int).
+
+    Args:
+        combo: the '<infra>__<svc>' workspace key locating the svc-int's
+            override/OD files; '' resolves via ints_core.default_combo
+            (standalone use — Phase 8A should pass it explicitly).
+
+    Returns:
+        {'factors': DataFrame(scenario, year, station_id, factor) — baseline
+            vectors with the svc-int overrides applied (rows replaced/appended),
+         'modal_distance': DataFrame(scenario, year, modal_factor,
+            distance_factor),
+         'od_long': DataFrame(origin_station_id, dest_station_id, trips) —
+            the 6B dev OD for a svc-int (PT_Feeder), else the 4B baseline}.
+
+    Under Municipal the dev OD and factors equal the baseline by construction
+    (6A/6B do not run — allocation is frequency-blind), so svc_int_id is
+    ignored there.
+    """
+    svc_network = f'{svc_version}_network'
+    factors = pd.read_parquet(
+        paths.get_growth_factors_parquet(svc_network, method))
+    modal_distance = pd.read_csv(
+        paths.get_modal_distance_factors_csv(svc_network))
+    od_path = paths.get_station_od_long_csv(svc_network, method, attribution)
+
+    if svc_int_id is not None and method != 'municipal':
+        if not combo:
+            import ints_core as _core
+            combo = _core.default_combo(svc_version=svc_version)
+        int_network = paths.svc_int_network_name(svc_int_id, combo)
+        override_csv = paths.get_growth_factor_overrides_csv(int_network,
+                                                             method)
+        if os.path.exists(override_csv):
+            overrides = pd.read_csv(override_csv)
+            replaced = set(overrides['station_id'].unique())
+            factors = pd.concat(
+                [factors[~factors['station_id'].isin(replaced)], overrides],
+                ignore_index=True)
+        dev_od_path = paths.get_station_od_long_csv(int_network, method,
+                                                    attribution)
+        if os.path.exists(dev_od_path):
+            od_path = dev_od_path
+        else:
+            print(f"  WARNING: no 6B OD for {svc_int_id} at {dev_od_path} — "
+                  f"composing on the baseline OD.")
+    od_long = pd.read_csv(od_path)
+    return {'factors': factors, 'modal_distance': modal_distance,
+            'od_long': od_long}
+
+
+def compose_scenario_od(svc_int_id, scenario: int, year: int, *,
+                        svc_version: str, method: str, attribution: str,
+                        store: dict = None, combo: str = '') -> pd.DataFrame:
+    """Compose the scenario OD for (svc_int_id, scenario, year) on demand.
+
+    Long-format throughout: trips x sqrt(f_origin * f_dest) x modal x
+    distance. svc_int_id=None composes the baseline. Pass a preloaded
+    load_factor_store result as store for bulk loops (Phase 8A) — it is
+    loaded per call otherwise (combo as in load_factor_store).
+
+    Returns:
+        DataFrame(origin_station_id, dest_station_id, trips) — same schema
+        as the input long OD.
+
+    Raises:
+        ValueError: scenario/year outside the store, or an OD station without
+            a factor row (stale store — rebuild Phase 7).
+    """
+    if store is None:
+        store = load_factor_store(svc_version, method, attribution, svc_int_id,
+                                  combo=combo)
+    f = store['factors']
+    fs = f[(f['scenario'] == scenario) & (f['year'] == year)]
+    if fs.empty:
+        raise ValueError(f"(scenario={scenario}, year={year}) not in the "
+                         f"factor store — rebuild Phase 7 with a wider range.")
+    md = store['modal_distance']
+    md_row = md[(md['scenario'] == scenario) & (md['year'] == year)]
+    if md_row.empty:
+        raise ValueError(f"(scenario={scenario}, year={year}) not in the "
+                         f"modal/distance table.")
+    m_factor = float(md_row['modal_factor'].iloc[0])
+    d_factor = float(md_row['distance_factor'].iloc[0])
+
+    sqrt_f = np.sqrt(fs.set_index('station_id')['factor'])
+    od = store['od_long'].copy()
+    sq_o = od['origin_station_id'].map(sqrt_f)
+    sq_d = od['dest_station_id'].map(sqrt_f)
+    missing = sorted(set(od.loc[sq_o.isna(), 'origin_station_id'])
+                     | set(od.loc[sq_d.isna(), 'dest_station_id']))
+    if missing:
+        raise ValueError(
+            f"{len(missing)} OD station(s) without factor rows (stale factor "
+            f"store — rebuild Phase 7): {missing}")
+    od['trips'] = od['trips'] * sq_o * sq_d * m_factor * d_factor
+    return od
+
+
+def validate_factor_store(svc_version: str, base_infra: str, method: str,
+                          attribution: str, n_scenarios: int, start_year: int,
+                          end_year: int, sample_scenarios=(1, 50, 100),
+                          sample_years=(2050, 2100)) -> bool:
+    """Three-check validation of the factor store against direct application.
+
+    1. Base-year identity: compose(None, s, start_year) == input OD.
+    2. Long == wide: the long-format composition equals the legacy wide-matrix
+       row/col sqrt-multiplication with the same factor slice.
+    3. Legacy-mechanics parity: the vectorised G @ W^T station factors equal
+       compute_growth_od_matrix_optimized's per-station loop fed identical
+       weights and the identical seeded district scenarios (isolates the
+       reimplementation from the intentional weight/gateway re-sourcing).
+
+    Standalone-CLI / verification use only — not called from the pipeline.
+    Returns True when all checks pass; prints per-check results.
+    """
+    print(f"\n=== Validating factor store ({svc_version}, {method}) ===")
+    store = load_factor_store(svc_version, method, attribution, None)
+    ok = True
+    sample_scenarios = [s for s in sample_scenarios if s <= n_scenarios]
+
+    # -- 1. base-year identity ------------------------------------------------
+    base = compose_scenario_od(None, sample_scenarios[0], start_year,
+                               svc_version=svc_version, method=method,
+                               attribution=attribution, store=store)
+    if np.allclose(base['trips'].values, store['od_long']['trips'].values,
+                   rtol=1e-12, atol=1e-12):
+        print("  [1] base-year identity: PASS")
+    else:
+        diff = np.abs(base['trips'].values
+                      - store['od_long']['trips'].values).max()
+        print(f"  [1] base-year identity: FAIL (max abs diff {diff})")
+        ok = False
+
+    # -- 2. long == wide ------------------------------------------------------
+    f = store['factors']
+    md = store['modal_distance']
+    worst = 0.0
+    for s in sample_scenarios:
+        for y in sample_years:
+            composed = compose_scenario_od(None, s, y,
+                                           svc_version=svc_version,
+                                           method=method,
+                                           attribution=attribution,
+                                           store=store)
+            wide = store['od_long'].pivot_table(index='origin_station_id',
+                                                columns='dest_station_id',
+                                                values='trips',
+                                                aggfunc='sum', fill_value=0.0)
+            fac = f[(f['scenario'] == s)
+                    & (f['year'] == y)].set_index('station_id')['factor']
+            sqrt_f = np.sqrt(fac)
+            grown = wide.mul(sqrt_f.reindex(wide.index), axis=0) \
+                        .mul(sqrt_f.reindex(wide.columns), axis=1)
+            md_row = md[(md['scenario'] == s) & (md['year'] == y)]
+            grown *= (float(md_row['modal_factor'].iloc[0])
+                      * float(md_row['distance_factor'].iloc[0]))
+            check = composed.set_index(
+                ['origin_station_id', 'dest_station_id'])['trips']
+            wide_vals = grown.stack().reindex(check.index)
+            worst = max(worst,
+                        float(np.abs(wide_vals.values
+                                     - check.values).max()))
+    if worst <= 1e-9 * max(1.0, float(store['od_long']['trips'].max())):
+        print(f"  [2] long == wide composition: PASS (max abs diff {worst:.2e})")
+    else:
+        print(f"  [2] long == wide composition: FAIL (max abs diff {worst:.2e})")
+        ok = False
+
+    # -- 3. legacy-mechanics parity -------------------------------------------
+    refs = get_bezirk_population_scenarios()
+    population_scenarios = {
+        district: generate_population_scenarios(df, start_year, end_year,
+                                                n_scenarios)
+        for district, df in refs.items()
+    }
+    communes = _build_communes_population_df(settings.start_year_scenario)
+    known_bfs = communes[communes['bezirk'].isin(population_scenarios)]
+    known_bfs = known_bfs[pd.to_numeric(known_bfs['anzahl'],
+                                        errors='coerce') > 0]
+    bfs_pop = dict(zip(known_bfs['gemeinde_bfs_nr'].astype(int),
+                       known_bfs['anzahl']))
+    svc_network = f'{svc_version}_network'
+    pairs = _read_breakdown_weights(
+        paths.get_station_commune_breakdown_csv(svc_network, method))
+    pairs = pairs[pairs['BFS_NR'].isin(bfs_pop)]
+    # identical weights on both sides: commune total population (legacy
+    # semantics), restricted to communes with a district trajectory
+    synthetic = pairs.copy()
+    synthetic['pop_in_station'] = synthetic['BFS_NR'].map(bfs_pop)
+    stations = sorted(synthetic['station_id'].unique())
+    district_factors = _district_factor_table(n_scenarios, start_year,
+                                              end_year)
+    W, _ = _station_weight_matrix(synthetic, stations, set(),
+                                  set(district_factors['district'].unique()))
+    vec = _station_factor_frame(W, district_factors, start_year)
+    station_communes = synthetic.groupby('station_id')['BFS_NR'] \
+                                .apply(list).to_dict()
+    dummy_od = pd.DataFrame(1.0, index=stations,
+                            columns=[str(s) for s in stations])
+    worst3 = 0.0
+    for s in sample_scenarios:
+        for y in sample_years:
+            legacy = compute_growth_od_matrix_optimized(
+                dummy_od, station_communes, communes, population_scenarios,
+                s - 1, y, start_year)
+            legacy_diag = pd.Series(
+                {st: legacy.loc[st, str(st)] for st in stations})
+            vec_slice = vec[(vec['scenario'] == s) & (vec['year'] == y)] \
+                .set_index('station_id')['factor'].reindex(stations)
+            worst3 = max(worst3, float(np.abs(vec_slice.values
+                                              - legacy_diag.values).max()))
+    if worst3 <= 1e-9:
+        print(f"  [3] legacy-mechanics parity: PASS (max abs diff {worst3:.2e})")
+    else:
+        print(f"  [3] legacy-mechanics parity: FAIL (max abs diff {worst3:.2e})")
+        ok = False
+
+    print(f"  => {'ALL CHECKS PASSED' if ok else 'VALIDATION FAILED'}")
+    return ok
+
+
+def _changed_stations(base_bd: pd.DataFrame, dev_bd: pd.DataFrame) -> list:
+    """Stations whose (BFS_NR, pop_in_station) weight rows differ between the
+    baseline and developed breakdowns (incl. stations only in one of them)."""
+    merged = base_bd.merge(dev_bd, on=['station_id', 'BFS_NR'], how='outer',
+                           suffixes=('_base', '_dev'), indicator=True)
+    diff = merged[(merged['_merge'] != 'both')
+                  | (merged['pop_in_station_base']
+                     != merged['pop_in_station_dev'])]
+    return sorted(diff['station_id'].unique())
+
+
+def _od_station_universe(od_long: pd.DataFrame) -> list:
+    """Sorted unique station ids appearing as origin or destination."""
+    orig = pd.to_numeric(od_long['origin_station_id'], errors='coerce')
+    dest = pd.to_numeric(od_long['dest_station_id'], errors='coerce')
+    ids = set(orig.dropna().astype(int)) | set(dest.dropna().astype(int))
+    return sorted(ids)
+
+
+def _load_gateway_ids(svc_network: str, infra_version: str) -> set:
+    """Gateway (boundary) station node ids from the Phase-3B JSON.
+
+    Empty set with a warning if the file is absent — gateways then land in the
+    CH-fallback class (same trajectory, louder print)."""
+    path = paths.get_boundary_stations_json(svc_network, infra_version)
+    if not os.path.exists(path):
+        print(f"  WARNING: boundary stations file missing at {path} — "
+              f"no gateway classification.")
+        return set()
+    with open(path, encoding='utf-8') as f:
+        ids = json.load(f)
+    return {int(x) for x in ids}
+
+
+def _get_ch_population_reference(start_year: int, end_year: int) -> pd.DataFrame:
+    """CH national reference trajectory (jahr, total_population, growth_rate).
+
+    BFS observations + Referenzszenario A-00-2025 up to 2050, then Eurostat
+    national growth rates 2051-2100 compounded — *unscaled*, unlike the
+    districts, which get the Eurostat rates scaled relative to CH."""
+    df_ch = pd.read_csv(paths.POPULATION_SCENARIO_CH_BFS_2055, sep=",")
+    pop = pd.to_numeric(df_ch['Beobachtungen'], errors='coerce').combine_first(
+        pd.to_numeric(df_ch['Referenzszenario A-00-2025'], errors='coerce'))
+    base = pd.DataFrame({
+        'jahr': pd.to_numeric(df_ch['Jahr'], errors='coerce'),
+        'total_population': pop,
+    }).dropna()
+    base['jahr'] = base['jahr'].astype(int)
+    base = base[base['jahr'] <= 2050].sort_values('jahr').reset_index(drop=True)
+
+    eurostat_df = pd.read_excel(paths.POPULATION_SCENARIO_CH_EUROSTAT_2100)
+    eurostat_df.columns = eurostat_df.columns.map(str)
+    rate_row = eurostat_df[eurostat_df['unit'] == 'GROWTH_RATE']
+    rates = rate_row[[str(y) for y in range(2051, 2101)]].iloc[0].astype(float)
+
+    current = base['total_population'].iloc[-1]
+    rows = []
+    for year in range(2051, 2101):
+        current *= (1 + rates[str(year)])
+        rows.append({'jahr': year, 'total_population': current})
+    ref_df = pd.concat([base, pd.DataFrame(rows)], ignore_index=True)
+    ref_df['growth_rate'] = ref_df['total_population'].pct_change().fillna(0.0)
+    return ref_df
+
+
+def _district_factor_table(n_scenarios: int, start_year: int,
+                           end_year: int) -> pd.DataFrame:
+    """Long (district, scenario, year, factor) growth-factor table.
+
+    Districts from get_bezirk_population_scenarios plus the '__CH__'
+    pseudo-district (gateways/fallbacks); factor = pop(s, y) / pop(s,
+    start_year); scenario ids 1-based (legacy 'scenario_<N>' convention).
+    Memoised — the LHS draws are seeded, so the table is deterministic for
+    given (n_scenarios, start_year, end_year)."""
+    key = (n_scenarios, start_year, end_year)
+    if key in _DISTRICT_FACTOR_MEMO:
+        return _DISTRICT_FACTOR_MEMO[key]
+    refs = get_bezirk_population_scenarios()
+    refs[_CH_DISTRICT] = _get_ch_population_reference(start_year, end_year)
+    frames = []
+    for district, ref in refs.items():
+        scen = generate_population_scenarios(ref, start_year, end_year,
+                                             n_scenarios)
+        wide = scen.pivot(index='scenario', columns='year', values='population')
+        fac = wide.div(wide[start_year].replace(0, np.nan), axis=0).fillna(1.0)
+        long = (fac.reset_index()
+                .melt(id_vars='scenario', var_name='year', value_name='factor'))
+        long['district'] = district
+        frames.append(long)
+    out = pd.concat(frames, ignore_index=True)
+    out['scenario'] = out['scenario'].astype(int) + 1
+    out['year'] = out['year'].astype(int)
+    out = out[['district', 'scenario', 'year', 'factor']]
+    _DISTRICT_FACTOR_MEMO[key] = out
+    return out
+
+
+def _read_breakdown_weights(breakdown_csv: str) -> pd.DataFrame:
+    """Cleaned (station_id, BFS_NR, pop_in_station) weight rows from a 4A/6A
+    station-commune breakdown: NO_PT sentinel (-1) and zero-pop rows dropped."""
+    bd = pd.read_csv(breakdown_csv, encoding='utf-8-sig')
+    bd['station_id'] = pd.to_numeric(bd['station_number'], errors='coerce')
+    bd['BFS_NR'] = pd.to_numeric(bd['BFS_NR'], errors='coerce')
+    bd['pop_in_station'] = pd.to_numeric(bd['pop_in_station'],
+                                         errors='coerce').fillna(0.0)
+    bd = bd.dropna(subset=['station_id', 'BFS_NR'])
+    bd['station_id'] = bd['station_id'].astype(int)
+    bd['BFS_NR'] = bd['BFS_NR'].astype(int)
+    bd = bd[(bd['station_id'] > 0) & (bd['pop_in_station'] > 0)]
+    return bd[['station_id', 'BFS_NR', 'pop_in_station']].reset_index(drop=True)
+
+
+def _station_weight_matrix(bd: pd.DataFrame, station_ids: list,
+                           gateway_ids: set, valid_districts: set) -> tuple:
+    """Row-normalised station x district weight matrix from pop_in_station.
+
+    Every station in station_ids gets a row: breakdown-weighted stations carry
+    their allocated population summed per Bezirk; gateways (no ZH communes by
+    design) and weightless stations carry full weight on the CH pseudo-district
+    — gateways silently, others with a printed warning. Breakdown rows whose
+    Bezirk has no trajectory are reassigned to CH with a printed count.
+
+    Args:
+        bd: cleaned weight rows from _read_breakdown_weights.
+
+    Returns:
+        (W, classification): W indexed by station_id, columns = districts;
+        classification dict with 'weighted'/'gateway'/'fallback' id lists.
+    """
+    bd = bd[bd['station_id'].isin(set(station_ids))].copy()
+    communes = _build_communes_population_df(settings.start_year_scenario)
+    bfs_to_bezirk = dict(zip(communes['gemeinde_bfs_nr'].astype(int),
+                             communes['bezirk']))
+    bd['district'] = bd['BFS_NR'].map(bfs_to_bezirk)
+    bad = bd['district'].isna() | ~bd['district'].isin(valid_districts)
+    if bad.any():
+        print(f"  {int(bad.sum())} breakdown row(s) with unknown/unmapped "
+              f"Bezirk -> CH trajectory")
+        bd.loc[bad, 'district'] = _CH_DISTRICT
+
+    W = (bd.groupby(['station_id', 'district'])['pop_in_station'].sum()
+         .unstack(fill_value=0.0))
+    if _CH_DISTRICT not in W.columns:
+        W[_CH_DISTRICT] = 0.0
+    weighted = set(W.index)
+    gateway = sorted(s for s in station_ids
+                     if s not in weighted and s in gateway_ids)
+    fallback = sorted(s for s in station_ids
+                      if s not in weighted and s not in gateway_ids)
+    if fallback:
+        print(f"  WARNING: {len(fallback)} OD station(s) without "
+              f"pop_in_station weights and not gateways -> CH trajectory: "
+              f"{fallback}")
+    extra = pd.DataFrame(0.0, columns=W.columns,
+                         index=pd.Index(gateway + fallback, name='station_id'))
+    extra[_CH_DISTRICT] = 1.0
+    W = pd.concat([W, extra]).sort_index()
+    W = W.div(W.sum(axis=1), axis=0)
+    return W, {'weighted': sorted(weighted), 'gateway': gateway,
+               'fallback': fallback}
+
+
+def _station_factor_frame(W: pd.DataFrame, district_factors: pd.DataFrame,
+                          start_year: int) -> pd.DataFrame:
+    """Per-station factors F = G @ W^T as long (scenario, year, station_id,
+    factor); asserts factor == 1.0 at start_year."""
+    G = district_factors.pivot(index=['scenario', 'year'], columns='district',
+                               values='factor')
+    missing = [d for d in W.columns if d not in G.columns]
+    if missing:
+        raise ValueError(f"No growth trajectory for district(s): {missing}")
+    F = pd.DataFrame(G[W.columns].values @ W.T.values,
+                     index=G.index, columns=W.index)
+    base = F.xs(start_year, level='year')
+    if not np.allclose(base.values, 1.0, atol=1e-9):
+        raise AssertionError(
+            "Base-year station factors deviate from 1.0 — check trajectories")
+    long = F.stack().rename('factor').reset_index()
+    long['station_id'] = long['station_id'].astype(int)
+    return long[['scenario', 'year', 'station_id', 'factor']]
+
+
+def _modal_distance_table(n_scenarios: int, start_year: int,
+                          end_year: int) -> pd.DataFrame:
+    """Station-independent (scenario, year, modal_factor, distance_factor),
+    relative to start_year; legacy parameters kept (the hardcoded values from
+    generate_od_growth_scenarios). Memoised like the district table."""
+    key = (n_scenarios, start_year, end_year)
+    if key in _MODAL_DISTANCE_MEMO:
+        return _MODAL_DISTANCE_MEMO[key]
+    modal = generate_modal_split_scenarios(
+        avg_growth_rate=0.0045, start_value=0.209, start_year=start_year,
+        end_year=end_year, n_scenarios=n_scenarios, start_std_dev=0.015,
+        end_std_dev=0.045, std_dev_shocks=0.02)
+    dist = generate_distance_per_person_scenarios(
+        avg_growth_rate=-0.0027, start_value=39.79, start_year=start_year,
+        end_year=end_year, n_scenarios=n_scenarios, start_std_dev=0.005,
+        end_std_dev=0.015, std_dev_shocks=0.015)
+
+    def _factorise(df, value_col, name):
+        wide = df.pivot(index='scenario', columns='year', values=value_col)
+        fac = wide.div(wide[start_year].replace(0, np.nan), axis=0).fillna(1.0)
+        long = (fac.reset_index()
+                .melt(id_vars='scenario', var_name='year', value_name=name))
+        long['scenario'] = long['scenario'].astype(int) + 1
+        long['year'] = long['year'].astype(int)
+        return long
+
+    out = _factorise(modal, 'modal_split', 'modal_factor').merge(
+        _factorise(dist, 'distance_per_person', 'distance_factor'),
+        on=['scenario', 'year'])
+    _MODAL_DISTANCE_MEMO[key] = out
+    return out
+
+
+def _plot_factor_store_inputs(n_scenarios: int, start_year: int, end_year: int,
+                              districts: List[str] = None) -> None:
+    """Fan plots (range/mean/90% band) for the catchment-area districts, the CH
+    pseudo-district, modal split and distance per person.
+
+    ``districts`` is the catchment Bezirke (those contributing population to the
+    catchment's stations — the factor store's weight-matrix columns); when None
+    (standalone use) the first three Bezirke are plotted as a fallback.
+    """
+    plot_dir = os.path.join(paths.MAIN, paths.PLOT_SCENARIOS)
+    os.makedirs(plot_dir, exist_ok=True)
+    refs = get_bezirk_population_scenarios()
+    if districts:
+        targets = [(d, refs[d]) for d in sorted(districts) if d in refs]
+    else:
+        targets = list(refs.items())[:3]
+    targets.append(('CH', _get_ch_population_reference(start_year, end_year)))
+    for district, ref in targets:
+        scen = generate_population_scenarios(ref, start_year, end_year,
+                                             n_scenarios)
+        label = f"population_{district.replace(' ', '_')}"
+        plot_scenarios_with_range(scen.rename(columns={'population': label}),
+                                  plot_dir, label, title=f"Population {district}")
+    modal = generate_modal_split_scenarios(
+        avg_growth_rate=0.0045, start_value=0.209, start_year=start_year,
+        end_year=end_year, n_scenarios=n_scenarios, start_std_dev=0.015,
+        end_std_dev=0.045, std_dev_shocks=0.02)
+    plot_scenarios_with_range(modal, plot_dir, 'modal_split')
+    dist = generate_distance_per_person_scenarios(
+        avg_growth_rate=-0.0027, start_value=39.79, start_year=start_year,
+        end_year=end_year, n_scenarios=n_scenarios, start_std_dev=0.005,
+        end_std_dev=0.015, std_dev_shocks=0.015)
+    plot_scenarios_with_range(dist, plot_dir, 'distance_per_person')
+    print(f"  Scenario fan plots -> {plot_dir}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Legacy full-OD pickle path (main.py / main_cap.py only) — kept untouched
+# ═══════════════════════════════════════════════════════════════════════════
 
 def get_bezirk_population_scenarios():
     # Read the Swiss population scenario CSV with "," separator
@@ -338,7 +1022,8 @@ def plot_population_scenarios(scenarios_df: pd.DataFrame, n_to_plot: int = 10):
 def plot_scenarios_with_range(
         scenarios_df: pd.DataFrame,
         save_path,
-        value_col: str = "population"
+        value_col: str = "population",
+        title: str = None
 ):
     """
     Plot the range of all scenarios for a given value column as a shaded area
@@ -349,6 +1034,8 @@ def plot_scenarios_with_range(
     - scenarios_df: DataFrame with columns "scenario", "year", and the specified value column
     - save_path: path where the plot will be saved
     - value_col: name of the column in scenarios_df containing the values to plot
+    - title: optional chart-title prefix; defaults to the title-cased value_col (so a
+      caller can render e.g. 'CH' that title() would otherwise lowercase to 'Ch').
     """
     # compute per-year stats
     year_stats = (
@@ -410,7 +1097,7 @@ def plot_scenarios_with_range(
     ax.yaxis.set_major_formatter(EngFormatter(unit='', places=2))
 
     # labels & styling
-    col_title = value_col.replace('_', ' ').title()
+    col_title = title if title is not None else value_col.replace('_', ' ').title()
     ax.set_xlabel("Year")
     ax.set_title(f"{col_title} Scenarios: Range, Mean and 90% Confidence Interval")
     ax.grid(True)
@@ -801,7 +1488,7 @@ def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, u
     scenarios = generate_od_growth_scenarios(
         _get_od_base_matrix(start_year),
         pd.read_excel(paths.COMMUNE_TO_STATION_PATH),
-        _build_communes_population_df(settings.POPULATION_BASE_YEAR),
+        _build_communes_population_df(settings.start_year_scenario),
         start_year=start_year,
         end_year=end_year,
         num_of_scenarios=num_of_scenarios,
@@ -826,4 +1513,62 @@ def get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, u
 
 
 if __name__ == '__main__':
-    get_random_scenarios(start_year=2018, end_year=2100, num_of_scenarios=100, use_cache=False, do_plot=True)
+    # Standalone CLI (module-CLI pattern): prompts with settings defaults.
+    # Through main_new, phase_7_scenarios passes the settings values directly.
+    os.chdir(paths.MAIN)
+    print("=== Phase 7: scenario factor store (standalone) ===")
+
+    _svc_default = settings.SVC_VERSION
+    if _svc_default == 'Build_New':
+        _svc_default = settings.SVC_BUILD_NEW_NAME
+    _svc = input(f"Service version [{_svc_default}]: ").strip() or _svc_default
+
+    import infra_ints_orchestrator as _io
+    _infra_default = _io._resolve_base_version()
+    _infra = (input(f"Infrastructure version [{_infra_default}]: ").strip()
+              or _infra_default)
+
+    _method_default = ('municipal' if settings.CATCHMENT_METHOD == 'Municipal'
+                       else 'pt_feeder')
+    _method = (input(f"OD method (pt_feeder/municipal) [{_method_default}]: ")
+               .strip() or _method_default)
+    _attr_default = (settings.OD_ATTRIBUTION_MODE if _method == 'pt_feeder'
+                     else 'municipal')
+    _attr = (input(f"Attribution [{_attr_default}]: ").strip() or _attr_default)
+
+    _n = int(input(f"Number of scenarios [{settings.amount_of_scenarios}]: ")
+             .strip() or settings.amount_of_scenarios)
+    _y0 = int(input(f"Start year [{settings.start_year_scenario}]: ")
+              .strip() or settings.start_year_scenario)
+    _y1 = int(input(f"End year [{settings.end_year_scenario}]: ")
+              .strip() or settings.end_year_scenario)
+
+    _plots_default = 'y' if settings.PLOT_SCENARIOS else 'n'
+    _plots = (input(f"Generate plots? (y/n) [{_plots_default}]: ").strip()
+              or _plots_default).lower() == 'y'
+    _cache_default = 'y' if settings.use_cache_scenarios else 'n'
+    _cache = (input(f"Use cache? (y/n) [{_cache_default}]: ").strip()
+              or _cache_default).lower() == 'y'
+
+    build_scenario_factor_store(_svc, _infra, _method, _attr, _n, _y0, _y1,
+                                make_plots=_plots, use_cache=_cache)
+
+    if _method == 'pt_feeder':
+        _ov = (input("Build per-svc-int overrides? (y/n) [y]: ").strip()
+               or 'y').lower() == 'y'
+        if _ov:
+            import svc_ints_orchestrator as _so
+            _combo = f'{_infra}__{_svc}'
+            _records = [r for t in _so.SUPPORTED_SVC_INT_TYPES
+                        for r in _so.read_records(t, network=_combo)]
+            if not _records:
+                print(f"  No svc-ints registered for combo '{_combo}'.")
+            for _rec in _records:
+                build_svc_int_factor_overrides(
+                    str(_rec['int_id']), _svc, _infra, _method, _attr,
+                    _n, _y0, _y1, use_cache=_cache)
+
+    _val = (input("Run store validation? (y/n) [n]: ").strip()
+            or 'n').lower() == 'y'
+    if _val:
+        validate_factor_store(_svc, _infra, _method, _attr, _n, _y0, _y1)

@@ -1,20 +1,22 @@
-# catchment_allocate.py
-#
-# Station catchment area generation for infraScanRail.
-# Houses both the municipal (centroid-based) and PT-Feeder (GTFS multimodal)
-# methods. Both methods are always run so their results can be compared.
-#
-# Public entry point: get_catchment(use_cache: bool) -> None
-#
-# Directory layout:
-#   Data outputs  -> data/Catchment_Area/            (shared Step 1)
-#                    data/Catchment_Area/Municipal/   (municipal method)
-#                    data/Catchment_Area/PT_Feeder/   (PT-feeder method)
-#   Plot outputs  -> plots/Catchment_Area/            (shared Step 1 plots)
-#                    plots/Catchment_Area/Municipal/  (municipal method)
-#                    plots/Catchment_Area/PT_Feeder/  (PT-feeder method)
+"""Station catchment area generation for infraScanRail (Phase 4A).
+
+Last modified: 2026-06-20
+
+Houses both the Municipal (centroid-based) and PT-Feeder (GTFS multimodal)
+allocation methods. On the main_new path only the active settings.CATCHMENT_METHOD
+runs; the standalone CLI can run both ('both') to produce the comparison diff plot.
+
+Public entry point: get_catchment(use_cache, method, feeder_base, rail_base, ...).
+
+Directory layout:
+  Data outputs  -> data/Catchment_Area/<svc>/{Municipal,PT_Feeder}/
+  Plot outputs  -> plots/Catchment_Area/<svc>/{Municipal,PT_Feeder}/
+Shared inputs (boundary, pop/employment grids, per-municipality summary) are
+produced by catchment_base.py (Phase 2) and consumed here.
+"""
 
 import os
+import sys
 import time
 
 import geopandas as gpd
@@ -24,6 +26,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Wedge
+import matplotlib.patheffects as pe
 from scipy.spatial import cKDTree
 from scipy.stats import gaussian_kde
 import fiona
@@ -33,6 +36,7 @@ from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
+import cache_manifest
 import paths
 import settings
 import cost_parameters as cp
@@ -73,13 +77,6 @@ CYCLE_RADIUS_M = 2500    # m - cycling search radius to rail
 
 # noPT sentinel
 NO_PT_ID       = -1
-
-# Access mode codes (used in allocation logic and visualisation)
-MODE_NO_PT  = 0
-MODE_WALK   = 1
-MODE_BUS    = 2
-MODE_TRAM   = 3
-MODE_CYCLE  = 4
 
 # Station search constraint (PT-Feeder method)
 MAX_CANDIDATE_STATIONS = 5
@@ -126,9 +123,9 @@ def _get_active_transfer_penalty_sec(headway_min: float = None) -> float:
     """Return the active transfer penalty (seconds) for a single transfer edge.
 
     'calibrated' + 'fixed_value' → cp.PI_TRANSFER_MIN (12.1 min eq. IVT, pre-weighted)
-    'calibrated' + 'explicit'    → W_TRANSFER * (TRANSFER_WALK_MIN + t_wait(h)) minutes
+    'calibrated' + 'explicit'    → W_TRANSFER * max(TRANSFER_WALK_MIN, t_wait(h)) minutes
     'absolute'   + 'fixed_value' → cp.average_train_change_time (7.1 min, raw)
-    'absolute'   + 'explicit'    → 1.0 * (TRANSFER_WALK_MIN + t_wait(h)) minutes
+    'absolute'   + 'explicit'    → 1.0 * max(TRANSFER_WALK_MIN, t_wait(h)) minutes
 
     Args:
         headway_min: Connecting-service headway (minutes). Only used in 'explicit' model.
@@ -137,7 +134,7 @@ def _get_active_transfer_penalty_sec(headway_min: float = None) -> float:
     if settings.TRANSFER_COST_MODEL == 'explicit':
         h = headway_min if headway_min is not None else float('inf')
         w_transfer = 1.0 if is_abs else float(cp.W_TRANSFER)
-        return w_transfer * (cp.TRANSFER_WALK_MIN + cp.t_wait_min(h)) * 60.0
+        return w_transfer * max(cp.TRANSFER_WALK_MIN, cp.t_wait_min(h)) * 60.0
     if is_abs:
         return float(cp.average_train_change_time) * 60.0
     return float(cp.PI_TRANSFER_MIN) * 60.0
@@ -159,6 +156,14 @@ _INFRA_PROJECTION: str = None
 # the standalone CLI prompts for ambiguous choices). False when called from
 # another orchestrator (e.g. main_new.py), in which case cached defaults win.
 _INTERACTIVE_MODE: bool = False
+
+
+def _can_prompt() -> bool:
+    """True when an interactive terminal is attached (stdin is a real TTY)."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        return False
 
 # Temporal variant → subfolder + filename-suffix mapping for the unprojected
 # rail/feeder GeoPackages. Keys:
@@ -320,6 +325,13 @@ def _assign_stations_to_municipalities(muni_gdf, rail_stations, bfs_col, name_co
                 print(f"    [{i + 1}] {sn} "
                       f"({st['_dist']:.0f}m from centroid)")
 
+            if not _can_prompt():
+                raise FileNotFoundError(
+                    f"Municipality '{muni_name}' has {len(sorted_st)} candidate "
+                    f"stations and no cached station_assignment.csv to resolve the "
+                    f"choice, but no interactive terminal is available. Run "
+                    f"catchment_allocate standalone "
+                    f"(python catchment_allocate.py) to build the assignment first.")
             while True:
                 choice = input(f"  Select station for '{muni_name}' "
                                f"[1-{len(sorted_st)}]: ")
@@ -361,7 +373,7 @@ def _run_municipal_method(boundary, rail_stations, pop_grid=None, empl_grid=None
     gpd.GeoDataFrame or None
         Municipal catchment polygons (for diff plot), or None on failure.
     """
-    print("\n--- Municipal Method ---")
+    print("\n--- 4A Municipal Method ---")
 
     # Load municipalities — only those whose centroid falls within the
     # study-area boundary (drops peripheral municipalities that merely
@@ -493,7 +505,6 @@ def _run_municipal_method(boundary, rail_stations, pop_grid=None, empl_grid=None
         make_phase_4a_plots(
             method='municipal',
             sa_boundary=None,
-            ca_boundary=boundary,
             allocation=pd.DataFrame(),    # no per-cell allocation for municipal
             rail_stations=rail_stations,
             pop_grid=pop_grid,
@@ -1100,6 +1111,238 @@ def _plot_municipal_catchments_network(muni_catchment, rail_stations,
     )
 
 
+# Graph-colouring palette shared with _build_visualisation (right panel).
+_CATCHMENT_PALETTE = [
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+    '#8c564b', '#e377c2', '#bcbd22', '#17becf', '#393b79',
+    '#637939', '#8c6d31', '#843c39', '#7b4173', '#5254a3',
+]
+
+
+def _colour_catchments_graph(clipped_catchment, id_col):
+    """Balanced 8-colour graph colouring of adjacent catchments.
+
+    Mirrors the colouring in `_build_visualisation` so the fills here match the
+    station-allocation panel. Returns {station_id -> hex colour}.
+    """
+    G = nx.Graph()
+    for i in range(len(clipped_catchment)):
+        G.add_node(clipped_catchment.loc[i, id_col])
+    for i in range(len(clipped_catchment)):
+        for j in range(i + 1, len(clipped_catchment)):
+            gi = clipped_catchment.loc[i, 'geometry']
+            gj = clipped_catchment.loc[j, 'geometry']
+            if gi.intersects(gj):
+                inter = gi.intersection(gj)
+                if hasattr(inter, 'length') and inter.length > 0:
+                    G.add_edge(clipped_catchment.loc[i, id_col],
+                               clipped_catchment.loc[j, id_col])
+    n_target = min(8, len(_CATCHMENT_PALETTE))
+    usage = [0] * n_target
+    coloring = {}
+    for node in sorted(G.nodes(), key=lambda n: -G.degree(n)):
+        neigh = {coloring[v] for v in G.neighbors(node) if v in coloring}
+        cands = [c for c in range(n_target) if c not in neigh] or list(range(n_target))
+        best = min(cands, key=lambda c: (usage[c], c))
+        coloring[node] = best
+        usage[best] += 1
+    return {sid: _CATCHMENT_PALETTE[cidx] for sid, cidx in coloring.items()}
+
+
+def _plot_catchment_areas_with_network(allocation, catchment_gdf, rail_stations,
+                                       boundary, output_dir, method_label,
+                                       temporal='full_day'):
+    """Combined overview: graph-coloured catchment cells + rail/feeder network,
+    stations filled with their catchment colour and labelled with the BAV Code,
+    plus a right-hand column with the legend and three zoom insets (Zürich,
+    Winterthur, study area).
+
+    Cells are coloured by `id_point` from `allocation` — the same source as the
+    `catchment_visualisation_*_areas` panel — so colours stay consistent; cells
+    with no catchment (id_point == NO_PT_ID, populated/FTE) are drawn grey.
+
+    Args:
+        allocation:    Per-cell allocation with E_KOORD/N_KOORD, id_point.
+        catchment_gdf: Dissolved catchment polygons (column `id`/`train_station`)
+                       used only for the graph-colouring adjacency.
+        rail_stations: Rail stations for plotting; uses `id_point` and (when
+                       present) the BAV `Code` column for the in-dot labels.
+        boundary:      Catchment-area polygon (clipping + main-map extent).
+        output_dir:    Directory for the output PDF.
+        method_label:  e.g. 'PT-Feeder' — title + output filename slug.
+        temporal:      Passed to the line loaders.
+    """
+    if allocation is None or len(allocation) == 0 or catchment_gdf is None or catchment_gdf.empty:
+        print(f"  Skipping {method_label} areas+network overview — no allocation/catchment")
+        return
+    print(f"  Building {method_label} catchment areas + network overview ...")
+
+    GREY = '#d9d9d9'
+    CA_LW, SA_LW = 1.8, round(1.8 * 0.7, 2)   # study-area border 30% thinner
+    RAIL_COLOUR = 'black'
+    mode_colours = {'bus': '#0000FF', 'tram': '#FF00FF', 'metro': '#00246B',
+                    'ship': '#004B8D', 'funicular': '#1B5E20'}
+    mode_labels = {'bus': 'Bus', 'tram': 'Tram', 'metro': 'Metro',
+                   'ship': 'Ship', 'funicular': 'Funicular'}
+
+    # --- base layers ---------------------------------------------------------
+    boundary_gdf = gpd.GeoDataFrame(geometry=[boundary], crs=CODEBASE_CRS)
+    sa_geom = _load_sa_boundary()
+    sa_bnd_gdf = (gpd.GeoDataFrame(geometry=[sa_geom], crs=CODEBASE_CRS)
+                  if sa_geom is not None else None)
+    lakes = _load_lakes_for_extent(boundary, scope='ca')
+
+    feeder_lines = _load_feeder_lines(boundary, temporal)
+    rail_lines = _load_rail_lines_for_plot(boundary, temporal)
+    if feeder_lines is not None and not feeder_lines.empty:
+        feeder_lines = gpd.clip(feeder_lines, boundary)
+    if rail_lines is not None and not rail_lines.empty:
+        rail_lines = gpd.clip(rail_lines, boundary)
+    plotted_modes = [m for m in mode_colours
+                     if feeder_lines is not None and not feeder_lines.empty
+                     and len(feeder_lines[feeder_lines['mode'].fillna('').str.lower() == m])]
+
+    # --- graph colouring (exclude the id == -1 no-PT pseudo-catchment) -------
+    clipped = gpd.clip(catchment_gdf, boundary).reset_index(drop=True)
+    id_col = 'id' if 'id' in clipped.columns else 'train_station'
+    clipped = clipped[clipped[id_col] != NO_PT_ID].reset_index(drop=True)
+    color_map = _colour_catchments_graph(clipped, id_col)
+    cmap_str = {str(k): v for k, v in color_map.items()}
+
+    # --- cells coloured by id_point (no-catchment -> grey) -------------------
+    al = allocation.copy()
+    al['geometry'] = [box(e, n, e + CELL_SIZE_M, n + CELL_SIZE_M)
+                      for e, n in zip(al['E_KOORD'], al['N_KOORD'])]
+    al = gpd.GeoDataFrame(al, geometry='geometry', crs=CODEBASE_CRS)
+    al = gpd.clip(al, boundary)
+    al['_cellcolour'] = al['id_point'].map(color_map).fillna(GREY)
+
+    # --- stations: fill = catchment colour, label = BAV Code -----------------
+    prep_bnd = prep(boundary)
+    rs = rail_stations[rail_stations.geometry.apply(lambda p: prep_bnd.contains(p))].copy()
+    rs['idp'] = rs['id_point'].astype(str)
+    rs['has_cat'] = rs['idp'].isin(cmap_str.keys())
+    rs['fill'] = rs['idp'].map(cmap_str).fillna(GREY)
+    rs['code'] = rs['Code'].astype(str) if 'Code' in rs.columns else ''
+    rs_yes, rs_no = rs[rs['has_cat']], rs[~rs['has_cat']]
+
+    def draw(ax, code_fs, sa_boundary=False):
+        ax.set_facecolor('#E8E8E8')
+        boundary_gdf.plot(ax=ax, color='white', edgecolor='none', zorder=0)
+        al.plot(ax=ax, color=al['_cellcolour'].tolist(), edgecolor='none',
+                alpha=0.85, zorder=2)
+        if lakes is not None and not lakes.empty:
+            lakes.plot(ax=ax, color='#A8D8EA', edgecolor='none', zorder=3)
+        for m in plotted_modes:
+            feeder_lines[feeder_lines['mode'].fillna('').str.lower() == m].plot(
+                ax=ax, color=mode_colours[m], linewidth=0.6, alpha=0.9, zorder=4)
+        if rail_lines is not None and not rail_lines.empty:
+            rail_lines.plot(ax=ax, color=RAIL_COLOUR, linewidth=1.3, zorder=5)
+        if sa_boundary:
+            if sa_bnd_gdf is not None:
+                sa_bnd_gdf.boundary.plot(ax=ax, color='black', linewidth=SA_LW,
+                                         linestyle='--', zorder=6)
+        else:
+            boundary_gdf.boundary.plot(ax=ax, color='black', linewidth=CA_LW,
+                                       linestyle='--', zorder=6)
+        halo = [pe.withStroke(linewidth=code_fs * 0.32, foreground='white')]
+        for sub, dot_z, txt_z in ((rs_no, 6.3, 6.4), (rs_yes, 7, 8)):
+            if not len(sub):
+                continue
+            ax.scatter(sub.geometry.x, sub.geometry.y, s=28,
+                       c=(GREY if sub is rs_no else sub['fill'].tolist()),
+                       edgecolors='black', linewidths=0.7, marker='o', zorder=dot_z)
+            for _, r in sub.iterrows():
+                if r['code'] and r['code'].lower() != 'nan':
+                    ax.text(r.geometry.x, r.geometry.y, r['code'],
+                            ha='center', va='center', fontsize=code_fs,
+                            color='black', zorder=txt_z, clip_on=True,
+                            path_effects=halo)
+        ax.set_aspect('equal')
+
+    def legend_handles():
+        h = [Patch(facecolor=_CATCHMENT_PALETTE[0], edgecolor='white', linewidth=0.4,
+                   label='Station catchment'),
+             Patch(facecolor=GREY, edgecolor='none', label='Populated cells, no catchment')]
+        for m in plotted_modes:
+            h.append(Line2D([0], [0], color=mode_colours[m], lw=1.4,
+                            label=mode_labels[m] + ' feeder'))
+        h += [Line2D([0], [0], color=RAIL_COLOUR, lw=1.6, label='Rail line'),
+              Line2D([0], [0], marker='o', color='w', markerfacecolor='#bcbd22',
+                     markeredgecolor='black', markersize=9, label='Rail Station'),
+              Line2D([0], [0], color='black', lw=CA_LW, linestyle='--',
+                     label='Catchment area boundary'),
+              Line2D([0], [0], color='black', lw=SA_LW, linestyle='--',
+                     label='Study area boundary')]
+        return h
+
+    # --- inset windows: administrative / study-area extents ------------------
+    def _bounds_win(b):
+        return (b[0], b[2], b[1], b[3])
+    insets = []
+    muni_path = os.path.join(paths.MAIN, paths.MUNICIPAL_BOUNDARIES_GPKG)
+    if os.path.exists(muni_path):
+        muni = gpd.read_file(muni_path).to_crs(CODEBASE_CRS)
+        for name, bfs in (('Zürich', 261), ('Winterthur', 230)):
+            g = muni[muni['bfs_nummer'] == bfs]
+            if not g.empty:
+                insets.append((name, _bounds_win(g.total_bounds)))
+    if sa_geom is not None:
+        insets.append(('Study area', _bounds_win(sa_geom.bounds)))
+
+    # === figure ==============================================================
+    fig = plt.figure(figsize=(22, 18))
+    TOP, BOTTOM = 0.95, 0.05
+    COL_W = 0.2128
+    COL_LEFT = 0.95 - COL_W
+    GAP_LR = 0.006
+    H_INSET = (COL_W * 22) / (1.06 * 18)
+
+    ax_main = fig.add_axes([0.045, BOTTOM, COL_LEFT - GAP_LR - 0.045, TOP - BOTTOM])
+    ax_main.set_anchor('E')
+    draw(ax_main, code_fs=2.4)
+    bx0, by0, bx1, by1 = boundary.bounds
+    mpad = 200
+    ax_main.set_xlim(bx0 - mpad, bx1 + mpad)
+    ax_main.set_ylim(by0 - mpad, by1 + mpad)
+    ax_main.set_xlabel('E [m]')
+    ax_main.set_ylabel('N [m]')
+    _add_map_elements(ax_main)
+    ax_main.set_title(f'{method_label} Catchment Areas with Network', fontsize=16)
+
+    # legend pinned to the plotting-area top; measure its height for equal gaps
+    ax_leg = fig.add_axes([COL_LEFT, BOTTOM, COL_W, TOP - BOTTOM])
+    ax_leg.axis('off')
+    ax_leg.patch.set_visible(False)
+    leg = ax_leg.legend(handles=legend_handles(), loc='upper left',
+                        bbox_to_anchor=(0.0, 1.0, 1.0, 0.0), mode='expand',
+                        fontsize=12, frameon=True, facecolor='white',
+                        edgecolor='black', borderaxespad=0)
+    fig.canvas.draw()
+    h_leg = leg.get_window_extent(fig.canvas.get_renderer()).height / fig.bbox.height
+
+    n_ins = max(len(insets), 1)
+    gap_v = ((TOP - BOTTOM) - h_leg - n_ins * H_INSET) / n_ins
+    for k, (name, (x0, x1, y0, y1)) in enumerate(insets):
+        y_box = TOP - h_leg - (k + 1) * (gap_v + H_INSET)
+        ax_i = fig.add_axes([COL_LEFT, y_box, COL_W, H_INSET])
+        draw(ax_i, code_fs=4.5, sa_boundary=True)
+        ax_i.set_xlim(x0, x1)
+        ax_i.set_ylim(y0, y1)
+        ax_i.set_xticks([]); ax_i.set_yticks([])
+        ax_i.text(1.04, 0.5, name, transform=ax_i.transAxes, rotation=90,
+                  va='center', ha='center', fontsize=15, fontweight='bold')
+        for sp in ax_i.spines.values():
+            sp.set_linewidth(1.4)
+
+    slug = method_label.lower().replace(' ', '_').replace('-', '_')
+    out_path = os.path.join(output_dir, f'catchment_{slug}_areas_network_insets.pdf')
+    os.makedirs(output_dir, exist_ok=True)
+    fig.savefig(out_path, bbox_inches='tight', dpi=250)
+    plt.close(fig)
+    print(f"    Saved -> {out_path}")
+
+
 # ===============================================================================
 # STEP 2-PT: PT-FEEDER BUFFERS
 # ===============================================================================
@@ -1175,6 +1418,11 @@ def _load_rail_stations(boundary, temporal='full_day', buffer=BUFFER_RAIL_M):
     # use it directly as id_point without any external crosswalk file.
     rail['diva_nr'] = None
     rail['id_point'] = rail['stop_id']
+
+    # The enriched rail_stops carries the nodes.gpkg schema (name column `Name`,
+    # no `stop_name`); map it so downstream name lookups don't degrade to ids.
+    if 'stop_name' not in rail.columns and 'Name' in rail.columns:
+        rail = rail.rename(columns={'Name': 'stop_name'})
 
     keep_cols = ['stop_id', 'stop_name', 'diva_nr', 'id_point', 'mode', 'geometry']
     for c in keep_cols:
@@ -2284,24 +2532,20 @@ def _compute_variant_freq_lookup() -> dict:
     """Aggregate per-variant frequency + service_period across all temporal
     subfolders (cross-period view).
 
-    Uses `_load_lines_all_periods` to read All_Day + Peak + Off_Peak files
-    with their canonical service_period filters (All_Day no filter, Peak →
-    peak_only, Off_Peak → offpeak_only). Cross-subfolder duplicates are then
-    removed on (route_id, variant_rank, direction_id) so each variant-
-    direction row contributes once. The CLI `settings.TEMPORAL` does NOT
-    scope this helper — until a concrete use case justifies per-temporal
-    variant data here, every sheet that consumes line frequencies sees the
-    full cross-period view.
+    Uses `_load_lines_all_periods` to read the full-day top-level lines file
+    (the complete union of all services). Rows are de-duplicated on
+    (route_id, variant_rank, direction_id) so each variant-direction row
+    contributes once.
 
     Per (route_id, variant_rank) aggregation:
       - freq_am / freq_pm / freq_op : mean of freq_{am,pm,op}_peak_dep_hr /
-        freq_offpeak_dep_hr across direction rows.
-      - total_dep : sum across direction rows over the ARE 06:00-20:00 window.
+        freq_offpeak_dep_hr across direction rows (retained, diagnostic only).
+      - total_dep : mean across direction rows over the ARE 06:00-20:00 window
+        (per-direction, matches _compute_stop_gueteklassen).
       - service_period : most common non-placeholder tag across the rows;
         falls back to 'unknown' only when no row carried a recognised tag.
-      - freq_per_h : per-variant period-specific dep/h:
-            peak_only            -> max(freq_am, freq_pm)
-            offpeak_only / all_day -> freq_op
+      - freq_per_h : whole-day average dep/h per direction
+        (= total_dep / (GK_WINDOW_MIN/60) = freq_per_h_window).
 
     Returns dict[(route_id_str, variant_rank_int)] -> dict of the columns
     above. Empty dict when no lines files are available.
@@ -2340,15 +2584,16 @@ def _compute_variant_freq_lookup() -> dict:
             .agg(freq_am=('freq_am_peak_dep_hr', 'mean'),
                  freq_pm=('freq_pm_peak_dep_hr', 'mean'),
                  freq_op=('freq_offpeak_dep_hr', 'mean'),
-                 total_dep=('total_dep', 'sum'),
+                 total_dep=('total_dep', 'mean'),
                  service_period=('service_period', _sp_mode))
             .reset_index())
 
-    def _per_period_freq(row):
-        if row['service_period'] == 'peak_only':
-            return max(float(row['freq_am'] or 0.0), float(row['freq_pm'] or 0.0))
-        return float(row['freq_op'] or 0.0)
-    agg['freq_per_h'] = agg.apply(_per_period_freq, axis=1)
+    # Whole-day average dep/h per direction (= freq_per_h_window). Uses the
+    # per-direction mean of total_dep over the ARE 06:00-20:00 window
+    # (GK_WINDOW_MIN), matching _compute_stop_gueteklassen so stop-level
+    # dep_per_h / wait_min stay consistent with the Güteklasse headway. The
+    # per-period freq_am/pm/op columns are retained for diagnostics only.
+    agg['freq_per_h'] = agg['total_dep'] / (GK_WINDOW_MIN / 60.0)
 
     return agg.set_index(['route_id_str', 'variant_rank_i']).to_dict('index')
 
@@ -2642,9 +2887,9 @@ def _build_pt_stops_sa_sheet(feeder_stops, feeder_segments, feeder_graph,
         sid = r['stop_id']
         lines = sorted(stop_lines_map.get(sid, set()))
         # dep_per_h = Σ freq_per_h across every (route_id, variant_rank) visiting
-        # this stop. Each variant's freq_per_h is the period-specific value
-        # produced by `_compute_variant_freq_lookup` (peak_only → max(AM, PM);
-        # offpeak_only / all_day → off-peak).
+        # this stop. Each variant's freq_per_h is the whole-day average
+        # (total_dep / (GK_WINDOW_MIN/60) = freq_per_h_window) from
+        # `_compute_variant_freq_lookup`, consistent with the ARE Güteklasse.
         dep_h = sum(float(freq_per_v.get(vk, {}).get('freq_per_h', 0.0) or 0.0)
                     for vk in stop_variants_map.get(sid, set()))
         # Implicit headway from the per-line sum; wait via the same piecewise
@@ -3036,10 +3281,22 @@ def _build_visualisation(allocation, grid, rail_stations, boundary, method_label
                         G.add_edge(clipped_catchment.loc[i, id_col],
                                    clipped_catchment.loc[j, id_col])
 
-        coloring = nx.coloring.greedy_color(G, strategy='largest_first')
-        n_colors = max(coloring.values()) + 1 if coloring else 1
-        color_map = {sid: boundary_palette[cidx % len(boundary_palette)]
-                     for sid, cidx in coloring.items()}
+        # Balanced 8-colour assignment: keep bordering catchments distinct but
+        # spread usage across 8 palette colours. Plain greedy minimisation
+        # collapsed to ~5 colours, so many non-adjacent catchments reused a
+        # colour and were ambiguous. Largest-degree first; each station takes the
+        # least-globally-used colour that no bordering catchment already holds.
+        n_target = min(8, len(boundary_palette))
+        usage = [0] * n_target
+        coloring = {}
+        for node in sorted(G.nodes(), key=lambda n: -G.degree(n)):
+            neigh = {coloring[v] for v in G.neighbors(node) if v in coloring}
+            cands = [c for c in range(n_target) if c not in neigh] or list(range(n_target))
+            best = min(cands, key=lambda c: (usage[c], c))
+            coloring[node] = best
+            usage[best] += 1
+        n_colors = len(set(coloring.values()))
+        color_map = {sid: boundary_palette[cidx] for sid, cidx in coloring.items()}
         max_deg = max(dict(G.degree()).values()) if G.degree() else 0
         print(f"    Graph colouring: {n_colors} colours for "
               f"{len(clipped_catchment)} station catchments (max adjacency {max_deg})")
@@ -3079,58 +3336,8 @@ def _build_visualisation(allocation, grid, rail_stations, boundary, method_label
         ax.set_ylabel(ylabel)
         _add_map_elements(ax)
 
-    # --- Figure: 1×2 panels ---
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(26, 11), sharey=True)
-    fig.suptitle(f'Catchment Area Allocation — {method_label}', fontsize=14)
-
-    # ---- Left panel: Access mode ----
-    legend_left = []
-    for mode, color in mode_colors.items():
-        subset = alloc[alloc['access_mode'] == mode]
-        if len(subset) > 0:
-            subset.plot(ax=ax1, color=color, edgecolor='none', alpha=0.85, zorder=2)
-            legend_left.append(
-                Patch(facecolor=color, edgecolor='none', label=mode_labels[mode]))
-    _base_setup(ax1, ylabel='N [m]')
-    legend_left.append(
-        Line2D([0], [0], color='black', linewidth=1.8, linestyle='--',
-               label='Study area boundary'))
-    legend_left.append(
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
-               markeredgecolor='black', markersize=8, label='Rail station'))
-    ax1.set_title('Access Mode', fontsize=13)
-    ax1.legend(handles=legend_left, loc='upper center',
-               bbox_to_anchor=(0.5, -0.06), bbox_transform=ax1.transAxes,
-               ncol=3, fontsize=8, framealpha=0.9, borderaxespad=0)
-
-    # ---- Right panel: Station allocation ----
-    legend_right = []
-    if color_map:
-        for sid, color in color_map.items():
-            subset = alloc[alloc['id_point'] == sid]
-            if len(subset) > 0:
-                subset.plot(ax=ax2, color=color, edgecolor='none', alpha=0.85, zorder=2)
-        legend_right.append(
-            Patch(facecolor=boundary_palette[0], edgecolor='none',
-                  label='Station catchment'))
-    no_pt_cells = alloc[alloc['id_point'] == NO_PT_ID]
-    if len(no_pt_cells) > 0:
-        no_pt_cells.plot(ax=ax2, color='#d9d9d9', edgecolor='none', alpha=0.85, zorder=2)
-    legend_right.append(
-        Patch(facecolor='#d9d9d9', edgecolor='none', label='No access'))
-    legend_right.append(
-        Line2D([0], [0], color='black', linewidth=1.8, linestyle='--',
-               label='Study area boundary'))
-    legend_right.append(
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
-               markeredgecolor='black', markersize=8, label='Rail station'))
-    _base_setup(ax2, ylabel='')
-    ax2.set_title('Station Allocation', fontsize=13)
-    ax2.legend(handles=legend_right, loc='upper center',
-               bbox_to_anchor=(0.5, -0.06), bbox_transform=ax2.transAxes,
-               ncol=3, fontsize=8, framealpha=0.9, borderaxespad=0)
-
     # --- Summary table: Modal Access | Hierarchical | Non-Hierarchical ---
+    # (computed first; it is rendered below the Access-Mode figure only)
     pop_map_d  = grid.set_index('RELI')['NUMMER'].to_dict()
     empl_map_d = empl_grid.set_index('RELI')['NUMMER'].to_dict() if empl_grid is not None else {}
 
@@ -3221,16 +3428,69 @@ def _build_visualisation(allocation, grid, rail_stations, boundary, method_label
             "Hierarchical: walk/PT primary + cycle fallback  |  "
             "Non-Hierarchical: fastest mode wins (cycle competes equally)")
 
-    fig.subplots_adjust(top=0.93, bottom=0.24, wspace=0.02)
-    fig.text(0.5, 0.02, tbl, ha='center', va='bottom',
-             fontsize=7.5, fontfamily='monospace',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.85))
+    slug = method_label.lower().replace(" ", "_")
+    boundary_line = Line2D([0], [0], color='black', linewidth=1.8, linestyle='--',
+                           label='Study area boundary')
+    station_mark  = Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
+                           markeredgecolor='black', markersize=8, label='Rail station')
 
-    out_path = os.path.join(PT_FEEDER_PLOT_DIR,
-                            f'catchment_visualisation_{method_label.lower().replace(" ", "_")}.pdf')
-    fig.savefig(out_path, bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    print(f"    Saved -> {out_path}")
+    # === Figure 1: Access Mode (+ summary table below) ======================
+    fig1, ax1 = plt.subplots(figsize=(13, 11))
+    fig1.suptitle(f'Catchment Area Allocation — {method_label}: Access Mode',
+                  fontsize=14)
+    legend_left = []
+    for mode, color in mode_colors.items():
+        subset = alloc[alloc['access_mode'] == mode]
+        if len(subset) > 0:
+            subset.plot(ax=ax1, color=color, edgecolor='none', alpha=0.85, zorder=2)
+            legend_left.append(
+                Patch(facecolor=color, edgecolor='none', label=mode_labels[mode]))
+    _base_setup(ax1, ylabel='N [m]')
+    legend_left += [boundary_line, station_mark]
+    ax1.set_title('Access Mode', fontsize=13)
+    ax1.legend(handles=legend_left, loc='upper center',
+               bbox_to_anchor=(0.5, -0.06), bbox_transform=ax1.transAxes,
+               ncol=3, fontsize=8, framealpha=0.9, borderaxespad=0)
+    fig1.subplots_adjust(top=0.93, bottom=0.24)
+    fig1.text(0.5, 0.02, tbl, ha='center', va='bottom',
+              fontsize=7.5, fontfamily='monospace',
+              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.85))
+    out_modes = os.path.join(PT_FEEDER_PLOT_DIR,
+                             f'catchment_visualisation_{slug}_modes.pdf')
+    fig1.savefig(out_modes, bbox_inches='tight', dpi=150)
+    plt.close(fig1)
+    print(f"    Saved -> {out_modes}")
+
+    # === Figure 2: Station Allocation (catchment areas) =====================
+    fig2, ax2 = plt.subplots(figsize=(13, 11))
+    fig2.suptitle(f'Catchment Area Allocation — {method_label}: Station Allocation',
+                  fontsize=14)
+    legend_right = []
+    if color_map:
+        for sid, color in color_map.items():
+            subset = alloc[alloc['id_point'] == sid]
+            if len(subset) > 0:
+                subset.plot(ax=ax2, color=color, edgecolor='none', alpha=0.85, zorder=2)
+        legend_right.append(
+            Patch(facecolor=boundary_palette[0], edgecolor='none',
+                  label='Station catchment'))
+    no_pt_cells = alloc[alloc['id_point'] == NO_PT_ID]
+    if len(no_pt_cells) > 0:
+        no_pt_cells.plot(ax=ax2, color='#d9d9d9', edgecolor='none', alpha=0.85, zorder=2)
+    legend_right.append(
+        Patch(facecolor='#d9d9d9', edgecolor='none', label='No access'))
+    legend_right += [boundary_line, station_mark]
+    _base_setup(ax2, ylabel='N [m]')
+    ax2.set_title('Station Allocation', fontsize=13)
+    ax2.legend(handles=legend_right, loc='upper center',
+               bbox_to_anchor=(0.5, -0.06), bbox_transform=ax2.transAxes,
+               ncol=3, fontsize=8, framealpha=0.9, borderaxespad=0)
+    fig2.subplots_adjust(top=0.93, bottom=0.12)
+    out_areas = os.path.join(PT_FEEDER_PLOT_DIR,
+                             f'catchment_visualisation_{slug}_areas.pdf')
+    fig2.savefig(out_areas, bbox_inches='tight', dpi=150)
+    plt.close(fig2)
+    print(f"    Saved -> {out_areas}")
 
 
 # ===============================================================================
@@ -3238,39 +3498,56 @@ def _build_visualisation(allocation, grid, rail_stations, boundary, method_label
 # ===============================================================================
 
 def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
-                     pop_grid, empl_grid, rail_stations, boundary):
-    """Cell-level comparison plot: Municipal vs PT-Feeder station assignment.
+                     pop_grid, empl_grid, rail_stations, boundary,
+                     labels=('Municipal', 'PT-Feeder'), out_path=None,
+                     base_assignment=None):
+    """Cell-level comparison plot: station assignment of two allocations.
 
+    Default use compares Municipal vs PT-Feeder; Phase 6A reuses it for
+    base-vs-developed PT-Feeder by passing the base catchment in the first slot,
+    the svc-int catchment + allocation in the second, and `labels`/`out_path`.
     Only cells with population and/or employment are coloured.  Colours:
       - Same station in both methods       → light grey
       - Different station in both methods   → orange (reassigned)
-      - Municipal only (no PT-Feeder)       → red
-      - PT-Feeder only (no Municipal)       → blue
+      - First method only                   → red
+      - Second method only                  → blue
 
     Combined station catchment boundaries from both methods are overlaid.
 
     Parameters
     ----------
     muni_catchment : gpd.GeoDataFrame
-        Municipal catchment with columns [id_point, geometry], dissolved per station.
+        First catchment with columns [id_point, geometry], dissolved per station.
     pt_catchment : gpd.GeoDataFrame
-        PT-Feeder catchment GPKG with columns [train_station, id, geometry].
+        Second catchment GPKG with columns [train_station, id, geometry].
     pt_allocation : pd.DataFrame
-        PT-Feeder cell allocation with columns [RELI, id_point, E_KOORD, N_KOORD].
+        Second method's cell allocation with [RELI, id_point, E_KOORD, N_KOORD].
     pop_grid, empl_grid : gpd.GeoDataFrame
         Population / employment grids with RELI column.
     rail_stations : gpd.GeoDataFrame
     boundary : shapely.Polygon
+    labels : tuple(str, str)
+        Display names of the (first, second) allocation in title/legend/table.
+    out_path : str, optional
+        Output PDF path; default keeps the Municipal-vs-PT-Feeder location.
     """
     if muni_catchment is None or pt_catchment is None:
         print("  Skipping diff plot - one method did not produce catchment geometry")
         return
 
-    print("  Building Municipal vs PT-Feeder diff plot (cell-level) ...")
+    lbl_a, lbl_b = labels
+    print(f"  Building {lbl_a} vs {lbl_b} diff plot (cell-level) ...")
 
-    # --- Cell-level municipal assignment via spatial join ---
-    muni_cells = _assign_cells_to_municipal_catchment(
-        pop_grid, empl_grid, muni_catchment)
+    # --- Cell-level first-slot assignment ---
+    # Exact per-cell assignment when the caller has it (Phase 6A passes the
+    # baseline allocation); spatial join to the catchment polygons otherwise
+    # (fuzzy at polygon borders — fine for the Municipal-vs-PT-Feeder use).
+    if base_assignment is not None:
+        muni_cells = base_assignment[['RELI', 'id_point']].copy()
+        muni_cells = muni_cells[muni_cells['id_point'] != NO_PT_ID]
+    else:
+        muni_cells = _assign_cells_to_municipal_catchment(
+            pop_grid, empl_grid, muni_catchment)
     muni_cells = muni_cells.rename(columns={'id_point': 'muni_station'})
     muni_cells['muni_station'] = pd.to_numeric(
         muni_cells['muni_station'], errors='coerce')
@@ -3372,8 +3649,8 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
     cat_cfg = [
         ('same',      CLR_SAME,      'Same station'),
         ('different', CLR_DIFFERENT, 'Different station (reassigned)'),
-        ('muni_only', CLR_MUNI_ONLY, 'Municipal only'),
-        ('pt_only',   CLR_PT_ONLY,   'PT-Feeder only'),
+        ('muni_only', CLR_MUNI_ONLY, f'{lbl_a} only'),
+        ('pt_only',   CLR_PT_ONLY,   f'{lbl_b} only'),
     ]
     legend_handles = []
     for cat, colour, label in cat_cfg:
@@ -3382,6 +3659,13 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
             subset.plot(ax=ax, color=colour, edgecolor='none', zorder=2)
             legend_handles.append(
                 Patch(facecolor=colour, edgecolor='none', label=label))
+
+    # Lakes — drawn above the category cells but below the catchment-boundary
+    # lines and station markers, mirroring the other catchment maps so water
+    # reads as water in the diff view (uses the shared CA lakes helper).
+    _diff_lakes = _load_lakes_for_extent(boundary, scope='ca')
+    if not _diff_lakes.empty:
+        _diff_lakes.plot(ax=ax, color='#A8D8EA', edgecolor='none', zorder=3)
 
     # Normalise catchment column names
     muni_c = muni_catchment.copy()
@@ -3406,39 +3690,34 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
 
     legend_handles += [
         Line2D([0], [0], color='#d6604d', linewidth=1, linestyle='--',
-               label='Municipal catchment boundary'),
+               label=f'{lbl_a} catchment boundary'),
         Line2D([0], [0], color='#4393c3', linewidth=1, linestyle='-',
-               label='PT-Feeder catchment boundary'),
+               label=f'{lbl_b} catchment boundary'),
     ]
 
     # --- Station markers: white fill + black outline for all; green fill for
-    #     stations that have a PT-feeder catchment but no municipalities assigned
-    #     in the municipal method (n_communes == 0 in the Stations_Summary
-    #     sheet of station_catchments.xlsx). ---
+    #     stations that gain a catchment in PT-Feeder — i.e. they have a
+    #     PT-Feeder catchment but no Municipal catchment at all. ---
     prep_bnd_diff = prep(boundary)
     stations_in_bnd = rail_stations[
         rail_stations.geometry.apply(lambda p: prep_bnd_diff.contains(p))].copy()
 
-    # Load no-municipality stations from the municipal Stations_Summary sheet.
-    # All ID sets use strings to match rail_stations['id_point'] (str from stop_id).
-    summary_xlsx = os.path.join(MUNICIPAL_DATA_DIR, 'station_catchments.xlsx')
-    no_muni_ids: set = set()
-    if os.path.exists(summary_xlsx):
-        try:
-            _sum = pd.read_excel(summary_xlsx, sheet_name='Stations_Summary',
-                                  engine='openpyxl')
-            no_muni_mask = _sum['n_communes'].fillna(0).astype(int) == 0
-            no_muni_ids = set(
-                _sum.loc[no_muni_mask, 'station_number'].astype(str).values
-            )
-        except Exception as exc:
-            print(f"    WARNING: failed to read Stations_Summary from {summary_xlsx}: {exc}")
+    # A station with no Municipal catchment is ABSENT from muni_c (the breakdown
+    # has one row per assigned commune, so zero-commune stations never appear) —
+    # so the "gained" set is the catchment-id difference, not a zero-count lookup.
+    # int-normalised strings match stations_in_bnd['id_point'] (clean str ids)
+    # and absorb any float ids ("8503000.0") carried by the catchment GPKGs.
+    def _station_id_set(gdf):
+        out = set()
+        for x in gdf['id_point'].values:
+            if pd.notna(x) and str(int(x)) != str(NO_PT_ID):
+                out.add(str(int(x)))
+        return out
 
-    # A station is "PT-feeder new" if it has no municipal assignment AND exists
-    # in the PT-feeder catchment
-    pt_ids = {str(x) for x in pt_c['id_point'].values
-              if str(x) != str(NO_PT_ID)}
-    pt_new_ids = no_muni_ids & pt_ids
+    muni_ids   = _station_id_set(muni_c)
+    pt_ids     = _station_id_set(pt_c)
+    pt_new_ids = pt_ids - muni_ids
+    print(f"    Stations gaining a catchment in {lbl_b} (green): {len(pt_new_ids)}")
 
     sta_all    = stations_in_bnd
     sta_pt_new = stations_in_bnd[
@@ -3460,7 +3739,7 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
                label='Rail station (both methods)'),
         Line2D([0], [0], marker='o', color='w', markerfacecolor='#2ca02c',
                markeredgecolor='black', markersize=8,
-               label='Rail station (PT-Feeder only)'),
+               label=f'Rail station ({lbl_b} only)'),
     ]
 
     # Study area boundary
@@ -3475,7 +3754,7 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
     ax.set_xlim(bx_min - pad, bx_max + pad)
     ax.set_ylim(by_min - pad, by_max + pad)
 
-    ax.set_title('Catchment Comparison: Municipal vs PT-Feeder', fontsize=14)
+    ax.set_title(f'Catchment Comparison: {lbl_a} vs {lbl_b}', fontsize=14)
     ax.set_xlabel('E [m]')
     ax.set_ylabel('N [m]')
     ax.set_aspect('equal')
@@ -3485,14 +3764,14 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
 
     # --- Summary table ---
     col_w = 9
-    tbl  = "Population & employment shift: Municipal → PT-Feeder\n"
+    tbl  = f"Population & employment shift: {lbl_a} → {lbl_b}\n"
     tbl += f"{'Category':<28}{'Pop (%)':>{col_w}}{'FTE (%)':>{col_w}}\n"
     tbl += "─" * (28 + 2 * col_w) + "\n"
     rows = [
-        ('Same station',              pct_same),
-        ('Changed station',           pct_diff),
-        ('Lost access (Mun. only)',   pct_muni),
-        ('Gained access (PT only)',   pct_pt),
+        ('Same station',                   pct_same),
+        ('Changed station',                pct_diff),
+        (f'Lost access ({lbl_a} only)',    pct_muni),
+        (f'Gained access ({lbl_b} only)',  pct_pt),
     ]
     for label, (pp, ep) in rows:
         tbl += f"{label:<28}{pp:>{col_w-1}.1f}%{ep:>{col_w-1}.1f}%\n"
@@ -3507,8 +3786,10 @@ def _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
              fontsize=9, fontfamily='monospace',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.85))
 
-    out_path = os.path.join(os.path.dirname(PT_FEEDER_PLOT_DIR),
-                            'catchment_diff_municipal_vs_pt_feeder.pdf')
+    if out_path is None:
+        out_path = os.path.join(os.path.dirname(PT_FEEDER_PLOT_DIR),
+                                'catchment_diff_municipal_vs_pt_feeder.pdf')
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
     print(f"    Saved -> {out_path}")
@@ -3524,8 +3805,8 @@ _ACCESS_LABELS = ['0–5', '5–10', '10–15', '15–20', '20–25', '25–30',
 _ACCESS_GREY   = '#BDBDBD'
 
 
-def _plot_access_times(walk_df, cycle_df, feeder_df, alloc_pop, pop_grid,
-                       rail_stations, feeder_stops, boundary, empl_grid=None):
+def _plot_access_times(walk_df, cycle_df, feeder_df, allocation, pop_grid,
+                       boundary, empl_grid=None):
     """Produce four access-time maps (plasma_r palette, discrete 3/5-min bins).
 
     Plots
@@ -3533,7 +3814,7 @@ def _plot_access_times(walk_df, cycle_df, feeder_df, alloc_pop, pop_grid,
     1. Walk        — cells within BUFFER_RAIL_M of a rail station
     2. Cycle       — cells within CYCLE_RADIUS_M of a rail station
     3. Feeder      — cells within bus/tram buffer whose feeder stop is graph-reachable
-    4. Best choice — winner-takes-all result (alloc_pop), all in-buffer cells
+    4. Best choice — winner-takes-all result (allocation), all in-buffer cells
 
     Cells outside their respective buffer are shown in grey.
     Colour scale: plasma_r (yellow = fast, dark purple/blue = slow).
@@ -3552,14 +3833,22 @@ def _plot_access_times(walk_df, cycle_df, feeder_df, alloc_pop, pop_grid,
         lakes = gpd.read_file(paths.LAKES_SHP).to_crs(CODEBASE_CRS)
         lakes = lakes[lakes.geometry.intersects(boundary)].copy()
 
-    # Pre-build square polygon geometry for the grid (100 m × 100 m)
-    _e = pop_grid['E_KOORD'].values
-    _n = pop_grid['N_KOORD'].values
+    # Pre-build square polygon geometry (100 m × 100 m) for every inhabited cell
+    # (Pop>0 OR FTE>0) so FTE-only cells appear too; Pop/FTE attribution stays
+    # per-grid via pop_map / empl_map below.
+    grid_cells = pop_grid[['RELI', 'E_KOORD', 'N_KOORD']]
+    if empl_grid is not None:
+        grid_cells = pd.concat(
+            [grid_cells, empl_grid[['RELI', 'E_KOORD', 'N_KOORD']]],
+            ignore_index=True
+        ).drop_duplicates(subset='RELI')
+    grid_cells = grid_cells.reset_index(drop=True)
+    _e = grid_cells['E_KOORD'].values
+    _n = grid_cells['N_KOORD'].values
     squares = [box(e, n, e + CELL_SIZE_M, n + CELL_SIZE_M)
                for e, n in zip(_e, _n)]
     grid_plot = gpd.GeoDataFrame(
-        pop_grid[['RELI', 'E_KOORD', 'N_KOORD']].copy(),
-        geometry=squares, crs=CODEBASE_CRS
+        grid_cells.copy(), geometry=squares, crs=CODEBASE_CRS
     )
 
     def _class(time_sec):
@@ -3706,14 +3995,14 @@ def _plot_access_times(walk_df, cycle_df, feeder_df, alloc_pop, pop_grid,
                 feeder_df['RELI'].values,
                 feeder_df['total_time_sec'].values)
 
-    # --- 4. Best choice (winner-takes-all from alloc_pop) ---
-    # alloc_pop already has the minimum-time station per cell
-    best_mask = alloc_pop['id_point'] != NO_PT_ID
+    # --- 4. Best choice (winner-takes-all from the allocation) ---
+    # the allocation already has the minimum-time station per cell
+    best_mask = allocation['id_point'] != NO_PT_ID
     if best_mask.any():
         _render('Access Time — Best Mode (Walk / Cycle / PT)',
                 'plot_access_time_best.pdf',
-                alloc_pop.loc[best_mask, 'RELI'].values,
-                alloc_pop.loc[best_mask, 'access_time_sec'].values)
+                allocation.loc[best_mask, 'RELI'].values,
+                allocation.loc[best_mask, 'access_time_sec'].values)
 
 
 # ===============================================================================
@@ -3792,23 +4081,17 @@ def _kat_to_ring_records(stop_row, boundary_geom=None):
 # SHARED LOADERS — per-line frequency and per-segment tables across all periods
 # ===============================================================================
 
-# Each (subfolder, suffix, keep_period) tuple defines one of the three
-# service-period GeoPackages produced by services_network_builder. Loading all
-# three with these filters yields exactly one row per (route_id, direction_id,
-# variant_rank) regardless of the periods the line operates in.
-_PERIOD_SPECS = [
-    ('All_Day',  '_allday',  None),
-    ('Peak',     '_peak',    'peak_only'),
-    ('Off_Peak', '_offpeak', 'offpeak_only'),
-]
-
-
 def _load_lines_all_periods(base, name, mode_grp_map=None):
-    """Load per-line frequency table from all three temporal subfolders.
+    """Load the full-day per-line table from the top-level ``<base>/<name>.gpkg``.
+
+    The top-level file is the complete union of all services (all_day +
+    peak_only + offpeak_only), one row per (route_id, direction_id,
+    variant_rank), and is the single source of truth. The All_Day / Peak /
+    Off_Peak subfolders are diagnostic-only and no longer read here.
 
     Args:
         base: Absolute path to the network root (_FEEDER_BASE or _RAIL_BASE).
-        name: File basename without suffix or extension, e.g. 'pt_feeder_lines'.
+        name: File basename without extension, e.g. 'pt_feeder_lines'.
         mode_grp_map: Optional dict mapping layer name → mode_group code. When
             given, adds a 'mode_group' column to each layer's frame; falls
             back to 'B' for layers not in the map. None to skip the column.
@@ -3817,44 +4100,49 @@ def _load_lines_all_periods(base, name, mode_grp_map=None):
         Concatenation of all rows with all original columns retained, plus
         'mode_group' if mode_grp_map was provided.
     """
+    path = os.path.join(base, f'{name}.gpkg')
+    if not os.path.exists(path):
+        return pd.DataFrame()
     frames = []
-    for subfolder, suffix, keep_period in _PERIOD_SPECS:
-        path = os.path.join(base, subfolder, f'{name}{suffix}.gpkg')
-        for layer_name, _schema in pyogrio.list_layers(path):
-            gdf = gpd.read_file(path, layer=layer_name)
-            if keep_period is not None and 'service_period' in gdf.columns:
-                gdf = gdf[gdf['service_period'] == keep_period]
-            if mode_grp_map is not None:
-                gdf['mode_group'] = mode_grp_map.get(layer_name, 'B')
-            frames.append(gdf)
+    for layer_name, _schema in pyogrio.list_layers(path):
+        gdf = gpd.read_file(path, layer=layer_name)
+        if mode_grp_map is not None:
+            gdf['mode_group'] = mode_grp_map.get(layer_name, 'B')
+        frames.append(gdf)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def _load_segs_all_periods(base, name):
-    """Load per-segment edges from all three temporal subfolders, deduped.
+    """Load per-segment edges from the top-level ``<base>/<name>.gpkg``, deduped.
+
+    Reads the full-day top-level file (single source of truth) rather than the
+    temporal subfolders.
 
     Args:
         base: Absolute path to the network root (_FEEDER_BASE or _RAIL_BASE).
-        name: File basename without suffix or extension, e.g. 'pt_feeder_segments'.
+        name: File basename without extension, e.g. 'pt_feeder_segments'.
 
     Returns:
         DataFrame with columns ['from_stop_id', 'to_stop_id', 'route_id',
         'direction_id', 'variant_rank']. Bidirectional rows preserved so
         terminal stops appearing only in direction_id=1 are included.
     """
+    path = os.path.join(base, f'{name}.gpkg')
+    if not os.path.exists(path):
+        return pd.DataFrame(
+            columns=['from_stop_id', 'to_stop_id', 'route_id',
+                     'direction_id', 'variant_rank'])
     frames = []
-    for subfolder, suffix, _period in _PERIOD_SPECS:
-        path = os.path.join(base, subfolder, f'{name}{suffix}.gpkg')
-        for layer_name, _schema in pyogrio.list_layers(path):
-            gdf = gpd.read_file(path, layer=layer_name)
-            gdf = gdf.rename(columns={
-                'from_stop_nr': 'from_stop_id',
-                'to_stop_nr':   'to_stop_id',
-                'GTFS_ID':      'route_id',
-            })
-            frames.append(
-                gdf[['from_stop_id', 'to_stop_id',
-                     'route_id', 'direction_id', 'variant_rank']].copy())
+    for layer_name, _schema in pyogrio.list_layers(path):
+        gdf = gpd.read_file(path, layer=layer_name)
+        gdf = gdf.rename(columns={
+            'from_stop_nr': 'from_stop_id',
+            'to_stop_nr':   'to_stop_id',
+            'GTFS_ID':      'route_id',
+        })
+        frames.append(
+            gdf[['from_stop_id', 'to_stop_id',
+                 'route_id', 'direction_id', 'variant_rank']].copy())
     combined = pd.concat(frames, ignore_index=True)
     return combined.drop_duplicates(
         subset=['from_stop_id', 'to_stop_id', 'route_id', 'direction_id', 'variant_rank'])
@@ -3919,7 +4207,10 @@ def _reconstruct_stop_sequence(variant_segments):
         return []
     pairs = [(str(r['from_stop_id']), str(r['to_stop_id']))
              for _, r in variant_segments.iterrows()]
-    pairs = list(set(pairs))   # dedupe in case the same segment appears twice
+    # Dedupe SORTED: set order varies with the per-process string-hash seed, and
+    # on a branching variant succ keeps the last pair seen per from-stop — the
+    # successor pick (and thus the whole chain) must not depend on the process.
+    pairs = sorted(set(pairs))
     succ = {a: b for a, b in pairs}
     targets = set(succ.values())
     starts = [s for s in succ.keys() if s not in targets]
@@ -4841,6 +5132,306 @@ def _plot_gueteklassen_comparison(feeder_stops, rail_stops, boundary, pop_grid, 
 # ORCHESTRATORS
 # ===============================================================================
 
+def allocate_cells_subset(cells_subset, svc_network):
+    """Phase-6 hook: PT-Feeder allocation for a subset of grid cells on a given
+    service network. Returns (allocation, affected_communes); writes no files.
+
+    The full run (_run_pt_feeder_method) and this hook share the same
+    _allocate_pt_feeder_core, so a subset is allocated by the identical
+    frequency-aware argmin.
+
+    Args:
+        cells_subset: GeoDataFrame[RELI, E_KOORD, N_KOORD, NUMMER, geometry] — a
+            subset of the pop/empl grid.
+        svc_network: dict of pre-built network objects (rail_stations, feeder_stops,
+            feeder_stop_to_rail_times/_components, transfer_free_headway,
+            station_freq_penalty), as assembled by _run_pt_feeder_method (or by
+            Phase 6 for a developed svc-int network).
+
+    Returns:
+        (allocation, affected_communes) — allocation has the _allocate_cells schema;
+        affected_communes is the set of BFS_NR the subset cells fall in.
+    """
+    alloc, _walk, _cycle, _feeder = _allocate_pt_feeder_core(cells_subset, svc_network)
+    return alloc, _communes_of_cells(cells_subset)
+
+
+def _allocate_pt_feeder_core(cells, svc_network):
+    """Compute per-cell walk/cycle/feeder access times and allocate each cell to its
+    best station — the network-dependent core shared by the full PT-feeder run and
+    allocate_cells_subset. Returns (allocation, walk_df, cycle_df, feeder_df)."""
+    rail_stations = svc_network['rail_stations']
+    walk   = _compute_walk_to_rail_times(cells, rail_stations)
+    cycle  = _compute_cycle_to_rail_times(cells, rail_stations)
+    feeder = _compute_feeder_to_rail_times(
+        cells, svc_network['feeder_stops'], svc_network['feeder_stop_to_rail_times'],
+        feeder_stop_to_rail_components=svc_network['feeder_stop_to_rail_components'],
+        transfer_free_headway=svc_network['transfer_free_headway'],
+    )
+    alloc = _allocate_cells(walk, cycle, feeder, cells, rail_stations,
+                            station_freq_penalty=svc_network['station_freq_penalty'])
+    return alloc, walk, cycle, feeder
+
+
+# Phase-6A base-network bundle cache: (feeder_base, rail_base) -> svc_network
+# dict. The feeder side (stops, graph times, transfer-free headways) is network-
+# independent across svc-ints, so it is built once per run and reused.
+_PHASE6_BUNDLE_CACHE: dict = {}
+
+
+def reallocate_for_svc_int(svc_int_id, affected_stations, base_svc_network,
+                           dev_rail_base, make_plots=False,
+                           full_recompute=False, combo='') -> dict:
+    """Phase-6A: PT-Feeder subset reallocation for one service intervention.
+
+    Affected cells = cells whose candidate-station set (cell_station_candidates
+    CSV, top-5) contains an affected station. Only those cells are re-allocated,
+    on the developed network's frequencies: EXT/NDC add no stations and never
+    touch the feeder network, so of the svc_network bundle only the
+    station_freq_penalty (rail line/segment frequencies) is rebuilt from
+    `dev_rail_base`; the feeder-side members are reused from the base bundle.
+    The result is merged per-cell into the baseline allocation, the breakdown is
+    recomputed in full from the merged allocation, and the per-svc-int catchment
+    outputs are written under
+    data/Catchment_Area/Developments/<combo>/<svc_int_id>_network/PT_Feeder/.
+
+    Args:
+        svc_int_id:        svc-int id (e.g. 'ext_100001').
+        affected_stations: iterable[int] affected id_points (Hook-1 CSV).
+        base_svc_network:  baseline service network WITH the '_network' suffix.
+        dev_rail_base:     merged developed rail network dir
+                           (svc_ints_orchestrator.build_merged_unprojected).
+        make_plots:        base-vs-developed diff plot + catchment/network map.
+        full_recompute:    oracle mode (plan Phase 4): re-allocate EVERY cell on
+                           the developed network — no per-cell merge — through
+                           the same bundle, so a parity check against the
+                           selective result isolates the affected-cell rule.
+        combo:             the '<infra>__<svc>' workspace key for the output
+                           paths; '' resolves via ints_core.default_combo
+                           (standalone use).
+
+    Returns:
+        dict(allocation, affected_communes, breakdown, n_cells_affected).
+    """
+    global _FEEDER_BASE, _RAIL_BASE
+    os.chdir(paths.MAIN)
+    base_feeder = os.path.join(paths.FEEDER_LINES_DIR, base_svc_network,
+                               paths.SERVICES_UNPROJECTED_SUBDIR)
+    base_rail = os.path.join(paths.RAIL_LINES_DIR, base_svc_network,
+                             paths.SERVICES_UNPROJECTED_SUBDIR)
+    prev_bases = (_FEEDER_BASE, _RAIL_BASE)
+
+    catchment_base.setup_versioned_dirs(base_svc_network)
+    base_pt_dir = catchment_base.PT_FEEDER_DATA_DIR
+    alloc_path = os.path.join(base_pt_dir, 'allocation_pt_feeder.parquet')
+    cand_path = os.path.join(base_pt_dir, 'cell_station_candidates.csv')
+    if not os.path.exists(cand_path):
+        raise FileNotFoundError(
+            f"cell-station candidates CSV missing at {cand_path}. Re-run "
+            f"Phase 4A (catchment_allocate.get_catchment, PT_Feeder) first.")
+
+    print(f"\n--- Phase 6A [{svc_int_id}]: PT-Feeder subset reallocation ---")
+    cand = pd.read_csv(cand_path, encoding='utf-8-sig')
+    id_cols = [c for c in (f'Station_{i}_ID'
+                           for i in range(1, MAX_CANDIDATE_STATIONS + 1))
+               if c in cand.columns]
+    aff = {int(s) for s in (affected_stations or [])}
+    hit = cand[id_cols].isin(aff).any(axis=1)
+    relis = set(cand.loc[hit, 'RELI'].astype(np.int64))
+    print(f"    affected cells: {len(relis):,} of {len(cand):,} "
+          f"(candidate set ∩ {len(aff)} affected station(s))")
+
+    boundary = _load_catchment_boundary()
+    pop_grid = load_population_grid_cached()
+    empl_grid = load_employment_grid_cached()
+    base_alloc = None   # loaded (or backfilled) once the base bundle exists
+
+    try:
+        _FEEDER_BASE, _RAIL_BASE = base_feeder, base_rail
+        bundle = _build_svc_network_bundle(boundary)
+
+        if not os.path.exists(alloc_path):
+            # One-time backfill of a pre-rework 4A run: same bundle + core as the
+            # full run, so the persisted baseline is identical to what 4A now writes.
+            print("    baseline allocation parquet missing — backfilling once "
+                  "from the base bundle (all cells) ...")
+            _backfill_base_allocation(pop_grid, empl_grid, bundle, alloc_path)
+        base_alloc = pd.read_parquet(alloc_path)
+
+        if not relis and not full_recompute:
+            print("    no affected cells — allocation, breakdown and catchment "
+                  "equal the baseline; copying outputs.")
+            merged, alloc_sub, communes = base_alloc.copy(), None, set()
+        else:
+            # Developed-network frequency pieces (the only rail-dependent members)
+            _RAIL_BASE = dev_rail_base
+            rail_lines_dev = _load_rail_line_freqs()
+            rail_segs_dev = _load_rail_segments_table()
+            pen_dev = _compute_station_freq_penalties(
+                rail_lines_dev, rail_segs_dev, bundle['rail_stations'])
+            svc_net_dev = dict(bundle)
+            svc_net_dev['station_freq_penalty'] = pen_dev
+
+            pop_relis = set(pop_grid['RELI'].values)
+            if full_recompute:
+                print("    ORACLE: full re-allocation of every cell on the "
+                      "developed network ...")
+                cells_pop = pop_grid
+                cells_empl = empl_grid[~empl_grid['RELI'].isin(pop_relis)]
+            else:
+                cells_pop = pop_grid[pop_grid['RELI'].isin(relis)]
+                cells_empl = empl_grid[empl_grid['RELI'].isin(relis)
+                                       & ~empl_grid['RELI'].isin(pop_relis)]
+            parts, communes = [], set()
+            for cells in (cells_pop, cells_empl):
+                if cells.empty:
+                    continue
+                a, c = allocate_cells_subset(cells.copy(), svc_net_dev)
+                parts.append(a)
+                communes |= c
+            alloc_sub = pd.concat(parts, ignore_index=True)
+            if full_recompute:
+                merged = alloc_sub
+            else:
+                merged = pd.concat(
+                    [base_alloc[~base_alloc['RELI'].isin(relis)], alloc_sub],
+                    ignore_index=True)
+            n_changed = _count_changed_cells(base_alloc, alloc_sub)
+            print(f"    re-allocated {len(alloc_sub):,} cell(s); "
+                  f"{n_changed:,} changed station; "
+                  f"{len(communes)} affected commune(s)")
+
+        breakdown = _compute_station_commune_breakdown_pt_feeder(
+            merged, pop_grid, empl_grid, bundle['rail_stations'])
+
+        # Per-svc-int outputs (Phase-4A schema, combo-keyed network name)
+        if not combo:
+            import ints_core as _core
+            combo = _core.default_combo(
+                svc_version=base_svc_network.removesuffix('_network'))
+        catchment_base.setup_versioned_dirs(
+            paths.svc_int_network_name(svc_int_id, combo))
+        out_dir = catchment_base.PT_FEEDER_DATA_DIR
+        os.makedirs(out_dir, exist_ok=True)
+        merged.to_parquet(os.path.join(out_dir, 'allocation_pt_feeder.parquet'),
+                          index=False)
+        breakdown.to_csv(os.path.join(out_dir, 'station_commune_breakdown.csv'),
+                         index=False, encoding='utf-8-sig')
+        pop_relis = set(pop_grid['RELI'].values)
+        merged_pop = merged[merged['RELI'].isin(pop_relis)]
+        dev_catchment, _ = _build_catchment_gpkg(
+            merged_pop, pop_grid, empl_grid, bundle['rail_stations'], out_dir,
+            breakdown=breakdown)
+        print(f"    per-svc-int catchment outputs -> {out_dir}")
+
+        if make_plots:
+            base_catchment = gpd.read_file(
+                os.path.join(base_pt_dir, 'catchment.gpkg'))
+            # the catchment GPKG carries 'id'; _assign_cells_to_municipal_
+            # catchment (diff plot, first slot) joins on 'id_point'
+            if 'id_point' not in base_catchment.columns:
+                base_catchment = base_catchment.rename(columns={'id': 'id_point'})
+            plot_rs = _get_plot_rail_stations(bundle['rail_stations'], scope='ca')
+            plot_dir = catchment_base.PT_FEEDER_PLOT_DIR
+            _build_diff_plot(
+                base_catchment, dev_catchment, merged, pop_grid, empl_grid,
+                plot_rs, boundary, labels=('Base', svc_int_id),
+                out_path=os.path.join(plot_dir,
+                                      f'catchment_diff_base_vs_{svc_int_id}.pdf'),
+                base_assignment=base_alloc)
+            _plot_catchments_with_network(
+                dev_catchment, plot_rs, boundary, output_dir=plot_dir,
+                method_label=f'PT-Feeder {svc_int_id}')
+
+        return {'allocation': merged, 'affected_communes': communes,
+                'breakdown': breakdown, 'n_cells_affected': len(relis)}
+    finally:
+        _FEEDER_BASE, _RAIL_BASE = prev_bases
+        catchment_base.setup_versioned_dirs(base_svc_network)
+
+
+def _build_svc_network_bundle(boundary, temporal='full_day'):
+    """Build the Hook-2 svc_network dict for the active _FEEDER_BASE/_RAIL_BASE
+    without writing any Phase-4A outputs (no Güteklassen gpkgs, buffers or
+    plots). Cached per (feeder_base, rail_base) — Phase 6A reuses the base
+    bundle across svc-ints and swaps only the rail-frequency pieces."""
+    key = (_FEEDER_BASE, _RAIL_BASE)
+    if key in _PHASE6_BUNDLE_CACHE:
+        return _PHASE6_BUNDLE_CACHE[key]
+    print("    building base svc-network bundle (once per run) ...")
+    feeder_stops = _load_feeder_stops(boundary, temporal)
+    rail_stations = _load_rail_stations(boundary, temporal, buffer=0)
+    feeder_segments = _load_feeder_segments(temporal)
+    feeder_stops, rail_stations = _compute_stop_gueteklassen(
+        feeder_stops, rail_stations)
+    fs_times, fs_components, _graph = _build_feeder_graph(
+        feeder_stops, feeder_segments, rail_stations)
+    feeder_lines = _load_feeder_line_freqs()
+    rail_lines = _load_rail_line_freqs()
+    rail_segments = _load_rail_segments_table()
+    transfer_free_headway = _compute_transfer_free_headways(
+        feeder_segments, feeder_lines, feeder_stops, rail_stations)
+    station_freq_penalty = _compute_station_freq_penalties(
+        rail_lines, rail_segments, rail_stations)
+    bundle = {
+        'rail_stations': rail_stations,
+        'feeder_stops': feeder_stops,
+        'feeder_stop_to_rail_times': fs_times,
+        'feeder_stop_to_rail_components': fs_components,
+        'transfer_free_headway': transfer_free_headway,
+        'station_freq_penalty': station_freq_penalty,
+    }
+    _PHASE6_BUNDLE_CACHE[key] = bundle
+    return bundle
+
+
+def _backfill_base_allocation(pop_grid, empl_grid, bundle, alloc_path) -> None:
+    """Compute and persist the baseline allocation for a pre-rework 4A run.
+
+    Same _allocate_pt_feeder_core + pop/empl-only split as _run_pt_feeder_method,
+    so the parquet equals what 4A now persists; no other 4A outputs are touched.
+    """
+    alloc_pop, _w, _c, _f = _allocate_pt_feeder_core(pop_grid, bundle)
+    pop_relis = set(pop_grid['RELI'].values)
+    empl_only = empl_grid[~empl_grid['RELI'].isin(pop_relis)].copy()
+    if not empl_only.empty:
+        alloc_empl, _w, _c, _f = _allocate_pt_feeder_core(empl_only, bundle)
+        alloc_combined = pd.concat([alloc_pop, alloc_empl], ignore_index=True)
+    else:
+        alloc_combined = alloc_pop
+    alloc_combined.to_parquet(alloc_path, index=False)
+    print(f"    baseline allocation ({len(alloc_combined):,} cells) "
+          f"backfilled -> {alloc_path}")
+
+
+def _count_changed_cells(base_alloc, alloc_sub) -> int:
+    """Cells whose chosen station differs between baseline and the re-allocated
+    subset (diagnostic for the Phase-6A log)."""
+    if alloc_sub is None or not len(alloc_sub):
+        return 0
+    b = base_alloc[['RELI', 'id_point']].rename(columns={'id_point': 'base_id'})
+    d = alloc_sub[['RELI', 'id_point']].merge(b, on='RELI', how='left')
+    return int((pd.to_numeric(d['id_point'], errors='coerce')
+                != pd.to_numeric(d['base_id'], errors='coerce')).sum())
+
+
+def _communes_of_cells(cells) -> set:
+    """Set of BFS_NR the given grid cells fall in (spatial join to municipal
+    boundaries; same boundary load + BFS detection as the PT-feeder breakdown)."""
+    muni = gpd.read_file(paths.MUNICIPAL_BOUNDARIES_GPKG).to_crs(CODEBASE_CRS)
+    if 'objektart' in muni.columns:
+        muni = muni[muni['objektart'] == 'Gemeindegebiet'].copy()
+    bfs_col = next((c for c in ['BFS_NR', 'bfs_nr', 'BFS_NUMMER', 'bfs_nummer',
+                                 'GMDNR', 'gmdnr'] if c in muni.columns), None)
+    if bfs_col is None:
+        return set()
+    muni[bfs_col] = pd.to_numeric(muni[bfs_col], errors='coerce').astype('Int64')
+    muni = muni.dropna(subset=[bfs_col])[[bfs_col, 'geometry']]
+    cg = cells[['RELI', 'geometry']].copy()
+    joined = gpd.sjoin(cg, muni, how='left', predicate='within')
+    return {int(b) for b in joined[bfs_col].dropna().unique()}
+
+
 def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
                           visualize: bool = True):
     """Full PT-Feeder allocation pipeline.
@@ -4855,10 +5446,10 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
     tuple(gpd.GeoDataFrame, pd.DataFrame)
         PT-Feeder catchment polygons and the population cell allocation.
     """
-    print("\n--- PT-Feeder Method ---")
+    print("\n--- 4A PT-Feeder Method ---")
     st = time.time()
 
-    # Step 2-PT: Load network data
+    # Load network data
     feeder_stops    = _load_feeder_stops(boundary, temporal)
     # Restrict to rail stations strictly inside the catchment boundary —
     # out-of-boundary stations (e.g. Killwangen-Spreitenbach) are not
@@ -4875,14 +5466,14 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
 
     _build_pt_buffers(feeder_stops, rail_stations, boundary, pop_grid, empl_grid)
 
-    print(f"  [Step 2-PT complete: {time.time() - st:.1f}s]")
+    print(f"  [4A PT-Feeder] network prep complete: {time.time() - st:.1f}s")
     st = time.time()
 
-    # Step 3: Build feeder graph
+    # Build feeder graph
     feeder_stop_to_rail_times, feeder_stop_to_rail_components, feeder_graph = _build_feeder_graph(
         feeder_stops, feeder_segments, rail_stations)
 
-    # Step 3b: W2 frequency-aware lookups. Run in both cost methods — the only
+    # W2 frequency-aware lookups. Run in both cost methods — the only
     # difference between 'calibrated' and 'absolute' is the weights applied
     # downstream (w_wait scales the boarding-wait term; the station penalty is
     # raw seconds either way). The frequency logic itself is mode-independent.
@@ -4899,46 +5490,41 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
         rail_lines, rail_segments, rail_stations,
     )
 
-    print(f"  [Step 3 complete: {time.time() - st:.1f}s]")
+    print(f"  [4A PT-Feeder] feeder graph + frequency lookups complete: {time.time() - st:.1f}s")
     st = time.time()
 
-    # Step 4: Allocate cells — population grid first
+    # Bundle the pre-built network objects so the cell→station allocation core is
+    # shared verbatim by the full run and the Phase-6 subset hook (allocate_cells_subset).
+    svc_network = {
+        'rail_stations': rail_stations,
+        'feeder_stops': feeder_stops,
+        'feeder_stop_to_rail_times': feeder_stop_to_rail_times,
+        'feeder_stop_to_rail_components': feeder_stop_to_rail_components,
+        'transfer_free_headway': transfer_free_headway,
+        'station_freq_penalty': station_freq_penalty,
+    }
+
+    # Allocate cells — population grid first
     print("\n  Allocating population cells ...")
-    walk_pop  = _compute_walk_to_rail_times(pop_grid, rail_stations)
-    cycle_pop = _compute_cycle_to_rail_times(pop_grid, rail_stations)
-    feeder_pop = _compute_feeder_to_rail_times(
-        pop_grid, feeder_stops, feeder_stop_to_rail_times,
-        feeder_stop_to_rail_components=feeder_stop_to_rail_components,
-        transfer_free_headway=transfer_free_headway,
-    )
-    alloc_pop = _allocate_cells(walk_pop, cycle_pop, feeder_pop,
-                                pop_grid, rail_stations,
-                                station_freq_penalty=station_freq_penalty)
+    alloc_pop, walk_pop, cycle_pop, feeder_pop = _allocate_pt_feeder_core(
+        pop_grid, svc_network)
 
-    print(f"  [Pop allocation complete: {time.time() - st:.1f}s]")
+    print(f"  [4A PT-Feeder] population allocation complete: {time.time() - st:.1f}s")
     st = time.time()
 
-    # Step 4b: Allocate employment-only cells (RELIs in empl_grid but not in pop_grid).
+    # Allocate employment-only cells (RELIs in empl_grid but not in pop_grid).
     # Necessary so the diff plot can compare all inhabited cells, not just pop cells.
     pop_relis_set = set(pop_grid['RELI'].values)
     empl_only_grid = empl_grid[~empl_grid['RELI'].isin(pop_relis_set)].copy()
     if not empl_only_grid.empty:
         print(f"\n  Allocating {len(empl_only_grid):,} employment-only cells ...")
-        walk_empl   = _compute_walk_to_rail_times(empl_only_grid, rail_stations)
-        cycle_empl  = _compute_cycle_to_rail_times(empl_only_grid, rail_stations)
-        feeder_empl = _compute_feeder_to_rail_times(
-            empl_only_grid, feeder_stops, feeder_stop_to_rail_times,
-            feeder_stop_to_rail_components=feeder_stop_to_rail_components,
-            transfer_free_headway=transfer_free_headway,
-        )
-        alloc_empl = _allocate_cells(walk_empl, cycle_empl, feeder_empl,
-                                     empl_only_grid, rail_stations,
-                                     station_freq_penalty=station_freq_penalty)
+        alloc_empl, walk_empl, cycle_empl, feeder_empl = _allocate_pt_feeder_core(
+            empl_only_grid, svc_network)
         alloc_combined = pd.concat([alloc_pop, alloc_empl], ignore_index=True)
         walk_all   = pd.concat([walk_pop,   walk_empl  ], ignore_index=True)
         cycle_all  = pd.concat([cycle_pop,  cycle_empl ], ignore_index=True)
         feeder_all = pd.concat([feeder_pop, feeder_empl], ignore_index=True)
-        print(f"  [Empl-only allocation complete: {time.time() - st:.1f}s]")
+        print(f"  [4A PT-Feeder] employment-only allocation complete: {time.time() - st:.1f}s")
     else:
         alloc_combined = alloc_pop.copy()
         walk_all, cycle_all, feeder_all = walk_pop, cycle_pop, feeder_pop
@@ -4950,6 +5536,13 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
     # catchment_OD_preparation.py read the unified file).
     _build_candidates_csv(walk_all, cycle_all, feeder_all,
                           pop_grid, empl_grid, rail_stations, PT_FEEDER_DATA_DIR)
+
+    # Persist the per-cell allocation (Phase 6A hook): the candidates CSV is
+    # sorted WITHOUT the frequency penalty, so the chosen station is not
+    # reconstructible from it — 6A merges unaffected cells from this parquet.
+    _alloc_path = os.path.join(PT_FEEDER_DATA_DIR, 'allocation_pt_feeder.parquet')
+    alloc_combined.to_parquet(_alloc_path, index=False)
+    print(f"    Allocation ({len(alloc_combined):,} cells) saved -> {_alloc_path}")
 
     st = time.time()
 
@@ -4974,15 +5567,24 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
         breakdown=breakdown)
     if visualize:
         plot_rs = _get_plot_rail_stations(rail_stations, scope='ca')
-        _build_visualisation(alloc_pop, pop_grid, plot_rs, boundary, 'PT-Feeder',
+        # Plot every inhabited cell (Pop>0 OR FTE>0): alloc_combined adds the
+        # employment-only cells to the population allocation, and the *_all access
+        # frames keep the summary table's Pop/FTE totals consistent with them.
+        _build_visualisation(alloc_combined, pop_grid, plot_rs, boundary, 'PT-Feeder',
                              empl_grid,
-                             walk_df=walk_pop, cycle_df=cycle_pop, feeder_df=feeder_pop,
+                             walk_df=walk_all, cycle_df=cycle_all, feeder_df=feeder_all,
                              catchment_gdf=pt_catchment)
-        _plot_access_times(walk_pop, cycle_pop, feeder_pop, alloc_pop, pop_grid,
-                           plot_rs, feeder_stops, boundary, empl_grid=empl_grid)
+        _plot_access_times(walk_all, cycle_all, feeder_all, alloc_combined, pop_grid,
+                           boundary, empl_grid=empl_grid)
         # Catchment + network overlay (analogue of the Municipal plot)
         _plot_catchments_with_network(
             pt_catchment, plot_rs, boundary,
+            output_dir=PT_FEEDER_PLOT_DIR, method_label='PT-Feeder',
+            temporal=temporal,
+        )
+        # Combined areas + network overview with legend and zoom insets
+        _plot_catchment_areas_with_network(
+            alloc_combined, pt_catchment, plot_rs, boundary,
             output_dir=PT_FEEDER_PLOT_DIR, method_label='PT-Feeder',
             temporal=temporal,
         )
@@ -4994,7 +5596,6 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
         make_phase_4a_plots(
             method='pt_feeder',
             sa_boundary=None,    # _load_sa_boundary() called inside the orchestrator
-            ca_boundary=boundary,
             allocation=alloc_combined,
             rail_stations=rail_stations,
             pop_grid=pop_grid,
@@ -5006,7 +5607,7 @@ def _run_pt_feeder_method(boundary, pop_grid, empl_grid, temporal='all',
             breakdown=breakdown,
         )
 
-    print(f"  [Outputs complete: {time.time() - st:.1f}s]")
+    print(f"  [4A PT-Feeder] outputs complete: {time.time() - st:.1f}s")
 
     return pt_catchment, alloc_combined
 
@@ -5414,7 +6015,12 @@ def _read_rail_stops_gpkg(path: str):
     else:
         return None
     if 'stop_name' not in stops.columns:
-        stops['stop_name'] = stops['stop_id']
+        # The enriched rail_stops carries the nodes.gpkg schema, where the name
+        # column is `Name`; fall back to the numeric id only if neither exists.
+        if 'Name' in stops.columns:
+            stops = stops.rename(columns={'Name': 'stop_name'})
+        else:
+            stops['stop_name'] = stops['stop_id']
     return stops
 
 
@@ -5624,8 +6230,9 @@ def _plot_sa_stations_overview_map(sa_stations, sa_boundary, shares_df,
     sa_ids = sorted(sa_row_by_id.keys())
 
     def _slices_for(sub, value_col):
-        """Return (label, share, colour) per slice, sorted desc; <3% merged into Other.
-        Communes share colours across Pop/FTE via a BFS-keyed mapping."""
+        """Return (label, share, colour) per slice: the top-3 communes by value,
+        with the remainder merged into 'Other'. Communes share colours across
+        Pop/FTE via a BFS-keyed mapping."""
         if sub.empty:
             return []
         total = float(sub[value_col].sum())
@@ -5639,57 +6246,42 @@ def _plot_sa_stations_overview_map(sa_stations, sa_boundary, shares_df,
 
         ranked = sub.sort_values(value_col, ascending=False).copy()
         ranked['share'] = ranked[value_col] / total
-        main         = ranked[ranked['share'] >= 0.03]
-        other_share  = float(ranked[ranked['share'] < 0.03]['share'].sum())
+        # Show only the top-3 communes that each hold >= 5%; everything else
+        # (smaller top-3 entries plus the long tail) collapses into 'Other'.
+        shown = ranked.head(3)
+        shown = shown[shown['share'] >= 0.05]
+        other_share = float(1.0 - shown['share'].sum())
         out = []
-        for _, r in main.iterrows():
+        for _, r in shown.iterrows():
             name = (str(r['commune_name']) if pd.notna(r.get('commune_name'))
                     else f"BFS {r['BFS_NR']}")
             out.append((name, float(r['share']), colour_for_bfs[int(r['BFS_NR'])]))
-        if other_share > 0:
+        if other_share > 1e-6:
             out.append(('Other', other_share, '#888888'))
         return out
 
-    def _closest_angle_in_arc(theta1: float, theta2: float, target: float) -> float:
-        """Angle in the counterclockwise arc [theta1, theta2] closest to `target`.
+    def _layout_pie(cx, cy, slices, title, label_side, clockwise):
+        """Compute wedge + leader geometry for one pie WITHOUT drawing.
 
-        Used to anchor the leader line on the slice's perimeter at the point
-        nearest the labelled side, so the leader never crosses the pie.
+        Returns a layout dict consumed by `_render_pie`. Each leader leaves its
+        share's centre as a radius (perpendicular to the circle, out to 1.10·r).
+        A single 100 % share anchors on the horizontal axis toward the label side
+        (9 o'clock left / 3 o'clock right) instead of the degenerate 6 o'clock
+        midpoint of a full 360° wedge. Shares facing the label column ('near') go
+        straight across; inward shares ('far') route up beside the pie and across
+        to a label at the station-text height.
         """
-        a = theta1 % 360
-        b = theta2 % 360
-        t = target % 360
-        arc_size = (theta2 - theta1) % 360
-        if arc_size == 0:
-            arc_size = 360
-        # Distance from `a` going counterclockwise to `t`
-        d_at = (t - a) % 360
-        if d_at <= arc_size:
-            return t
-        # `t` is outside the arc — return the nearer endpoint
-        d_a = min(abs(t - a), 360 - abs(t - a))
-        d_b = min(abs(t - b), 360 - abs(t - b))
-        return a if d_a < d_b else b
+        left    = (label_side == 'left')
+        lx_text = cx - label_dx if left else cx + label_dx
+        ha      = 'right' if left else 'left'
+        sgn     = -1 if left else 1
+        min_gap = pie_radius * 0.40
+        r_out   = pie_radius * 1.10
+        x_turn  = cx + sgn * pie_radius * 1.25
+        box_ly  = cy + pie_radius * 1.45
+        single  = (len(slices) == 1)
 
-    def _draw_pie(cx, cy, slices, title, label_side, clockwise):
-        """Draw one pie at (cx, cy) with leader-lined labels on `label_side`.
-
-        Two-pass label placement:
-          1. Wedges drawn + each slice's natural label y computed from the
-             closest-arc anchor (target = 180° for left, 0° for right).
-          2. Labels sorted top-to-bottom; if any pair is closer than
-             ~0.45·pie_radius the lower one is pushed down to enforce
-             the gap, so nameplates never stack on top of each other.
-        Leaders are then drawn from the slice arc to the resolved label y.
-        """
-        if not slices:
-            return
-        target = 180.0 if label_side == 'left' else 0.0
-        lx_text = cx - label_dx if label_side == 'left' else cx + label_dx
-        ha      = 'right' if label_side == 'left' else 'left'
-
-        # ── Pass 1: draw wedges, collect anchor info ──────────────────────
-        items = []   # one dict per slice: name, share, sx, sy, ly
+        wedges, recs = [], []
         start = 90.0
         for name, share, colour in slices:
             delta = share * 360.0
@@ -5699,42 +6291,114 @@ def _plot_sa_stations_overview_map(sa_stations, sa_boundary, shares_df,
             else:
                 theta1, theta2 = start, start + delta
                 start += delta
-            ax.add_patch(Wedge(
-                center=(cx, cy), r=pie_radius, theta1=theta1, theta2=theta2,
-                facecolor=colour, edgecolor='white', linewidth=0.5, zorder=9,
-            ))
-            anchor_deg = _closest_angle_in_arc(theta1, theta2, target)
-            rad = np.deg2rad(anchor_deg)
-            items.append({
-                'name':  name,
-                'share': share,
-                'sx':    cx + pie_radius * np.cos(rad),
-                'sy':    cy + pie_radius * np.sin(rad),
-                'ly':    cy + pie_radius * 1.25 * np.sin(rad),
+            wedges.append((theta1, theta2, colour))
+            if not single and share > 0.5:
+                # Dominant slice: perpendicular drop at 6 o'clock (from the share
+                # centre, straight down) then a horizontal leg to a label below.
+                recs.append({
+                    'name': name, 'share': share, 'kind': 'major',
+                    'sx': cx, 'sy': cy - pie_radius * 0.50,
+                })
+                continue
+            if single:
+                cosr, sinr = (-1.0, 0.0) if left else (1.0, 0.0)
+            else:
+                mid = np.deg2rad((theta1 + theta2) / 2.0)
+                cosr, sinr = np.cos(mid), np.sin(mid)
+            recs.append({
+                'name': name, 'share': share,
+                'sx': cx + pie_radius * 0.50 * cosr, 'sy': cy + pie_radius * 0.50 * sinr,
+                'ox': cx + r_out * cosr,             'oy': cy + r_out * sinr,
+                'kind': 'near' if ((cosr <= 0) if left else (cosr >= 0)) else 'far',
             })
 
-        # ── Pass 2: enforce minimum vertical gap between stacked labels ────
-        min_gap = pie_radius * 0.45
-        items_sorted = sorted(items, key=lambda d: -d['ly'])
-        for i in range(1, len(items_sorted)):
-            ceiling = items_sorted[i - 1]['ly'] - min_gap
-            if items_sorted[i]['ly'] > ceiling:
-                items_sorted[i]['ly'] = ceiling
+        near  = [d for d in recs if d['kind'] == 'near']
+        far   = [d for d in recs if d['kind'] == 'far']
+        major = [d for d in recs if d['kind'] == 'major']
+        for d in major:                      # label sits below the pie, beside it
+            d['ly'] = cy - pie_radius * 1.07
 
-        # ── Pass 3: draw leaders + labels at the resolved y positions ─────
-        for d in items_sorted:
-            ax.plot([d['sx'], lx_text], [d['sy'], d['ly']],
-                    color='black', linewidth=0.4, zorder=10)
+        # near: seed at the radius exit, de-collide downward. No vertical clamp —
+        # labels may rise over the station text box (approved), so the de-collided
+        # stack gets full room to spread evenly without overlapping each other.
+        near.sort(key=lambda d: -d['oy'])
+        for d in near:
+            d['ly'] = d['oy']
+        for i in range(1, len(near)):
+            ceiling = near[i - 1]['ly'] - min_gap
+            if near[i]['ly'] > ceiling:
+                near[i]['ly'] = ceiling
+        # far: stack upward from the text-box height
+        far.sort(key=lambda d: -d['oy'])
+        y_lab = box_ly
+        for d in far:
+            d['ly'] = y_lab
+            y_lab += min_gap
+
+        return {
+            'cx': cx, 'cy': cy, 'lx_text': lx_text, 'ha': ha, 'x_turn': x_turn,
+            'min_gap': min_gap, 'title': title, 'wedges': wedges, 'recs': recs,
+            'single': single,
+        }
+
+    def _place_single_label(L, other, box_bottom):
+        """For a 100 % pie, lift/drop its single label off the pie centreline to
+        clear both the paired pie's labels and the station/totals box, choosing
+        whichever side (above/below cy) has more vertical room."""
+        if not L['single'] or not L['recs']:
+            return
+        cy = L['cy']
+        title_y = cy - pie_radius * 1.25
+        other_lys = [r['ly'] for r in other['recs']]
+        ups = [box_bottom - cy] + [ly - cy for ly in other_lys if ly > cy]
+        dns = [cy - title_y]    + [cy - ly for ly in other_lys if ly < cy]
+        room_up = min(ups) if ups else pie_radius
+        room_dn = min(dns) if dns else pie_radius
+        go_up   = room_up >= room_dn
+        room    = room_up if go_up else room_dn
+        offset  = min(pie_radius * 0.55, max(0.0, room - L['min_gap']))
+        L['recs'][0]['ly'] = cy + offset if go_up else cy - offset
+
+    def _render_pie(L):
+        if not L['wedges']:
+            return
+        cx, cy = L['cx'], L['cy']
+        lx_text, x_turn, ha = L['lx_text'], L['x_turn'], L['ha']
+        for theta1, theta2, colour in L['wedges']:
+            ax.add_patch(Wedge(
+                center=(cx, cy), r=pie_radius, theta1=theta1, theta2=theta2,
+                facecolor=colour, edgecolor='none', zorder=9))
+        for d in L['recs']:
+            if d['kind'] == 'near':         # radius + horizontal/angled to label
+                ax.plot([d['sx'], d['ox']], [d['sy'], d['oy']],
+                        color='black', linewidth=0.4, zorder=10)
+                ax.plot([d['ox'], lx_text], [d['oy'], d['ly']],
+                        color='black', linewidth=0.4, zorder=10)
+            elif d['kind'] == 'major':      # perpendicular drop at 6 o'clock + horizontal
+                ax.plot([d['sx'], d['sx']], [d['sy'], d['ly']],
+                        color='black', linewidth=0.4, zorder=10)
+                ax.plot([d['sx'], lx_text], [d['ly'], d['ly']],
+                        color='black', linewidth=0.4, zorder=10)
+            else:                           # radius + perpendicular + angled + horizontal
+                y_knee = max(cy + pie_radius * 1.05, d['oy'])
+                ax.plot([d['sx'], d['ox']], [d['sy'], d['oy']],
+                        color='black', linewidth=0.4, zorder=10)
+                ax.plot([d['ox'], d['ox']], [d['oy'], y_knee],
+                        color='black', linewidth=0.4, zorder=10)
+                ax.plot([d['ox'], x_turn], [y_knee, d['ly']],
+                        color='black', linewidth=0.4, zorder=10)
+                ax.plot([x_turn, lx_text], [d['ly'], d['ly']],
+                        color='black', linewidth=0.4, zorder=10)
+        for d in L['recs']:
             ax.text(lx_text, d['ly'], f"{d['name']} ({d['share'] * 100:.1f}%)",
                     fontsize=5, ha=ha, va='center', zorder=11,
                     bbox=dict(boxstyle='square,pad=0.15',
-                              facecolor='white', edgecolor='none'))
-
+                              facecolor='white', edgecolor='black', linewidth=0.4))
         # Pie title at the bottom of the pie (Pop/FTE — sits at marker y)
-        ax.text(cx, cy - pie_radius * 1.25, title,
+        ax.text(cx, cy - pie_radius * 1.25, L['title'],
                 fontsize=5, ha='center', va='top', fontweight='bold', zorder=11,
                 bbox=dict(boxstyle='square,pad=0.15',
-                          facecolor='white', edgecolor='none'))
+                          facecolor='white', edgecolor='black', linewidth=0.4))
 
     for sid in sa_ids:
         row = sa_row_by_id[sid]
@@ -5748,11 +6412,22 @@ def _plot_sa_stations_overview_map(sa_stations, sa_boundary, shares_df,
 
         # Pies sit ABOVE the marker — Pop on the left (labels to the left),
         # FTE on the right (labels to the right). FTE is mirrored so slice
-        # geometry doesn't crowd the centre of the pair.
-        _draw_pie(x - pie_dx, y + pie_dy, pop_slices,
-                  title='Pop', label_side='left',  clockwise=True)
-        _draw_pie(x + pie_dx, y + pie_dy, fte_slices,
-                  title='FTE', label_side='right', clockwise=False)
+        # geometry doesn't crowd the centre of the pair. Lay both out first so a
+        # 100 % pie's lone label can dodge the paired pie's labels + totals box.
+        pop_L = _layout_pie(x - pie_dx, y + pie_dy, pop_slices,
+                            'Pop', label_side='left',  clockwise=True)
+        fte_L = _layout_pie(x + pie_dx, y + pie_dy, fte_slices,
+                            'FTE', label_side='right', clockwise=False)
+        box_bottom = (y + pie_dy) + pie_radius * 1.25
+        if pop_L['single'] and fte_L['single']:
+            # Both 100 %: stagger in opposite directions for a clean read.
+            pop_L['recs'][0]['ly'] = (y + pie_dy) + pie_radius * 0.55
+            fte_L['recs'][0]['ly'] = (y + pie_dy) - pie_radius * 0.55
+        else:
+            _place_single_label(pop_L, fte_L, box_bottom)
+            _place_single_label(fte_L, pop_L, box_bottom)
+        _render_pie(pop_L)
+        _render_pie(fte_L)
 
         # Station name + totals below the marker
         if not sub.empty:
@@ -5773,7 +6448,7 @@ def _plot_sa_stations_overview_map(sa_stations, sa_boundary, shares_df,
         ax.text(x, label_y, label,
                 fontsize=5, fontweight='bold', va='bottom', ha='center', zorder=11,
                 bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
-                          edgecolor='none'))
+                          edgecolor='black', linewidth=0.4))
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
@@ -6058,7 +6733,7 @@ def _compute_cell_gueteklassen(feeder_stops, rail_stops, pop_grid, empl_grid):
 
 
 def _plot_gueteklassen_stacked_bar(feeder_stops, rail_stops,
-                                     sa_boundary, ca_boundary,
+                                     sa_boundary,
                                      pop_grid, empl_grid, output_dir):
     """One PDF with four 100%-stacked bars: SA-Pop, SA-FTE, CA-Pop, CA-FTE.
 
@@ -6158,7 +6833,110 @@ def _plot_gueteklassen_stacked_bar(feeder_stops, rail_stops,
 
 # --- Orchestrator --------------------------------------------------------------
 
-def make_phase_4a_plots(method, sa_boundary, ca_boundary,
+def _plot_study_catchment_overview(ca_boundary, sa_boundary, rail_lines, out_dir):
+    """Overview map locating the study area within the catchment area.
+
+    Same cartographic grammar as the catchment_base pop/empl/lakes maps (grey
+    exterior, white catchment interior, faint municipal boundaries, lakes,
+    dashed catchment boundary, north arrow + scale bar). The study area is an
+    orange overlay with a solid boundary; the rail network is faint grey
+    context when provided. No municipality labels.
+
+    Args:
+        ca_boundary: Catchment-area polygon (EPSG:2056) — extent and clip.
+        sa_boundary: Study-area polygon (EPSG:2056) — highlighted overlay.
+        rail_lines:  Optional rail-line GeoDataFrame for context (clipped to
+                     the catchment area); omitted when None/empty.
+        out_dir:     Directory for the PDF (the versioned network plot root,
+                     e.g. plots/Catchment_Area/<svc_network>/).
+
+    Produces: <out_dir>/study_catchment_area_overview.pdf
+    """
+    print("  Plotting study/catchment area overview ...")
+
+    muni = gpd.read_file(paths.MUNICIPAL_BOUNDARIES_GPKG).to_crs(CODEBASE_CRS)
+    if 'objektart' in muni.columns:
+        muni = muni[muni['objektart'] == 'Gemeindegebiet']
+    muni = muni[muni.geometry.intersects(ca_boundary)].copy()
+
+    lakes = None
+    if os.path.exists(paths.LAKES_SHP):
+        lakes = gpd.read_file(paths.LAKES_SHP).to_crs(CODEBASE_CRS)
+        lakes = lakes[lakes.geometry.intersects(ca_boundary)].copy()
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+    ax.set_facecolor('#E8E8E8')   # grey outside the catchment
+
+    ca_gdf = gpd.GeoDataFrame(geometry=[ca_boundary], crs=CODEBASE_CRS)
+    sa_gdf = gpd.GeoDataFrame(geometry=[sa_boundary], crs=CODEBASE_CRS)
+
+    # White catchment interior
+    ca_gdf.plot(ax=ax, color='white', edgecolor='none', zorder=0)
+
+    # Study-area highlight (blue overlay)
+    sa_gdf.plot(ax=ax, color='#6BAED6', edgecolor='none', alpha=0.5, zorder=1)
+
+    # Municipal boundaries (clipped to catchment), faint
+    muni_comp  = gpd.clip(muni, ca_boundary)
+    muni_lines = muni_comp.boundary.explode(index_parts=False)
+    muni_lines = muni_lines[~muni_lines.geom_type.isin(['Point', 'MultiPoint'])]
+    muni_lines.plot(ax=ax, color='#404040', linewidth=0.3, zorder=2)
+
+    # Lakes above municipal lines, below boundaries
+    if lakes is not None and not lakes.empty:
+        lakes_draw = gpd.clip(lakes, ca_boundary)
+        if not lakes_draw.empty:
+            lakes_draw.plot(ax=ax, color='#A8D8EA', edgecolor='none', zorder=3)
+
+    # Study-area boundary (solid blue), below the rail network
+    sa_gdf.boundary.plot(ax=ax, color='#08519C', linewidth=1.8, zorder=5)
+
+    # Rail network context (orange), above the study-area boundary
+    rail_plotted = rail_lines is not None and not rail_lines.empty
+    if rail_plotted:
+        rail_draw = gpd.clip(rail_lines, ca_boundary)
+        if not rail_draw.empty:
+            rail_draw.plot(ax=ax, color='#FF7F00', linewidth=1.0, alpha=0.9,
+                           zorder=6)
+        else:
+            rail_plotted = False
+
+    # Catchment area boundary (dashed black), on top
+    ca_gdf.boundary.plot(ax=ax, color='black', linewidth=1.8, linestyle='--',
+                         zorder=7)
+
+    bx_min, by_min, bx_max, by_max = ca_boundary.bounds
+    pad = 200
+    ax.set_xlim(bx_min - pad, bx_max + pad)
+    ax.set_ylim(by_min - pad, by_max + pad)
+
+    _add_map_elements(ax)
+
+    legend_handles = [
+        Patch(facecolor='white', edgecolor='black', label='Catchment area'),
+        Patch(facecolor='#6BAED6', edgecolor='#08519C', label='Study area'),
+        Line2D([0], [0], color='#404040', linewidth=0.3, label='Municipal boundary'),
+        Patch(facecolor='#A8D8EA', edgecolor='none', label='Lake'),
+    ]
+    if rail_plotted:
+        legend_handles.append(
+            Line2D([0], [0], color='#FF7F00', linewidth=1.1, label='Rail network'))
+    ax.legend(handles=legend_handles, fontsize=7, loc='upper right',
+              framealpha=0.9)
+
+    ax.set_title('Study area within the catchment area', fontsize=13)
+    ax.set_xlabel('E [m]')
+    ax.set_ylabel('N [m]')
+    ax.set_aspect('equal')
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, 'study_catchment_area_overview.pdf')
+    fig.savefig(out_path, bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    print(f"    Saved -> {out_path}")
+
+
+def make_phase_4a_plots(method, sa_boundary,
                           allocation, rail_stations,
                           pop_grid, empl_grid,
                           feeder_stops=None, rail_stops=None,
@@ -6169,7 +6947,6 @@ def make_phase_4a_plots(method, sa_boundary, ca_boundary,
     Args:
         method:       'pt_feeder' or 'municipal'
         sa_boundary:  Shapely polygon (or None — see _load_sa_boundary fallback)
-        ca_boundary:  Shapely polygon
         allocation:   per-cell DataFrame (PT-Feeder method only). For Municipal
                       pass an empty DataFrame; cell-level plots are skipped.
         rail_stations: full rail station GeoDataFrame
@@ -6239,8 +7016,16 @@ def make_phase_4a_plots(method, sa_boundary, ca_boundary,
     # Plot (c): Güteklassen stacked bar — PT_Feeder only (needs classified stops)
     if is_pt_feeder and feeder_stops is not None and rail_stops is not None:
         _plot_gueteklassen_stacked_bar(feeder_stops, rail_stops,
-                                         sa_boundary, ca_boundary,
+                                         sa_boundary,
                                          pop_grid, empl_grid, plot_dir)
+
+    # Network-level orientation map: study area within the catchment area.
+    # Saved to the versioned network root (parent of the method plot dir).
+    # Rail context is loaded canton-wide (catchment extent), not just the SA.
+    ca_boundary = _load_catchment_boundary()
+    overview_rail = _load_rail_lines_for_plot(ca_boundary)
+    _plot_study_catchment_overview(
+        ca_boundary, sa_boundary, overview_rail, os.path.dirname(plot_dir))
 
     print(f"  === Phase 4A plot suite complete ({method}) ===\n")
 
@@ -6260,9 +7045,9 @@ def _interactive_config():
         rail_base:   str  – resolved path to the rail Unprojected directory
         temporal      : 'full_day' | 'all_day' | 'peak' | 'offpeak'
     """
-    print("=" * 70)
+    print("=" * 160)
     print("catchment_allocate.py — PIPELINE CONFIGURATION")
-    print("=" * 70)
+    print("=" * 160)
 
     # --- A. Method selection ---
     print("\nA. CATCHMENT METHOD")
@@ -6447,7 +7232,7 @@ def _interactive_config():
     print("   Controls how the per-transfer penalty is computed on feeder-graph transfer edges.")
     print("   1) Fixed value — single PI_TRANSFER_MIN (calibrated) or "
           "average_train_change_time (absolute), independent of connecting headway")
-    print("   2) Explicit    — TRANSFER_WALK_MIN + t_wait_min(connecting_headway), "
+    print("   2) Explicit    — max(TRANSFER_WALK_MIN, t_wait_min(connecting_headway)), "
           "weighted by W_TRANSFER (calibrated) or 1.0 (absolute)")
     _settings_tcm2 = getattr(settings, 'TRANSFER_COST_MODEL', 'fixed_value')
     _default_tcm2  = '1' if _settings_tcm2 == 'fixed_value' else '2'
@@ -6465,9 +7250,9 @@ def _interactive_config():
         'pt_feeder': 'PT-Feeder (GTFS multimodal)',
         'both':      'Both + diff comparison plot',
     }
-    print("\n" + "-" * 70)
+    print("\n" + "-" * 160)
     print("  CONFIGURATION SUMMARY")
-    print("-" * 70)
+    print("-" * 160)
     print(f"  Method         : {method_labels[method]}")
     print(f"  Service version: {svc_version}")
     if need_feeder:
@@ -6478,7 +7263,7 @@ def _interactive_config():
     print(f"  Infra projection: {infra_projection if infra_projection else 'Unprojected'}")
     print(f"  Travel cost    : {travel_cost_method}")
     print(f"  Transfer model : {transfer_cost_model}")
-    print("-" * 70)
+    print("-" * 160)
 
     return {
         'method':              method,
@@ -6543,7 +7328,7 @@ def get_catchment(use_cache: bool, method: str = 'both',
     os.chdir(paths.MAIN)
     _ensure_dirs()
 
-    print("=" * 70)
+    print("=" * 160)
     print("CATCHMENT ALLOCATION")
     print(f"  Method : {method}")
     if method in ('pt_feeder', 'both'):
@@ -6556,7 +7341,7 @@ def get_catchment(use_cache: bool, method: str = 'both',
         print(f"  Transfer penalty   : {_xp_sec:.0f}s "
               f"({_xp_sec / 60:.2f} min, "
               f"{'comfort-weighted PI_TRANSFER' if settings.TRAVEL_COST_METHOD == 'calibrated' else 'raw average_train_change_time'})")
-    print("=" * 70)
+    print("=" * 160)
 
     total_start = time.time()
 
@@ -6578,12 +7363,12 @@ def get_catchment(use_cache: bool, method: str = 'both',
             missing = [f for f in expected_files if not os.path.exists(f)]
             print(f"Cache enabled but {len(missing)} file(s) missing. Regenerating ...")
 
-    # --- Step 1: Read shared data from catchment_base cache ---
-    # Step 1 (boundary, filtered grids, per-municipality summary, raster +
-    # choropleth plots) is produced by `python catchment_base.py`. This module
+    # --- Read shared data from catchment_base cache (Phase 2) ---
+    # The shared inputs (boundary, filtered grids, per-municipality summary, raster +
+    # choropleth plots) are produced by `python catchment_base.py`. This module
     # only consumes the cached outputs — if any are missing, the cache readers
     # raise FileNotFoundError with an actionable message.
-    print("\n[Step 1] Reading shared data from catchment_base cache ...")
+    print("\n[4A] Reading shared data from catchment_base cache ...")
     boundary  = _load_catchment_boundary()
     pop_grid  = load_population_grid_cached()
     empl_grid = load_employment_grid_cached()
@@ -6616,11 +7401,19 @@ def get_catchment(use_cache: bool, method: str = 'both',
             boundary, pop_grid, empl_grid, temporal, visualize=visualize)
 
     if method == 'both' and visualize:
-        print("\n[Comparison] Building diff plot ...")
+        print("\n[4A] Building Municipal vs PT-Feeder diff plot ...")
         rail_stations = _load_rail_stations(boundary, temporal, buffer=0)
         plot_rs = _get_plot_rail_stations(rail_stations, scope='ca')
         _build_diff_plot(muni_catchment, pt_catchment, pt_allocation,
                          pop_grid, empl_grid, plot_rs, boundary)
+
+    if _ref:
+        if method in ('municipal', 'both'):
+            cache_manifest.write_manifest(MUNICIPAL_DATA_DIR, 'catchment_4a',
+                                          {'svc_network': svc_version})
+        if method in ('pt_feeder', 'both'):
+            cache_manifest.write_manifest(PT_FEEDER_DATA_DIR, 'catchment_4a',
+                                          {'svc_network': svc_version})
 
     elapsed = time.time() - total_start
     print(f"\nCatchment allocation complete - {elapsed:.1f}s total")

@@ -1,7 +1,15 @@
-# services_filter_gtfs.py
-#
-# GTFS stop coordinates are always WGS84 (EPSG:4326) and are reprojected to EPSG:2056
-# before spatial filtering.
+"""services_filter_gtfs.py
+Last modified: 2026-06-19
+
+Filters the Swiss national GTFS timetable to the catchment-area subset (rail +
+PT-feeder route types, spatial + service-duration filters, retention policies)
+for the services pipeline. Driven by main_new Phase 2 Step 2.4 as a subprocess
+(--input-folder / --output-folder); standalone without those args it prompts.
+
+The module executes top-to-bottom on run (no importable functions). GTFS stop
+coordinates are always WGS84 (EPSG:4326) and are reprojected to EPSG:2056 before
+spatial filtering.
+"""
 
 import json
 import os
@@ -82,9 +90,8 @@ OPTIONAL_FILES = ['transfers.txt', 'feed_info.txt', 'frequencies.txt']
 CODEBASE_CRS = 'EPSG:2056'
 GTFS_CRS     = 'EPSG:4326'
 
-# Tier 1 service duration filter: drop service_ids active on fewer than this
-# many weekday days across the full timetable year. Removes one-off events,
-# single-weekend specials, and very short construction-period services.
+# Tier 1 service duration filter: drop service_ids active on fewer than this many weekday days across the full timetable year.
+# Removes one-off events, single-weekend specials, and very short construction-period services.
 MIN_WEEKDAY_ACTIVE_DAYS = 20
 
 # ---------------------------------------------------------------------------
@@ -94,8 +101,7 @@ CANTONS_GPKG       = paths.CANTON_BOUNDARIES_GPKG
 BEZIRKE_GPKG       = paths.BEZIRKE_BOUNDARIES_GPKG
 MUNICIPALITIES_GPKG = paths.MUNICIPAL_BOUNDARIES_GPKG
 
-# Timetable year — extracted from the input folder name for the default
-# output folder suggestion. Falls back to 'GTFS' if not parseable.
+# Timetable year — extracted from the input folder name for the default output folder suggestion. Falls back to 'GTFS' if not parseable.
 _TIMETABLE_YEAR_TAG = 'SVC2026'
 
 
@@ -113,9 +119,9 @@ def _configure_gtfs_folders():
         gtfs_input_folder  : str – subfolder name under GTFS_TRANSIT_DIR
         gtfs_output_folder : str – subfolder name under GTFS_TRANSIT_DIR
     """
-    print("=" * 70)
+    print("=" * 160)
     print("services_filter_gtfs.py — Pipeline configuration")
-    print("=" * 70)
+    print("=" * 160)
     print(f"\n   Catchment boundary : {paths.CATCHMENT_AREA_BOUNDARY_GPKG}")
     print("   Run initialisation.py first if that file does not exist.\n")
 
@@ -238,14 +244,14 @@ def _write(df, filename):
 
 os.chdir(paths.MAIN)  # All path constants in paths.py are relative to MAIN
 
-print("=" * 70)
+print("=" * 160)
 print("services_filter_gtfs.py")
 print(f"  CATCHMENT_METHOD      : {settings.CATCHMENT_METHOD}")
 print(f"  Catchment boundary    : {paths.CATCHMENT_AREA_BOUNDARY_GPKG}")
 print(f"  GTFS source           : {os.path.join(paths.GTFS_TRANSIT_DIR, GTFS_INPUT_FOLDER)}")
 print(f"  GTFS output           : {os.path.join(paths.GTFS_TRANSIT_DIR, GTFS_OUTPUT_FOLDER)}")
 print(f"  Spatial CRS           : {CODEBASE_CRS}")
-print("=" * 70)
+print("=" * 160)
 
 _gtfs_output_dir = os.path.join(paths.GTFS_TRANSIT_DIR, GTFS_OUTPUT_FOLDER)
 if os.path.isdir(_gtfs_output_dir):
@@ -317,10 +323,8 @@ print(f"\n  Timetable period (from calendar.txt): {TIMETABLE_START} to {TIMETABL
 # ===========================================================================
 # Step 3 — service duration filter (Tier 1)
 #
-# Compute effective weekday active days per service_id using calendar.txt +
-# calendar_dates.txt, and drop service_ids below MIN_WEEKDAY_ACTIVE_DAYS.
-# This removes one-off events, single-weekend specials, and very short
-# construction-period services before any downstream processing.
+# Compute effective weekday active days per service_id using calendar.txt + calendar_dates.txt, and drop service_ids below MIN_WEEKDAY_ACTIVE_DAYS.
+# This removes one-off events, single-weekend specials, and very short construction-period services before any downstream processing.
 # ===========================================================================
 
 print(f"\n[3] Service duration filter (Tier 1): min {MIN_WEEKDAY_ACTIVE_DAYS} weekday active days ...")
@@ -803,9 +807,9 @@ routes_check['route_type_int'] = pd.to_numeric(routes_check['route_type'], error
 route_type_counts = routes_check['route_type_int'].value_counts().sort_index()
 
 report_lines = [
-    "=" * 70,
+    "=" * 160,
     "GTFS FILTER REPORT — services_filter_gtfs.py",
-    "=" * 70,
+    "=" * 160,
     "",
     "Configuration",
     f"  CATCHMENT_METHOD      : {settings.CATCHMENT_METHOD}",
@@ -882,7 +886,7 @@ report_lines += [
     "RUNTIME",
     f"  Total elapsed            : {time.time() - _start_time:.1f} seconds",
     "",
-    "=" * 70,
+    "=" * 160,
 ]
 
 report_text = "\n".join(report_lines)

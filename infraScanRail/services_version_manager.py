@@ -14,7 +14,7 @@ Workflow
 
 Usage (interactive):
     python services_version_manager.py
-Last modified: 2026-05-11
+Last modified: 2026-06-20
 """
 
 import shutil
@@ -436,7 +436,7 @@ def _run_phase0(
         future_template = False
         print(f"\n  Auto-selected network '{version_name}' for adjustment.")
     else:
-        print("\n" + "-" * 60)
+        print("\n" + "-" * 160)
         print("  What do you want to do?")
         print("    1) Create a new network version (copy from an existing one)")
         print("    2) Adjust an existing network")
@@ -511,7 +511,7 @@ def _run_phase0(
         print(f"\n  Station catalog: auto-selected infra version '{auto_infra_version}'.")
         station_catalog = _load_station_catalog(auto_infra_version)
     elif infra_versions:
-        print("\n" + "-" * 60)
+        print("\n" + "-" * 160)
         print("  Choose infra version for station catalog:")
         iv_idx = _pick_one(infra_versions, "Infra version")
         if iv_idx is not None:
@@ -597,7 +597,7 @@ def _display_stop_sequence(chain: List[pd.Series], title: str = '') -> None:
     """Print a numbered stop list with TT values for each segment."""
     if title:
         print(f"\n  {title}")
-    print("  " + "-" * 56)
+    print("  " + "-" * 160)
     if not chain:
         print("  (no stops)")
         return
@@ -614,7 +614,7 @@ def _display_stop_sequence(chain: List[pd.Series], title: str = '') -> None:
             tt_str = f"TT={float(tt):.1f} min"
         suffix = f"  [formula]" if src == 'formula' else ''
         print(f"    {i}) {name}  {tt_str}{suffix}")
-    print("  " + "-" * 56)
+    print("  " + "-" * 160)
     print(f"  {len(chain) + 1} stops, {len(chain)} segment(s)")
 
 
@@ -2048,7 +2048,7 @@ def _editing_loop(
     while True:
         n_segs  = sum(len(g) for g in seg_layers.values())
         n_lines = sum(len(g) for g in line_layers.values())
-        print("\n" + "-" * 60)
+        print("\n" + "-" * 160)
         print("  %s  |  %d segment(s)  |  %d line feature(s)" % (mode_label, n_segs, n_lines))
         print("    1) View / search routes")
         print("    2) Remove route  (full or trim head/tail)")
@@ -2304,6 +2304,8 @@ def main():
                         help='Infra version for station catalog (auto-select, no prompt)')
     parser.add_argument('--network', default=None,
                         help='Auto-select this network in adjust mode, skipping the Phase 0 menu')
+    parser.add_argument('--non-interactive', action='store_true',
+                        help='Skip all editing; load, save, and propagate without prompts')
     args, _ = parser.parse_known_args()
 
     try:
@@ -2317,8 +2319,19 @@ def main():
     except SystemExit:
         return
 
+    if args.non_interactive:
+        print("\n  [non-interactive] Saving '%s/Unprojected/' without editing..." % version_name)
+        _save_svc_data(rail_seg, rail_line, feed_seg, feed_line, out_rail_dir, out_feeder_dir)
+        _propagate_to_period_folders(
+            orig_rail_seg, rail_seg,
+            orig_rail_line, rail_line,
+            out_rail_dir,
+        )
+        print("  Done.")
+        return
+
     # Phase 1 — Rail services editing
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 160)
     print("  RAIL SERVICES  —  network: %s" % version_name)
     rail_seg, rail_line = _editing_loop(
         rail_seg, rail_line, station_catalog, version_name,
@@ -2328,7 +2341,7 @@ def main():
     # Phase 2 — Track-based feeder (optional)
     n_feed = sum(len(g) for g in feed_seg.values() if not g.empty)
     if n_feed > 0:
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 160)
         ans = input("  Edit track-based feeder services (tram / metro / funicular)? (y/n) [n]: "
                     ).strip().lower() or 'n'
         if ans == 'y':
@@ -2345,7 +2358,7 @@ def main():
                 feed_line[ln] = gdf
 
     # Phase 3 — Save
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 160)
     print("  Saving '%s/Unprojected/' ..." % version_name)
     _save_svc_data(rail_seg, rail_line, feed_seg, feed_line, out_rail_dir, out_feeder_dir)
 

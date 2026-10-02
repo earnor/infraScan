@@ -1,4 +1,5 @@
 # services_network_builder.py
+# Last modified: 2026-06-20
 #
 # CRS used throughout this script: EPSG:2056 (LV95 — Swiss National Grid).
 # Stop coordinates are read directly from the stop_E / stop_N columns written
@@ -1312,14 +1313,14 @@ def _configure_pipeline():
             write_fullday = True
 
         mode_labels = {'all': 'ALL', 'pt_feeder': 'PT-FEEDER ONLY', 'rail': 'RAIL ONLY'}
-        print("=" * 70)
+        print("=" * 160)
         print("services_network_builder.py — NON-INTERACTIVE CONFIGURATION")
-        print("=" * 70)
+        print("=" * 160)
         print(f"  GTFS input folder  : {gtfs_input}")
         print(f"  Mode selection     : {mode_labels[build_modes]}")
         print(f"  Time-period output : {'ALL' if _args.all_periods else 'FULL-DAY ONLY'}")
         print(f"  Output folder      : {output_folder}")
-        print("=" * 70)
+        print("=" * 160)
 
         return {
             'gtfs_input_folder': gtfs_input,
@@ -1332,9 +1333,9 @@ def _configure_pipeline():
         }
 
     # --- Interactive path ----------------------------------------------------
-    print("=" * 70)
+    print("=" * 160)
     print("services_network_builder.py — PIPELINE CONFIGURATION")
-    print("=" * 70)
+    print("=" * 160)
 
     # --- A. GTFS Input Folder ------------------------------------------------
     print("\nA. GTFS INPUT FOLDER")
@@ -1420,14 +1421,14 @@ def _configure_pipeline():
         '3': 'PEAK ONLY',
         '4': 'OFF-PEAK ONLY',
     }
-    print("\n" + "-" * 70)
+    print("\n" + "-" * 160)
     print("  CONFIGURATION SUMMARY")
-    print("-" * 70)
+    print("-" * 160)
     print(f"  GTFS input folder  : {gtfs_input}")
     print(f"  Mode selection     : {mode_labels[build_modes]}")
     print(f"  Time-period output : {period_labels[period_choice]}")
     print(f"  Output folder      : {output_folder}")
-    print("-" * 70)
+    print("-" * 160)
 
     return {
         'gtfs_input_folder': gtfs_input,
@@ -1496,7 +1497,7 @@ rl_segments_offpeak_path = os.path.join(_rail_offpeak_dir, RAIL_SEGMENTS_OFFPEAK
 rl_stops_peak_path       = os.path.join(_rail_peak_dir,    RAIL_STOPS_PEAK_FILE)
 rl_stops_offpeak_path    = os.path.join(_rail_offpeak_dir, RAIL_STOPS_OFFPEAK_FILE)
 
-print("=" * 70)
+print("=" * 160)
 print("services_network_builder.py")
 print(f"  CATCHMENT_METHOD : {settings.CATCHMENT_METHOD}")
 print(f"  CATCHMENT_CANTON : {settings.CATCHMENT_CANTON_ABBREV}")
@@ -1504,7 +1505,7 @@ print(f"  GTFS source      : {os.path.join(paths.GTFS_TRANSIT_DIR, GTFS_INPUT_FO
 print(f"  PT-Feeder output : {_pt_out_dir}")
 print(f"  Rail output      : {_rail_out_dir}")
 print(f"  Spatial CRS      : {CODEBASE_CRS}")
-print("=" * 70)
+print("=" * 160)
 
 _ensure_dir(_pt_out_dir)
 _ensure_dir(_rail_out_dir)
@@ -3168,9 +3169,9 @@ if WRITE_OFFPEAK:
 _output_files_report.append("  + QGIS .qgz project files for each written GeoPackage")
 
 report_lines = [
-    "=" * 70,
+    "=" * 160,
     "NETWORK BUILD REPORT — services_network_builder.py",
-    "=" * 70,
+    "=" * 160,
     "",
     "PIPELINE CONFIGURATION",
     f"  GTFS input folder  : {GTFS_INPUT_FOLDER}",
@@ -3276,7 +3277,7 @@ report_lines = [
     "RUNTIME",
     f"  Total elapsed                : {elapsed:.1f} seconds",
     "",
-    "=" * 70,
+    "=" * 160,
 ]
 
 report_text = "\n".join(report_lines)

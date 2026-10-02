@@ -26,7 +26,7 @@ a path_nodes-aware rail output.
 
 Usage (interactive):
     python infrabuild_infrastructure_enhancement.py
-Last modified: 2026-05-07
+Last modified: 2026-06-19
 """
 
 import difflib
@@ -995,6 +995,8 @@ def _build_feeder_composition(derived: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             'Edge_Level':            1,
             'Under_Construction':    0,
             'Piece_Length':          row.geometry.length,
+            'Num_Tracks':            row.get('Num_Tracks', 2),
+            'Gauge':                 row.get('Gauge'),
             'geometry':              row.geometry,
         })
     return gpd.GeoDataFrame(rows, crs=SWISS_CRS)

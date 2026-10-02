@@ -1,5 +1,6 @@
 """
 Network Builder Module
+Last modified: 2026-06-20
 
 Two-phase interactive pipeline:
 
@@ -37,6 +38,15 @@ from matplotlib_map_utils.core.north_arrow import NorthArrow, north_arrow
 sys.path.insert(0, str(Path(__file__).parent))
 import paths
 import settings
+
+# Force UTF-8 on stdout/stderr so the box-drawing/bullet/ellipsis glyphs used in the
+# CLI and validation output never raise UnicodeEncodeError under a cp1252-strict
+# redirected stream (piped / logged runs on Windows). No-op when already UTF-8.
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except (AttributeError, ValueError):
+    pass
 
 
 # =============================================================================
@@ -203,6 +213,9 @@ def list_versions(infra_dir: Optional[str] = None) -> List[str]:
 
     A subfolder qualifies when it contains both nodes.gpkg and segments.gpkg.
     Raw/ is excluded (intermediate artifact, not a selectable network state).
+    Developments/ is excluded (composed/derived intervention outputs, not a base
+    network state — these live deeper under data/Developments/ now, but the name is
+    skipped defensively in case a stray gpkg ever lands at its root).
 
     Returns version names sorted alphabetically, with 'Base' first when present.
     """
@@ -214,7 +227,7 @@ def list_versions(infra_dir: Optional[str] = None) -> List[str]:
     for sub in sorted(root.iterdir()):
         if not sub.is_dir():
             continue
-        if sub.name.startswith('Raw'):
+        if sub.name.startswith('Raw') or sub.name == 'Developments':
             continue
         if (sub / 'nodes.gpkg').exists() and (sub / 'segments.gpkg').exists():
             versions.append(sub.name)
@@ -1221,9 +1234,9 @@ def run_build_base(
 
     Returns (macro_nodes, macro_segs, composition).
     """
-    print("=" * 60)
+    print("=" * 160)
     print("Build Macroscopic Base Network")
-    print("=" * 60)
+    print("=" * 160)
 
     raw_path = Path(raw_dir  or (Path(paths.MAIN) / paths.NETWORK_INFRASTRUCTURE_RAW))
     out_path = Path(output_dir or (Path(paths.MAIN) / paths.NETWORK_INFRASTRUCTURE_BASE))
@@ -1349,9 +1362,9 @@ def run_build_base(
     _build_infra_qgz(str(out_path / _qgz_name), out_path)
     print(f"  {_qgz_name} → {out_path / _qgz_name}")
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 160)
     print(f"Done  |  {len(macro_nodes)} nodes  |  {len(macro_segs)} segments")
-    print("=" * 60)
+    print("=" * 160)
 
     return macro_nodes, macro_segs, composition
 
@@ -1387,7 +1400,7 @@ def _filter_composition_for_version(
     version_segment_ids and are simply dropped.  Manually added segments
     (new_From_To IDs) have no composition entry, so they are absent already.
     """
-    if composition_base.empty or 'ID' not in composition_base.columns:
+    if composition_base.empty or 'Segment_ID' not in composition_base.columns:
         return composition_base
     mask = composition_base['Segment_ID'].isin(version_segment_ids)
     return composition_base[mask].reset_index(drop=True)
@@ -1670,10 +1683,14 @@ def _build_infra_qgz(
     ca_id   = f'ca_{uuid.uuid4().hex[:8]}'
     sa_id   = f'sa_{uuid.uuid4().hex[:8]}'
 
-    # Relative paths from the version directory to boundary files
-    # data/Infrastructure/<version>/ → ../../Catchment_Area/Boundaries/
-    ca_relpath = '../../Catchment_Area/Boundaries/catchment_area_boundary.gpkg'
-    sa_relpath = '../../Catchment_Area/Boundaries/study_area_boundary.gpkg'
+    # Relative paths from the project's version_dir to the boundary gpkgs, computed
+    # dynamically (as_posix for QGIS) so they resolve at any folder depth — Dev_Full /
+    # Derived sit deeper than the depth-2 data/Infrastructure/<version>/ that the old
+    # hardcoded ../../ assumed, which is why their boundary layers failed to load.
+    _ca_abs = Path(paths.MAIN) / paths.CATCHMENT_AREA_BOUNDARY_GPKG
+    _sa_abs = Path(paths.MAIN) / paths.STUDY_AREA_BOUNDARY_GPKG
+    ca_relpath = Path(os.path.relpath(_ca_abs, version_dir)).as_posix()
+    sa_relpath = Path(os.path.relpath(_sa_abs, version_dir)).as_posix()
 
     seg_block = _segments_maplayer_xml(seg_id, segments_file,
                                         f'Segments — {version}')
@@ -1826,6 +1843,18 @@ def _classify_nodes(nodes: gpd.GeoDataFrame):
     tram_funicular = nodes[is_station & has_tram_f & ~has_train]
     junctions      = nodes[nc.astype(str) == 'junction']
     return train_stations, tram_funicular, junctions
+
+
+def _rail_only_frame(df):
+    """Drop pure tram / funicular / cog rows; keep train, train/tram composites, and
+    mode-less rows (junctions). Used to de-clutter the wide CA infra-int maps where the
+    tram network around Zürich obscures the rail changes."""
+    if df is None or getattr(df, 'empty', True) or 'Transport_Mode' not in df.columns:
+        return df
+    tm = df['Transport_Mode'].astype(str)
+    is_tramish = (tm.str.contains('tram|funicular|cog', case=False, na=False)
+                  & ~tm.str.contains('train', case=False, na=False))
+    return df[~is_tramish]
 
 
 # =============================================================================
@@ -2277,66 +2306,6 @@ def plot_electrification_map(
     return fig
 
 
-def plot_construct_type_map(
-    network: NetworkData,
-    extent=None,
-    output_path: Optional[Path] = None,
-    title: Optional[str] = None,
-    figsize: Tuple[int, int] = (16, 12),
-    show_outside: bool = False,
-    is_catchment: bool = False,
-) -> plt.Figure:
-    """Tunnel / bridge / gallery construct type map."""
-    if title is None:
-        title = f"Construct Type — {network.version}"
-    fig, ax = _base_plot(network, title, figsize, extent=extent)
-    ax.set_facecolor('#f5f5f5')
-    
-    if show_outside:
-        _plot_lakes(ax, extent=extent)
-    else:
-        _plot_lakes(ax, boundary=network.boundary)
-
-    segs     = _clip_to_boundary(network.segments, network.boundary)
-
-    construct_present = set()
-    if len(segs) > 0 and 'construct_type' in segs.columns:
-        for ctype, color in CONSTRUCT_COLORS.items():
-            mask = segs['construct_type'] == ctype
-            if mask.any():
-                construct_present.add(ctype)
-                lw = 3 if ctype in ('tunnel', 'bridge') else 2
-                segs[mask].plot(ax=ax, color=color, linewidth=lw, alpha=0.85)
-        unknown = ~segs['construct_type'].isin(CONSTRUCT_COLORS)
-        if unknown.any():
-            segs[unknown].plot(ax=ax, color=CONSTRUCT_DEFAULT, linewidth=2, alpha=0.7)
-            construct_present.add('unknown')
-    else:
-        segs.plot(ax=ax, color='gray', linewidth=2, alpha=0.7)
-
-    if construct_present:
-        legend = []
-        for ctype, color in CONSTRUCT_COLORS.items():
-            if ctype in construct_present:
-                legend.append(Line2D([0], [0], color=color, linewidth=3,
-                                     label=ctype.title()))
-        if 'unknown' in construct_present:
-            legend.append(Line2D([0], [0], color=CONSTRUCT_DEFAULT, linewidth=2,
-                                 label='Unknown'))
-        _lgnd = ax.legend(handles=legend, loc='upper right', fontsize=10,
-                          title='Construct Type', title_fontsize=11)
-        _lgnd.get_title().set_fontweight('bold')
-
-    _add_north_arrow(ax)
-    _add_scale_bar(ax)
-    plt.tight_layout()
-
-    if output_path:
-        fig.savefig(output_path, bbox_inches='tight')
-        print(f"  Saved → {output_path}")
-    return fig
-
-
 # =============================================================================
 # Canonical Infrastructure Plot
 # =============================================================================
@@ -2511,11 +2480,17 @@ def plot_infrastructure_canonical(
     show_labels: bool = True,
     is_catchment: bool = False,
     show_outside: bool = False,
+    rail_only: bool = False,
 ) -> plt.Figure:
     """Infrastructure overview: black parallel tracks by count,
     white station circles with CODE labels."""
     if title is None:
         title = f"Infrastructure — {network.version}"
+    if rail_only:
+        network = NetworkData(nodes=_rail_only_frame(network.nodes),
+                              segments=_rail_only_frame(network.segments),
+                              graph=network.graph, version=network.version,
+                              boundary=network.boundary)
     fig, ax = _base_plot(network, title, figsize, extent=extent)
     if show_outside:
         _plot_lakes(ax, extent=extent)
@@ -2886,8 +2861,26 @@ def plot_infrastructure_diff(
     show_labels: bool = True,
     is_catchment: bool = False,
     show_outside: bool = False,
+    added_color: Optional[str] = None,
+    added_edge: Optional[str] = None,
+    added_label: Optional[str] = None,
+    superseded_seg_ids: Optional[set] = None,
+    superseded_color: Optional[str] = None,
+    added_type_colors: Optional[dict] = None,
+    rail_only: bool = False,
 ) -> plt.Figure:
     """Diff plot: net_a is the reference, net_b is the comparison.
+
+    ``added_color`` / ``added_edge`` / ``added_label`` recolour the "added /
+    track-gained" category (default green) — used by the infra-int per-type plots
+    to draw CC additions in purple and CAP additions in orange.
+
+    ``added_type_colors`` (optional) colours added / track-gained segments and nodes
+    BY their ``int_type`` tag in ``net_b`` — e.g.
+    ``{'cc': {'color': purple, 'edge': ..., 'label': 'Connecting curve'},
+       'cap': {'color': orange, 'edge': ..., 'label': 'Capacity intervention'}}`` —
+    so one combined plot distinguishes CC from CAP. Overrides the single ``added_color``
+    for the added category; untyped added items fall back to ``added_color``/green.
 
     Segments
     --------
@@ -2910,6 +2903,11 @@ def plot_infrastructure_diff(
     """
     if title is None:
         title = f"Infrastructure diff — {net_b.version} vs {net_a.version}"
+
+    # colour overrides for the added/track-gained category (per-type int diffs)
+    _GREEN = added_color or _DIFF_GREEN
+    _GREEN_EDGE = added_edge or '#005a00'
+    _ADDED_LABEL = added_label or 'Added'
 
     fig, ax = _base_plot(net_b, title, figsize, extent=extent)
     if is_catchment:
@@ -2946,12 +2944,31 @@ def plot_infrastructure_diff(
         nodes_a = net_a.nodes.copy()
         nodes_b = net_b.nodes.copy()
 
+    # Rail-only: drop the tram/funicular network so the wide CA maps show only rail.
+    if rail_only:
+        segs_a, segs_b = _rail_only_frame(segs_a), _rail_only_frame(segs_b)
+        nodes_a, nodes_b = _rail_only_frame(nodes_a), _rail_only_frame(nodes_b)
+
     # ── Segment diff ──────────────────────────────────────────────────────────
     ids_a = set(segs_a['Segment_ID'].dropna())
     ids_b = set(segs_b['Segment_ID'].dropna())
 
     removed_segs = segs_a[segs_a['Segment_ID'].isin(ids_a - ids_b)]
     added_segs   = segs_b[segs_b['Segment_ID'].isin(ids_b - ids_a)]
+
+    # Superseded base segments (e.g. a connecting curve's split host legs): present in
+    # A, absent in B because they were replaced by sub-pieces. When a superseded colour
+    # is given, peel them out of 'removed' and draw them in that lighter shade — the
+    # strong added_color stays for the genuinely-new curve + junctions.
+    _SUPERSEDED = superseded_color or '#c9a8f5'
+    _sup_ids = {str(s) for s in (superseded_seg_ids or ())}
+    if superseded_color and _sup_ids:
+        _sup_mask = removed_segs['Segment_ID'].astype(str).isin(_sup_ids)
+        superseded_segs = removed_segs[_sup_mask]
+        removed_segs = removed_segs[~_sup_mask]
+    else:
+        superseded_segs = removed_segs.iloc[0:0]
+
     common_ids   = ids_a & ids_b
 
     common_a = segs_a[segs_a['Segment_ID'].isin(common_ids)].set_index('Segment_ID')
@@ -2974,7 +2991,7 @@ def plot_infrastructure_diff(
 
     unchanged_ids = []
     modified_ids  = []
-    track_gained  = []  # list of (geom, n_a, n_b)
+    track_gained  = []  # list of (geom, n_a, n_b, sid)
     track_lost    = []  # list of (geom, n_a, n_b)
 
     for sid in common_ids:
@@ -2984,7 +3001,7 @@ def plot_infrastructure_diff(
         n_b  = int(common_b.loc[sid].get('Num_Tracks', 1) or 1)
         geom = common_b.loc[sid].geometry
         if n_b > n_a:
-            track_gained.append((geom, n_a, n_b))
+            track_gained.append((geom, n_a, n_b, sid))
         elif n_b < n_a:
             track_lost.append((geom, n_a, n_b))
         else:
@@ -3035,6 +3052,44 @@ def plot_infrastructure_diff(
     modified_nodes  = nodes_b[nodes_b['Name'].isin(modified_node_names)]
     unchanged_nodes = nodes_b[nodes_b['Name'].isin(unchanged_node_names)]
 
+    # ── Per-int-type colouring of the added / track-gained category ───────────
+    # When added_type_colors is given, added segments/nodes and track-gained segments
+    # are coloured by their int_type tag (CC vs CAP); otherwise the single added_color.
+    _seg_type = ({str(k): v for k, v in
+                  zip(segs_b['Segment_ID'].astype(str), segs_b['int_type'])}
+                 if added_type_colors and 'int_type' in segs_b.columns else {})
+    _node_type = ({str(k): v for k, v in
+                   zip(nodes_b['Name'].astype(str), nodes_b['int_type'])}
+                  if added_type_colors and 'int_type' in nodes_b.columns else {})
+
+    def _type_rgb(itype):
+        spec = added_type_colors.get(itype) if added_type_colors else None
+        if spec:
+            return spec.get('color', _GREEN), spec.get('edge', _GREEN_EDGE)
+        return _GREEN, _GREEN_EDGE
+
+    def _added_seg_groups(gdf):
+        """Yield (sub_gdf, color) partitions of added segments by int_type colour."""
+        if gdf is None or gdf.empty:
+            return []
+        if not added_type_colors:
+            return [(gdf, _GREEN)]
+        key = gdf['Segment_ID'].astype(str).map(lambda s: _seg_type.get(s))
+        return [(sub, _type_rgb(itype)[0]) for itype, sub in gdf.groupby(key, dropna=False)]
+
+    def _added_node_groups(gdf):
+        """Yield (sub_gdf, color, edge) partitions of added nodes by int_type colour."""
+        if gdf is None or gdf.empty:
+            return []
+        if not added_type_colors:
+            return [(gdf, _GREEN, _GREEN_EDGE)]
+        key = gdf['Name'].astype(str).map(lambda s: _node_type.get(s))
+        out = []
+        for itype, sub in gdf.groupby(key, dropna=False):
+            col, edge = _type_rgb(itype)
+            out.append((sub, col, edge))
+        return out
+
     ms_ts = 20 if is_catchment else 55
     ms_jn = 5  if is_catchment else 8
 
@@ -3067,30 +3122,38 @@ def plot_infrastructure_diff(
                                   track_spacing_m=ts)
         for _, row in modified_segs.iterrows():
             _draw_parallel_tracks(ax, row.geometry, int(row.get('Num_Tracks', 1) or 1),
-                                  color=_DIFF_YELLOW, linewidth=1.4, alpha=_ga, zorder=3,
+                                  color=_DIFF_YELLOW, linewidth=1.4, alpha=_ga, zorder=11,
+                                  track_spacing_m=ts)
+        for _, row in superseded_segs.iterrows():
+            _draw_parallel_tracks(ax, row.geometry, int(row.get('Num_Tracks', 1) or 1),
+                                  color=_SUPERSEDED, linewidth=1.4, alpha=_ga, zorder=12,
                                   track_spacing_m=ts)
         for _, row in removed_segs.iterrows():
             _draw_parallel_tracks(ax, row.geometry, int(row.get('Num_Tracks', 1) or 1),
-                                  color=_DIFF_RED, linewidth=1.4, alpha=_ga, zorder=4,
+                                  color=_DIFF_RED, linewidth=1.4, alpha=_ga, zorder=12,
                                   track_spacing_m=ts)
-        for _, row in added_segs.iterrows():
-            _draw_parallel_tracks(ax, row.geometry, int(row.get('Num_Tracks', 1) or 1),
-                                  color=_DIFF_GREEN, linewidth=1.4, alpha=_ga, zorder=5,
-                                  track_spacing_m=ts)
+        for _sub, _col in _added_seg_groups(added_segs):
+            for _, row in _sub.iterrows():
+                _draw_parallel_tracks(ax, row.geometry, int(row.get('Num_Tracks', 1) or 1),
+                                      color=_col, linewidth=1.4, alpha=_ga, zorder=13,
+                                      track_spacing_m=ts)
         for geom, n_a, n_b in track_lost:
             _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_b + [_DIFF_RED] * (n_a - n_b),
-                                        linewidth=1.2, alpha=_ga, zorder=4, track_spacing_m=ts)
-        for geom, n_a, n_b in track_gained:
-            _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_a + [_DIFF_GREEN] * (n_b - n_a),
-                                        linewidth=1.2, alpha=_ga, zorder=5, track_spacing_m=ts)
-        _plot_node_set(unchanged_nodes, _DIFF_BLACK,   _DIFF_BLACK,   _ga, 5)
-        _plot_node_set(modified_nodes,  _DIFF_YELLOW, '#7a6000',    _ga, 6)
-        _plot_node_set(removed_nodes,   _DIFF_RED,    '#7f0000',    _ga, 7)
-        _plot_node_set(added_nodes,     _DIFF_GREEN,  '#005a00',    _ga, 8)
+                                        linewidth=1.2, alpha=_ga, zorder=12, track_spacing_m=ts)
+        for geom, n_a, n_b, _sid in track_gained:
+            _gain = _type_rgb(_seg_type.get(str(_sid)))[0]
+            _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_a + [_gain] * (n_b - n_a),
+                                        linewidth=1.2, alpha=_ga, zorder=13, track_spacing_m=ts)
+        _plot_node_set(unchanged_nodes, _DIFF_BLACK,   _DIFF_BLACK,   _ga, 3)
+        _plot_node_set(modified_nodes,  _DIFF_YELLOW, '#7a6000',    _ga, 14)
+        _plot_node_set(removed_nodes,   _DIFF_RED,    '#7f0000',    _ga, 15)
+        for _sub, _col, _edge in _added_node_groups(added_nodes):
+            _plot_node_set(_sub, _col, _edge, _ga, 16)
 
         # Clip all categories to boundary for the solid pass
         unchanged_segs  = _clip_to_boundary(unchanged_segs,  boundary)
         modified_segs   = _clip_to_boundary(modified_segs,   boundary)
+        superseded_segs = _clip_to_boundary(superseded_segs, boundary)
         removed_segs    = _clip_to_boundary(removed_segs,    boundary)
         added_segs      = _clip_to_boundary(added_segs,      boundary)
         unchanged_nodes = _clip_to_boundary(unchanged_nodes, boundary)
@@ -3099,7 +3162,7 @@ def plot_infrastructure_diff(
         added_nodes     = _clip_to_boundary(added_nodes,     boundary)
         if boundary is not None and not boundary.empty:
             _bgeom      = boundary.geometry.union_all()
-            track_gained = [(g, na, nb) for g, na, nb in track_gained
+            track_gained = [(g, na, nb, sid) for g, na, nb, sid in track_gained
                             if g is not None and not g.is_empty
                             and g.centroid.within(_bgeom)]
             track_lost   = [(g, na, nb) for g, na, nb in track_lost
@@ -3111,26 +3174,34 @@ def plot_infrastructure_diff(
     # _draw_seg_category merges all geometries per Num_Tracks group into a
     # single MultiLineString before drawing — eliminates per-segment alpha
     # compositing that creates darker blobs at junctions. alpha=1.0 throughout.
-    _draw_seg_category(ax, unchanged_segs, _DIFF_BLACK,  linewidth=1.05, alpha=1.0, zorder=2, ts=ts)
-    _draw_seg_category(ax, modified_segs,  _DIFF_YELLOW, linewidth=1.4,  alpha=1.0, zorder=3, ts=ts)
-    _draw_seg_category(ax, removed_segs,   _DIFF_RED,    linewidth=1.4,  alpha=1.0, zorder=4, ts=ts)
-    _draw_seg_category(ax, added_segs,     _DIFF_GREEN,  linewidth=1.4,  alpha=1.0, zorder=5, ts=ts)
+    # z-order: unchanged network stays at the bottom (segs z2, nodes z3); every changed
+    # element (modified/superseded/removed/added segments + nodes) is lifted into a high
+    # band (z11–16) so an intervention is never hidden under an unchanged segment or a
+    # station marker.
+    _draw_seg_category(ax, unchanged_segs,  _DIFF_BLACK,  linewidth=1.05, alpha=1.0, zorder=2, ts=ts)
+    _draw_seg_category(ax, modified_segs,   _DIFF_YELLOW, linewidth=1.4,  alpha=1.0, zorder=11, ts=ts)
+    _draw_seg_category(ax, superseded_segs, _SUPERSEDED,  linewidth=1.4,  alpha=1.0, zorder=12, ts=ts)
+    _draw_seg_category(ax, removed_segs,    _DIFF_RED,    linewidth=1.4,  alpha=1.0, zorder=12, ts=ts)
+    for _sub, _col in _added_seg_groups(added_segs):
+        _draw_seg_category(ax, _sub, _col, linewidth=1.4, alpha=1.0, zorder=13, ts=ts)
     for geom, n_a, n_b in track_lost:
         _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_b + [_DIFF_RED] * (n_a - n_b),
-                                    linewidth=1.2, alpha=1.0, zorder=4, track_spacing_m=ts)
-    for geom, n_a, n_b in track_gained:
-        _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_a + [_DIFF_GREEN] * (n_b - n_a),
-                                    linewidth=1.2, alpha=1.0, zorder=5, track_spacing_m=ts)
+                                    linewidth=1.2, alpha=1.0, zorder=12, track_spacing_m=ts)
+    for geom, n_a, n_b, _sid in track_gained:
+        _gain = _type_rgb(_seg_type.get(str(_sid)))[0]
+        _draw_parallel_tracks_mixed(ax, geom, ['black'] * n_a + [_gain] * (n_b - n_a),
+                                    linewidth=1.2, alpha=1.0, zorder=13, track_spacing_m=ts)
 
     # ── Draw nodes (solid pass) ───────────────────────────────────────────────
-    _plot_node_set(unchanged_nodes, _DIFF_BLACK,   _DIFF_BLACK,   1.0, 5)
-    _plot_node_set(modified_nodes,  _DIFF_YELLOW, '#7a6000',    1.0, 6)
-    _plot_node_set(removed_nodes,   _DIFF_RED,    '#7f0000',    1.0, 7)
-    _plot_node_set(added_nodes,     _DIFF_GREEN,  '#005a00',    1.0, 8)
+    _plot_node_set(unchanged_nodes, _DIFF_BLACK,   _DIFF_BLACK,   1.0, 3)
+    _plot_node_set(modified_nodes,  _DIFF_YELLOW, '#7a6000',    1.0, 14)
+    _plot_node_set(removed_nodes,   _DIFF_RED,    '#7f0000',    1.0, 15)
+    for _sub, _col, _edge in _added_node_groups(added_nodes):
+        _plot_node_set(_sub, _col, _edge, 1.0, 16)
 
     # ── Labels (added/removed/modified stations only) ─────────────────────────
     if show_labels and not is_catchment:
-        for nodes_gdf, color in ((added_nodes,    _DIFF_GREEN),
+        for nodes_gdf, color in ((added_nodes,    _GREEN),
                                  (removed_nodes,  _DIFF_RED),
                                  (modified_nodes, _DIFF_YELLOW)):
             ts_n, tf_n, _ = _classify_nodes(nodes_gdf)
@@ -3144,7 +3215,7 @@ def plot_infrastructure_diff(
                         fontsize=7, fontweight='bold', color=color,
                         bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
                                   edgecolor='none', alpha=0.7),
-                        zorder=8,
+                        zorder=20,
                     )
 
     # ── Legend ────────────────────────────────────────────────────────────────
@@ -3153,10 +3224,18 @@ def plot_infrastructure_diff(
                          label='Unchanged'))
     legend.append(Line2D([0], [0], color=_DIFF_YELLOW, linewidth=1.4,
                          label='Modified'))
-    legend.append(Line2D([0], [0], color=_DIFF_GREEN,  linewidth=1.4,
-                         label='Added'))
+    if added_type_colors:
+        for _itype, _spec in added_type_colors.items():
+            legend.append(Line2D([0], [0], color=_spec.get('color', _GREEN), linewidth=1.4,
+                                 label=_spec.get('label', str(_itype))))
+    else:
+        legend.append(Line2D([0], [0], color=_GREEN,       linewidth=1.4,
+                             label=_ADDED_LABEL))
     legend.append(Line2D([0], [0], color=_DIFF_RED,    linewidth=1.4,
                          label='Removed'))
+    if superseded_color:
+        legend.append(Line2D([0], [0], color=_SUPERSEDED, linewidth=1.4,
+                             label='Superseded (split)'))
     legend.append(Line2D([0], [0], color='none', label=r'$\bf{Nodes}$'))
     legend.append(Line2D([0], [0], marker='o', color='w',
                          markerfacecolor=_DIFF_BLACK, markersize=6,
@@ -3165,10 +3244,17 @@ def plot_infrastructure_diff(
                          markerfacecolor=_DIFF_YELLOW,
                          markeredgecolor='#7a6000', markersize=8,
                          label='Modified'))
-    legend.append(Line2D([0], [0], marker='o', color='w',
-                         markerfacecolor=_DIFF_GREEN,
-                         markeredgecolor='#005a00', markersize=8,
-                         label='Added'))
+    if added_type_colors:
+        for _itype, _spec in added_type_colors.items():
+            legend.append(Line2D([0], [0], marker='o', color='w',
+                                 markerfacecolor=_spec.get('color', _GREEN),
+                                 markeredgecolor=_spec.get('edge', _GREEN_EDGE), markersize=8,
+                                 label=_spec.get('label', str(_itype))))
+    else:
+        legend.append(Line2D([0], [0], marker='o', color='w',
+                             markerfacecolor=_GREEN,
+                             markeredgecolor=_GREEN_EDGE, markersize=8,
+                             label=_ADDED_LABEL))
     legend.append(Line2D([0], [0], marker='o', color='w',
                          markerfacecolor=_DIFF_RED,
                          markeredgecolor='#7f0000', markersize=8,
@@ -3337,6 +3423,16 @@ def plot_engineering_structures(
             elif 'tram' in _mode_str:
                 seg_id_to_track_color[_sid] = _TRAM_TRACK_COLOR
 
+    # Track count comes from the parent segment's Num_Tracks (segments.gpkg is the
+    # source of truth, matching the infrastructure plot). The composition's per-piece
+    # Num_Tracks can lag behind seed/scenario track doubling, so it is used only as a
+    # fallback when a piece has no matching segment.
+    _seg_nt = (
+        network.segments.dropna(subset=['Segment_ID'])
+        .drop_duplicates('Segment_ID').set_index('Segment_ID')['Num_Tracks'].to_dict()
+        if not network.segments.empty and 'Segment_ID' in network.segments.columns else {}
+    )
+
     legend_handles: list = []
     legend_seen:    set  = set()
     _bridge_proxy = None  # set on first bridge encounter; used for HandlerTuple legend
@@ -3359,7 +3455,7 @@ def plot_engineering_structures(
                 continue
             ctype = str(piece.get('Engineering_Structure', 'normal')).lower()
             try:
-                nt = piece.get('Num_Tracks', 1)
+                nt = _seg_nt.get(str(piece.get('Segment_ID', '')), piece.get('Num_Tracks', 1))
                 num_tracks = int(float(nt)) if pd.notna(nt) else 1
             except (ValueError, TypeError):
                 num_tracks = 1
@@ -3693,6 +3789,190 @@ def plot_speed_map(
 
 
 # =============================================================================
+# Plot + diff orchestration (the single source shared by the CLI and main_new
+# Phases 3A/3B — call sites pick the version/extents, the dispatch is here)
+# =============================================================================
+
+# (key, plot fn, extent scope, filename, extra kwargs). 'sa_construct' is handled
+# specially below because it needs the composition frame and the nodes.
+_INFRA_PLOT_SPECS = [
+    ('ca_infra', plot_infrastructure_canonical, 'ca', 'ca_infrastructure.pdf',
+     {'is_catchment': True, 'show_labels': False}),
+    ('ca_gauge', plot_gauge_map,           'ca', 'ca_gauge.pdf',           {'is_catchment': True}),
+    ('ca_elec',  plot_electrification_map, 'ca', 'ca_electrification.pdf', {'is_catchment': True}),
+    ('ca_speed', plot_speed_map,           'ca', 'ca_speed.pdf',           {'is_catchment': True}),
+    ('ca_owner', plot_owner_map,           'ca', 'ca_owner.pdf',           {'is_catchment': True}),
+    ('sa_infra', plot_infrastructure_canonical, 'sa', 'sa_infrastructure.pdf', {'show_outside': True}),
+    ('sa_gauge', plot_gauge_map,           'sa', 'sa_gauge.pdf',           {'show_outside': True}),
+    ('sa_elec',  plot_electrification_map, 'sa', 'sa_electrification.pdf', {'show_outside': True}),
+    ('sa_speed', plot_speed_map,           'sa', 'sa_speed.pdf',           {'show_outside': True}),
+    ('sa_owner', plot_owner_map,           'sa', 'sa_owner.pdf',           {'show_outside': True}),
+    ('sa_construct', plot_engineering_structures, 'sa', 'sa_engineering_structures.pdf',
+     {'show_outside': True}),
+]
+
+# Canonical key order — the default "render everything" set.
+INFRA_PLOT_KEYS = [spec[0] for spec in _INFRA_PLOT_SPECS]
+
+
+def _extent_from_boundary(gdf, margin_m: int = 2000):
+    """Return (xmin, xmax, ymin, ymax) padded by margin_m, or None when gdf is None/empty."""
+    if gdf is None or getattr(gdf, 'empty', True):
+        return None
+    b = gdf.total_bounds  # [minx, miny, maxx, maxy]
+    return (b[0] - margin_m, b[2] + margin_m, b[1] - margin_m, b[3] + margin_m)
+
+
+def render_infrastructure_plots(
+    nodes: gpd.GeoDataFrame,
+    segments: gpd.GeoDataFrame,
+    version: str,
+    *,
+    plot_dir,
+    ca_boundary: Optional[gpd.GeoDataFrame] = None,
+    sa_boundary: Optional[gpd.GeoDataFrame] = None,
+    composition: Optional[gpd.GeoDataFrame] = None,
+    graph: Optional[nx.Graph] = None,
+    plot_set: Optional[List[str]] = None,
+) -> None:
+    """Render the standard infrastructure plot set for one network version.
+
+    Single source of plot orchestration for the standalone CLI and main_new Phases 3A/3B.
+    Each key maps to one primitive + extent + filename; catchment-area maps clip to
+    ca_boundary, study-area maps draw the wider context. 'sa_construct' (engineering
+    structures) needs composition and is skipped with a note when none is available.
+
+    Args:
+        nodes, segments: The version's network frames.
+        version: Version name (used for plot titles).
+        plot_dir: Output directory (created if missing).
+        ca_boundary, sa_boundary: Catchment- / study-area boundary GeoDataFrames.
+        composition: segments_composition frame — required for 'sa_construct'.
+        graph: Pre-built NetworkX graph; built from nodes/segments when None.
+        plot_set: Keys to render (see INFRA_PLOT_KEYS); None renders every key.
+    """
+    keys = list(plot_set) if plot_set is not None else list(INFRA_PLOT_KEYS)
+    if not keys:
+        print("  No plots requested.")
+        return
+
+    G = graph if graph is not None else build_networkx_graph(nodes, segments)
+    plot_dir = Path(plot_dir)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  Generating plots → {plot_dir}")
+
+    ext = {'ca': _extent_from_boundary(ca_boundary),
+           'sa': _extent_from_boundary(sa_boundary)}
+    net = {
+        'ca': NetworkData(nodes=nodes, segments=segments, graph=G,
+                          version=version, boundary=ca_boundary),
+        'sa': NetworkData(nodes=nodes, segments=segments, graph=G,
+                          version=version, boundary=sa_boundary),
+    }
+    spec_by_key = {k: (fn, scope, fname, kw)
+                   for k, fn, scope, fname, kw in _INFRA_PLOT_SPECS}
+
+    for key in keys:
+        if key not in spec_by_key:
+            print(f"    Unknown plot key '{key}' — skipped.")
+            continue
+        fn, scope, fname, kw = spec_by_key[key]
+        if key == 'sa_construct':
+            if composition is None or composition.empty:
+                print("    sa_engineering_structures.pdf — skipped (no composition data).")
+                continue
+            print(f"    {fname} ...")
+            fig = plot_engineering_structures(
+                net['sa'], composition, extent=ext['sa'],
+                output_path=plot_dir / fname, show_outside=True, nodes=nodes,
+            )
+        else:
+            print(f"    {fname} ...")
+            fig = fn(net[scope], extent=ext[scope],
+                     output_path=plot_dir / fname, **kw)
+        plt.close(fig)
+    print("  Plots complete.")
+
+
+def render_infrastructure_diff(
+    base_nodes: gpd.GeoDataFrame,
+    base_segments: gpd.GeoDataFrame,
+    base_version: str,
+    dev_nodes: gpd.GeoDataFrame,
+    dev_segments: gpd.GeoDataFrame,
+    dev_version: str,
+    *,
+    out_dir,
+    ca_boundary: Optional[gpd.GeoDataFrame] = None,
+    sa_boundary: Optional[gpd.GeoDataFrame] = None,
+    comp_base: Optional[gpd.GeoDataFrame] = None,
+    comp_dev: Optional[gpd.GeoDataFrame] = None,
+    scope: str = 'both',
+    xlsx_dir=None,
+    make_plots: bool = True,
+) -> None:
+    """Export the base-vs-developed diff: a two-sheet Excel report + ca/sa diff maps.
+
+    Wraps export_infrastructure_diff (xlsx) and plot_infrastructure_diff (one PDF per
+    requested extent). The Excel report lands in xlsx_dir (default out_dir); the diff
+    maps land in out_dir. The xlsx is a data output and is always written; the diff
+    maps are gated by make_plots.
+
+    Args:
+        base_*: Reference network (the pre-development version).
+        dev_*: Developed network (what changed relative to base).
+        out_dir: Output directory for the diff PDFs.
+        ca_boundary, sa_boundary: Boundaries for the respective extents.
+        comp_base, comp_dev: Composition frames for the Excel diff.
+        scope: 'ca', 'sa', or 'both' — which extents to draw.
+        xlsx_dir: Directory for the Excel report (default: out_dir).
+        make_plots: When False, write only the Excel report (skip the diff maps).
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    xlsx_dir = Path(xlsx_dir) if xlsx_dir is not None else out_dir
+
+    base_G = build_networkx_graph(base_nodes, base_segments)
+    dev_G  = build_networkx_graph(dev_nodes, dev_segments)
+
+    xlsx_path = xlsx_dir / f'diff_{dev_version}_vs_{base_version}.xlsx'
+    print(f"  Diff report ...")
+    export_infrastructure_diff(
+        net_a=NetworkData(nodes=base_nodes, segments=base_segments,
+                          graph=base_G, version=base_version),
+        net_b=NetworkData(nodes=dev_nodes, segments=dev_segments,
+                          graph=dev_G, version=dev_version),
+        comp_a=comp_base if comp_base is not None else gpd.GeoDataFrame(),
+        comp_b=comp_dev if comp_dev is not None else gpd.GeoDataFrame(),
+        output_path=xlsx_path,
+    )
+
+    if not make_plots:
+        return
+
+    pairs = []
+    if scope in ('ca', 'both'):
+        pairs.append(('ca', ca_boundary, _extent_from_boundary(ca_boundary), True))
+    if scope in ('sa', 'both'):
+        pairs.append(('sa', sa_boundary, _extent_from_boundary(sa_boundary), False))
+
+    for scope_key, bdry, extent, is_ca in pairs:
+        net_a = NetworkData(nodes=base_nodes, segments=base_segments,
+                            graph=base_G, version=base_version, boundary=bdry)
+        net_b = NetworkData(nodes=dev_nodes, segments=dev_segments,
+                            graph=dev_G, version=dev_version, boundary=bdry)
+        fname = f'{scope_key}_diff_vs_{base_version}.pdf'
+        print(f"  Diff ({scope_key.upper()}) ...")
+        fig = plot_infrastructure_diff(
+            net_a, net_b, extent=extent,
+            output_path=out_dir / fname,
+            is_catchment=is_ca, show_outside=True,
+        )
+        plt.close(fig)
+    print(f"  Diff output → {out_dir}")
+
+
+# =============================================================================
 # Import core (helpers shared with infrabuild_version_manager.py)
 # Pure data-frame primitives used by the version manager TUI, the seed
 # augmentation hook above, and the derived-version builder. No I/O policy here.
@@ -3894,6 +4174,9 @@ def _split_row_template(S, geom, from_name, to_name,
         'Route_Number':          S['Route_Number'],
         'Route_Name':            S['Route_Name'],
         'Route_Owner':           S['Route_Owner'],
+        # Split pieces are the same physical track as the host: inherit its mode so the
+        # capacity loader's train-segment filter keeps them (a missing mode is dropped).
+        'Transport_Mode':        S.get('Transport_Mode', pd.NA),
         'Average_Speed':         S.get('Average_Speed', pd.NA),
         'Predominant_Speed':     S.get('Predominant_Speed', pd.NA),
         'Speed_Coverage_Pct':    S.get('Speed_Coverage_Pct', 0.0),
@@ -3910,6 +4193,19 @@ def _redistribute_composition(composition, old_seg_id, split_dist,
     old_comp = composition[composition['Segment_ID'] == old_seg_id].copy()
     composition = composition[composition['Segment_ID'] != old_seg_id].reset_index(drop=True)
 
+    # Each piece keeps its OWN sub-geometry sliced from the relevant half — NOT the whole
+    # half. Assigning the full geom_A/geom_B to every piece made a single bridge/tunnel piece
+    # paint the entire half-segment in the engineering-structures plot (which draws per piece).
+    def _slice(half_geom, a, b):
+        a = max(0.0, min(a, half_geom.length))
+        b = max(0.0, min(b, half_geom.length))
+        if b - a <= 0.01:
+            return half_geom
+        try:
+            return shp_substring(half_geom, a, b)
+        except Exception:
+            return half_geom
+
     new_rows = []
     cumulative = 0.0
     for _, piece in old_comp.iterrows():
@@ -3922,20 +4218,22 @@ def _redistribute_composition(composition, old_seg_id, split_dist,
         if piece_end <= split_dist:
             new_rows.append({**base, 'Segment_ID': id_A,
                              'From_Name': from_name, 'To_Name': mid_name,
-                             '_geom': geom_A})
+                             '_geom': _slice(geom_A, piece_start, piece_end)})
         elif piece_start >= split_dist:
             new_rows.append({**base, 'Segment_ID': id_B,
                              'From_Name': mid_name, 'To_Name': to_name,
-                             '_geom': geom_B})
+                             '_geom': _slice(geom_B, piece_start - split_dist, piece_end - split_dist)})
         else:
             len_in_A = split_dist - piece_start
             len_in_B = piece_end  - split_dist
             new_rows.append({**base, 'Segment_ID': id_A,
                              'From_Name': from_name, 'To_Name': mid_name,
-                             'Piece_Length': len_in_A, '_geom': geom_A})
+                             'Piece_Length': len_in_A,
+                             '_geom': _slice(geom_A, piece_start, split_dist)})
             new_rows.append({**base, 'Segment_ID': id_B,
                              'From_Name': mid_name, 'To_Name': to_name,
-                             'Piece_Length': len_in_B, '_geom': geom_B})
+                             'Piece_Length': len_in_B,
+                             '_geom': _slice(geom_B, 0.0, len_in_B)})
         cumulative = piece_end
 
     if new_rows:
@@ -4109,9 +4407,9 @@ def validate_and_autofill(
     Returns:
         (nodes, segments, composition, ok_to_save).
     """
-    print("\n" + "─" * 60)
+    print("\n" + "─" * 160)
     print("  Pre-save validation")
-    print("─" * 60)
+    print("─" * 160)
 
     counts: dict = {}
     warnings: List[str] = []
@@ -4344,6 +4642,72 @@ def validate_and_autofill(
 # Seed loading (Topic 3)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _resync_composition_geometry(segments, composition):
+    """Re-slice straight-placeholder composition pieces along their parent segment.
+
+    Seeded 'Added' segments (e.g. the Brüttener Tunnel) carry their real alignment in
+    segments.gpkg but their composition pieces were authored as straight 2-point lines
+    (correct Piece_Length + Engineering_Structure, no alignment). The engineering-structures
+    plot draws per-piece geometry, so those pieces render as straight lines. This restores
+    the invariant that a composition piece is a sub-alignment of its segment: a single-piece
+    segment takes the whole segment geometry; a multi-piece segment is sliced by cumulative
+    Piece_Length. Only segments that have a degenerate (≤2-point) piece are touched, so the
+    base pieces already sliced from real geometry are left untouched. Returns composition.
+    """
+    if (composition is None or getattr(composition, 'empty', True)
+            or 'Segment_ID' not in composition.columns
+            or segments is None or segments.empty or 'Segment_ID' not in segments.columns):
+        return composition
+
+    def _cc(g):
+        if g is None or g.is_empty:
+            return 0
+        return (sum(len(p.coords) for p in g.geoms)
+                if g.geom_type == 'MultiLineString' else len(g.coords))
+
+    seg_geom = (segments.dropna(subset=['Segment_ID']).drop_duplicates('Segment_ID')
+                .set_index('Segment_ID').geometry)
+    has_plen = 'Piece_Length' in composition.columns
+    n_fixed = 0
+    for sid, idx in composition.groupby('Segment_ID').groups.items():
+        if sid not in seg_geom.index:
+            continue
+        pidx = list(idx)
+        if not any(_cc(composition.at[i, 'geometry']) <= 2 for i in pidx):
+            continue
+        line = seg_geom.loc[sid]
+        if line is None or line.is_empty:
+            continue
+        if line.geom_type == 'MultiLineString':
+            line = linemerge(line)
+        if line.geom_type != 'LineString' or line.length <= 0:
+            continue
+        L = line.length
+        if len(pidx) == 1:
+            composition.at[pidx[0], 'geometry'] = line
+            n_fixed += 1
+            continue
+        plens = [max(0.0, float(pd.to_numeric(composition.at[i, 'Piece_Length'],
+                                              errors='coerce') or 0.0)) if has_plen else 0.0
+                 for i in pidx]
+        tot = sum(plens)
+        if tot <= 0:
+            plens = [1.0] * len(pidx)
+            tot = float(len(pidx))
+        scale, cum = L / tot, 0.0
+        for i, pl in zip(pidx, plens):
+            a, b = cum * scale, min(L, (cum + pl) * scale)
+            try:
+                composition.at[i, 'geometry'] = shp_substring(line, a, b)
+                n_fixed += 1
+            except Exception:
+                pass
+            cum += pl
+    if n_fixed:
+        print(f"  [seed]   re-synced geometry on {n_fixed} placeholder composition piece(s) to segment")
+    return composition
+
+
 def load_and_apply_seed(
     version_name: str,
     nodes: gpd.GeoDataFrame,
@@ -4459,14 +4823,39 @@ def load_and_apply_seed(
                 segments, composition, add_segs, seed_comp,
             )
 
+    # --- 7. re-sync composition Num_Tracks to the parent segment ----------
+    # filter_network sets composition Num_Tracks = segment Num_Tracks (the per-piece
+    # column mirrors the segment), but seed 'Modified' entries (step 4) bump the segment
+    # without touching its composition pieces. Re-establish the invariant here so every
+    # composition piece reflects the seeded track count — else the engineering-structures
+    # plot (the only per-piece Num_Tracks reader) under-draws the doubled corridors.
+    if (composition is not None and not composition.empty
+            and 'Num_Tracks' in composition.columns and 'Segment_ID' in composition.columns):
+        seg_nt = (segments.dropna(subset=['Segment_ID'])
+                  .drop_duplicates('Segment_ID').set_index('Segment_ID')['Num_Tracks'])
+        mapped = composition['Segment_ID'].map(seg_nt)
+        diff_mask = mapped.notna() & (
+            pd.to_numeric(composition['Num_Tracks'], errors='coerce')
+            != pd.to_numeric(mapped, errors='coerce')
+        )
+        n_synced = int(diff_mask.sum())
+        if n_synced:
+            composition.loc[diff_mask, 'Num_Tracks'] = mapped[diff_mask].values
+            print(f"  [seed]   re-synced Num_Tracks on {n_synced} composition piece(s) to segment")
+
+    # --- 8. re-sync composition piece GEOMETRY to the parent segment -----------
+    # Seeded 'Added' pieces are authored as straight placeholder lines; re-slice them along
+    # the real segment alignment so the engineering-structures plot follows the curve.
+    composition = _resync_composition_geometry(segments, composition)
+
     return nodes, segments, composition
 
 if __name__ == "__main__":
     os.chdir(paths.MAIN)
 
-    print("=" * 60)
+    print("=" * 160)
     print("infraScanRail — Network Builder")
-    print("=" * 60)
+    print("=" * 160)
 
     _infra_root = Path(paths.MAIN) / paths.NETWORK_INFRASTRUCTURE_DIR
     _base_path  = Path(paths.MAIN) / paths.NETWORK_INFRASTRUCTURE_BASE
@@ -4488,9 +4877,9 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     # ── Step 0 / Q1: Which network version to build? ─────────────────────────
-    print("\n" + "─" * 60)
+    print("\n" + "─" * 160)
     print("[Step 0 / Q1]  Which network version to build?")
-    print("─" * 60)
+    print("─" * 160)
 
     _NEW_BASE = '[New Base]'
 
@@ -4528,9 +4917,9 @@ if __name__ == "__main__":
     print(f"  → {_chosen}")
 
     # ── Step 0 / Q2: Which plots to generate? ────────────────────────────────
-    print("\n" + "─" * 60)
+    print("\n" + "─" * 160)
     print("[Step 0 / Q2]  Which plots to generate?")
-    print("─" * 60)
+    print("─" * 160)
     print("\n  Catchment area (extent = catchment_area_boundary):")
     print("    Infrastructure · Gauge · Electrification · Speed · Track Owner")
     print("  Study area (extent = study_area_boundary):")
@@ -4593,9 +4982,9 @@ if __name__ == "__main__":
     _plot_label_map = dict(_ALL_PLOTS)
 
     # ── Step 0 / Q3: Diff plot? ───────────────────────────────────────────────
-    print("\n" + "─" * 60)
+    print("\n" + "─" * 160)
     print("[Step 0 / Q3]  Diff plot")
-    print("─" * 60)
+    print("─" * 160)
 
     _do_diff = input("\n  Generate a diff plot? (y/n) [n]: ").strip().lower() or "n"
     _ref_version  = None
@@ -4637,9 +5026,9 @@ if __name__ == "__main__":
                 print("  Enter 1, 2, or 3.")
 
     # ── Step 1: Build ─────────────────────────────────────────────────────────
-    print("\n" + "─" * 60)
+    print("\n" + "─" * 160)
     print("[Step 1]  Network building")
-    print("─" * 60)
+    print("─" * 160)
 
     if _chosen == _NEW_BASE:
         if len(_raw_dirs) == 1:
@@ -4681,9 +5070,9 @@ if __name__ == "__main__":
 
         _chosen_seed_year = None
         if _seed_years:
-            print("\n" + "─" * 60)
+            print("\n" + "─" * 160)
             print("[Step 1b]  Apply a seed to this build?")
-            print("─" * 60)
+            print("─" * 160)
             print("\n  Available seed years:")
             for _si, _sy in enumerate(_seed_years, 1):
                 print(f"    {_si}) {_sy}")
@@ -4802,18 +5191,23 @@ if __name__ == "__main__":
             _segments.to_file(_version_dir / 'segments.gpkg', driver='GPKG')
             print(f"  segments.gpkg updated → {_version_dir / 'segments.gpkg'}")
 
-        # Derive and export composition for this version
+        # Composition for this version: prefer the version's OWN segments_composition.gpkg
+        # (written when the version was created — its Segment_IDs match exactly). Only fall
+        # back to filtering the Base composition for legacy versions that never wrote one.
+        _ver_comp_path  = _version_dir / "segments_composition.gpkg"
         _base_comp_path = _base_path / "segments_composition.gpkg"
-        if _base_comp_path.exists():
-            _base_comp    = gpd.read_file(_base_comp_path)
-            _ver_sids     = set(_segments['Segment_ID'].dropna())
-            _composition  = _filter_composition_for_version(_base_comp, _ver_sids)
-            _composition.to_file(_version_dir / "segments_composition.gpkg", driver="GPKG")
-            print(f"  segments_composition.gpkg → {_version_dir / 'segments_composition.gpkg'}"
-                  f"  ({len(_composition)} pieces)")
+        if _ver_comp_path.exists():
+            _composition = gpd.read_file(_ver_comp_path)
+            print(f"  segments_composition.gpkg  ({len(_composition)} pieces)")
+        elif _base_comp_path.exists():
+            _base_comp   = gpd.read_file(_base_comp_path)
+            _ver_sids    = set(_segments['Segment_ID'].dropna())
+            _composition = _filter_composition_for_version(_base_comp, _ver_sids)
+            _composition.to_file(_ver_comp_path, driver="GPKG")
+            print(f"  segments_composition.gpkg → {_ver_comp_path}  ({len(_composition)} pieces)")
         else:
             _composition = gpd.GeoDataFrame()
-            print("  Warning: Base composition not found — skipping composition export.")
+            print("  Warning: no version or Base composition found — skipping composition export.")
 
         # QGIS project
         print("\n--- QGIS project ---")
@@ -4825,8 +5219,8 @@ if __name__ == "__main__":
     print("\n--- Building NetworkX graph ---")
     G = build_networkx_graph(_nodes, _segments)
 
-    # Load boundaries and extents — needed by both Step 2 (plots) and Step 3
-    # (diff), so resolved unconditionally here rather than inside either block.
+    # Boundaries — passed to render_infrastructure_plots / _diff, which derive their
+    # own padded extents. Resolved once here for both Step 2 and Step 3.
     _ca_boundary, _sa_boundary = None, None
     _ca_bdry_path = Path(paths.MAIN) / paths.CATCHMENT_AREA_BOUNDARY_GPKG
     _sa_bdry_path = Path(paths.MAIN) / paths.STUDY_AREA_BOUNDARY_GPKG
@@ -4835,149 +5229,53 @@ if __name__ == "__main__":
     if _sa_bdry_path.exists():
         _sa_boundary = gpd.read_file(_sa_bdry_path)
 
-    def _extent_from_gdf(gdf, margin_m: int = 2000):
-        if gdf is None:
-            return None
-        b = gdf.total_bounds          # [minx, miny, maxx, maxy]
-        return (b[0] - margin_m, b[2] + margin_m,
-                b[1] - margin_m, b[3] + margin_m)
-
-    _ca_ext = _extent_from_gdf(_ca_boundary)
-    _sa_ext = _extent_from_gdf(_sa_boundary)
-
     # ── Step 2: Plots ─────────────────────────────────────────────────────────
     if not _plot_set:
         print("\n  No plots requested.")
     else:
-        print("\n" + "─" * 60)
+        print("\n" + "─" * 160)
         print("[Step 2]  Generating plots")
-        print("─" * 60)
-
+        print("─" * 160)
         _plot_dir = Path(paths.MAIN) / paths.INFRASTRUCTURE_PLOTS_DIR / _chosen
-        _plot_dir.mkdir(parents=True, exist_ok=True)
-        print(f"\n  Output: {_plot_dir}")
-
-        _net_ca = NetworkData(nodes=_nodes, segments=_segments, graph=G,
-                              version=_chosen, boundary=_ca_boundary)
-        _net_sa = NetworkData(nodes=_nodes, segments=_segments, graph=G,
-                              version=_chosen, boundary=_sa_boundary)
-
-        _plot_dispatch = {
-            'ca_infra':  (plot_infrastructure_canonical, _net_ca, _ca_ext,
-                          'ca_infrastructure.pdf'),
-            'ca_gauge':  (plot_gauge_map,                _net_ca, _ca_ext,
-                          'ca_gauge.pdf'),
-            'ca_elec':   (plot_electrification_map,      _net_ca, _ca_ext,
-                          'ca_electrification.pdf'),
-            'ca_speed':  (plot_speed_map,                _net_ca, _ca_ext,
-                          'ca_speed.pdf'),
-            'ca_owner':  (plot_owner_map,                _net_ca, _ca_ext,
-                          'ca_owner.pdf'),
-            'sa_infra':  (plot_infrastructure_canonical, _net_sa, _sa_ext,
-                          'sa_infrastructure.pdf'),
-            'sa_gauge':  (plot_gauge_map,                _net_sa, _sa_ext,
-                          'sa_gauge.pdf'),
-            'sa_elec':   (plot_electrification_map,      _net_sa, _sa_ext,
-                          'sa_electrification.pdf'),
-            'sa_speed':  (plot_speed_map,                _net_sa, _sa_ext,
-                          'sa_speed.pdf'),
-            'sa_owner':  (plot_owner_map,                _net_sa, _sa_ext,
-                          'sa_owner.pdf'),
-        }
-
-        for _pk in _plot_set:
-            if _pk == 'sa_construct':
-                if _composition.empty:
-                    print("  Skipping Engineering Structures — no composition data.")
-                    continue
-                print(f"  {_plot_label_map[_pk]} ...")
-                _fig = plot_engineering_structures(
-                    _net_sa, _composition, extent=_sa_ext,
-                    output_path=_plot_dir / "sa_engineering_structures.pdf",
-                    show_outside=True,
-                    nodes=_nodes,
-                )
-                plt.close(_fig)
-            else:
-                _fn, _net, _ext, _fname = _plot_dispatch[_pk]
-                print(f"  {_plot_label_map[_pk]} ...")
-                
-                kwargs = {}
-                if _pk.startswith('sa_'):
-                    kwargs['show_outside'] = True
-                if _pk.startswith('ca_'):
-                    kwargs['is_catchment'] = True
-                if _pk == 'ca_infra':
-                    kwargs['show_labels'] = False
-                
-                _fig = _fn(_net, extent=_ext, output_path=_plot_dir / _fname, **kwargs)
-                plt.close(_fig)
+        render_infrastructure_plots(
+            _nodes, _segments, _chosen,
+            plot_dir=_plot_dir,
+            ca_boundary=_ca_boundary, sa_boundary=_sa_boundary,
+            composition=_composition, graph=G, plot_set=_plot_set,
+        )
 
     # ── Step 3: Diff plot ─────────────────────────────────────────────────────
     if _do_diff == "y" and _ref_version is not None:
-        print("\n" + "─" * 60)
+        print("\n" + "─" * 160)
         print("[Step 3]  Diff plot")
-        print("─" * 60)
+        print("─" * 160)
 
         print(f"\n  Loading reference '{_ref_version}'...")
         _ref_nodes, _ref_segs = load_version(_ref_version)
-        _ref_G = build_networkx_graph(_ref_nodes, _ref_segs)
 
         _ref_comp_path = _infra_root / _ref_version / 'segments_composition.gpkg'
         _ref_comp = (gpd.read_file(_ref_comp_path)
                      if _ref_comp_path.exists() else gpd.GeoDataFrame())
 
-        _diff_dir = Path(paths.MAIN) / paths.INFRASTRUCTURE_PLOTS_DIR / _chosen
-        _diff_dir.mkdir(parents=True, exist_ok=True)
-
-        # Excel diff report — saved alongside the version's geopackages
-        _diff_xlsx = _infra_root / _chosen / f"diff_{_chosen}_vs_{_ref_version}.xlsx"
-        print(f"  Diff report ...")
-        _ref_net_full  = NetworkData(nodes=_ref_nodes, segments=_ref_segs,
-                                     graph=_ref_G, version=_ref_version)
-        _comp_net_full = NetworkData(nodes=_nodes, segments=_segments,
-                                     graph=G, version=_chosen)
-        export_infrastructure_diff(
-            net_a=_ref_net_full,
-            net_b=_comp_net_full,
-            comp_a=_ref_comp,
-            comp_b=_composition,
-            output_path=_diff_xlsx,
+        _diff_dir   = Path(paths.MAIN) / paths.INFRASTRUCTURE_PLOTS_DIR / _chosen
+        _diff_scope = {'1': 'ca', '2': 'sa', '3': 'both'}.get(_diff_scope, 'both')
+        render_infrastructure_diff(
+            _ref_nodes, _ref_segs, _ref_version,
+            _nodes, _segments, _chosen,
+            out_dir=_diff_dir,
+            ca_boundary=_ca_boundary, sa_boundary=_sa_boundary,
+            comp_base=_ref_comp, comp_dev=_composition,
+            scope=_diff_scope,
+            xlsx_dir=_infra_root / _chosen,
         )
 
-        _diff_pairs = []
-        if _diff_scope in ("1", "3"):
-            _diff_pairs.append(("ca", _ca_boundary, _ca_ext, True))
-        if _diff_scope in ("2", "3"):
-            _diff_pairs.append(("sa", _sa_boundary, _sa_ext, False))
-
-        for _scope_key, _bdry, _ext, _is_ca in _diff_pairs:
-            _ref_net  = NetworkData(nodes=_ref_nodes, segments=_ref_segs,
-                                    graph=_ref_G, version=_ref_version,
-                                    boundary=_bdry)
-            _comp_net = NetworkData(nodes=_nodes, segments=_segments,
-                                    graph=G, version=_chosen,
-                                    boundary=_bdry)
-            _diff_fname = f"diff_{_chosen}_vs_{_ref_version}_{_scope_key}.pdf"
-            print(f"  Diff ({_scope_key.upper()}) ...")
-            _fig = plot_infrastructure_diff(
-                net_a=_ref_net,
-                net_b=_comp_net,
-                extent=_ext,
-                output_path=_diff_dir / _diff_fname,
-                is_catchment=_is_ca,
-                show_outside=True,
-            )
-            plt.close(_fig)
-        print(f"  Diff output → {_diff_dir}")
-
     # ── Summary ───────────────────────────────────────────────────────────────
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 160)
     print(f"Version : {_chosen}")
     print(f"Nodes   : {G.number_of_nodes()}")
     print(f"Edges   : {G.number_of_edges()}")
     if _plot_set:
         print(f"Plots   : {_plot_dir}")
-    print("=" * 60)
+    print("=" * 160)
 
 

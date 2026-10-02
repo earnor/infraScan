@@ -1,34 +1,43 @@
 """catchment_OD_preparation.py
-Last modified: 2026-05-27
+Last modified: 2026-06-20
 
-Station-pair OD matrix preparation for two methods (PT-feeder, Municipal)
-across three time windows (AM peak, off-peak, all-day). Both methods consume
-the same scaled communal OD; differ only in cell-to-station attribution.
+Phase 4B — station-pair OD matrix preparation for the active catchment method
+(PT-Feeder or Municipal; the standalone CLI can run both). Both methods consume
+the same GVM-anchored commune OD; they differ only in commune-to-station attribution.
 
-Public entry point: prepare_all_od_matrices(use_cache: bool) -> None
+Public entry point: prepare_all_od_matrices(use_cache, svc_version, infra_version,
+method, attribution_mode, ...) -> None
 
-Pipeline (W3):
+Pipeline (Phase 4B):
   1. Load catchment boundary, rail stations (within boundary), name lookup.
-  2. Load daily communal OD via scoring.GetOevDemandPerCommune(tau=1).
-  3. Scale each OD pair forward to POPULATION_BASE_YEAR using the geometric
-     mean of its endpoints' per-commune growth factors.
-  4. PT-feeder branch: apply per-(commune, station) Pop/FTE shares read from
-     catchment_allocate's station_commune_breakdown.csv as origin/dest weights.
-  5. Municipal branch (Phase 3): commune→station 1:1 mapping (Phase 3).
-  6. Emit per (method, time-window) name-keyed station OD CSV.
-  7. Print conservation diagnostics for each method.
+  2. Build the GVM-anchored commune OD for the target year via od_communal (2018
+     actual blended toward the symmetrised 2040 forecast; exact at 2018 / 2040,
+     population-only beyond 2040).
+  3. Classify pairs in/out of catchment; route external demand to boundary gateway
+     stations (volume split + convergence / dead-gateway handling).
+  4. Branch attribution: PT-Feeder applies per-(commune, station) Pop/FTE or count-
+     blend shares read from catchment_allocate's station_commune_breakdown.csv as
+     origin/dest weights; Municipal uses a commune→station 1:1 mapping.
+  5. Scale by τ into peak / off-peak / full-day station-OD workbooks (XLSX).
+  6. Persist long-format OD + weights + gateway inputs for Phase 6B.
+  7. Print conservation diagnostics; export top-relations, OD pie map, Sankeys, heatmaps.
 """
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 from matplotlib.patches import Wedge
+from matplotlib.path import Path as _MplPath
 import numpy as np
 import pandas as pd
+from pyogrio import list_layers
 
+import cache_manifest
 import paths
 import settings
 import scoring
@@ -42,6 +51,14 @@ _CODEBASE_CRS = 'EPSG:2056'
 # assignment); main_new.py sets it False so saved assignments load silently.
 _INTERACTIVE_MODE = True
 
+
+def _can_prompt() -> bool:
+    """True when an interactive terminal is attached (stdin is a real TTY)."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        return False
+
 # Diagnostic plots — updated to the versioned path by prepare_all_od_matrices()
 # when catchment_base.setup_versioned_dirs() has been called beforehand.
 OD_COMPARISON_PLOT_DIR = catchment_base.OD_COMPARISON_PLOT_DIR
@@ -53,7 +70,9 @@ OD_COMPARISON_PLOT_DIR = catchment_base.OD_COMPARISON_PLOT_DIR
 
 def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
                             infra_version: str = '', method: str = '',
-                            attribution_mode: str = '') -> None:
+                            attribution_mode: str = '',
+                            both_attributions: bool = False,
+                            make_plots: bool = True) -> None:
     """Generate station-pair OD matrices for the selected method(s) × three windows.
 
     Args:
@@ -68,12 +87,22 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
                      settings.CATCHMENT_METHOD). main_new passes the active method.
         attribution_mode: 'specific' | 'blended' | '' (empty ->
                      settings.OD_ATTRIBUTION_MODE). PT-Feeder only.
+        both_attributions: When True (standalone runs only), PT-Feeder runs BOTH
+                     attribution modes so each per-window workbook carries a
+                     'Specific' and a 'Blended' sheet. When False (the main_new
+                     pipeline default) only `attribution_mode` is run, producing a
+                     single-sheet workbook.
+        make_plots:  When True (default; standalone), render the SA-stations OD
+                     pie map, the corridor Sankeys and the method-comparison
+                     diagnostics. main_new passes settings.PLOT_STATION_OD so the
+                     plots honour the Phase-4B visualisation toggle. Excel/CSV
+                     data outputs are always written regardless.
 
     Writes (under paths.MAIN):
-        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_matrix_stations_{peak,off_peak,full_day}.csv
-        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_matrix_stations.xlsx  (full station×station matrix, one sheet per window)
-        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_top5.xlsx
-        data/Traffic_Flow/OD/<svc_network>/Gateway/{gateway_zone_assignment.json,gateway_out_of_catchment.csv,gateway_splits.csv}
+        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_matrix_stations_{peak,off_peak,full_day}.xlsx  (a sheet per attribution mode)
+        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_matrix_stations.xlsx  (chosen-attribution station×station matrix, one sheet per window)
+        data/Traffic_Flow/OD/<svc_network>/<PT_Feeder|Municipal>/od_station_top_relations.xlsx
+        data/Traffic_Flow/OD/<svc_network>/Gateway/{gateway_zone_assignment.json,gateway_out_of_catchment.csv,gateway_splits.xlsx}
     """
     global OD_COMPARISON_PLOT_DIR
 
@@ -87,23 +116,25 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
     methods   = _resolve_methods(method)
     attr_mode = (attribution_mode or settings.OD_ATTRIBUTION_MODE).strip().lower()
 
-    print("\n=== Preparing station-pair OD matrices (W3) ===")
+    print("\n=== Preparing station-pair OD matrices (Phase 4B) ===")
     print(f"  Method(s): {', '.join(methods)}   Attribution: {attr_mode}")
 
     boundary      = catchment_base._load_catchment_boundary()
     rail_stations = catchment_allocate._load_rail_stations(boundary, 'all', buffer=0)
     name_lookup   = _build_station_name_lookup(rail_stations)
 
-    scale_factors, agg_fallback = _compute_commune_scale_factors()
+    # Resolve the infra version once — used for the authoritative SA station set
+    # (rail_stops_sa.gpkg) and for gateway routing.
+    infra_version = _resolve_infra_version(svc_version, infra_version)
 
-    communal_od   = _load_communal_od()
-    total_before  = float(communal_od['wert'].sum())
-    communal_od   = _apply_scale_factors(communal_od, scale_factors, agg_fallback)
-    total_after   = float(communal_od['wert'].sum())
-    growth_pct    = 100.0 * (total_after / total_before - 1.0) if total_before else 0.0
-    print(f"  Communal OD scaled 2018→{settings.POPULATION_BASE_YEAR} "
-          f"(per-commune geometric mean): "
-          f"total {total_before:,.0f} → {total_after:,.0f} ({growth_pct:+.1f}%)")
+    # Demand layer (network-agnostic): GVM-anchored commune OD at the target year.
+    # od_communal scales the 2018 actual toward the symmetrised 2040 forecast (exact
+    # at 2018 / 2040), replacing the former pop-only geometric-mean scaling. The
+    # spatial station attribution (count-blend) below is unchanged. The target year
+    # matches the catchment pop/empl grid (settings.start_year_scenario) so demand
+    # and attribution stay on the same year.
+    target_year = settings.start_year_scenario
+    communal_od = od_communal(year=target_year)
 
     # --- Gateway routing: classify in/out of catchment, assign gateways ---
     commune_gdf, bfs_col = _load_commune_boundaries()
@@ -127,34 +158,100 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
     gw_ids     = gateways['gateway_station_ids']
 
     # --- Branch dispatch (only the selected method(s)) ---
+    # `attr_mode` selects the attribution feeding the combined matrix, top-relations,
+    # pie map and comparison plots. With both_attributions=True (standalone) PT-Feeder
+    # additionally runs the other mode so each per-window workbook carries a
+    # 'Specific' and a 'Blended' sheet; from main_new only `attr_mode` is run.
+    chosen_label = 'Blended' if attr_mode == 'blended' else 'Specific'
     pt_long = muni_long = None
+    branch_attr_longs = {}   # branch -> {sheet_label -> long_df}
     if 'pt_feeder' in methods:
-        pt_long, pt_orig_weights = _run_pt_feeder_branch(branch_od, gw_ids, attr_mode)
+        if both_attributions:
+            pt_specific, ow_specific = _run_pt_feeder_branch(branch_od, gw_ids, 'specific')
+            pt_blended,  ow_blended  = _run_pt_feeder_branch(branch_od, gw_ids, 'blended')
+            branch_attr_longs['pt_feeder'] = {'Specific': pt_specific, 'Blended': pt_blended}
+            if attr_mode == 'blended':
+                pt_long, pt_orig_weights = pt_blended, ow_blended
+            else:
+                pt_long, pt_orig_weights = pt_specific, ow_specific
+        else:
+            pt_long, pt_orig_weights = _run_pt_feeder_branch(branch_od, gw_ids, attr_mode)
+            branch_attr_longs['pt_feeder'] = {chosen_label: pt_long}
         _diagnose_conservation(branch_od, pt_long, pt_orig_weights, 'PT-Feeder')
     if 'municipal' in methods:
         muni_long = _run_municipal_branch(branch_od, gw_ids)
+        branch_attr_longs['municipal'] = {'Municipal': muni_long}
         _diagnose_conservation(branch_od, muni_long, None, 'Municipal')
 
-    # --- Emit CSVs per (method, window) into the versioned OD tree ---
+    # Fill any name_lookup gaps from the allocation breakdown (peak-only stations
+    # absent from the all-day rail-stops load), then verify full coverage.
+    for _m in methods:
+        _extend_name_lookup_from_breakdown(name_lookup, _m)
+    _check_name_coverage(pt_long,   name_lookup, 'PT-Feeder')
+    _check_name_coverage(muni_long, name_lookup, 'Municipal')
+
+    # --- Emit per-window workbooks (a sheet per attribution mode) ---
     windows = [(cp.TAU_PEAK_SHARE,     'peak'),
                (cp.TAU_OFFPEAK_SHARE,  'off_peak'),
                (cp.TAU_FULL_DAY_SHARE, 'full_day')]
-    branch_longs = {'pt_feeder': pt_long, 'municipal': muni_long}
-    print("\n  Writing CSVs ...")
+    branch_longs = {'pt_feeder': pt_long, 'municipal': muni_long}  # chosen attribution
+    print("\n  Writing per-window OD workbooks ...")
     for branch in methods:
-        long_df = branch_longs[branch]
-        if long_df is None:
+        attr_longs = branch_attr_longs.get(branch)
+        if not attr_longs:
             continue
         for tau, suffix in windows:
-            out_path = paths.get_station_od_csv(svc_version, branch, suffix)
+            out_path = paths.get_station_od_window_xlsx(svc_version, branch, suffix)
             if use_cache and Path(out_path).exists():
                 print(f"    cached: {out_path}")
             else:
-                _apply_window_scaling(long_df, tau, name_lookup, out_path,
-                                      label=f'{branch} {suffix}')
+                _write_window_xlsx(attr_longs, tau, name_lookup, out_path,
+                                   label=f'{branch} {suffix}')
+
+    # --- Persist reloadable baseline artifacts (Phase 6B subset reaggregation) ---
+    # Additive only: the whole-day long-format OD, the PT-feeder attribution weights
+    # and the gateway-expanded communal OD are written so reaggregate_subset can be
+    # driven from disk without re-running this function. The wide xlsx outputs above
+    # are unchanged. Weights are reproduced via the attribution_weights() seam (same
+    # producer as the live branch) so disk and live stay in lock-step.
+    print("\n  Persisting long-format OD + attribution weights ...")
+    for branch in methods:
+        attr_longs = branch_attr_longs.get(branch)
+        if not attr_longs:
+            continue
+        for label, long_df in attr_longs.items():
+            attribution = label.lower()
+            long_path = paths.get_station_od_long_csv(svc_version, branch, attribution)
+            Path(long_path).parent.mkdir(parents=True, exist_ok=True)
+            if use_cache and Path(long_path).exists():
+                print(f"    cached: {long_path}")
+            else:
+                long_df.to_csv(long_path, index=False, encoding='utf-8-sig')
+            if branch == 'pt_feeder':
+                ow, dw = attribution_weights('pt_feeder', attribution, gw_ids)
+                ow.to_csv(paths.get_attribution_weights_csv(
+                    svc_version, branch, attribution, 'orig'),
+                    index=False, encoding='utf-8-sig')
+                dw.to_csv(paths.get_attribution_weights_csv(
+                    svc_version, branch, attribution, 'dest'),
+                    index=False, encoding='utf-8-sig')
+    communal_path = paths.get_communal_od_csv(svc_version)
+    Path(communal_path).parent.mkdir(parents=True, exist_ok=True)
+    if use_cache and Path(communal_path).exists():
+        print(f"    cached: {communal_path}")
+    else:
+        branch_od.to_csv(communal_path, index=False, encoding='utf-8-sig')
+    # Gateway recompute inputs (Phase 6B): communal_od_branch.csv concatenates
+    # internal + gateway rows unsplittably (gateway station ids can collide with
+    # BFS codes), so 6B rebuilds the developed communal OD from the pre-expansion
+    # external OD (zone codes intact) + internal OD + in-boundary BFS set.
+    _persist_gateway_inputs(svc_version, internal_od, external_od, in_bnd_bfs,
+                            use_cache)
+    print(f"    long OD + weights + communal OD under "
+          f"{paths.get_od_version_dir(svc_version)}")
 
     # --- Top-5 origins/destinations Excel export + per-method OD pie map ---
-    sa_stations_gdf = _load_sa_stations(rail_stations)
+    sa_stations_gdf = _load_sa_stations(rail_stations, svc_version, infra_version)
     sa_ids = set(pd.to_numeric(sa_stations_gdf['id_point'], errors='coerce')
                  .dropna().astype(int).tolist())
     for branch in methods:
@@ -162,16 +259,29 @@ def prepare_all_od_matrices(use_cache: bool = False, svc_version: str = '',
         if long_df is not None:
             _export_od_matrix_excel(long_df, windows, name_lookup,
                                     svc_version, branch)
-            _export_top5_excel(long_df, sa_ids, name_lookup, branch, svc_version)
-            _plot_sa_stations_od_map(long_df, sa_stations_gdf, name_lookup,
-                                     branch, svc_version)
+            _export_top_relations_excel(long_df, sa_ids, name_lookup, branch,
+                                        svc_version, windows)
+            if make_plots:
+                _plot_sa_stations_od_map(long_df, sa_stations_gdf, name_lookup,
+                                         branch, svc_version, attr_mode)
+                build_corridor_sankeys(long_df, name_lookup, svc_version, branch,
+                                       attr_mode)
+                _plot_sa_relation_heatmaps(long_df, sa_ids, name_lookup,
+                                           svc_version, branch)
 
-    # --- Diagnostic plots (comparison; only when both methods are present) ---
+    # --- Method comparison + diagnostic plots (only when both methods present) ---
     if pt_long is not None and muni_long is not None:
-        _plot_od_diagnostics(pt_long, muni_long, rail_stations, boundary,
-                              name_lookup)
+        _export_method_comparison_excel(pt_long, muni_long, sa_ids,
+                                        name_lookup, svc_version)
+        if make_plots:
+            _plot_od_diagnostics(pt_long, muni_long, rail_stations, boundary,
+                                  name_lookup)
 
-    print("\n=== W3 OD matrices done ===")
+    cache_manifest.write_manifest(paths.get_od_version_dir(svc_version),
+                                  'station_od_4b',
+                                  {'svc_network': svc_version,
+                                   'infra_version': infra_version})
+    print("\n=== Phase 4B OD matrices done ===")
 
 
 def _resolve_methods(method: str) -> list:
@@ -190,79 +300,9 @@ def _resolve_methods(method: str) -> list:
     return ['pt_feeder'] if cm == 'pt_feeder' else ['municipal']
 
 
-# Backwards-compat alias — DEPRECATED. New callers should use
-# prepare_all_od_matrices, which produces six matrices instead of one.
-prepare_od_pt_feeder_a = prepare_all_od_matrices
-
-
 # ===============================================================================
-# NEW SHARED HELPERS (W3)
+# NEW SHARED HELPERS (Phase 4B)
 # ===============================================================================
-
-def _compute_commune_scale_factors() -> tuple:
-    """Per-commune forward growth factors pop_{POPULATION_BASE_YEAR} / pop_2018.
-
-    Both years are loaded via catchment_base.load_commune_pop(year) (cantonal
-    xlsx actuals 1962-2025; bezirk projection 2026-2050; Eurostat-extended
-    2051-2100). A factor is produced for every commune with positive 2018
-    population. Communes absent from either series fall back to the catchment-
-    wide aggregate factor.
-
-    Returns:
-        (factors, agg_fallback)
-        factors:      dict[int BFS_NR -> float growth factor]
-        agg_fallback: float — aggregate pop_base / pop_2018 over all communes.
-    """
-    base_year = settings.POPULATION_BASE_YEAR
-    print(f"  Computing per-commune 2018->{base_year} growth factors ...")
-
-    pop_2018 = catchment_base.load_commune_pop(2018)
-    pop_base = catchment_base.load_commune_pop(base_year)
-
-    factors = {}
-    for bfs, p0 in pop_2018.items():
-        p0 = float(p0)
-        p1 = float(pop_base.get(bfs, 0.0))
-        if p0 > 0 and p1 > 0:
-            factors[int(bfs)] = p1 / p0
-
-    tot0 = float(pop_2018[pop_2018 > 0].sum())
-    tot1 = float(pop_base[pop_base.index.isin(pop_2018.index)].sum())
-    agg_fallback = (tot1 / tot0) if tot0 > 0 else 1.0
-
-    if factors:
-        vals = np.array(list(factors.values()), dtype=float)
-        print(f"    {len(factors)} commune factors  "
-              f"min={vals.min():.3f}  median={np.median(vals):.3f}  "
-              f"max={vals.max():.3f}")
-    print(f"    Aggregate fallback factor 2018->{base_year}: {agg_fallback:.4f}")
-    return factors, agg_fallback
-
-
-def _apply_scale_factors(communal_od: pd.DataFrame, factors: dict,
-                         agg_fallback: float) -> pd.DataFrame:
-    """Scale each OD pair by the geometric mean of its endpoint growth factors.
-
-    trips_scaled(i,j) = wert(i,j) * sqrt(factor_i * factor_j)
-
-    The geometric mean avoids the over-statement of the multiplicative
-    factor_i * factor_j form (e.g. two communes each growing 20% would inflate a
-    flow by 44% rather than 20%). Communes without a factor use agg_fallback.
-
-    Args:
-        communal_od:  DataFrame[quelle_code, ziel_code, wert].
-        factors:      dict[int BFS_NR -> float] from _compute_commune_scale_factors.
-        agg_fallback: float fallback factor for communes missing from `factors`.
-
-    Returns:
-        Copy of communal_od with `wert` scaled in place.
-    """
-    od = communal_od.copy()
-    f_o = od['quelle_code'].map(factors).fillna(agg_fallback)
-    f_d = od['ziel_code'].map(factors).fillna(agg_fallback)
-    od['wert'] = od['wert'] * np.sqrt(f_o * f_d)
-    return od
-
 
 # ===============================================================================
 # GATEWAY ROUTING (out-of-catchment handling)
@@ -390,7 +430,8 @@ def _load_boundary_stations(svc_network: str, infra_version: str) -> list:
     return out
 
 
-def _build_boundary_station_index(boundary_ids: list, infra_version: str) -> dict:
+def _build_boundary_station_index(boundary_ids: list, infra_version: str,
+                                  verbose: bool = True) -> dict:
     """Map each boundary station id -> (name, shapely point).
 
     Reads the infrastructure nodes GeoPackage
@@ -398,6 +439,10 @@ def _build_boundary_station_index(boundary_ids: list, infra_version: str) -> dic
     services projection uses for boundary-station names — so every boundary
     station resolves to its name and coordinates, including the ones outside the
     catchment buffer (rail stops only cover in-catchment stations).
+
+    verbose=False suppresses the "absent from infra nodes" note (used when
+    indexing the full served-station set, where many stops are legitimately not
+    infra nodes).
     """
     if not boundary_ids:
         return {}
@@ -418,37 +463,90 @@ def _build_boundary_station_index(boundary_ids: list, infra_version: str) -> dic
         name = str(r.get('Name') or r['num_int'])
         idx[r['num_int']] = (name, r.geometry)
     missing = want - set(idx.keys())
-    if missing:
+    if missing and verbose:
         print(f"    Note: {len(missing)} boundary station(s) absent from infra "
               f"nodes: {sorted(missing)}")
     return idx
 
 
+def _build_gateway_station_rows(svc_network: str, infra_version: str = '',
+                                extra_ids=None) -> gpd.GeoDataFrame:
+    """rail_stations-schema rows for the gateway (boundary) stations plus any
+    extra_ids (e.g. convergence stations), so the routing graph can host
+    boardable gateway portals keyed by integer id.
+
+    Gateways lie outside the catchment, so catchment_allocate._load_rail_stations
+    omits them; this fills the gap from the infrastructure nodes.gpkg. Columns
+    match _load_rail_stations: stop_id, stop_name, diva_nr, id_point, mode,
+    geometry (stop_id == id_point == str(node number)).
+
+    Args:
+        svc_network:   Service network folder name.
+        infra_version: Infra subfolder holding nodes.gpkg / boundary_stations.json
+                       (resolved when empty).
+        extra_ids:     Optional iterable of additional node ids to include
+                       (convergence stations are served nodes outside the
+                       catchment, otherwise absent from the routing graph).
+
+    Returns:
+        GeoDataFrame (EPSG:2056); empty (with the schema columns) when no
+        gateways resolve.
+    """
+    cols = ['stop_id', 'stop_name', 'diva_nr', 'id_point', 'mode', 'geometry']
+    infra = _resolve_infra_version(svc_network, infra_version)
+    ids = [int(x) for x in _load_boundary_stations(svc_network, infra)]
+    if extra_ids:
+        ids += [int(x) for x in extra_ids]
+    if not ids:
+        return gpd.GeoDataFrame(columns=cols, geometry='geometry',
+                                crs=_CODEBASE_CRS)
+    bs_index = _build_boundary_station_index(sorted(set(ids)), infra)
+    rows = []
+    for sid, (nm, geom) in bs_index.items():
+        if geom is None:
+            continue
+        rows.append({'stop_id': str(int(sid)), 'stop_name': str(nm),
+                     'diva_nr': None, 'id_point': str(int(sid)),
+                     'mode': 'gateway', 'geometry': geom})
+    if not rows:
+        return gpd.GeoDataFrame(columns=cols, geometry='geometry',
+                                crs=_CODEBASE_CRS)
+    return gpd.GeoDataFrame(rows, geometry='geometry', crs=_CODEBASE_CRS)
+
+
 def _normalise_assignment(raw: dict) -> dict:
     """Normalise a loaded zone-assignment dict to dict[int code -> list[int]].
 
-    Accepts both the legacy single-station format ({code: id}) and the
-    multi-station format ({code: [id, ...]}).
+    Accepts the legacy single-station ({code: id}) and multi-station
+    ({code: [id, ...]}) formats, plus the readable format where each station is a
+    {"id": int, "name": str} object ({code: [{"id": .., "name": ..}, ...]}).
     """
-    def _valid_ints(values):
-        valid = []
-        for value in values:
-            try:
-                valid.append(int(value))
-            except (TypeError, ValueError):
-                continue
-        return valid
-
+    def _sid(x):
+        return int(x['id']) if isinstance(x, dict) else int(x)
     out = {}
     for k, v in raw.items():
         code = int(k)
         if isinstance(v, (list, tuple)):
-            station_ids = _valid_ints(v)
+            out[code] = [_sid(x) for x in v]
         else:
-            station_ids = _valid_ints([v])
-        if station_ids:
-            out[code] = station_ids
+            out[code] = [_sid(v)]
     return out
+
+
+def _save_zone_assignment(mapping: dict, bs_index: dict, json_path: str) -> None:
+    """Write the zone→gateway assignment in the readable format:
+    {code: [{"id": station_number, "name": station_name}, ...]}.
+
+    Carries both the station number and name for readability; round-trips through
+    _normalise_assignment (which tolerates this and the legacy id-only formats).
+    """
+    def _entry(sid):
+        name = bs_index.get(int(sid), (str(int(sid)), None))[0]
+        return {'id': int(sid), 'name': name}
+    payload = {str(k): [_entry(s) for s in v] for k, v in mapping.items()}
+    os.makedirs(os.path.dirname(json_path), exist_ok=True)
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def _assign_external_zones(zone_codes, boundary_ids, bs_index, zone_names,
@@ -456,49 +554,50 @@ def _assign_external_zones(zone_codes, boundary_ids, bs_index, zone_names,
     """Assign each external GVM zone (e.g., for Kt ZH: code > 9999) to one or more gateway stations.
 
     Multiple stations per zone are allowed; the zone's demand is later split
-    across them by service volume. Persisted to json_path as {code: [ids]}. On
-    re-run the saved assignment is offered for reuse (interactive) or loaded
-    silently (automated). Mirrors the municipal station-assignment override.
+    across them by service volume. Persisted to json_path in the readable format
+    {code: [{"id": station_number, "name": station_name}, ...]} (legacy id-only
+    files are auto-upgraded on load). A complete saved assignment is loaded
+    silently (interactive or not); an incomplete one prompts for the missing zones
+    (interactive) or raises (automated). Delete the json to force a full rebuild.
 
     Returns dict[int zone_code -> list[int gateway_station_id]] (skipped absent).
     """
     zone_codes = sorted(int(z) for z in zone_codes)
     saved = None
+    legacy_format = False
     if os.path.exists(json_path):
         with open(json_path, encoding='utf-8') as f:
-            saved = _normalise_assignment(json.load(f))
+            raw = json.load(f)
+        saved = _normalise_assignment(raw)
+        legacy_format = bool(raw) and not all(
+            isinstance(v, list) and all(isinstance(e, dict) for e in v)
+            for v in raw.values())
 
     if saved is not None:
         complete = all(z in saved for z in zone_codes)
-        if not _INTERACTIVE_MODE:
-            if not complete:
-                missing = [z for z in zone_codes if z not in saved]
-                raise FileNotFoundError(
-                    f"Gateway zone assignment at {json_path} is missing zones "
-                    f"{missing}. Run catchment_OD_preparation standalone to "
-                    f"complete the assignment.")
+        if complete:
+            # Upgrade a legacy id-only file to the readable name+number format
+            # in place (no re-prompting), then use it silently. Delete the json
+            # to force a full rebuild.
+            if legacy_format:
+                _save_zone_assignment(saved, bs_index, json_path)
+                print(f"  Upgraded gateway zone assignment to readable format")
             print(f"  Loaded gateway zone assignment ({len(saved)} zones)")
             return {z: saved[z] for z in zone_codes}
-        print(f"  Existing gateway zone assignment found: {json_path}")
-        print("  1) Use existing")
-        print("  2) Recreate")
-        while True:
-            choice = input("  Select [1]: ").strip() or '1'
-            if choice == '1':
-                if complete:
-                    return {z: saved[z] for z in zone_codes}
-                print("    Existing assignment incomplete; prompting for "
-                      "missing zones only.")
-                break
-            if choice == '2':
-                saved = None
-                break
-            print("    Enter 1 or 2.")
+        if not (_INTERACTIVE_MODE and _can_prompt()):
+            missing = [z for z in zone_codes if z not in saved]
+            raise FileNotFoundError(
+                f"Gateway zone assignment at {json_path} is missing zones "
+                f"{missing}. Run catchment_OD_preparation standalone to "
+                f"complete the assignment.")
+        print(f"  Existing gateway zone assignment incomplete — prompting for "
+              f"missing zones only.")
 
-    if not _INTERACTIVE_MODE:
+    if not (_INTERACTIVE_MODE and _can_prompt()):
         raise FileNotFoundError(
-            f"No gateway zone assignment at {json_path} and not in interactive "
-            f"mode. Run catchment_OD_preparation standalone first.")
+            f"No gateway zone assignment at {json_path} and no interactive "
+            f"terminal to create one. Run catchment_OD_preparation standalone "
+            f"first.")
 
     mapping = dict(saved) if saved else {}
     ordered_ids = sorted(boundary_ids)
@@ -535,10 +634,7 @@ def _assign_external_zones(zone_codes, boundary_ids, bs_index, zone_names,
             print(f"      Invalid — enter one or more of 1–{len(ordered_ids)} "
                   f"(comma-separated) or 's'.")
 
-    os.makedirs(os.path.dirname(json_path), exist_ok=True)
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump({str(k): [int(s) for s in v] for k, v in mapping.items()},
-                  f, indent=2)
+    _save_zone_assignment(mapping, bs_index, json_path)
     print(f"  Saved gateway zone assignment → {json_path}")
     return mapping
 
@@ -599,38 +695,50 @@ def _gateway_segments_path(svc_network: str, infra_version: str) -> str:
                         infra_version, 'rail_segments.gpkg')
 
 
-def _window_freq_series(df: pd.DataFrame, window: str) -> pd.Series:
-    """Per-segment frequency for the chosen temporal window (dep/hr).
+def _load_line_freq_per_h_window(svc_network: str, infra_version: str) -> dict:
+    """Whole-day per-variant freq_per_h_window from the full-day rail_lines.gpkg.
 
-    full_day / all_day -> am + pm + offpeak ; peak -> am + pm ; offpeak -> offpeak.
+    freq_per_h_window = total_dep / (GK_WINDOW_MIN/60). Keyed as strings on
+    (route_id, direction_id, variant_rank) to match the segment GTFS_ID /
+    direction_id / variant_rank columns used at the gateways.
     """
-    for c in ('freq_am_peak_dep_hr', 'freq_pm_peak_dep_hr', 'freq_offpeak_dep_hr'):
-        if c not in df.columns:
-            df[c] = 0.0
-    am = pd.to_numeric(df['freq_am_peak_dep_hr'],  errors='coerce').fillna(0.0)
-    pm = pd.to_numeric(df['freq_pm_peak_dep_hr'],  errors='coerce').fillna(0.0)
-    op = pd.to_numeric(df['freq_offpeak_dep_hr'],  errors='coerce').fillna(0.0)
-    w = (window or 'full_day').lower()
-    if w == 'peak':
-        return am + pm
-    if w in ('offpeak', 'off_peak'):
-        return op
-    return am + pm + op
+    lines_path = os.path.join(paths.MAIN, paths.RAIL_LINES_DIR, svc_network,
+                              infra_version, 'rail_lines.gpkg')
+    if not os.path.exists(lines_path):
+        return {}
+    frames = []
+    for lyr in list_layers(lines_path)[:, 0].tolist():
+        g = gpd.read_file(lines_path, layer=lyr)
+        if 'geometry' in g.columns:
+            g = pd.DataFrame(g.drop(columns='geometry'))
+        frames.append(g)
+    if not frames:
+        return {}
+    df = pd.concat(frames, ignore_index=True)
+    df['total_dep'] = pd.to_numeric(df.get('total_dep'), errors='coerce')
+    df = df.dropna(subset=['total_dep'])
+    fpw = df['total_dep'] / (catchment_allocate.GK_WINDOW_MIN / 60.0)
+    return {
+        (str(rid), str(did), str(vr)): float(f)
+        for rid, did, vr, f in zip(
+            df['route_id'], df['direction_id'], df['variant_rank'], fpw)
+    }
 
 
 def _freq_by_route_at_gateways(seg_path: str, layer: str, gateway_ids,
-                               window: str) -> dict:
-    """Summed window frequency of services crossing the canton boundary at each
-    gateway station, for one route_type layer.
+                               freq_lookup: dict) -> dict:
+    """Summed whole-day frequency (freq_per_h_window) of services crossing the
+    canton boundary at each gateway station, for one route_type layer.
 
     Matching uses boundary_entry_node / boundary_exit_node — the node where a
     service enters/leaves the catchment — NOT the scheduled stop columns:
     long-distance / inter-regional trains traverse boundary stations without
     stopping, so they never appear as from/to stops. boundary_entry/exit_node is
     set consistently across all route types, giving a comparable cross-border
-    supply measure. Each service variant is counted once per direction.
+    supply measure. Each service variant is counted once per direction; its
+    frequency is the whole-day freq_per_h_window joined from the lines table on
+    (GTFS_ID, direction_id, variant_rank).
     """
-    from pyogrio import list_layers
     try:
         available = list_layers(seg_path)[:, 0].tolist()
     except Exception:
@@ -643,12 +751,16 @@ def _freq_by_route_at_gateways(seg_path: str, layer: str, gateway_ids,
         seg = pd.DataFrame(seg.drop(columns='geometry'))
     for c in ('boundary_entry_node', 'boundary_exit_node'):
         seg[c] = pd.to_numeric(seg.get(c), errors='coerce')
-    seg['freq'] = _window_freq_series(seg, window)
+    seg['freq'] = [
+        freq_lookup.get((str(r), str(d), str(v)), 0.0)
+        for r, d, v in zip(seg.get('GTFS_ID'), seg.get('direction_id'),
+                           seg.get('variant_rank'))
+    ]
 
     want = {int(g) for g in gateway_ids}
     touch = seg[seg['boundary_entry_node'].isin(want)
                 | seg['boundary_exit_node'].isin(want)]
-    keys = [k for k in ('Service', 'direction_id', 'variant_rank')
+    keys = [k for k in ('GTFS_ID', 'direction_id', 'variant_rank')
             if k in touch.columns]
     out = {}
     for gid in want:
@@ -661,15 +773,18 @@ def _freq_by_route_at_gateways(seg_path: str, layer: str, gateway_ids,
     return out
 
 
-def _compute_gateway_splits(gateway_ids, svc_network, infra_version, window,
-                            bs_index, csv_path) -> pd.DataFrame:
+def _compute_gateway_splits(gateway_ids, svc_network, infra_version,
+                            bs_index) -> pd.DataFrame:
     """Local (S-Bahn + RE) vs long-distance (LD + IR) service-supply split per
-    gateway, written to csv_path.
+    gateway.
 
     local_share = f(sbahn + regional) / (f(sbahn + regional) + f(long_distance +
-    inter_regional)). Gateways with no crossing service in the window default to
-    local_share=1.0. The split is metadata for downstream routing — the gateway
-    carries full demand in the OD matrix itself.
+    inter_regional)), where f is the whole-day freq_per_h_window summed over the
+    variants crossing the boundary at the gateway. Gateways with no crossing
+    service default to local_share=1.0. The split is metadata for downstream
+    routing — the gateway carries full demand in the OD matrix itself. Returned
+    for the caller to write as the 'Gateway_Split' sheet of the gateway routing
+    workbook.
     """
     gateway_ids = sorted({int(g) for g in gateway_ids})
     if not gateway_ids:
@@ -678,16 +793,17 @@ def _compute_gateway_splits(gateway_ids, svc_network, infra_version, window,
     if not os.path.exists(seg_path):
         print(f"    Gateway split: rail_segments.gpkg missing at {seg_path}")
         return pd.DataFrame()
+    freq_lookup = _load_line_freq_per_h_window(svc_network, infra_version)
 
     local = {}
     for lyr in _LOCAL_LAYERS:
         for gid, f in _freq_by_route_at_gateways(
-                seg_path, lyr, gateway_ids, window).items():
+                seg_path, lyr, gateway_ids, freq_lookup).items():
             local[gid] = local.get(gid, 0.0) + f
     ldirt = {}
     for lyr in _LDIRT_LAYERS:
         for gid, f in _freq_by_route_at_gateways(
-                seg_path, lyr, gateway_ids, window).items():
+                seg_path, lyr, gateway_ids, freq_lookup).items():
             ldirt[gid] = ldirt.get(gid, 0.0) + f
 
     rows = []
@@ -699,8 +815,8 @@ def _compute_gateway_splits(gateway_ids, svc_network, infra_version, window,
         else:
             ls = 1.0
             gid_name = bs_index.get(gid, (str(gid), None))[0]
-            print(f"    Gateway {gid_name} ({gid}): no crossing service in window "
-                  f"'{window}' — defaulting local share=1.0")
+            print(f"    Gateway {gid_name} ({gid}): no crossing service "
+                  f"— defaulting local share=1.0")
         rows.append({
             'gateway_station_id': gid,
             'station_name': bs_index.get(gid, (str(gid), None))[0],
@@ -708,11 +824,228 @@ def _compute_gateway_splits(gateway_ids, svc_network, infra_version, window,
             'local_share': round(ls, 4), 'longdist_share': round(1.0 - ls, 4),
         })
     df = pd.DataFrame(rows)
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    df.to_csv(csv_path, index=False, encoding='utf-8-sig')
-    print(f"    Gateway service-supply splits ({len(df)} gateways, "
-          f"window='{window}') → {csv_path}")
+    print(f"    Gateway service-supply splits computed ({len(df)} gateways, "
+          f"whole-day freq_per_h_window)")
     return df
+
+
+def _load_line_name_lookup(svc_network: str, infra_version: str) -> dict:
+    """route_id (str) -> line_short_name from the full-day rail_lines.gpkg.
+
+    Readability only for the connection table; falls back to the route_id when a
+    name is missing.
+    """
+    lines_path = os.path.join(paths.MAIN, paths.RAIL_LINES_DIR, svc_network,
+                              infra_version, 'rail_lines.gpkg')
+    if not os.path.exists(lines_path):
+        return {}
+    out = {}
+    for lyr in list_layers(lines_path)[:, 0].tolist():
+        g = gpd.read_file(lines_path, layer=lyr)
+        if 'route_id' not in g.columns or 'line_short_name' not in g.columns:
+            continue
+        for rid, nm in zip(g['route_id'], g['line_short_name']):
+            if pd.notna(nm) and str(nm).strip():
+                out.setdefault(str(rid), str(nm).strip())
+    return out
+
+
+def _build_gateway_connections(gateway_ids, svc_network: str, infra_version: str,
+                               splits_df: pd.DataFrame, freq_lookup: dict,
+                               bs_index: dict) -> pd.DataFrame:
+    """Per-gateway service-connection table consumed by passenger routing.
+
+    One row per (gateway_station_id, direction_role, route_id, direction_id,
+    variant_rank): the crossing service's type (local/longdist from the segment
+    layer), whether it stops at the gateway, its whole-day freq_per_h_window, and
+    the nested boarding weight. Weights sum to 1.0 per (gateway, direction_role).
+
+    The boarding weight is the **nested key**: the service-type total comes from
+    the gateway's supply share (`local_share`/`longdist_share`), then *within* a
+    type demand is distributed by per-service `freq_per_h_window`. Type shares are
+    renormalised over the types actually present in that (gateway, role) so the
+    weights always sum to 1.0. (Numerically equal to a flat per-service frequency
+    split while both levels are frequency-derived; the structure is kept so the
+    type totals can be re-sourced/calibrated later.)
+
+    direction_role: 'inbound' (boundary_entry_node == gateway; used when the
+    gateway is an OD origin) / 'outbound' (boundary_exit_node == gateway; gateway
+    as an OD destination).
+
+    Only boundary gateways appear here. Convergence stations (served hubs used as
+    substitutes for dead boundary stations) route via normal graph portals, not
+    this table — their crossing services are not reliably flagged at the
+    convergence node (e.g. Zug carries no boundary crossing), so a connection-
+    table split would misroute them.
+
+    Returns an empty DataFrame when no projected segments / gateways resolve.
+    """
+    gateway_ids = sorted({int(g) for g in gateway_ids})
+    seg_path = _gateway_segments_path(svc_network, infra_version)
+    if not gateway_ids or not os.path.exists(seg_path):
+        return pd.DataFrame()
+
+    type_share = {int(r.gateway_station_id):
+                  {'local': float(r.local_share), 'longdist': float(r.longdist_share)}
+                  for r in splits_df.itertuples(index=False)} if not splits_df.empty else {}
+    layer_type = {**{l: 'local' for l in _LOCAL_LAYERS},
+                  **{l: 'longdist' for l in _LDIRT_LAYERS}}
+    name_lookup = _load_line_name_lookup(svc_network, infra_version)
+
+    try:
+        available = list_layers(seg_path)[:, 0].tolist()
+    except Exception:
+        available = []
+
+    want = set(gateway_ids)
+    recs = []
+    for layer, stype in layer_type.items():
+        if layer not in available:
+            continue
+        seg = gpd.read_file(seg_path, layer=layer)
+        if 'geometry' in seg.columns:
+            seg = pd.DataFrame(seg.drop(columns='geometry'))
+        for c in ('boundary_entry_node', 'boundary_exit_node',
+                  'from_stop_nr', 'to_stop_nr'):
+            seg[c] = pd.to_numeric(seg.get(c), errors='coerce')
+        for gid in want:
+            for role, col in (('inbound', 'boundary_entry_node'),
+                              ('outbound', 'boundary_exit_node')):
+                sub = seg[seg[col] == gid]
+                if sub.empty:
+                    continue
+                for (rid, did, vr), _g in sub.groupby(
+                        ['GTFS_ID', 'direction_id', 'variant_rank'], sort=False):
+                    freq = float(freq_lookup.get((str(rid), str(did), str(vr)), 0.0))
+                    vrows = seg[(seg['GTFS_ID'] == rid)
+                                & (seg['direction_id'] == did)
+                                & (seg['variant_rank'] == vr)]
+                    stops = bool((vrows['from_stop_nr'] == gid).any()
+                                 or (vrows['to_stop_nr'] == gid).any())
+                    recs.append({
+                        'gateway_station_id': gid,
+                        'station_name': bs_index.get(gid, (str(gid), None))[0],
+                        'direction_role': role,
+                        'route_id': str(rid), 'direction_id': str(did),
+                        'variant_rank': vr,
+                        'line_short_name': name_lookup.get(str(rid), str(rid)),
+                        'service_type': stype,
+                        'stops_at_gateway': stops,
+                        'freq_per_h_window': round(freq, 4),
+                    })
+
+    df = pd.DataFrame(recs)
+    if df.empty:
+        return df
+    df = df.drop_duplicates(['gateway_station_id', 'direction_role',
+                             'route_id', 'direction_id', 'variant_rank'])
+    df = _apply_nested_boarding_weights(df, type_share)
+    return df.sort_values(['gateway_station_id', 'direction_role',
+                           'service_type', 'freq_per_h_window'],
+                          ascending=[True, True, True, False]).reset_index(drop=True)
+
+
+def _apply_nested_boarding_weights(df: pd.DataFrame, type_share: dict) -> pd.DataFrame:
+    """Add boarding_weight per (gateway, direction_role): renormalised type share
+    × within-type frequency share. Weights sum to 1.0 per group (or 0 when the
+    group has no positive frequency)."""
+    out = []
+    for (gid, _role), grp in df.groupby(['gateway_station_id', 'direction_role'],
+                                        sort=False):
+        grp = grp.copy()
+        ts = type_share.get(int(gid), {})
+        tfreq = grp.groupby('service_type')['freq_per_h_window'].sum()
+        present = [t for t in tfreq.index if tfreq[t] > 0]
+        denom = sum(ts.get(t, 0.0) for t in present)
+        if present and denom > 0:
+            eff = {t: ts.get(t, 0.0) / denom for t in present}
+        elif present:                       # no supply share available -> equal types
+            eff = {t: 1.0 / len(present) for t in present}
+        else:
+            eff = {}
+        w = []
+        for _, row in grp.iterrows():
+            t, f = row['service_type'], row['freq_per_h_window']
+            intra = (f / tfreq[t]) if tfreq.get(t, 0.0) > 0 else 0.0
+            w.append(round(eff.get(t, 0.0) * intra, 6))
+        grp['boarding_weight'] = w
+        out.append(grp)
+    return pd.concat(out, ignore_index=True)
+
+
+def _build_region_gateways_table(gw_weights: dict, zone_names: dict,
+                                 bs_index: dict) -> pd.DataFrame:
+    """Wide region→gateway share table for the workbook's 'Region_Gateways' sheet.
+
+    One row per routed region (gw_weights key): the region label followed by
+    `Gateway i` / `Share gateway i` columns for each assigned gateway, ordered by
+    descending share. Single-gateway regions list one gateway at 100 %. Region
+    labelled by external-zone name where known, else 'BFS <code>' for out-of-
+    catchment communes (code ≤ 9999) or the bare zone code. Multi-gateway regions
+    are listed first.
+    """
+    if not gw_weights:
+        return pd.DataFrame()
+
+    def _region_label(code):
+        if code in zone_names:
+            return zone_names[code]
+        return f"BFS {code}" if code <= 9999 else str(code)
+
+    def _gw_name(sid):
+        return bs_index.get(int(sid), (str(int(sid)), None))[0]
+
+    rows, max_gw = [], 0
+    for code, pairs in gw_weights.items():
+        ordered = sorted(pairs, key=lambda sv: -sv[1])
+        row = {'Region': _region_label(int(code))}
+        for i, (sid, share) in enumerate(ordered, 1):
+            row[f'Gateway {i}']       = _gw_name(sid)
+            row[f'Share gateway {i}'] = round(float(share), 4)
+        rows.append((int(code), len(ordered), row))
+        max_gw = max(max_gw, len(ordered))
+
+    rows.sort(key=lambda t: (-t[1], t[0]))   # multi-gateway first, then by code
+    cols = ['Region']
+    for i in range(1, max_gw + 1):
+        cols += [f'Gateway {i}', f'Share gateway {i}']
+    return pd.DataFrame([r for _, _, r in rows]).reindex(columns=cols)
+
+
+def _write_gateway_splits_xlsx(splits: pd.DataFrame, gw_weights: dict,
+                               zone_names: dict, bs_index: dict,
+                               out_path: str) -> None:
+    """Write the gateway routing workbook (replaces the old gateway_splits.csv).
+
+    Sheet 'Gateway_Split'   — per-gateway local vs long-distance service split.
+    Sheet 'Region_Gateways' — every routed region with its gateway station(s) and
+        demand shares (see _build_region_gateways_table).
+    """
+    region_tbl = _build_region_gateways_table(gw_weights, zone_names, bs_index)
+    has_splits = splits is not None and not splits.empty
+    if not has_splits and region_tbl.empty:
+        return
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+        (splits if has_splits else pd.DataFrame()).to_excel(
+            writer, sheet_name='Gateway_Split', index=False)
+        region_tbl.to_excel(writer, sheet_name='Region_Gateways', index=False)
+    print(f"    Gateway routing workbook "
+          f"({len(splits) if has_splits else 0} gateways, "
+          f"{len(region_tbl)} regions) → {out_path}")
+
+
+def _write_gateway_connections_xlsx(connections: pd.DataFrame,
+                                    out_path: str) -> None:
+    """Write the gateway service-connection table (single 'Connections' sheet)."""
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    df = connections if connections is not None and not connections.empty \
+        else pd.DataFrame()
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Connections', index=False)
+    n_gw = df['gateway_station_id'].nunique() if not df.empty else 0
+    print(f"    Gateway service-connection table ({len(df)} variant-rows, "
+          f"{n_gw} gateways) → {out_path}")
 
 
 def _build_gateway_weights(assignment: dict, volumes: dict) -> dict:
@@ -765,6 +1098,192 @@ def _build_gateway_od(external_od: pd.DataFrame, gw_weights: dict,
     return pd.DataFrame(rows, columns=['quelle_code', 'ziel_code', 'wert'])
 
 
+def _served_station_ids(svc_network: str, infra_version: str) -> set:
+    """Station numbers that appear as a from/to stop in the projected segments
+    (i.e. boardable in the service network) — used to validate convergence
+    targets."""
+    seg_path = _gateway_segments_path(svc_network, infra_version)
+    if not os.path.exists(seg_path):
+        return set()
+    served = set()
+    for lyr in list_layers(seg_path)[:, 0].tolist():
+        g = gpd.read_file(seg_path, layer=lyr)
+        for col in ('from_stop_nr', 'to_stop_nr'):
+            served |= set(pd.to_numeric(g.get(col), errors='coerce')
+                          .dropna().astype(int).tolist())
+    return served
+
+
+def _served_station_index(svc_network: str, infra_version: str) -> dict:
+    """dict[int station id -> name] for served stations (boardable in the service
+    network), so convergence targets can be entered and stored by name as well as
+    by number."""
+    served = _served_station_ids(svc_network, infra_version)
+    if not served:
+        return {}
+    return {i: nm for i, (nm, _g)
+            in _build_boundary_station_index(sorted(served), infra_version,
+                                             verbose=False).items()}
+
+
+def _resolve_station_token(text, served_ids: set, id_to_name: dict,
+                           allow_substring: bool = True) -> tuple:
+    """Resolve a typed token (station number or name) to a served station id.
+
+    Returns (id, None) on success, else (None, message). Matching: a numeric token
+    is taken as the id; otherwise a case-insensitive exact name match, then
+    (optionally) a unique case-insensitive substring match.
+    """
+    t = str(text).strip()
+    if not t:
+        return None, "empty"
+    if t.isdigit():
+        return (int(t), None) if int(t) in served_ids \
+            else (None, f"id {t} is not a served station")
+    tl = t.lower()
+    exact = [i for i, n in id_to_name.items()
+             if i in served_ids and str(n).strip().lower() == tl]
+    if len(exact) == 1:
+        return exact[0], None
+    if len(exact) > 1:
+        return None, "ambiguous name: " + ", ".join(
+            f"{id_to_name[i]} ({i})" for i in exact)
+    if allow_substring:
+        subs = [i for i, n in id_to_name.items()
+                if i in served_ids and tl in str(n).strip().lower()]
+        if len(subs) == 1:
+            return subs[0], None
+        if len(subs) > 1:
+            return None, "matches several: " + ", ".join(
+                f"{id_to_name[i]} ({i})" for i in subs[:10])
+    return None, "no served station matches"
+
+
+def _load_convergence_map(gateway_dir: str, id_to_name: dict = None) -> dict:
+    """Load the optional convergence-map override
+    (gateway_convergence_map.json): {"<zone_or_gateway_id>": <served_station>}.
+
+    A key matching an assignment zone redirects that whole zone to the convergence
+    station; any other key is treated as a gateway station id and replaced wherever
+    it appears. The value may be a bare id, a readable {"id":.., "name":..} object,
+    or a station NAME (a bare string or {"name":..}); names are resolved against
+    served stations when `id_to_name` is supplied (exact case-insensitive match).
+    Absent file -> {}.
+    """
+    path = os.path.join(gateway_dir, 'gateway_convergence_map.json')
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding='utf-8') as f:
+        raw = json.load(f)
+    served_ids = set(id_to_name) if id_to_name else set()
+    out = {}
+    for k, v in raw.items():
+        val  = v.get('id') if isinstance(v, dict) else v
+        name = v.get('name') if isinstance(v, dict) else None
+        sid = None
+        if val is not None:
+            try:
+                sid = int(val)
+            except (ValueError, TypeError):
+                name = name or val          # value was a name string, not an id
+        if sid is None and name and id_to_name:
+            sid, msg = _resolve_station_token(name, served_ids, id_to_name,
+                                              allow_substring=False)
+            if sid is None:
+                print(f"  Convergence map: cannot resolve '{name}' for key {k} "
+                      f"({msg}); skipped.")
+                continue
+        if sid is None:
+            continue
+        try:
+            out[int(k)] = sid
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def _save_convergence_map(conv_map: dict, bs_index: dict, gateway_dir: str) -> None:
+    """Persist the convergence map in the readable {key: {"id":.., "name":..}} form."""
+    path = os.path.join(gateway_dir, 'gateway_convergence_map.json')
+    payload = {str(k): {'id': int(v),
+                        'name': bs_index.get(int(v), (str(int(v)), None))[0]}
+               for k, v in conv_map.items()}
+    os.makedirs(gateway_dir, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _apply_convergence_redirect(assignment: dict, conv_map: dict) -> dict:
+    """Redirect `assignment` per `conv_map`. Keys matching an assignment zone
+    redirect that whole zone to [conv_id]; other keys are gateway station ids and
+    are replaced wherever they occur (order-preserving dedupe). Mutates and returns
+    `assignment`."""
+    if not conv_map:
+        return assignment
+    for key, conv in conv_map.items():
+        if key in assignment:
+            assignment[key] = [int(conv)]
+    gw_redirect = {k: int(v) for k, v in conv_map.items() if k not in assignment}
+    if gw_redirect:
+        for z, stns in assignment.items():
+            seen, out = set(), []
+            for s in (gw_redirect.get(int(s), int(s)) for s in stns):
+                if s not in seen:
+                    seen.add(s)
+                    out.append(s)
+            assignment[z] = out
+    return assignment
+
+
+def _guard_dead_gateways(assignment: dict, dead_set: set, served_ids: set,
+                         id_to_name: dict, bs_index: dict, conv_map: dict,
+                         gateway_dir: str) -> dict:
+    """Ensure no zone routes only through dead (no-service) gateways. Zones whose
+    entire assignment is dead get a convergence station: prompt interactively, else
+    raise. The prompt accepts a station NAME or number; the resolved name+number is
+    persisted. Mutates+returns assignment.
+    """
+    problem = {z: stns for z, stns in assignment.items()
+               if stns and all(int(s) in dead_set for s in stns)}
+    if not problem:
+        return assignment
+    conv_json = os.path.join(gateway_dir, 'gateway_convergence_map.json')
+    if not (_INTERACTIVE_MODE and _can_prompt()):
+        raise FileNotFoundError(
+            f"Gateway zones {sorted(problem)} route only through dead (no-service) "
+            f"boundary stations: "
+            f"{ {z: [bs_index.get(int(s),(str(s),None))[0] for s in stns] for z,stns in problem.items()} }. "
+            f"Add a convergence (served upstream) station for each to {conv_json}, "
+            f"or run catchment_OD_preparation standalone to assign one.")
+    print(f"\n  {len(problem)} zone(s) route only through dead gateways — assign a "
+          f"convergence (served upstream) station for each (enter a station name "
+          f"or number):")
+    changed = False
+    for z, stns in problem.items():
+        dead_names = ', '.join(bs_index.get(int(s), (str(s), None))[0] for s in stns)
+        while True:
+            raw = input(f"    Zone {z} (dead: {dead_names}) -> served station "
+                        f"name or number (or 's' to skip/drop demand): ").strip()
+            if raw.lower() == 's':
+                print(f"      zone {z} left dead (demand will drop)")
+                break
+            sid, msg = _resolve_station_token(raw, served_ids, id_to_name)
+            if sid is None:
+                print(f"      {msg} — enter a served station name or number, or 's'.")
+                continue
+            nm = id_to_name.get(sid, str(sid))
+            assignment[z] = [sid]
+            conv_map[z] = sid
+            bs_index[sid] = (nm, bs_index.get(sid, (None, None))[1])
+            changed = True
+            print(f"      zone {z} -> {nm} ({sid})")
+            break
+    if changed:
+        _save_convergence_map(conv_map, bs_index, gateway_dir)
+        print(f"  Saved convergence map → {conv_json}")
+    return assignment
+
+
 def _prepare_gateways(external_od, commune_gdf, bfs_col, in_bnd_bfs,
                       svc_network, infra_version) -> dict:
     """Load gateway stations, assign external zones (multi) + out-of-catchment
@@ -792,7 +1311,7 @@ def _prepare_gateways(external_od, commune_gdf, bfs_col, in_bnd_bfs,
     gateway_dir = paths.get_gateway_dir(svc_network)
     json_path   = os.path.join(gateway_dir, 'gateway_zone_assignment.json')
     csv_path    = os.path.join(gateway_dir, 'gateway_out_of_catchment.csv')
-    splits_path = os.path.join(gateway_dir, 'gateway_splits.csv')
+    splits_xlsx = os.path.join(gateway_dir, 'gateway_splits.xlsx')
 
     zone_map = (_assign_external_zones(zone_codes, boundary_ids, bs_index,
                                        zone_names, json_path)
@@ -807,9 +1326,43 @@ def _prepare_gateways(external_od, commune_gdf, bfs_col, in_bnd_bfs,
     for code, stn in commune_map.items():
         assignment[code] = [stn]
 
-    used_gateways = {s for stations in assignment.values() for s in stations}
-    splits = _compute_gateway_splits(used_gateways, svc_network, infra,
-                                     settings.TEMPORAL, bs_index, splits_path)
+    # Convergence overrides: redirect specific zones / dead gateways to an upstream
+    # served station (e.g. Schaffhausen for Thayngen+Neunkirch, Zug for Zug Casino).
+    # Loaded from a separate map so the boundary assignment stays untouched.
+    boundary_set = {int(b) for b in boundary_ids}
+    served_names = _served_station_index(svc_network, infra)   # id -> name
+    served_ids   = set(served_names)
+    conv_map     = _load_convergence_map(gateway_dir, served_names)
+    if conv_map:
+        bad = sorted({int(v) for v in conv_map.values()
+                      if served_ids and int(v) not in served_ids})
+        if bad:
+            raise ValueError(
+                f"Convergence target(s) {bad} are not served stations (no stop in "
+                f"the service network); pick an upstream served station.")
+        assignment = _apply_convergence_redirect(assignment, conv_map)
+
+    # Dead-gateway guard: boundary gateways with no crossing service can't board
+    # demand. Detect them, then ensure no zone routes only through dead gateways
+    # (prompt for a convergence station interactively, else raise).
+    boundary_used = {int(s) for stns in assignment.values() for s in stns} & boundary_set
+    splits = _compute_gateway_splits(boundary_used, svc_network, infra, bs_index)
+    dead_set = {int(r.gateway_station_id) for r in splits.itertuples(index=False)
+                if (float(r.local_freq) + float(r.longdist_freq)) == 0.0}
+    assignment = _guard_dead_gateways(assignment, dead_set, served_ids,
+                                      served_names, bs_index, conv_map, gateway_dir)
+
+    # Final gateway set (post redirect + guard). Convergence stations are served
+    # nodes outside the catchment; pull their names/geometry into bs_index so the
+    # name lookup and the OD matrix label them, and split off the boundary subset
+    # (only boundary gateways get a connection-table entry; convergence stations
+    # route via normal graph portals).
+    used_gateways = {int(s) for stns in assignment.values() for s in stns}
+    conv_ids      = sorted(used_gateways - boundary_set)
+    if conv_ids:
+        bs_index.update(_build_boundary_station_index(conv_ids, infra))
+    boundary_used = used_gateways & boundary_set
+    splits = _compute_gateway_splits(boundary_used, svc_network, infra, bs_index)
 
     volumes = {}
     if not splits.empty:
@@ -817,13 +1370,26 @@ def _prepare_gateways(external_od, commune_gdf, bfs_col, in_bnd_bfs,
                    for r in splits.itertuples(index=False)}
     gw_weights = _build_gateway_weights(assignment, volumes)
 
+    _write_gateway_splits_xlsx(splits, gw_weights, zone_names, bs_index, splits_xlsx)
+
+    # Per-service connection table: which crossing services (stopping + passing)
+    # each boundary gateway feeds, with the nested type-then-frequency boarding
+    # weights the router uses to inject + split demand. Written for routing.
+    freq_lookup = _load_line_freq_per_h_window(svc_network, infra)
+    connections = _build_gateway_connections(
+        boundary_used, svc_network, infra, splits, freq_lookup, bs_index)
+    conn_xlsx = paths.get_gateway_connections_xlsx(svc_network)
+    _write_gateway_connections_xlsx(connections, conn_xlsx)
+
     multi = sum(1 for v in gw_weights.values() if len(v) > 1)
     print(f"  Gateways ready: {len(zone_map)} external zones "
           f"({multi} split across multiple gateways), "
           f"{len(commune_map)} out-of-catchment communes, "
-          f"{len(used_gateways)} gateways used.")
+          f"{len(used_gateways)} gateways used"
+          f"{f' ({len(conv_ids)} convergence)' if conv_ids else ''}.")
     return {'gw_weights': gw_weights, 'gateway_station_ids': used_gateways,
-            'bs_index': bs_index, 'splits': splits}
+            'bs_index': bs_index, 'splits': splits, 'connections': connections,
+            'convergence_ids': conv_ids}
 
 
 def _build_station_name_lookup(rail_stations) -> dict:
@@ -852,6 +1418,58 @@ def _build_station_name_lookup(rail_stations) -> dict:
             name = f"{name} ({sid})"
         lookup[sid] = name
     return lookup
+
+
+def _extend_name_lookup_from_breakdown(name_lookup: dict, method: str) -> int:
+    """Fill missing station ids in `name_lookup` with (station_number ->
+    station_name) pairs from station_commune_breakdown.csv.
+
+    The all-day rail-stops load behind `name_lookup` omits peak-only stations
+    (e.g. the Effretikon–Wetzikon corridor), which would otherwise render as bare
+    numeric ids. The breakdown carries every attributed station with its name, so
+    it is the authoritative gap-filler. Only absent ids are added (existing,
+    collision-disambiguated names are left untouched). Returns the count added.
+    """
+    data_dir = (catchment_base.PT_FEEDER_DATA_DIR if method == 'pt_feeder'
+                else catchment_base.MUNICIPAL_DATA_DIR)
+    path = os.path.join(paths.MAIN, data_dir, 'station_commune_breakdown.csv')
+    if not os.path.exists(path):
+        return 0
+    df = pd.read_csv(path, encoding='utf-8-sig')
+    if 'station_number' not in df.columns or 'station_name' not in df.columns:
+        return 0
+    added = 0
+    for num, nm in zip(df['station_number'], df['station_name']):
+        n = pd.to_numeric(num, errors='coerce')
+        if pd.isna(n):
+            continue
+        key  = str(int(n))
+        name = str(nm).strip()
+        if key not in name_lookup and name and name.lower() != 'nan':
+            name_lookup[key] = name
+            added += 1
+    if added:
+        print(f"  Name lookup extended with {added} station name(s) from the "
+              f"{method} breakdown (peak-only / out-of-all-day stations).")
+    return added
+
+
+def _check_name_coverage(long_df: pd.DataFrame, name_lookup: dict,
+                         label: str) -> None:
+    """Warn if any station id in `long_df` has no entry in `name_lookup` (which
+    would surface as a bare number in the matrices/plots)."""
+    if long_df is None or long_df.empty:
+        return
+    ids = pd.to_numeric(
+        pd.concat([long_df['origin_station_id'], long_df['dest_station_id']]),
+        errors='coerce').dropna().astype(int).unique()
+    missing = sorted(int(i) for i in ids if str(int(i)) not in name_lookup)
+    if missing:
+        print(f"  WARNING [{label}]: {len(missing)} station id(s) have no name and "
+              f"will render as bare numbers: {missing[:15]}"
+              f"{' ...' if len(missing) > 15 else ''}")
+    else:
+        print(f"  Name coverage [{label}]: all {len(ids)} station ids resolve to names.")
 
 
 def _build_window_matrix(long_df: pd.DataFrame, tau_window: float,
@@ -884,23 +1502,31 @@ def _build_window_matrix(long_df: pd.DataFrame, tau_window: float,
     return matrix
 
 
-def _apply_window_scaling(long_df: pd.DataFrame, tau_window: float,
-                          name_lookup: dict, output_path: str,
-                          label: str = '') -> None:
-    """Build the window station×station matrix and write it to CSV at
-    `output_path` (absolute).
+def _write_window_xlsx(attr_longs: dict, tau_window: float, name_lookup: dict,
+                       output_path: str, label: str = '') -> None:
+    """Write one per-window station×station OD workbook with a sheet per attribution
+    mode (PT-Feeder: 'Specific' + 'Blended'; Municipal: 'Municipal').
+
+    Args:
+        attr_longs: dict[sheet_label -> long-format OD DataFrame].
     """
-    matrix = _build_window_matrix(long_df, tau_window, name_lookup)
-    if matrix is None:
+    matrices = {}
+    for sheet, long_df in attr_longs.items():
+        matrix = _build_window_matrix(long_df, tau_window, name_lookup)
+        if matrix is not None:
+            matrices[sheet] = matrix
+    if not matrices:
         print(f"    ({label}): no data — skipping {output_path}")
         return
 
     out_full = Path(output_path)
     out_full.parent.mkdir(parents=True, exist_ok=True)
-    matrix.to_csv(out_full, encoding='utf-8-sig')
+    with pd.ExcelWriter(out_full, engine='openpyxl') as writer:
+        for sheet, matrix in matrices.items():
+            matrix.to_excel(writer, sheet_name=sheet)   # labels are ≤31 chars
+    sizes = '; '.join(f"{s}: {m.values.sum():,.0f}" for s, m in matrices.items())
     print(f"    Saved → {out_full}")
-    print(f"      {label}: {matrix.shape[0]}×{matrix.shape[1]} stations, "
-          f"total trips = {matrix.values.sum():,.1f}  (τ={tau_window})")
+    print(f"      {label}: {', '.join(matrices)}  ({sizes}; τ={tau_window})")
 
 
 def _export_od_matrix_excel(long_df: pd.DataFrame, windows: list,
@@ -1017,15 +1643,19 @@ def _load_station_breakdown(method: str) -> pd.DataFrame:
 
     pop_share_pct / empl_share_pct are the population / FTE shares of each
     commune attributed to a station — already computed by the allocation
-    (year-scaled, boundary-filtered, no-PT cells excluded), so they are used
-    directly as the OD origin / destination weights. No-PT rows (station id
-    NO_PT_ID = -1) are dropped; the remaining shares sum to ≤ 1 per commune.
+    (year-scaled, boundary-filtered, no-PT cells excluded). The 'specific' mode
+    uses the shares directly as origin / destination weights; the 'blended' mode
+    uses the absolute counts (pop_count / empl_count) with the commune totals
+    (pop_total / empl_total) for a count-based trip-end blend. No-PT rows (station
+    id NO_PT_ID = -1) are dropped; the remaining shares sum to ≤ 1 per commune.
 
     Args:
         method: 'pt_feeder' | 'municipal' — selects the versioned data dir.
 
     Returns:
-        DataFrame[BFS (int), station_id (int), pop_share (float), empl_share (float)].
+        DataFrame[BFS (int), station_id (int), pop_share, empl_share, pop_count,
+        empl_count, pop_total, empl_total (floats)]. pop_total / empl_total are
+        the commune-wide totals, constant per commune (repeated on every row).
     """
     data_dir = (catchment_base.PT_FEEDER_DATA_DIR if method == 'pt_feeder'
                 else catchment_base.MUNICIPAL_DATA_DIR)
@@ -1037,7 +1667,9 @@ def _load_station_breakdown(method: str) -> pd.DataFrame:
         )
     print(f"  Loading station-commune catchment breakdown ({method}) ...")
     df = pd.read_csv(path, encoding='utf-8-sig')
-    df = df[['BFS_NR', 'station_number', 'pop_share_pct', 'empl_share_pct']].copy()
+    df = df[['BFS_NR', 'station_number', 'pop_share_pct', 'empl_share_pct',
+             'pop_in_station', 'empl_in_station',
+             'pop_total_commune', 'empl_total_commune']].copy()
     df['BFS']        = pd.to_numeric(df['BFS_NR'],         errors='coerce')
     df['station_id'] = pd.to_numeric(df['station_number'], errors='coerce')
     df = df.dropna(subset=['BFS', 'station_id'])
@@ -1046,7 +1678,12 @@ def _load_station_breakdown(method: str) -> pd.DataFrame:
     df = df[df['station_id'] > 0]   # drop No-PT sentinel (NO_PT_ID = -1)
     df['pop_share']  = pd.to_numeric(df['pop_share_pct'],  errors='coerce').fillna(0.0) / 100.0
     df['empl_share'] = pd.to_numeric(df['empl_share_pct'], errors='coerce').fillna(0.0) / 100.0
-    out = df[['BFS', 'station_id', 'pop_share', 'empl_share']].reset_index(drop=True)
+    df['pop_count']  = pd.to_numeric(df['pop_in_station'],     errors='coerce').fillna(0.0)
+    df['empl_count'] = pd.to_numeric(df['empl_in_station'],    errors='coerce').fillna(0.0)
+    df['pop_total']  = pd.to_numeric(df['pop_total_commune'],  errors='coerce').fillna(0.0)
+    df['empl_total'] = pd.to_numeric(df['empl_total_commune'], errors='coerce').fillna(0.0)
+    out = df[['BFS', 'station_id', 'pop_share', 'empl_share',
+              'pop_count', 'empl_count', 'pop_total', 'empl_total']].reset_index(drop=True)
     print(f"    {out['BFS'].nunique()} communes, {out['station_id'].nunique()} stations, "
           f"{len(out):,} (commune, station) pairs")
     return out
@@ -1065,7 +1702,7 @@ def _run_municipal_branch(communal_od: pd.DataFrame,
         Long-format DataFrame: origin_station_id (int), dest_station_id (int),
         trips (float).
     """
-    print("\n  --- Municipal branch ---")
+    print("\n  --- 4B Municipal branch ---")
     assign = _load_municipal_assignment()
     bfs_to_stn = dict(zip(assign['BFS_NR'].astype(int),
                           assign['station_id'].astype(int)))
@@ -1113,8 +1750,9 @@ def _run_pt_feeder_branch(communal_od: pd.DataFrame, gateway_station_ids=None,
 
     Attribution mode:
         'specific' — origin weights = population share, dest weights = FTE share.
-        'blended'  — both sides = OD_SCALING_POP_WEIGHT×pop_share +
-                     OD_SCALING_EMPL_WEIGHT×empl_share (symmetric).
+        'blended'  — both sides = count-based trip-end blend
+                     (OD_BLEND_POP_RATE·pop_in_station + OD_BLEND_EMPL_RATE·empl_in_station,
+                     normalised by commune total activity; symmetric).
 
     Gateway ends in the OD are already station ids (the external leg was expanded
     upstream), so each gateway station is injected as an identity (weight 1.0) row
@@ -1125,9 +1763,36 @@ def _run_pt_feeder_branch(communal_od: pd.DataFrame, gateway_station_ids=None,
         long_df:      DataFrame[origin_station_id, dest_station_id, trips]
         orig_weights: DataFrame[BFS, station_id, orig_weight] — for diagnostic.
     """
-    print("\n  --- PT-feeder branch ---")
+    print("\n  --- 4B PT-feeder branch ---")
     breakdown = _load_station_breakdown('pt_feeder')
+    orig_weights, dest_weights = _attribution_weight_tables(
+        breakdown, attribution_mode, gateway_station_ids)
 
+    print(f"    Origin weights: {orig_weights['BFS'].nunique()} communes, "
+          f"{orig_weights['station_id'].nunique()} stations")
+    print(f"    Dest  weights: {dest_weights['BFS'].nunique()} communes, "
+          f"{dest_weights['station_id'].nunique()} stations")
+
+    long_df = _reaggregate_to_stations(communal_od, orig_weights, dest_weights)
+    return long_df, orig_weights
+
+
+def _attribution_weight_tables(breakdown: pd.DataFrame,
+                               attribution_mode: str = 'blended',
+                               gateway_station_ids=None) -> tuple:
+    """Build the (orig_weights, dest_weights) spatial attribution tables from a
+    station-commune breakdown.
+
+    'specific' — orig = population share, dest = FTE share (directional).
+    'blended'  — both = count-based trip-end blend (symmetric).
+    Gateway stations are injected as identity (weight 1.0) rows so an already-
+    expanded gateway end resolves to itself. Shared by _run_pt_feeder_branch and
+    the standalone attribution_weights() seam so both stay in lock-step.
+
+    Returns:
+        (orig_weights[BFS, station_id, orig_weight],
+         dest_weights[BFS, station_id, dest_weight]).
+    """
     if attribution_mode == 'blended':
         blended      = _compute_blended_weights(breakdown)
         orig_weights = blended.rename(columns={'weight': 'orig_weight'})
@@ -1137,19 +1802,11 @@ def _run_pt_feeder_branch(communal_od: pd.DataFrame, gateway_station_ids=None,
                         .rename(columns={'pop_share': 'orig_weight'}))
         dest_weights = (breakdown[['BFS', 'station_id', 'empl_share']]
                         .rename(columns={'empl_share': 'dest_weight'}))
-
     orig_weights = _inject_identity_weights(orig_weights, gateway_station_ids,
                                             'orig_weight')
     dest_weights = _inject_identity_weights(dest_weights, gateway_station_ids,
                                             'dest_weight')
-
-    print(f"    Origin weights: {orig_weights['BFS'].nunique()} communes, "
-          f"{orig_weights['station_id'].nunique()} stations")
-    print(f"    Dest  weights: {dest_weights['BFS'].nunique()} communes, "
-          f"{dest_weights['station_id'].nunique()} stations")
-
-    long_df = _reaggregate_to_stations(communal_od, orig_weights, dest_weights)
-    return long_df, orig_weights
+    return orig_weights, dest_weights
 
 
 def _inject_identity_weights(weights: pd.DataFrame, gateway_station_ids,
@@ -1166,26 +1823,163 @@ def _inject_identity_weights(weights: pd.DataFrame, gateway_station_ids,
 
 
 def _compute_blended_weights(breakdown: pd.DataFrame) -> pd.DataFrame:
-    """Symmetric blended weight per (commune, station):
-    (POP_WEIGHT×pop_share + EMPL_WEIGHT×empl_share) / (POP_WEIGHT + EMPL_WEIGHT).
+    """Symmetric count-based trip-end weight per (commune, station):
 
-    With OD_SCALING_EMPL_WEIGHT = 0 this reduces to the population share, applied
-    to both origin and destination sides. pop_share / empl_share come from the
-    catchment breakdown (each (commune, station) row carries both).
+        weight = (α·pop_in_station + β·empl_in_station)
+                 / (α·pop_total_commune + β·empl_total_commune)
+
+    α = OD_BLEND_POP_RATE, β = OD_BLEND_EMPL_RATE (both 1.0 by default: one daily
+    trip-end per resident and per job). Normalising by the commune total — not the
+    per-station sum — keeps Σ weight ≤ 1 per commune, so the no-PT share is dropped
+    exactly as in the share-based attribution. Applied to both origin and
+    destination ends, which (with a symmetric communal OD) yields a symmetric
+    station OD. Employment's influence is proportional to the actual job count, so
+    job-dense stations are credited without a global ratio overriding the local
+    pop:jobs mix. For single-station communes this resolves to ≈ 1.0 (minus no-PT),
+    matching the previous behaviour; multi-station communes shift toward their
+    job-dense stations.
 
     Args:
-        breakdown: DataFrame[BFS, station_id, pop_share, empl_share] from
-                   _load_station_breakdown.
+        breakdown: DataFrame[BFS, station_id, pop_count, empl_count, pop_total,
+                   empl_total] from _load_station_breakdown.
 
     Returns:
         DataFrame[BFS, station_id, weight].
     """
-    pw = float(settings.OD_SCALING_POP_WEIGHT)
-    ew = float(settings.OD_SCALING_EMPL_WEIGHT)
-    denom = (pw + ew) if (pw + ew) > 0 else 1.0
+    a = float(settings.OD_BLEND_POP_RATE)
+    b = float(settings.OD_BLEND_EMPL_RATE)
     m = breakdown.copy()
-    m['weight'] = (pw * m['pop_share'] + ew * m['empl_share']) / denom
+    numer = a * m['pop_count'] + b * m['empl_count']
+    denom = a * m['pop_total'] + b * m['empl_total']
+    m['weight'] = np.where(denom > 0, numer / denom, 0.0)
     return m[['BFS', 'station_id', 'weight']]
+
+
+# ===============================================================================
+# COMMUNE OD DEMAND LAYER (GVM-anchored, network-agnostic)
+# ===============================================================================
+# Year-parameterised commune OD: the 2018 actual scaled by population for the
+# trajectory shape and converging exactly to the canton's symmetrised 2040 forecast
+# at OD_ANCHOR_YEAR (both years are in the KTZH GVM Excel). No base-year switch —
+# the blend is a continuous function of year. Decoupled from the spatial station
+# attribution (the count-blend) below; the future scenario loop multiplies a
+# per-commune population deviation onto od_communal (the `scenario` hook).
+#
+#     T(i,j;Y) = T18·pf(i,j;Y) + w(Y)·[Gsym(i,j) − T18·pf(i,j;OD_ANCHOR_YEAR)]
+#     pf(i,j;Y) = sqrt(g_i(Y)·g_j(Y)),  g = pop(Y)/pop(OD_BASE_YEAR)
+#     Gsym(i,j) = mean(T2040(i,j), T2040(j,i))   # symmetrised → whole-day invariant
+#     w(Y)      = clip((Y−OD_BASE_YEAR)/(OD_ANCHOR_YEAR−OD_BASE_YEAR), 0, 1)
+#     Y>OD_ANCHOR_YEAR: T = Gsym · pf(Y)/pf(OD_ANCHOR_YEAR)   # population beyond anchor
+
+# Immutable data anchors (years present in the KTZH GVM Excel) — the single source
+# of truth for the OD trajectory; not run parameters.
+OD_BASE_YEAR = 2018
+OD_ANCHOR_YEAR = 2040
+
+
+def od_communal(year: int, scenario=None) -> pd.DataFrame:
+    """GVM-anchored commune OD at `year` (symmetric, whole-day, full daily demand).
+
+    Additive blend of the population-scaled 2018 OD and the symmetrised 2040
+    forecast, phased so the result equals the 2018 OD at OD_BASE_YEAR and the 2040
+    forecast at OD_ANCHOR_YEAR exactly; beyond OD_ANCHOR_YEAR the 2040 level is
+    carried forward by population only. The additive form (vs multiplicative)
+    handles the ~1,210 pairs that are new in 2040 (zero in 2018) and never divides
+    by a 2018 flow.
+
+    Args:
+        year:     Target year for the OD.
+        scenario: Reserved scenario hook for the future scenario loop (dormant).
+                  When wired, it resolves to a per-commune population deviation
+                  delta_i = pop_i(scenario, year) / pop_i(mean, year) (ratio-to-mean,
+                  ~1 centrally), applied per pair as wert * sqrt(delta_i * delta_j),
+                  so the scenario fan is centred on this GVM-anchored mean without
+                  double-counting the structural uplift already in the 2040 anchor.
+                  None -> deterministic mean (the central scenario at `year`).
+
+    Returns:
+        DataFrame[quelle_code (int), ziel_code (int), wert (float)] with positive
+        demand; symmetric. Used by both the PT-Feeder and Municipal branches.
+    """
+    if scenario is not None:
+        # Layer-2 hook (see scenario/delta seams): the scenario loop will scale the
+        # mean by per-commune population deviation. Not yet wired — return the mean.
+        pass
+
+    t18 = _od_year_symmetric(OD_BASE_YEAR).rename(columns={'wert': 't18'})
+    g   = _od_year_symmetric(OD_ANCHOR_YEAR).rename(columns={'wert': 'g'})
+    df  = t18.merge(g, on=['quelle_code', 'ziel_code'], how='outer')
+    df[['t18', 'g']] = df[['t18', 'g']].fillna(0.0)
+
+    f_y, agg_y = _commune_pop_factors(year)
+    f_a, agg_a = _commune_pop_factors(OD_ANCHOR_YEAR)
+
+    def _pf(factors, agg):
+        fq = df['quelle_code'].map(factors).fillna(agg)
+        fz = df['ziel_code'].map(factors).fillna(agg)
+        return np.sqrt(fq.to_numpy(dtype=float) * fz.to_numpy(dtype=float))
+
+    pf_y = _pf(f_y, agg_y)
+    pf_a = _pf(f_a, agg_a)
+    span = float(OD_ANCHOR_YEAR - OD_BASE_YEAR)
+    w = min(max((year - OD_BASE_YEAR) / span, 0.0), 1.0)
+
+    t18v, gv = df['t18'].to_numpy(dtype=float), df['g'].to_numpy(dtype=float)
+    blended = t18v * pf_y + w * (gv - t18v * pf_a)
+    beyond = np.where(pf_a > 0, gv * (pf_y / pf_a), gv)
+    wert = np.where(year > OD_ANCHOR_YEAR, beyond, blended)
+    df['wert'] = np.clip(wert, 0.0, None)
+
+    out = df[df['wert'] > 0][['quelle_code', 'ziel_code', 'wert']].reset_index(drop=True)
+    print(f"  od_communal({year}): {len(out):,} pairs, total {out['wert'].sum():,.0f} "
+          f"(w={w:.2f}; 2018={t18v.sum():,.0f}, Gsym={gv.sum():,.0f})")
+    return out
+
+
+def _od_year_symmetric(year: int) -> pd.DataFrame:
+    """Load one GVM year (tau=1 full daily demand), drop intrazonal, symmetrise.
+
+    The raw 2040 forecast carries ~1,148 directionally-asymmetric pairs; averaging
+    (i,j)/(j,i) preserves the whole-day-symmetric invariant and conserves total
+    demand. The already-symmetric 2018 actual round-trips unchanged.
+    """
+    od = scoring.GetOevDemandPerCommune(tau=1, year=year)
+    od = od[od['quelle_code'] != od['ziel_code']].copy()
+    od = od[od['wert'] > 0][['quelle_code', 'ziel_code', 'wert']].copy()
+    od['quelle_code'] = od['quelle_code'].astype(int)
+    od['ziel_code']   = od['ziel_code'].astype(int)
+    if od.empty:
+        return od
+    od['lo'] = np.minimum(od['quelle_code'], od['ziel_code'])
+    od['hi'] = np.maximum(od['quelle_code'], od['ziel_code'])
+    pair_mean = od.groupby(['lo', 'hi'], as_index=False)['wert'].mean()
+    fwd = pair_mean.rename(columns={'lo': 'quelle_code', 'hi': 'ziel_code'})
+    rev = pair_mean.rename(columns={'hi': 'quelle_code', 'lo': 'ziel_code'})
+    out = pd.concat([fwd, rev], ignore_index=True)
+    out = out[out['quelle_code'] != out['ziel_code']]
+    return out[['quelle_code', 'ziel_code', 'wert']].reset_index(drop=True)
+
+
+def _commune_pop_factors(year: int) -> tuple:
+    """Per-commune population factor pop(year)/pop(OD_BASE_YEAR).
+
+    Returns:
+        (factors, agg_fallback)
+        factors:      dict[int BFS_NR -> float] for communes with positive base pop.
+        agg_fallback: float aggregate pop(year)/pop(OD_BASE_YEAR) for missing communes.
+    """
+    pop_base = catchment_base.load_commune_pop(OD_BASE_YEAR)
+    pop_year = catchment_base.load_commune_pop(year)
+    factors = {}
+    for bfs, p0 in pop_base.items():
+        p0 = float(p0)
+        p1 = float(pop_year.get(bfs, 0.0))
+        if p0 > 0 and p1 > 0:
+            factors[int(bfs)] = p1 / p0
+    tot0 = float(pop_base[pop_base > 0].sum())
+    tot1 = float(pop_year[pop_year.index.isin(pop_base.index)].sum())
+    agg_fallback = (tot1 / tot0) if tot0 > 0 else 1.0
+    return factors, agg_fallback
 
 
 # ===============================================================================
@@ -1218,22 +2012,6 @@ def _load_commune_boundaries() -> tuple:
     muni = muni[[bfs_col, 'geometry']].dropna(subset=[bfs_col])
     print(f"    {len(muni)} communes loaded (BFS column: '{bfs_col}')")
     return muni, bfs_col
-
-
-def _load_communal_od() -> pd.DataFrame:
-    """Load canton-level PT OD (tau=1 = full daily demand), drop intrazonal pairs.
-
-    Returns:
-        DataFrame with columns: quelle_code (int), ziel_code (int), wert (float).
-    """
-    print("  Loading communal OD ...")
-    od = scoring.GetOevDemandPerCommune(tau=1)
-    od = od[od['quelle_code'] != od['ziel_code']].copy()
-    od = od[od['wert'] > 0][['quelle_code', 'ziel_code', 'wert']].copy()
-    od['quelle_code'] = od['quelle_code'].astype(int)
-    od['ziel_code']   = od['ziel_code'].astype(int)
-    print(f"    {len(od)} OD pairs with positive demand (intrazonal removed)")
-    return od
 
 
 def _reaggregate_to_stations(
@@ -1294,21 +2072,390 @@ def _reaggregate_to_stations(
 
 
 # ===============================================================================
+# SCENARIO / DELTA SEAMS  (dormant — NOT on the deterministic 4B path)
+# ===============================================================================
+# Interfaces the future scenario loop and per-intervention delta engine will call.
+# They reuse the live attribution / reaggregation internals so behaviour stays in
+# lock-step, but nothing in prepare_all_od_matrices invokes them today — they lie
+# dormant until the scenario tool is wired in.
+#
+# Composition contract (temporal demand ⟂ spatial attribution):
+#     station_OD(network, year, scenario)
+#         = _reaggregate_to_stations( od_communal(year, scenario),
+#                                     *attribution_weights(network...) )
+# W_network is network-specific and — under Option A's frozen pop:job ratio —
+# time-invariant, so it is computed once per network and a per-intervention delta
+# is merged for the affected communes only (see reaggregate_subset).
+
+def attribution_weights(method: str = 'pt_feeder',
+                        attribution_mode: str = 'blended',
+                        gateway_station_ids=None) -> tuple:
+    """Network-tagged spatial weights W_network as standalone (orig, dest) tables.
+
+    Wraps the same producer the live PT-Feeder branch uses
+    (_attribution_weight_tables) so the scenario loop / delta engine can cache base
+    weights and merge per-intervention deltas without re-running the branch.
+    Municipal uses a 1:1 commune→station map (see _load_municipal_assignment); this
+    seam covers the PT-Feeder count-blend / specific weights.
+
+    Returns:
+        (orig_weights, dest_weights) — DataFrame[BFS, station_id, *_weight].
+    """
+    breakdown = _load_station_breakdown(method)
+    return _attribution_weight_tables(breakdown, attribution_mode,
+                                      gateway_station_ids)
+
+
+def commune_candidates(method: str = 'pt_feeder') -> dict:
+    """dict[int BFS -> sorted list[int station_id]] of each commune's candidate
+    stations (those it is attributed to in the breakdown).
+
+    Lets the delta engine identify the communes an intervention touches:
+        affected_communes = { c : candidates(c) ∩ affected_stations ≠ ∅ }.
+    """
+    breakdown = _load_station_breakdown(method)
+    return {int(bfs): sorted(int(s) for s in grp['station_id'].unique())
+            for bfs, grp in breakdown.groupby('BFS')}
+
+
+def reaggregate_subset(communal_od: pd.DataFrame, orig_weights: pd.DataFrame,
+                       dest_weights: pd.DataFrame, communes) -> pd.DataFrame:
+    """Delta entry point: station OD for only the pairs whose origin OR destination
+    commune is in `communes` (the affected set).
+
+    The caller merges the returned long_df into the cached base station OD.
+    NOTE: a station pair mixes contributions from affected and unaffected
+    communes, so the exact merge is the DELTA `base − reagg(base, S) +
+    reagg(dev, S)` (see prepare_svc_int_od / _merge_od_delta), not a per-pair
+    replacement. Reuses _reaggregate_to_stations on the filtered communal OD, so
+    the maths matches a full run exactly.
+    """
+    cset = {int(c) for c in communes}
+    sub = communal_od[communal_od['quelle_code'].isin(cset)
+                      | communal_od['ziel_code'].isin(cset)]
+    return _reaggregate_to_stations(sub, orig_weights, dest_weights)
+
+
+# ===============================================================================
+# PHASE 6B — PER-SVC-INT OD DELTA MERGE
+# ===============================================================================
+
+# Base gateway state cache: (base_svc_network, infra_version) -> _prepare_gateways
+# dict. Built once per run from the saved assignment files (non-interactive).
+_PHASE6_GATEWAY_BASE: dict = {}
+
+
+def prepare_svc_int_od(svc_int_id, base_svc_network, infra_version,
+                       affected_communes, attribution='',
+                       full_recompute=False) -> dict:
+    """Phase-6B: per-svc-int station OD via the exact delta merge.
+
+    Affected set S = communes whose cells re-allocated in 6A ∪ gateways whose
+    zone demand split changed on the developed network (multi-gateway zones
+    split by crossing-service volume; the zone→gateway assignment itself is
+    static). The merge is `long_dev = long_base − reagg(base, S) + reagg(dev, S)`
+    — exact because the station attribution is linear in the communal rows.
+    Outputs are written in the Phase-4B schema under
+    Traffic_Flow/OD/Developments/<combo>/<svc_int_id>_network/PT_Feeder/ (long
+    CSV, weight CSVs, full_day workbook); Phase 7 consumes the long CSV
+    unchanged.
+
+    Args:
+        svc_int_id:        svc-int id (e.g. 'ext_100001').
+        base_svc_network:  baseline service network WITH the '_network' suffix.
+        infra_version:     base infra version (locates the svc-int's merged
+                           projected segments for the gateway-volume recompute).
+        affected_communes: iterable[int] BFS codes from 6A.
+        attribution:       '' -> settings.OD_ATTRIBUTION_MODE.
+        full_recompute:    oracle mode (plan Phase 4): full reaggregation of the
+                           developed communal OD with the dev weights — no delta
+                           merge — through the same functions, so a parity check
+                           against the selective result isolates the affected set.
+
+    Returns:
+        dict(od_long_dev, od_routing [origin_id, dest_id, trips],
+             changed_pairs, changed_gateways, affected_set).
+    """
+    attribution = (attribution or settings.OD_ATTRIBUTION_MODE).strip().lower()
+    branch = 'pt_feeder'
+    sheet_label = 'Blended' if attribution == 'blended' else 'Specific'
+    mode = 'ORACLE full reaggregation' if full_recompute else 'OD delta merge'
+    combo = f"{infra_version}__{base_svc_network.removesuffix('_network')}"
+    int_network = paths.svc_int_network_name(svc_int_id, combo)
+    print(f"\n--- Phase 6B [{svc_int_id}]: {mode} ({attribution}) ---")
+
+    # Baseline artifacts (Hook 3)
+    long_base = pd.read_csv(paths.get_station_od_long_csv(
+        base_svc_network, branch, attribution), encoding='utf-8-sig')
+    ow_base = pd.read_csv(paths.get_attribution_weights_csv(
+        base_svc_network, branch, attribution, 'orig'), encoding='utf-8-sig')
+    dw_base = pd.read_csv(paths.get_attribution_weights_csv(
+        base_svc_network, branch, attribution, 'dest'), encoding='utf-8-sig')
+    communal_base = pd.read_csv(paths.get_communal_od_csv(base_svc_network),
+                                encoding='utf-8-sig')
+    internal_od, external_od, in_bnd_bfs = _load_gateway_inputs(base_svc_network)
+
+    # Base gateway state (cached once per run; saved assignment, no prompts)
+    gws = _base_gateway_state(base_svc_network, infra_version, external_od,
+                              in_bnd_bfs)
+    gw_weights_base = gws['gw_weights']
+    gw_ids = gws['gateway_station_ids']
+    assignment = {code: [int(s) for s, _w in lst]
+                  for code, lst in gw_weights_base.items()}
+
+    # Developed-network gateway volumes -> dev demand split. Volumes come from
+    # the 5C merged projected segments (the delta-only projection would see only
+    # the changed services); frequencies = base lookup overridden by the delta's
+    # (replaced EXT variants share their key, NDC adds new ones).
+    seg_merged = str(Path(paths.get_svc_int_projected_path(
+        svc_int_id, infra_version, combo)).with_name('rail_segments_merged.gpkg'))
+    if not os.path.exists(seg_merged):
+        raise FileNotFoundError(
+            f"Merged projected segments missing at {seg_merged}. Run Phase 5C "
+            f"(merged services) for {svc_int_id} first.")
+    freq_dev = dict(_load_line_freq_per_h_window(base_svc_network, infra_version))
+    freq_dev.update(_load_line_freq_per_h_window(int_network, infra_version))
+    all_assigned = {int(s) for stns in assignment.values() for s in stns}
+    vols_dev = _gateway_volumes(seg_merged, all_assigned, freq_dev)
+    gw_weights_dev = _build_gateway_weights(assignment, vols_dev)
+
+    changed_gateways: set = set()
+    for code, base_lst in gw_weights_base.items():
+        if len(base_lst) < 2:
+            continue                      # single-gateway zones: share 1.0 always
+        base_shares = {int(s): float(w) for s, w in base_lst}
+        dev_shares = {int(s): float(w) for s, w in gw_weights_dev.get(code, [])}
+        if any(abs(base_shares[s] - dev_shares.get(s, 0.0)) > 1e-9
+               for s in base_shares):
+            changed_gateways |= set(base_shares)
+    print(f"    gateway split: {len(changed_gateways)} gateway(s) with a "
+          f"changed multi-gateway zone share")
+
+    S = {int(c) for c in (affected_communes or set())} | changed_gateways
+
+    # Dev weights from the 6A breakdown (written under the combo-keyed network)
+    catchment_base.setup_versioned_dirs(int_network)
+    try:
+        breakdown_dev = _load_station_breakdown('pt_feeder')
+    finally:
+        catchment_base.setup_versioned_dirs(base_svc_network)
+    ow_dev, dw_dev = _attribution_weight_tables(breakdown_dev, attribution,
+                                                gw_ids)
+
+    if full_recompute:
+        gateway_od_dev = _build_gateway_od(external_od, gw_weights_dev,
+                                           in_bnd_bfs)
+        communal_dev = pd.concat([internal_od, gateway_od_dev],
+                                 ignore_index=True)
+        long_dev = _reaggregate_to_stations(communal_dev, ow_dev, dw_dev)
+        key = ['origin_station_id', 'dest_station_id']
+        cmp = (long_base.groupby(key)['trips'].sum().rename('b').to_frame()
+               .join(long_dev.groupby(key)['trips'].sum().rename('d'),
+                     how='outer').fillna(0.0))
+        changed_pairs = {(int(o), int(dd)) for (o, dd) in
+                         cmp[(cmp['b'] - cmp['d']).abs() > 1e-9].index}
+    elif not S:
+        print("    affected set empty — OD equals the baseline.")
+        long_dev, changed_pairs = long_base.copy(), set()
+    else:
+        gateway_od_dev = _build_gateway_od(external_od, gw_weights_dev,
+                                           in_bnd_bfs)
+        communal_dev = pd.concat([internal_od, gateway_od_dev],
+                                 ignore_index=True)
+        base_sub = reaggregate_subset(communal_base, ow_base, dw_base, S)
+        dev_sub = reaggregate_subset(communal_dev, ow_dev, dw_dev, S)
+        long_dev, changed_pairs = _merge_od_delta(long_base, base_sub, dev_sub)
+    print(f"    affected set: {len(S)} commune/gateway code(s) -> "
+          f"{len(changed_pairs):,} changed station pair(s); OD total "
+          f"{long_dev['trips'].sum():,.1f} (base {long_base['trips'].sum():,.1f})")
+
+    # Persist per-svc-int OD (Phase-4B schema, combo-keyed network name)
+    long_path = paths.get_station_od_long_csv(int_network, branch, attribution)
+    Path(long_path).parent.mkdir(parents=True, exist_ok=True)
+    long_dev.to_csv(long_path, index=False, encoding='utf-8-sig')
+    ow_dev.to_csv(paths.get_attribution_weights_csv(
+        int_network, branch, attribution, 'orig'),
+        index=False, encoding='utf-8-sig')
+    dw_dev.to_csv(paths.get_attribution_weights_csv(
+        int_network, branch, attribution, 'dest'),
+        index=False, encoding='utf-8-sig')
+    name_lookup = _phase6_name_lookup(base_svc_network, gws['bs_index'])
+    _write_window_xlsx({sheet_label: long_dev}, cp.TAU_FULL_DAY_SHARE,
+                       name_lookup,
+                       paths.get_station_od_window_xlsx(int_network, branch,
+                                                        'full_day'),
+                       label=f'{svc_int_id} full_day')
+
+    # Routing-ready frame (TAU_FULL_DAY_SHARE = 1.0: the whole-day long table IS
+    # the routed full-day OD; mirror _load_routing_od's intrazonal/zero filter).
+    od_routing = long_dev.rename(columns={'origin_station_id': 'origin_id',
+                                          'dest_station_id': 'dest_id'})
+    od_routing = od_routing[(od_routing['origin_id'] != od_routing['dest_id'])
+                            & (od_routing['trips'] > 0)]
+    od_routing = od_routing[['origin_id', 'dest_id', 'trips']].copy()
+
+    return {'od_long_dev': long_dev, 'od_routing': od_routing,
+            'changed_pairs': changed_pairs,
+            'changed_gateways': changed_gateways, 'affected_set': S}
+
+
+def _persist_gateway_inputs(svc_network: str, internal_od, external_od,
+                            in_bnd_bfs, use_cache: bool) -> None:
+    """Write the Phase-6B gateway recompute inputs into the Gateway dir."""
+    gdir = paths.get_gateway_dir(svc_network)
+    os.makedirs(gdir, exist_ok=True)
+    for fname, df_ in (('od_internal.csv', internal_od),
+                       ('od_external.csv', external_od)):
+        fp = os.path.join(gdir, fname)
+        if use_cache and Path(fp).exists():
+            print(f"    cached: {fp}")
+        else:
+            df_.to_csv(fp, index=False, encoding='utf-8-sig')
+    bfs_fp = os.path.join(gdir, 'in_boundary_bfs.csv')
+    if not (use_cache and Path(bfs_fp).exists()):
+        pd.DataFrame({'BFS_NR': sorted(int(b) for b in in_bnd_bfs)}).to_csv(
+            bfs_fp, index=False, encoding='utf-8-sig')
+
+
+def _load_gateway_inputs(base_svc_network: str) -> tuple:
+    """Load (internal_od, external_od, in_bnd_bfs) for 6B; reconstruct and
+    persist them when a pre-rework 4B run did not write the files (same
+    functions as prepare_all_od_matrices, so the result is identical)."""
+    gdir = paths.get_gateway_dir(base_svc_network)
+    fps = {n: os.path.join(gdir, f'{n}.csv')
+           for n in ('od_internal', 'od_external', 'in_boundary_bfs')}
+    if all(os.path.exists(p) for p in fps.values()):
+        internal_od = pd.read_csv(fps['od_internal'], encoding='utf-8-sig')
+        external_od = pd.read_csv(fps['od_external'], encoding='utf-8-sig')
+        in_bnd = set(pd.read_csv(fps['in_boundary_bfs'])['BFS_NR'].astype(int))
+        return internal_od, external_od, in_bnd
+    print("    gateway inputs missing — reconstructing from the communal OD "
+          "(one-time backfill of a pre-rework 4B run) ...")
+    boundary = catchment_base._load_catchment_boundary()
+    commune_gdf, bfs_col = _load_commune_boundaries()
+    in_bnd = _get_in_catchment_bfs(boundary, commune_gdf, bfs_col)
+    communal_od = od_communal(year=settings.start_year_scenario)
+    internal_od, external_od = _classify_od(communal_od, in_bnd)
+    _persist_gateway_inputs(base_svc_network, internal_od, external_od, in_bnd,
+                            use_cache=False)
+    return internal_od, external_od, in_bnd
+
+
+def _base_gateway_state(base_svc_network: str, infra_version: str,
+                        external_od, in_bnd_bfs) -> dict:
+    """Cached _prepare_gateways result for the baseline network. All assignment
+    files exist from the 4B run, so the call is non-interactive; it re-writes
+    the (identical) base gateway workbooks as a side effect."""
+    key = (base_svc_network, infra_version)
+    if key not in _PHASE6_GATEWAY_BASE:
+        commune_gdf, bfs_col = _load_commune_boundaries()
+        _PHASE6_GATEWAY_BASE[key] = _prepare_gateways(
+            external_od, commune_gdf, bfs_col, in_bnd_bfs,
+            base_svc_network, infra_version)
+    return _PHASE6_GATEWAY_BASE[key]
+
+
+def _gateway_volumes(seg_path: str, gateway_ids, freq_lookup: dict) -> dict:
+    """Crossing-service volume (whole-day freq_per_h_window) per gateway over
+    all route-type layers — the network-dependent input of the demand split."""
+    vols: dict = {}
+    for lyr in list(_LOCAL_LAYERS) + list(_LDIRT_LAYERS):
+        for gid, f in _freq_by_route_at_gateways(seg_path, lyr, gateway_ids,
+                                                 freq_lookup).items():
+            vols[gid] = vols.get(gid, 0.0) + float(f)
+    return vols
+
+
+def _merge_od_delta(long_base: pd.DataFrame, base_sub: pd.DataFrame,
+                    dev_sub: pd.DataFrame) -> tuple:
+    """Exact delta merge: new = base − reagg(base, S) + reagg(dev, S).
+
+    Linear in the communal rows, so contributions of unaffected communes to a
+    mixed station pair survive. Float-noise negatives are clipped at 0; genuine
+    negatives (> 1e-6) are reported. Returns (long_dev, changed_pairs).
+    """
+    key = ['origin_station_id', 'dest_station_id']
+
+    def _series(df):
+        if df is None or not len(df):
+            return pd.Series(dtype=float)
+        return df.groupby(key)['trips'].sum()
+
+    delta = pd.concat([_series(long_base).rename('base'),
+                       _series(base_sub).rename('sub_base'),
+                       _series(dev_sub).rename('sub_dev')], axis=1).fillna(0.0)
+    delta['new'] = delta['base'] - delta['sub_base'] + delta['sub_dev']
+    n_neg = int((delta['new'] < -1e-6).sum())
+    if n_neg:
+        print(f"    WARNING: {n_neg} station pair(s) went negative in the "
+              f"delta merge (max {-delta['new'].min():.4f}) — clipped to 0.")
+    delta['new'] = delta['new'].clip(lower=0.0)
+
+    changed = delta[(delta['new'] - delta['base']).abs() > 1e-9]
+    changed_pairs = {(int(o), int(d)) for o, d in changed.index}
+
+    out = (delta.loc[delta['new'] > 1e-12, 'new'].rename('trips')
+           .reset_index())
+    out['origin_station_id'] = out['origin_station_id'].astype(int)
+    out['dest_station_id'] = out['dest_station_id'].astype(int)
+    return out, changed_pairs
+
+
+def _phase6_name_lookup(base_svc_network: str, bs_index: dict) -> dict:
+    """Station name lookup (incl. gateway names) for the per-svc-int workbook,
+    built on the baseline station set (svc-ints add no stations)."""
+    prev = catchment_allocate._RAIL_BASE
+    catchment_allocate._RAIL_BASE = os.path.join(
+        paths.RAIL_LINES_DIR, base_svc_network, paths.SERVICES_UNPROJECTED_SUBDIR)
+    try:
+        boundary = catchment_base._load_catchment_boundary()
+        rail_stations = catchment_allocate._load_rail_stations(
+            boundary, 'full_day', buffer=0)
+    finally:
+        catchment_allocate._RAIL_BASE = prev
+    name_lookup = _build_station_name_lookup(rail_stations)
+    for gid, (gname, _geom) in (bs_index or {}).items():
+        name_lookup.setdefault(str(int(gid)), str(gname))
+    return name_lookup
+
+
+# ===============================================================================
 # TOP-5 EXCEL EXPORT (study-area stations)
 # ===============================================================================
 
-def _load_sa_stations(rail_stations) -> gpd.GeoDataFrame:
-    """Return SA rail stations using the same method catchment_allocate uses for
-    the station_catchments breakdown.
+def _load_sa_stations(rail_stations, svc_version: str = '',
+                      infra_version: str = '') -> gpd.GeoDataFrame:
+    """Return the authoritative study-area rail-station set.
 
-    Filters the already-loaded `rail_stations` by the study-area boundary via
-    catchment_allocate._filter_stations_to_sa — identical to the SA filter
-    behind the Communes_by_station sheet, so the top-5 Excel and OD pie map
-    cover exactly that station set.
+    Sourced from rail_stops_sa.gpkg (per svc/infra version), which is filtered from
+    the FULL rail_stops layer and therefore includes peak-only stations (e.g. the
+    Effretikon–Wetzikon corridor) that the all-day rail-stops load behind
+    `rail_stations` omits. Falls back to the legacy SA-boundary filter on
+    `rail_stations` when the file is absent.
 
     Returns:
-        GeoDataFrame[id_point, stop_name, geometry] for SA-scoped stations.
+        GeoDataFrame[id_point (int), stop_name, geometry] for SA-scoped stations.
     """
+    sa_path = (paths.get_rail_stops_sa(svc_version, infra_version)
+               if (svc_version and infra_version) else '')
+    if sa_path and os.path.exists(sa_path):
+        from pyogrio import list_layers
+        frames = [gpd.read_file(sa_path, layer=lyr)
+                  for lyr in list_layers(sa_path)[:, 0]]
+        sa = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True)).to_crs(_CODEBASE_CRS)
+        # Tolerate both the nodes schema ('Name') and the legacy GTFS schema.
+        name_col = ('stop_name' if 'stop_name' in sa.columns
+                    else ('Name' if 'Name' in sa.columns else None))
+        sa['id_point'] = pd.to_numeric(sa['Number'], errors='coerce')
+        sa = sa.dropna(subset=['id_point'])
+        sa['id_point']  = sa['id_point'].astype(int)
+        sa['stop_name'] = (sa[name_col].astype(str).str.strip()
+                           if name_col else sa['id_point'].astype(str))
+        out = sa[['id_point', 'stop_name', 'geometry']].reset_index(drop=True)
+        print(f"  Study-area stations (rail_stops_sa): {len(out)}")
+        return out
+
+    print("  rail_stops_sa.gpkg unavailable — falling back to SA-boundary filter.")
     sa_boundary = catchment_allocate._load_sa_boundary()
     sa_gdf      = catchment_allocate._filter_stations_to_sa(rail_stations, sa_boundary)
     if sa_gdf is None or sa_gdf.empty:
@@ -1318,9 +2465,9 @@ def _load_sa_stations(rail_stations) -> gpd.GeoDataFrame:
     return sa_gdf
 
 
-def _top5_table(long_df: pd.DataFrame, sa_ids: set, name_lookup: dict,
-                group_col: str, partner_col: str, partner_label: str,
-                top_n: int = 5) -> pd.DataFrame:
+def _top_relations_table(long_df: pd.DataFrame, sa_ids: set, name_lookup: dict,
+                         group_col: str, partner_col: str, partner_label: str,
+                         top_n: int = 10) -> pd.DataFrame:
     """Build a wide top-N table for SA stations on the given grouping side.
 
     group_col   = 'origin_station_id' (top destinations) or 'dest_station_id'
@@ -1343,30 +2490,91 @@ def _top5_table(long_df: pd.DataFrame, sa_ids: set, name_lookup: dict,
     return pd.DataFrame(rows)
 
 
-def _export_top5_excel(long_df, sa_ids, name_lookup, method, svc_network,
-                       top_n: int = 5) -> None:
+def _export_top_relations_excel(long_df, sa_ids, name_lookup, method, svc_network,
+                                windows, top_n: int = 10) -> None:
     """Write 'Top_Destinations' and 'Top_Origins' sheets (SA stations only) to a
-    standalone od_top5.xlsx in the versioned per-method OD directory.
+    standalone od_station_top_relations.xlsx in the versioned per-method OD directory.
+
+    Each sheet stacks one top-N table per time window — full-day first, then peak,
+    then off-peak — separated by a blank row and a window header. τ is a uniform
+    scalar, so the partner ranking is identical across windows; only the trip
+    magnitudes scale.
     """
     if long_df is None or long_df.empty or not sa_ids:
-        print(f"    Top-5 export ({method}): no data — skipped")
+        print(f"    Top-relations export ({method}): no data — skipped")
         return
 
-    dest_tbl = _top5_table(long_df, sa_ids, name_lookup,
-                           'origin_station_id', 'dest_station_id', 'dest', top_n)
-    orig_tbl = _top5_table(long_df, sa_ids, name_lookup,
-                           'dest_station_id', 'origin_station_id', 'origin', top_n)
+    tau_by_suffix = {suffix: tau for tau, suffix in windows}
+    ordered = [('Full day', tau_by_suffix.get('full_day', 1.0)),
+               ('Peak',     tau_by_suffix.get('peak',     1.0)),
+               ('Off-peak', tau_by_suffix.get('off_peak', 1.0))]
+    sides = [('Top_Destinations', 'origin_station_id', 'dest_station_id', 'dest'),
+             ('Top_Origins',      'dest_station_id',   'origin_station_id', 'origin')]
 
-    out_path = paths.get_od_top5_xlsx(svc_network, method)
+    out_path = paths.get_od_top_relations_xlsx(svc_network, method)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
-        dest_tbl.to_excel(writer, sheet_name='Top_Destinations', index=False)
-        orig_tbl.to_excel(writer, sheet_name='Top_Origins', index=False)
-    print(f"    Top-5 origins/destinations → {out_path}")
+        for sheet, group_col, partner_col, partner_label in sides:
+            start = 0
+            for win_label, tau in ordered:
+                scaled = long_df.copy()
+                scaled['trips'] = scaled['trips'] * tau
+                tbl = _top_relations_table(scaled, sa_ids, name_lookup,
+                                           group_col, partner_col, partner_label,
+                                           top_n)
+                tbl.to_excel(writer, sheet_name=sheet, startrow=start + 1,
+                             index=False)
+                writer.sheets[sheet].cell(row=start + 1, column=1,
+                                          value=f'{win_label} (τ={tau:g})')
+                start += len(tbl) + 3
+    print(f"    Top origins/destinations (full-day + peak + off-peak) → {out_path}")
+
+
+def _export_method_comparison_excel(pt_long: pd.DataFrame, muni_long: pd.DataFrame,
+                                    sa_ids: set, name_lookup: dict,
+                                    svc_network: str) -> None:
+    """Per-SA-station OD-flow comparison between PT-Feeder and Municipal (τ=1).
+
+    For each study-area station: outgoing (sum as origin) and incoming (sum as
+    destination) trips under each method, their differences, and the percentage
+    change in total throughput Municipal → PT-Feeder. Written to a single-sheet
+    od_method_comparison.xlsx. Only meaningful when both methods are present.
+    """
+    if pt_long is None or muni_long is None or not sa_ids:
+        print("    Method comparison: needs both methods — skipped")
+        return
+
+    def _flows(long_df):
+        return (long_df.groupby('origin_station_id')['trips'].sum(),
+                long_df.groupby('dest_station_id')['trips'].sum())
+
+    pt_out, pt_in = _flows(pt_long)
+    mu_out, mu_in = _flows(muni_long)
+
+    rows = []
+    for sid in sorted(sa_ids):
+        po, pi = float(pt_out.get(sid, 0.0)), float(pt_in.get(sid, 0.0))
+        mo, mi = float(mu_out.get(sid, 0.0)), float(mu_in.get(sid, 0.0))
+        base   = mo + mi
+        rows.append({
+            'station':    name_lookup.get(str(sid), str(sid)),
+            'muni_out':   round(mo, 1), 'pt_out': round(po, 1),
+            'muni_in':    round(mi, 1), 'pt_in':  round(pi, 1),
+            'delta_out':  round(po - mo, 1), 'delta_in': round(pi - mi, 1),
+            'pct_delta':  (round(100.0 * ((po + pi) - base) / base, 1)
+                           if base > 0 else None),
+        })
+    df = pd.DataFrame(rows).sort_values('station').reset_index(drop=True)
+
+    out_path = paths.get_od_method_comparison_xlsx(svc_network)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Method_Comparison', index=False)
+    print(f"    Method comparison ({len(df)} SA stations) → {out_path}")
 
 
 # ===============================================================================
-# DIAGNOSTIC PLOTS (W3 Phase 4)
+# DIAGNOSTIC PLOTS (Phase 4B)
 # ===============================================================================
 
 def _build_station_summary(rail_stations, pt_long, muni_long, name_lookup):
@@ -1532,22 +2740,29 @@ def _plot_sa_stations_od_map(long_df: pd.DataFrame,
                               sa_stations: gpd.GeoDataFrame,
                               name_lookup: dict,
                               method: str,
-                              svc_version: str) -> None:
+                              svc_version: str,
+                              attribution_mode: str = '') -> None:
     """OD pie-chart map for SA stations — mirrors _plot_sa_stations_overview_map.
 
-    For each SA station two pies are drawn above the marker:
-      Left  ('Dest'): top-3 stations this station sends trips to   (as origin).
-      Right ('Orig'): top-3 stations that send trips to this station (as dest).
-    Slice labels show partner station name + share %. Colours are keyed
-    deterministically by partner station id. Slices below the visible threshold
-    are merged into 'Other'.
+    Each station's top-3 OD partners are shown as pie wedges with one compact
+    callout box per pie (single leader) listing 'partner (share %)'. Colours are
+    keyed deterministically by partner station id; sub-threshold partners merge
+    into 'Other'.
+
+    When the station OD is symmetric (Municipal, or PT-Feeder 'blended') Dest and
+    Orig are identical, so a single pie is drawn per station with its callout
+    fanned outward (away from the map centre). PT-Feeder 'specific' is directional,
+    so two pies are drawn — Dest (left, box left) and Orig (right, box right).
 
     Output: plots/Traffic_Flow/OD/<svc_version>/<Method>/od_sa_stations_od_map.pdf
     """
     if long_df is None or long_df.empty or sa_stations.empty:
         print(f"    OD pie map ({method}): no data — skipped")
         return
-    print(f"  Building SA-stations OD pie map ({method}) ...")
+    symmetric = (method == 'municipal'
+                 or (attribution_mode or '').strip().lower() == 'blended')
+    print(f"  Building SA-stations OD pie map ({method}; "
+          f"{'1 pie' if symmetric else '2 pies'}) ...")
 
     sa_boundary = catchment_allocate._load_sa_boundary()
 
@@ -1565,24 +2780,61 @@ def _plot_sa_stations_od_map(long_df: pd.DataFrame,
     fig, ax = plt.subplots(figsize=(14, 12))
     ax.set_facecolor('#f5f5f5')
 
-    # ── Background: SA area (white fill), lakes, SA boundary outline ─────────
+    # ── Background: rail + surroundings (ghost outside SA, solid inside) ──────
+    #     Mirrors catchment_allocate._plot_sa_stations_overview_map so the OD map
+    #     carries the same infrastructure context (no white SA mask — the
+    #     surrounding catchment area stays visible at reduced opacity).
+    from shapely.geometry import box as _box
+    extent_box = _box(xmin, ymin, xmax, ymax)
+
+    try:
+        muni = gpd.read_file(paths.MUNICIPAL_BOUNDARIES_GPKG).to_crs(
+            catchment_base.CODEBASE_CRS)
+        if 'objektart' in muni.columns:
+            muni = muni[muni['objektart'] == 'Gemeindegebiet']
+        muni_full = muni[muni.geometry.intersects(extent_box)].copy()
+        muni_full.boundary.plot(ax=ax, color='#B0B0B0', linewidth=0.3,
+                                linestyle='--', alpha=0.35, zorder=1)
+        if sa_boundary is not None and not muni_full.empty:
+            muni_in = gpd.clip(muni_full, sa_boundary)
+            if not muni_in.empty:
+                muni_in.boundary.plot(ax=ax, color='#808080', linewidth=0.45,
+                                      linestyle='--', alpha=0.9, zorder=2)
+    except Exception as exc:
+        print(f"    WARNING: failed to load municipal boundaries: {exc}")
+
+    try:
+        lakes_full = catchment_allocate._load_lakes_for_extent(extent_box, scope='ca')
+        if not lakes_full.empty:
+            lakes_full.plot(ax=ax, facecolor='#D6E9F2', edgecolor='none',
+                            alpha=0.4, zorder=3)
+            if sa_boundary is not None:
+                lakes_in = gpd.clip(lakes_full, sa_boundary)
+                if not lakes_in.empty:
+                    lakes_in.plot(ax=ax, facecolor='#A8D8EA', edgecolor='none',
+                                  alpha=1.0, zorder=4)
+    except Exception as exc:
+        print(f"    WARNING: failed to load lakes: {exc}")
+
+    try:
+        rail_full = catchment_allocate._load_rail_lines_for_plot(
+            extent_box, temporal='all')
+        if not rail_full.empty:
+            rail_full.plot(ax=ax, color='#FF7F00', linewidth=0.8,
+                           alpha=0.35, zorder=5)
+            if sa_boundary is not None:
+                rail_in = gpd.clip(rail_full, sa_boundary)
+                if not rail_in.empty:
+                    rail_in.plot(ax=ax, color='#FF7F00', linewidth=1.2,
+                                 alpha=1.0, zorder=6)
+    except Exception as exc:
+        print(f"    WARNING: failed to load rail lines: {exc}")
+
     if sa_boundary is not None:
         sa_gdf = gpd.GeoDataFrame(geometry=[sa_boundary],
                                   crs=catchment_base.CODEBASE_CRS)
-        sa_gdf.plot(ax=ax, color='white', edgecolor='none', zorder=1)
         sa_gdf.boundary.plot(ax=ax, color='black', linewidth=1.3,
                              linestyle='--', zorder=7)
-    if os.path.exists(paths.LAKES_SHP):
-        try:
-            from shapely.geometry import box as _box
-            lakes = gpd.read_file(paths.LAKES_SHP).to_crs(catchment_base.CODEBASE_CRS)
-            ext   = _box(xmin, ymin, xmax, ymax)
-            lakes = lakes[lakes.geometry.intersects(ext)]
-            if not lakes.empty:
-                lakes.plot(ax=ax, facecolor='#A8D8EA', edgecolor='none',
-                           alpha=0.8, zorder=3)
-        except Exception as _exc:
-            print(f"    WARNING: could not load lakes: {_exc}")
 
     # ── Station markers ──────────────────────────────────────────────────────
     ax.scatter(sa_stations.geometry.x, sa_stations.geometry.y,
@@ -1607,9 +2859,12 @@ def _plot_sa_stations_od_map(long_df: pd.DataFrame,
         if total <= 0:
             return []
         top   = sub.nlargest(top_n, 'trips')
-        other = total - float(top['trips'].sum())
+        # Show only the top-N partners that each hold >= 5%; everything else
+        # (smaller top-N entries plus the long tail) collapses into 'Other'.
+        shown = top[top['trips'] / total >= 0.05]
+        other = total - float(shown['trips'].sum())
         slices = []
-        for _, r in top.iterrows():
+        for _, r in shown.iterrows():
             pid = int(r[partner_col])
             slices.append((_nm(pid), float(r['trips']) / total,
                            colour_map.get(pid, '#888888')))
@@ -1617,110 +2872,163 @@ def _plot_sa_stations_od_map(long_df: pd.DataFrame,
             slices.append(('Other', other / total, '#888888'))
         return slices
 
-    # ── Pie geometry constants (match _plot_sa_stations_overview_map) ────────
+    # ── Pie + callout geometry ───────────────────────────────────────────────
+    #     One compact callout box per pie (single leader) listing every slice,
+    #     placed with collision avoidance (see below).
     pie_radius = min(sa_w, sa_h) * 0.022
-    pie_dx     = pie_radius * 1.35
-    pie_dy     = pie_radius * 1.25
-    label_dx   = pie_radius * 1.9
+    pie_dx     = pie_radius * 1.45   # half-separation of the Dest/Orig pair (specific)
+    pie_dy     = pie_radius * 1.30   # vertical lift of pie centre above the marker
+    label_dx   = pie_radius * 1.55   # pie centre → callout box anchor
+    centre_x   = 0.5 * (xmin + xmax)
 
     sa_row_by_id = {int(r['id_point']): r for _, r in sa_stations.iterrows()}
 
-    def _closest_angle_in_arc(theta1: float, theta2: float, target: float) -> float:
-        a = theta1 % 360
-        b = theta2 % 360
-        t = target % 360
-        arc_size = (theta2 - theta1) % 360
-        if arc_size == 0:
-            arc_size = 360
-        d_at = (t - a) % 360
-        if d_at <= arc_size:
-            return t
-        d_a = min(abs(t - a), 360 - abs(t - a))
-        d_b = min(abs(t - b), 360 - abs(t - b))
-        return a if d_a < d_b else b
-
-    def _draw_pie(cx, cy, slices, title, label_side, clockwise):
-        if not slices:
-            return
-        target  = 180.0 if label_side == 'left' else 0.0
-        lx_text = cx - label_dx if label_side == 'left' else cx + label_dx
-        ha      = 'right' if label_side == 'left' else 'left'
-
-        items = []
-        start = 90.0
-        for name, share, colour in slices:
-            delta = share * 360.0
-            if clockwise:
-                theta1, theta2 = start - delta, start
-                start -= delta
-            else:
-                theta1, theta2 = start, start + delta
-                start += delta
-            ax.add_patch(Wedge(
-                center=(cx, cy), r=pie_radius, theta1=theta1, theta2=theta2,
-                facecolor=colour, edgecolor='white', linewidth=0.5, zorder=9,
-            ))
-            anchor_deg = _closest_angle_in_arc(theta1, theta2, target)
-            rad = np.deg2rad(anchor_deg)
-            items.append({
-                'name':  name,
-                'share': share,
-                'sx':    cx + pie_radius * np.cos(rad),
-                'sy':    cy + pie_radius * np.sin(rad),
-                'ly':    cy + pie_radius * 1.25 * np.sin(rad),
-            })
-
-        min_gap     = pie_radius * 0.45
-        items_sorted = sorted(items, key=lambda d: -d['ly'])
-        for i in range(1, len(items_sorted)):
-            ceiling = items_sorted[i - 1]['ly'] - min_gap
-            if items_sorted[i]['ly'] > ceiling:
-                items_sorted[i]['ly'] = ceiling
-
-        for d in items_sorted:
-            ax.plot([d['sx'], lx_text], [d['sy'], d['ly']],
-                    color='black', linewidth=0.4, zorder=10)
-            ax.text(lx_text, d['ly'], f"{d['name']} ({d['share'] * 100:.1f}%)",
-                    fontsize=5, ha=ha, va='center', zorder=11,
-                    bbox=dict(boxstyle='square,pad=0.15',
-                              facecolor='white', edgecolor='none'))
-
-        ax.text(cx, cy - pie_radius * 1.25, title,
-                fontsize=5, ha='center', va='top', fontweight='bold', zorder=11,
-                bbox=dict(boxstyle='square,pad=0.15',
-                          facecolor='white', edgecolor='none'))
-
-    # ── Per-station rendering ────────────────────────────────────────────────
-    for sid, row in sa_row_by_id.items():
-        x, y = row.geometry.x, row.geometry.y
-
-        dest_slices = _top_slices(sid, 'origin_station_id', 'dest_station_id')
-        orig_slices = _top_slices(sid, 'dest_station_id',   'origin_station_id')
-
-        _draw_pie(x - pie_dx, y + pie_dy, dest_slices,
-                  title='Dest', label_side='left',  clockwise=True)
-        _draw_pie(x + pie_dx, y + pie_dy, orig_slices,
-                  title='Orig', label_side='right', clockwise=False)
-
-        total_out = float(long_df[long_df['origin_station_id'] == sid]['trips'].sum())
-        total_in  = float(long_df[long_df['dest_station_id']   == sid]['trips'].sum())
-        stn_name  = name_lookup.get(str(sid), row.get('stop_name', str(sid)))
-        label     = f"{stn_name}\nOut {total_out:,.0f} · In {total_in:,.0f}"
-        label_y   = (y + pie_dy + pie_radius * 1.25
-                     if (dest_slices or orig_slices) else y + pie_radius * 0.4)
-        ax.text(x, label_y, label,
-                fontsize=5, fontweight='bold', va='bottom', ha='center', zorder=11,
-                bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
-                          edgecolor='none'))
-
+    # Axes limits must be final before text extents are measured for de-collision.
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.set_aspect('equal')
+
+    _CALLOUT_BBOX = dict(boxstyle='square,pad=0.3', facecolor='white',
+                         edgecolor='black', linewidth=0.4)
+    _TOTALS_BBOX  = dict(boxstyle='round,pad=0.15', facecolor='white',
+                         edgecolor='black', linewidth=0.4)
+    _TITLE_BBOX   = dict(boxstyle='square,pad=0.15', facecolor='white',
+                         edgecolor='black', linewidth=0.4)
+
+    def _draw_pie(cx, cy, slices):
+        """Draw the wedges of one pie (clockwise from 12 o'clock); no labels."""
+        start = 90.0
+        for _name, share, colour in slices:
+            delta = share * 360.0
+            ax.add_patch(Wedge(center=(cx, cy), r=pie_radius,
+                               theta1=start - delta, theta2=start,
+                               facecolor=colour, edgecolor='white',
+                               linewidth=0.3, zorder=9))
+            start -= delta
+
+    # --- Collision-aware label placement -------------------------------------
+    # Each text box is placed at the first candidate position whose rendered
+    # extent clears every previously placed box and pie; callouts try their
+    # preferred side then the other, each at increasing vertical nudges, and the
+    # leader is drawn from the rim to the chosen anchor. If extent measurement is
+    # unavailable the preferred slot is used directly (no regression).
+    try:
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.transforms import Bbox
+        renderer = FigureCanvasAgg(fig).get_renderer()
+    except Exception:
+        renderer = None
+    placed = []
+
+    def _clash(bb, pad=4.0):
+        for o in placed:
+            if (bb.x0 < o.x1 + pad and bb.x1 > o.x0 - pad and
+                    bb.y0 < o.y1 + pad and bb.y1 > o.y0 - pad):
+                return True
+        return False
+
+    def _pie_obstacle(cx, cy):
+        if renderer is None:
+            return
+        (x0, y0) = ax.transData.transform((cx - pie_radius, cy - pie_radius))
+        (x1, y1) = ax.transData.transform((cx + pie_radius, cy + pie_radius))
+        placed.append(Bbox([[min(x0, x1), min(y0, y1)],
+                            [max(x0, x1), max(y0, y1)]]))
+
+    def _try_text(tx, ty, text, ha, va, bbox_kw, bold):
+        """Add the text; return it if it clears all obstacles, else remove it."""
+        t = ax.text(tx, ty, text, fontsize=5, ha=ha, va=va, zorder=11,
+                    fontweight=('bold' if bold else 'normal'), bbox=bbox_kw)
+        if renderer is None:
+            return t                       # cannot measure → accept first slot
+        if not _clash(t.get_window_extent(renderer)):
+            placed.append(t.get_window_extent(renderer))
+            return t
+        t.remove()
+        return None
+
+    def _place_callout(cx, cy, slices, pref_side):
+        if not slices:
+            return
+        text   = '\n'.join(f"{nm} ({sh * 100:.1f}%)" for nm, sh, _c in slices)
+        sides  = [pref_side, 'right' if pref_side == 'left' else 'left']
+        nudges = [0.0, 1.9 * pie_radius, -1.9 * pie_radius,
+                  3.8 * pie_radius, -3.8 * pie_radius]
+        for s, dy in [(s, dy) for s in sides for dy in nudges]:
+            left = (s == 'left')
+            bx   = cx - label_dx if left else cx + label_dx
+            ha   = 'right' if left else 'left'
+            if _try_text(bx, cy + dy, text, ha, 'center', _CALLOUT_BBOX, False):
+                rim = cx - pie_radius if left else cx + pie_radius
+                ax.plot([rim, bx], [cy, cy + dy], color='black',
+                        linewidth=0.4, zorder=10)
+                return
+        # fallback: preferred side, no nudge (drawn even if it clashes)
+        left = (pref_side == 'left')
+        bx   = cx - label_dx if left else cx + label_dx
+        ha   = 'right' if left else 'left'
+        ax.text(bx, cy, text, fontsize=5, ha=ha, va='center', zorder=11,
+                bbox=_CALLOUT_BBOX)
+        rim = cx - pie_radius if left else cx + pie_radius
+        ax.plot([rim, bx], [cy, cy], color='black', linewidth=0.4, zorder=10)
+
+    def _place_totals(cx, cy, stn_name, total_out, total_in):
+        text = f"{stn_name}\nOut {total_out:,.0f} · In {total_in:,.0f}"
+        for dy in (pie_radius * 1.30, pie_radius * 2.60,
+                   -pie_radius * 1.45, pie_radius * 3.90):
+            va = 'bottom' if dy >= 0 else 'top'
+            if _try_text(cx, cy + dy, text, 'center', va, _TOTALS_BBOX, True):
+                return
+        ax.text(cx, cy + pie_radius * 1.30, text, fontsize=5, fontweight='bold',
+                va='bottom', ha='center', zorder=11, bbox=_TOTALS_BBOX)
+
+    def _place_pie_title(cx, cy, txt):
+        t = ax.text(cx, cy - pie_radius * 1.25, txt, fontsize=5, ha='center',
+                    va='top', fontweight='bold', zorder=11, bbox=_TITLE_BBOX)
+        if renderer is not None:
+            placed.append(t.get_window_extent(renderer))
+
+    # ── Per-station rendering (two passes) ───────────────────────────────────
+    # Pass 1 draws every pie so callouts can avoid all of them; pass 2 places the
+    # text boxes busiest-station-first so the largest callouts win the prime slots.
+    stations = []
+    for sid, row in sa_row_by_id.items():
+        x, y = row.geometry.x, row.geometry.y
+        dest_slices = _top_slices(sid, 'origin_station_id', 'dest_station_id')
+        orig_slices = _top_slices(sid, 'dest_station_id',   'origin_station_id')
+        total_out = float(long_df[long_df['origin_station_id'] == sid]['trips'].sum())
+        total_in  = float(long_df[long_df['dest_station_id']   == sid]['trips'].sum())
+        stn_name  = name_lookup.get(str(sid), row.get('stop_name', str(sid)))
+        cy = y + pie_dy
+        if symmetric:
+            _draw_pie(x, cy, dest_slices)
+            _pie_obstacle(x, cy)
+        else:
+            _draw_pie(x - pie_dx, cy, dest_slices)
+            _draw_pie(x + pie_dx, cy, orig_slices)
+            _pie_obstacle(x - pie_dx, cy)
+            _pie_obstacle(x + pie_dx, cy)
+        stations.append((x, y, cy, dest_slices, orig_slices,
+                         total_out, total_in, stn_name))
+
+    stations.sort(key=lambda s: -(s[5] + s[6]))
+    for x, y, cy, dest_slices, orig_slices, total_out, total_in, stn_name in stations:
+        if symmetric:
+            _place_totals(x, cy, stn_name, total_out, total_in)
+            _place_callout(x, cy, dest_slices, 'left' if x < centre_x else 'right')
+        else:
+            _place_pie_title(x - pie_dx, cy, 'Dest')
+            _place_pie_title(x + pie_dx, cy, 'Orig')
+            _place_totals(x, cy, stn_name, total_out, total_in)
+            _place_callout(x - pie_dx, cy, dest_slices, 'left')
+            _place_callout(x + pie_dx, cy, orig_slices, 'right')
+
     ax.set_xlabel('E [m]')
     ax.set_ylabel('N [m]')
     method_label = 'PT-Feeder' if method == 'pt_feeder' else 'Municipal'
-    ax.set_title(f'SA stations — top-3 OD partners ({method_label}): '
-                 f'Dest (left pie) / Orig (right pie)')
+    subtitle = ('in = out (symmetric)' if symmetric
+                else 'Dest (left pie) / Orig (right pie)')
+    ax.set_title(f'SA stations — top-3 OD partners ({method_label}): {subtitle}')
     catchment_base._add_map_elements(ax)
 
     out_dir  = paths.get_od_method_plot_dir(svc_version, method)
@@ -1758,6 +3066,395 @@ def _plot_od_diagnostics(pt_long, muni_long, rail_stations, boundary,
     _plot_bar_attracted(summary, top_n=20)
     _plot_spatial_attracted(summary, boundary)
     _plot_diff_map(summary, boundary, top_n_label=5)
+
+
+# ===============================================================================
+# SA RELATION HEATMAPS  (study-area stations x partners / x study area)
+# ===============================================================================
+# Annotated trip heatmaps mirroring the routing skim heatmaps
+# (catchment_OD_rail_network._draw_matrix_heatmap), but for OD trip volumes.
+# Rows are the SA corridor stations (SANKEY_CORRIDORS order). Two views per method:
+#   (a) SA x top-N partner stations  — the N stations with the most aggregate
+#       SA-origin trips (gateways included; they dominate by design).
+#   (b) SA x SA — the corridor stations among themselves.
+# Values are read from the FULL-DAY station matrix built by _build_window_matrix
+# (the same construction as od_matrix_stations_full_day.xlsx), so the heatmaps
+# match the produced full-day Excel exactly. One set of plots per method, written
+# under that method's own OD plot dir.
+
+def _ordered_sa_ids(present: set) -> list:
+    """SA station ids in SANKEY_CORRIDORS (geographic) order, deduped, filtered to
+    those present in the OD data."""
+    seen, out = set(), []
+    for ids in SANKEY_CORRIDORS.values():
+        for s in ids:
+            si = int(s)
+            if si not in seen and si in present:
+                seen.add(si)
+                out.append(si)
+    return out
+
+
+def _heat_text_colour(rgba) -> str:
+    """Black/white annotation colour for legibility on a cell (WCAG luminance)."""
+    lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+    return 'white' if lum < 0.55 else 'black'
+
+
+def _fmt_trips(v: float) -> str:
+    """Compact trip-count cell label (k-suffixed above 1000)."""
+    if v >= 10000:
+        return f"{v / 1000:.0f}k"
+    if v >= 1000:
+        return f"{v / 1000:.1f}k"
+    if v >= 1:
+        return f"{v:.0f}"
+    return f"{v:.1f}" if v > 0 else ''
+
+
+def _draw_relation_heatmap(mat: np.ndarray, row_labels: list, col_labels: list,
+                           title: str, out_pdf: str, cmap: str = 'YlOrRd') -> None:
+    """One annotated trip heatmap (rows x cols, trips/day) with a colourbar."""
+    vmax = float(np.nanmax(mat)) if mat.size else 0.0
+    vmax = vmax if vmax > 0 else 1.0
+    fig, ax = plt.subplots(figsize=(max(0.6 * len(col_labels) + 3.0, 6.0),
+                                    max(0.5 * len(row_labels) + 2.0, 5.0)))
+    im = ax.imshow(mat, aspect='auto', cmap=cmap, vmin=0.0, vmax=vmax)
+    ax.set_xticks(range(len(col_labels)))
+    ax.set_xticklabels(col_labels, rotation=45, ha='right', fontsize=8)
+    ax.set_yticks(range(len(row_labels)))
+    ax.set_yticklabels(row_labels, fontsize=8)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Trips/day (full-day)', fontsize=9)
+    cmap_obj = im.cmap
+    for i in range(mat.shape[0]):
+        for j in range(mat.shape[1]):
+            v = mat[i, j]
+            if v > 0:
+                ax.text(j, i, _fmt_trips(v), ha='center', va='center', fontsize=7,
+                        fontweight='bold', color=_heat_text_colour(cmap_obj(v / vmax)))
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    fig.tight_layout()
+    Path(out_pdf).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_pdf, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"    Saved relation heatmap → {out_pdf}")
+
+
+def _plot_sa_relation_heatmaps(long_df: pd.DataFrame, sa_ids: set,
+                               name_lookup: dict, svc_version: str, method: str,
+                               top_n: int = 10) -> None:
+    """Two full-day trip heatmaps for one method's SA corridor stations:
+    (a) SA x top-`top_n` partner stations/gateways, (b) SA x SA. Built from the
+    full-day station matrix (matches od_matrix_stations_full_day.xlsx) and written
+    under the method's own OD plot dir."""
+    if long_df is None or long_df.empty or not sa_ids:
+        print(f"    SA relation heatmaps ({method}): no data — skipped")
+        return
+    full_mat = _build_window_matrix(long_df, cp.TAU_FULL_DAY_SHARE, name_lookup)
+    if full_mat is None or full_mat.empty:
+        print(f"    SA relation heatmaps ({method}): no full-day matrix — skipped")
+        return
+
+    sa_set = set(int(s) for s in sa_ids)
+    sa_names = []
+    for sid in _ordered_sa_ids(sa_set):
+        nm = name_lookup.get(str(int(sid)))
+        if nm in full_mat.index and nm not in sa_names:
+            sa_names.append(nm)
+    if not sa_names:
+        print(f"    SA relation heatmaps ({method}): no SA origins in matrix — skipped")
+        return
+
+    method_label = 'PT-Feeder' if method == 'pt_feeder' else 'Municipal'
+    out_dir = paths.get_od_method_plot_dir(svc_version, method)
+    print(f"\n  Building SA relation heatmaps ({method_label}, full-day) ...")
+
+    # (a) SA x top-N partners / gateways (cols ranked by total SA-origin trips,
+    #     SA stations themselves excluded — those are the (b) view).
+    sa_rows = full_mat.loc[sa_names]
+    partner_cols = sa_rows.drop(columns=[c for c in sa_names if c in sa_rows.columns],
+                                errors='ignore')
+    partners = list(partner_cols.sum(axis=0).sort_values(ascending=False).index[:top_n])
+    if partners:
+        mat_a = full_mat.reindex(index=sa_names, columns=partners,
+                                 fill_value=0.0).to_numpy(dtype=float)
+        _draw_relation_heatmap(
+            mat_a, sa_names, partners,
+            f'{method_label}: SA → top-{top_n} partner stations / gateways (full-day trips)',
+            os.path.join(out_dir, 'od_heatmap_sa_top_partners.pdf'))
+
+    # (b) SA x SA
+    mat_b = full_mat.reindex(index=sa_names, columns=sa_names,
+                             fill_value=0.0).to_numpy(dtype=float)
+    _draw_relation_heatmap(
+        mat_b, sa_names, sa_names,
+        f'{method_label}: SA → SA (study area, full-day trips)',
+        os.path.join(out_dir, 'od_heatmap_sa_x_sa.pdf'))
+
+
+# ===============================================================================
+# CORRIDOR SANKEY DIAGRAMS
+# ===============================================================================
+# Per corridor and direction the named partner-node set is the union of each
+# corridor station's top-N partners (SANKEY_TOP_N_NAMED); every corridor station's
+# flow to a named partner is drawn explicitly (even if it is that station's 5th/6th
+# choice), and only flow to non-named partners collapses into a single 'Other' node.
+# Static PDF via matplotlib (always); interactive HTML via plotly when importable.
+
+# Study-area corridor membership (id_point), in geographic order.
+SANKEY_CORRIDORS = {
+    'Corridor_A_Uster_Oberland': [8503128, 8503127, 8503126, 8503125,
+                                  8503124, 8503123, 8503130],
+    'Corridor_B_Effretikon_Wetzikon': [8503305, 8503303, 8503302, 8503301,
+                                       8503300, 8503123],
+}
+SANKEY_TOP_N_NAMED = 4   # named partners per station (4 named + 'Other' -> "top-5")
+
+
+def build_corridor_sankeys(long_df: pd.DataFrame, name_lookup: dict,
+                           svc_network: str, method: str,
+                           attribution_mode: str = '') -> None:
+    """Render corridor Sankeys (PDF + optional HTML) from the all-day (tau=1)
+    long-format OD, written directly in the per-method plot dir.
+
+    Origins and destinations are identical whenever the station OD is symmetric —
+    Municipal, or PT-Feeder 'blended' (both apply a single symmetric attribution
+    weight to a symmetric communal OD) — so only the Destination Sankey is drawn
+    for those. PT-Feeder 'specific' (origin=Pop, dest=FTE) is directional, so both
+    Origin and Destination Sankeys are drawn.
+    """
+    if long_df is None or long_df.empty:
+        print("    Corridor Sankeys: no OD data — skipped")
+        return
+    symmetric  = (method == 'municipal'
+                  or (attribution_mode or '').strip().lower() == 'blended')
+    directions = ('dest',) if symmetric else ('dest', 'orig')
+    out_dir = paths.get_od_method_plot_dir(svc_network, method)
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"  Building corridor Sankeys ({method}; "
+          f"{'dest only' if symmetric else 'dest + orig'}) ...")
+    for cname, ids in SANKEY_CORRIDORS.items():
+        for direction in directions:
+            _build_corridor_sankey(long_df, ids, direction, name_lookup,
+                                   cname, method, out_dir)
+
+
+def _sk_nm(name_lookup: dict, sid) -> str:
+    return name_lookup.get(str(int(sid)), str(int(sid)))
+
+
+def _corridor_partner_flows(long_df: pd.DataFrame, station_ids, direction) -> dict:
+    """dict[corridor_station_id -> dict[partner_id -> trips]].
+
+    'dest': corridor station is the ORIGIN, partner the destination.
+    'orig': corridor station is the DESTINATION, partner the origin. Self pairs dropped.
+    """
+    sset = set(int(s) for s in station_ids)
+    s_col, p_col = (('origin_station_id', 'dest_station_id') if direction == 'dest'
+                    else ('dest_station_id', 'origin_station_id'))
+    sub = long_df[long_df[s_col].isin(sset)]
+    flows = {}
+    for r in sub.itertuples(index=False):
+        S = int(getattr(r, s_col)); P = int(getattr(r, p_col))
+        if P == S:
+            continue
+        flows.setdefault(S, {})
+        flows[S][P] = flows[S].get(P, 0.0) + float(r.trips)
+    return flows
+
+
+def _sankey_named_set(flows: dict, top_n: int = SANKEY_TOP_N_NAMED) -> list:
+    """Union of each station's top-`top_n` partners, ordered by total flow desc."""
+    seen, totals = set(), {}
+    for pv in flows.values():
+        for P, v in pv.items():
+            totals[P] = totals.get(P, 0.0) + v
+    for pv in flows.values():
+        for P, _v in sorted(pv.items(), key=lambda kv: -kv[1])[:top_n]:
+            seen.add(P)
+    return sorted(seen, key=lambda P: -totals.get(P, 0.0))
+
+
+def _build_corridor_sankey(long_df, station_ids, direction, name_lookup, cname,
+                           method, out_dir) -> None:
+    flows = _corridor_partner_flows(long_df, station_ids, direction)
+    if not flows:
+        print(f"    {cname} {direction}: no flow — skipped")
+        return
+    named = _sankey_named_set(flows)
+    named_index = {P: i for i, P in enumerate(named)}
+    other_idx = len(named)
+
+    corridor_labels = [_sk_nm(name_lookup, s) for s in station_ids]
+    partner_labels  = [_sk_nm(name_lookup, p) for p in named] + ['Other']
+
+    links = []
+    for si, S in enumerate(station_ids):
+        pv = flows.get(int(S), {})
+        per_named, other = {}, 0.0
+        for P, val in pv.items():
+            if P in named_index:
+                pi = named_index[P]
+                per_named[pi] = per_named.get(pi, 0.0) + val
+            else:
+                other += val
+        for pi, val in per_named.items():
+            if val > 0:
+                links.append((si, pi, val) if direction == 'dest' else (pi, si, val))
+        if other > 1e-9:
+            links.append((si, other_idx, other) if direction == 'dest'
+                         else (other_idx, si, other))
+
+    if direction == 'dest':
+        left_labels, right_labels = corridor_labels, partner_labels
+    else:
+        left_labels, right_labels = partner_labels, corridor_labels
+
+    method_label = 'PT-Feeder' if method == 'pt_feeder' else 'Municipal'
+    pretty = cname.replace('_', ' ')
+    kind   = 'Destinations' if direction == 'dest' else 'Origins'
+    title  = f"{pretty} — top {kind} ({method_label}, all-day)"
+
+    out_pdf  = os.path.join(out_dir, f"sankey_{cname}_{direction}.pdf")
+    out_html = os.path.join(out_dir, f"sankey_{cname}_{direction}.html")
+    _draw_sankey_mpl(left_labels, right_labels, links, title, out_pdf)
+    _write_sankey_html(left_labels, right_labels, links, title, out_html)
+
+
+def _sankey_ribbon(ax, x0, x1, sy0, sy1, ty0, ty1, color) -> None:
+    """Filled S-curve band from a source segment [sy0,sy1] to a target [ty0,ty1]."""
+    xm = (x0 + x1) / 2.0
+    verts = [(x0, sy1), (xm, sy1), (xm, ty1), (x1, ty1),
+             (x1, ty0), (xm, ty0), (xm, sy0), (x0, sy0), (x0, sy1)]
+    codes = [_MplPath.MOVETO, _MplPath.CURVE4, _MplPath.CURVE4, _MplPath.CURVE4,
+             _MplPath.LINETO,  _MplPath.CURVE4, _MplPath.CURVE4, _MplPath.CURVE4,
+             _MplPath.CLOSEPOLY]
+    ax.add_patch(mpatches.PathPatch(_MplPath(verts, codes), facecolor=color,
+                                    edgecolor='none', alpha=0.45, zorder=2))
+
+
+def _sankey_stack(tots, gap, scale):
+    """Vertically-centred stacked spans [(y0, y1), ...] for one Sankey column."""
+    side_h = sum(t * scale for t in tots) + max(len(tots) - 1, 0) * gap
+    y = 0.5 + side_h / 2.0
+    spans = []
+    for t in tots:
+        h = t * scale
+        spans.append((y - h, y))
+        y -= h + gap
+    return spans
+
+
+def _draw_sankey_multi_mpl(columns, links, title, out_pdf) -> None:
+    """Draw an N-column static Sankey (PDF).
+
+    Args:
+        columns: ordered list of label-lists, one per column (left -> right).
+        links:   list of (col_idx, src_local, dst_local, value) — a flow from node
+                 src_local in column col_idx to node dst_local in column col_idx+1.
+        title, out_pdf: figure title and output path.
+
+    Node heights take max(inflow, outflow); for conserving middle columns the two
+    coincide. The 2-column callers go through _draw_sankey_mpl (a thin wrapper).
+    """
+    ncols = len(columns)
+    sizes = [len(c) for c in columns]
+    in_tot  = [[0.0] * n for n in sizes]
+    out_tot = [[0.0] * n for n in sizes]
+    for (c, s, d, v) in links:
+        out_tot[c][s] += v
+        in_tot[c + 1][d] += v
+    node_tot = [[max(in_tot[c][i], out_tot[c][i]) for i in range(sizes[c])]
+                for c in range(ncols)]
+    total = max((sum(col) for col in node_tot if col), default=0.0)
+    if total <= 0:
+        print(f"    Sankey: no flow — skipped {os.path.basename(out_pdf)}")
+        return
+
+    gap = 0.02
+    scale = (1.0 - (max(sizes) - 1) * gap) / total
+    spans = [_sankey_stack(node_tot[c], gap, scale) for c in range(ncols)]
+    xs = [0.10] if ncols == 1 else list(np.linspace(0.10, 0.90, ncols))
+    nw = 0.02
+    palette = plt.colormaps['tab20'].resampled(20)
+
+    fig, ax = plt.subplots(figsize=(13, 8))
+    col_colors = []
+    for c in range(ncols):
+        cols = (['#555555'] * sizes[c] if c == ncols - 1
+                else [palette((i + 3 * c) % 20) for i in range(sizes[c])])
+        col_colors.append(cols)
+        for i, (y0, y1) in enumerate(spans[c]):
+            ax.add_patch(mpatches.Rectangle((xs[c] - nw / 2, y0), nw, y1 - y0,
+                                            facecolor=cols[i], edgecolor='white',
+                                            linewidth=0.5, zorder=3))
+            if c == 0:
+                ax.text(xs[c] - nw / 2 - 0.012, (y0 + y1) / 2, columns[c][i],
+                        ha='right', va='center', fontsize=7)
+            elif c == ncols - 1:
+                ax.text(xs[c] + nw / 2 + 0.012, (y0 + y1) / 2, columns[c][i],
+                        ha='left', va='center', fontsize=7)
+            else:
+                ax.text(xs[c], y1 + 0.004, columns[c][i], ha='center', va='bottom',
+                        fontsize=7)
+
+    right_cur = [[y1 for (_y0, y1) in spans[c]] for c in range(ncols)]
+    left_cur  = [[y1 for (_y0, y1) in spans[c]] for c in range(ncols)]
+    for (c, s, d, v) in sorted(links, key=lambda t: (t[0], t[1], t[2])):
+        h = v * scale
+        sy_hi = right_cur[c][s]; sy_lo = sy_hi - h; right_cur[c][s] = sy_lo
+        ty_hi = left_cur[c + 1][d]; ty_lo = ty_hi - h; left_cur[c + 1][d] = ty_lo
+        _sankey_ribbon(ax, xs[c] + nw / 2, xs[c + 1] - nw / 2,
+                       sy_lo, sy_hi, ty_lo, ty_hi, col_colors[c][s])
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis('off')
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    fig.savefig(out_pdf, bbox_inches='tight')
+    plt.close(fig)
+    print(f"    Sankey → {out_pdf}")
+
+
+def _write_sankey_multi_html(columns, links, title, out_html) -> None:
+    """Write an interactive N-column Plotly Sankey; skips silently if plotly absent.
+
+    columns/links use the same convention as _draw_sankey_multi_mpl.
+    """
+    try:
+        import plotly.graph_objects as go
+    except Exception as exc:
+        print(f"    (plotly unavailable — interactive Sankey skipped: {exc})")
+        return
+    offs, labels, tot = [], [], 0
+    for col in columns:
+        offs.append(tot)
+        labels += list(col)
+        tot += len(col)
+    src = [offs[c] + s for (c, s, d, v) in links]
+    tgt = [offs[c + 1] + d for (c, s, d, v) in links]
+    val = [v for (c, s, d, v) in links]
+    fig = go.Figure(go.Sankey(
+        node=dict(label=labels, pad=15, thickness=16,
+                  line=dict(color='white', width=0.5)),
+        link=dict(source=src, target=tgt, value=val),
+    ))
+    fig.update_layout(title_text=title, font_size=11)
+    fig.write_html(out_html)
+    print(f"    Sankey (interactive) → {out_html}")
+
+
+def _draw_sankey_mpl(left_labels, right_labels, links, title, out_pdf) -> None:
+    """2-column static Sankey (thin wrapper over _draw_sankey_multi_mpl)."""
+    _draw_sankey_multi_mpl([left_labels, right_labels],
+                           [(0, li, ri, v) for (li, ri, v) in links], title, out_pdf)
+
+
+def _write_sankey_html(left_labels, right_labels, links, title, out_html) -> None:
+    """2-column interactive Sankey (thin wrapper over _write_sankey_multi_html)."""
+    _write_sankey_multi_html([left_labels, right_labels],
+                             [(0, li, ri, v) for (li, ri, v) in links], title, out_html)
 
 
 # ===============================================================================
@@ -1817,6 +3514,21 @@ if __name__ == '__main__':
         _a = input(f"Select attribution [{_default}]: ").strip() or _default
         _attr = 'specific' if _a == '1' else 'blended'
 
+    # Plot generation — standalone asks; default follows settings.PLOT_STATION_OD.
+    # (In the main pipeline the toggle decides without prompting.)
+    _default_plot = bool(getattr(settings, 'PLOT_STATION_OD', True))
+    _default_str  = 'y' if _default_plot else 'n'
+    print("\nPlots (SA stations OD pie map + corridor Sankeys):")
+    print(f"  Y/N — default '{_default_str}' from settings.PLOT_STATION_OD")
+    while True:
+        _p = input(f"Generate plots? [{_default_str}]: ").strip().lower() or _default_str
+        if _p in ('y', 'n', 'yes', 'no'):
+            _make_plots = _p.startswith('y')
+            break
+        print("  Invalid — enter y or n.")
+
     prepare_all_od_matrices(use_cache=settings.use_cache_stationsOD,
                             svc_version=_svc, method=_method,
-                            attribution_mode=_attr)
+                            attribution_mode=_attr,
+                            both_attributions=True,
+                            make_plots=_make_plots)

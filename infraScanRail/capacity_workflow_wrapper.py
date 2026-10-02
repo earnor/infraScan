@@ -1,5 +1,5 @@
 """Standalone runner for rail capacity analysis.
-Last modified: 2026-05-20
+Last modified: 2026-06-20
 
 Interactive CLI that discovers available infrastructure and service versions,
 then dispatches to one of four named workflows. All outputs are written to:
@@ -9,13 +9,14 @@ Workflows:
   Study Area     — capacity run scoped to the study area (SA-filtered infra + services)
   Catchment Area — capacity run for the full catchment (SA Dynamic + CA Set_Value or uniform)
   Development    — capacity run for a development infra version
-  Expanded       — capacity interventions on an existing Study Area or CA run
+  Added          — capacity interventions on an existing Study Area or CA run
 
-Phase 0 — interactive CLI: choose infra version + service version + workflow
-Phase 1 — build capacity tables (stations + segments, peak + off-peak)
-Phase 2 — build sections (Dynamic or Set_Value)
-Phase 3 — plot capacity network
-[Phase 4] — Expanded workflow only: capacity interventions
+Internal stages (named "Stage" so they never collide with the main_new phase numbers):
+Stage 0 — interactive CLI: choose infra version + service version + workflow
+Stage 1 — build capacity tables (stations + segments, peak + off-peak)
+Stage 2 — build sections (Dynamic or Set_Value)
+Stage 3 — plot capacity network
+[Stage 4] — Added workflow only: capacity interventions
 
 """
 
@@ -41,13 +42,12 @@ from capacity_calculator import (
     build_capacity_tables,
     build_capacity_tables_sa,
     build_capacity_tables_ca,
+    true_termini,
 )
 from capacity_interventions import (
     run_phase_four,
     visualize_enhanced_network,
-    cap_ints_to_spatial,
 )
-from infrabuild_version_manager import append_cap_intervention_rows, resolve_or_build
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -120,6 +120,21 @@ def _floor_capacity_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _boundary_extent(boundary_rel_path: str, margin_m: float = 2000.0):
+    """(xmin, xmax, ymin, ymax) of a boundary gpkg padded by margin_m; None on failure.
+
+    Mirrors infrabuild's _extent_from_boundary so the capacity SA/CA plots frame to the
+    study / catchment boundary (+buffer) instead of the tight data-driven bounds.
+    """
+    try:
+        import geopandas as gpd
+        b = gpd.read_file(str(Path(paths.MAIN) / boundary_rel_path)).total_bounds
+        return (b[0] - margin_m, b[2] + margin_m, b[1] - margin_m, b[3] + margin_m)
+    except Exception as exc:
+        print(f"  [extent] could not derive extent from {boundary_rel_path}: {exc}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # CLI helpers
 # ---------------------------------------------------------------------------
@@ -176,7 +191,7 @@ def _select_versions(require_existing_sections: bool = False) -> Optional[Tuple[
         ]
         if not svc_versions:
             print(f"\n  ERROR: No completed Study Area runs found for '{infra_version}'.")
-            print("  Run a Study Area workflow first (Phase 1-3).")
+            print("  Run a Study Area workflow first (Stage 1-3).")
             return None
 
     print("\n  Service version:")
@@ -256,22 +271,22 @@ def _execute_capacity_run(
         cap_path      = out_dir / f"capacity_{label}.xlsx"
         sections_path = out_dir / f"sections_{label}.xlsx"
 
-        print(f"\n{'='*70}")
+        print(f"\n{'='*160}")
         print(f"Infra:    {infra_version}")
         print(f"Service:  {svc_version}")
         if capacity_mode == "Dynamic":
             print(f"Strategy: {grouping_strategy}")
         print(f"Output:   {out_dir}")
-        print(f"{'='*70}\n")
+        print(f"{'='*160}\n")
 
-        # ── Phase 1: Capacity tables ─────────────────────────────────────────
-        print("Phase 1: Building capacity tables ...\n")
+        # ── Stage 1: Capacity tables ─────────────────────────────────────────
+        print("Stage 1: Building capacity tables ...\n")
         stations_peak, segments_peak, stations_offpeak, segments_offpeak, junction_numbers = \
             build_capacity_tables(infra_version, svc_version, label, output_dir=out_dir)
         print(f"\n  Capacity workbook: {cap_path}")
 
-        # ── Phase 2: Sections ────────────────────────────────────────────────
-        print(f"\nPhase 2: Building sections ({capacity_mode}) ...\n")
+        # ── Stage 2: Sections ────────────────────────────────────────────────
+        print(f"\nStage 2: Building sections ({capacity_mode}) ...\n")
         sections_df = _build_sections_dataframe(
             stations_peak, segments_peak,
             junction_numbers=junction_numbers,
@@ -309,9 +324,9 @@ def _execute_capacity_run(
             sections_df.to_excel(writer,      sheet_name="Sections",         index=False)
         print(f"\n  Sections workbook: {sections_path}")
 
-        # ── Phase 3: Plot ────────────────────────────────────────────────────
+        # ── Stage 3: Plot ────────────────────────────────────────────────────
         if visualize:
-            print("\nPhase 3: Plotting ...\n")
+            print("\nStage 3: Plotting ...\n")
             try:
                 from capacity_network_plots import plot_capacity_network, plot_service_network
                 _plots_dir = _PLOTS_ROOT / infra_version / svc_version
@@ -333,9 +348,9 @@ def _execute_capacity_run(
             except Exception as exc:
                 print(f"  WARNING: Plot failed: {exc}")
 
-        print(f"\n{'='*70}")
+        print(f"\n{'='*160}")
         print("COMPLETE")
-        print(f"{'='*70}\n")
+        print(f"{'='*160}\n")
         return 0
 
     except Exception as exc:
@@ -349,11 +364,11 @@ def _make_phase4_prep_workbook(
     sections_workbook_path: Path,
     prep_path: Path,
 ) -> None:
-    """Write a Phase 4-compatible prep workbook from a new-format sections workbook.
+    """Write an Added-workflow prep workbook from a new-format sections workbook.
 
-    Phase 4 (capacity_interventions.py) expects 'Stations' and 'Segments' sheets
-    with old column names ('tracks', 'platforms'). This adapter converts the
-    peak tables from the new format.
+    The interventions engine (capacity_interventions.py) expects 'Stations' and
+    'Segments' sheets with old column names ('tracks', 'platforms'). This adapter
+    converts the peak tables from the new format.
     """
     stations_df = pd.read_excel(sections_workbook_path, sheet_name="Stations_Peak")
     segments_df = pd.read_excel(sections_workbook_path, sheet_name="Segments_Peak")
@@ -376,6 +391,674 @@ def _make_phase4_prep_workbook(
     with pd.ExcelWriter(prep_path, engine="openpyxl") as writer:
         stations_df.to_excel(writer, sheet_name="Stations", index=False)
         segments_df.to_excel(writer, sheet_name="Segments", index=False)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5C primitive — capacity on a composed network (non-iterative resolve)
+# ---------------------------------------------------------------------------
+
+def _seg_key(seg_id) -> frozenset:
+    """'a-b' → frozenset({a, b}) (orientation-agnostic segment identity)."""
+    a, b = str(seg_id).split('-')
+    return frozenset((int(a), int(b)))
+
+
+def _section_seg_keys(segment_sequence) -> set:
+    """'a-b|b-c|…' → {frozenset({a,b}), frozenset({b,c}), …}."""
+    return {_seg_key(t) for t in str(segment_sequence).split('|') if '-' in t}
+
+
+def _effective_composed_capacity_mode():
+    """Resolve the 5C capacity method from the 3C settings.
+
+    Set_Value is used only when BOTH CAPACITY_MODE_SA and CAPACITY_MODE_CA are Set_Value;
+    any Dynamic on either scope → Dynamic (UIC) everywhere. CAPACITY_MODE='None' gates 5C
+    off upstream, so it is not handled here. Returns (mode, set_value).
+    """
+    _default = getattr(settings, 'CAPACITY_MODE', 'Dynamic')
+    sa = str(getattr(settings, 'CAPACITY_MODE_SA', _default))
+    ca = str(getattr(settings, 'CAPACITY_MODE_CA', _default))
+    if sa == 'Set_Value' and ca == 'Set_Value':
+        return 'Set_Value', float(getattr(settings, 'CAPACITY_SET_VALUE', 6))
+    return 'Dynamic', None
+
+
+def _apply_set_value(sections_df, set_value: float):
+    """Override section capacity with track_count x set_value (in place), recompute util.
+
+    Mirrors run_study_area_workflow's Set_Value branch so the composed-network design and
+    its local feasibility re-check use the same flat capacity convention as 3C.
+    """
+    cap = np.floor(pd.to_numeric(sections_df['track_count'], errors='coerce') * float(set_value))
+    sections_df['Capacity_peak'] = cap
+    sections_df['Capacity_offpeak'] = cap
+    for _w in ('peak', 'offpeak'):
+        _d = pd.to_numeric(sections_df.get(f'total_tphpd_{_w}'), errors='coerce')
+        sections_df[f'Utilization_{_w}'] = (_d / cap).where(cap > 0)
+    return sections_df
+
+
+def capacity_on_composed(
+    base_infra: str,
+    composed_infra: str,
+    projected_services_path: str,
+    *,
+    network_label: str,
+    modified_segment_ids: Optional[set] = None,
+    modified_termini: Optional[set] = None,
+    grouping_strategy: Optional[str] = None,
+    threshold_tphpd: Optional[float] = None,
+    capacity_mode: Optional[str] = None,
+    set_value: Optional[float] = None,
+) -> list:
+    """Design CAP that resolves over-capacity sections on a composed network — one shot.
+
+    Train-supply-driven and single-pass: builds sections on the composed topology from
+    the svc-int's projected delta services, restricts to sections overlapping
+    ``modified_segment_ids``, identifies capacity-constrained sections
+    (available_capacity = Capacity − total_tphpd < threshold_tphpd, the reactive margin —
+    default settings.SVC_INT_CAP_THRESHOLD_TPHPD ≈ 1 tphpd), designs an intervention for each
+    and LOCALLY resolves it (apply on a working copy, rebuild sections, escalate a
+    passing-siding to full duplication if still over). ``recalculate_enhanced_capacity``
+    is never called, so the global non-convergence is structurally avoided.
+
+    Coverage: sections are built over the FULL composed network; only the modified-segment
+    restriction scopes the line-section evaluation. The capacity method follows the 3C
+    settings (resolved by _effective_composed_capacity_mode): Set_Value
+    (Capacity = track_count x CAPACITY_SET_VALUE) only when BOTH CAPACITY_MODE_SA and
+    CAPACITY_MODE_CA are Set_Value, otherwise UIC ('Dynamic') everywhere — any Dynamic on
+    either scope forces Dynamic for all; CAPACITY_MODE='None' gates 5C off upstream. Besides
+    line sections, every terminus of the evaluated supply within scope gets a station turnback
+    check (a terminating train needs a track clear of the through traffic), independent of mode.
+
+    Args:
+        base_infra: base infra version (where the svc-int delta was projected).
+        composed_infra: composed infra version (base, or a Derived 'base__<hash>' name).
+        projected_services_path: the svc-int delta's projected rail_segments.gpkg.
+        network_label: label for logs / id provenance.
+        modified_segment_ids: 'from-to' ids to restrict line-section CAP to (CC-edited
+            segments ∪ segments where the delta RAISED load). None → evaluate all composed
+            sections; an explicit EMPTY set → evaluate NO section (e.g. a stop-pattern change
+            that alters no segment load → no siding/section CAP).
+        modified_termini: explicit BAV node set to scope the station-turnback check to —
+            the stations whose terminating-train count the svc-int genuinely raised (used for
+            STP, whose split/merge changes termini without changing segment load). None →
+            the turnback scope falls back to the nodes of ``modified_segment_ids`` (the
+            EXT/FRQ/NDC path, unchanged). When provided, the turnback check runs even if no
+            line section is constrained, so a genuine new terminus is still resolved.
+
+    Returns:
+        list[CapacityIntervention] — costed resolving interventions ([] if none needed).
+    """
+    from capacity_interventions import (
+        design_section_intervention, calculate_intervention_cost,
+        identify_capacity_constrained_sections, _alias_cols,
+    )
+
+    if grouping_strategy is None:
+        grouping_strategy = getattr(settings, 'CAPACITY_GROUPING_STRATEGY', 'baseline')
+    if threshold_tphpd is None:
+        threshold_tphpd = float(getattr(settings, 'SVC_INT_CAP_THRESHOLD_TPHPD',
+                                        getattr(settings, 'capacity_threshold', 1.0)))
+    if capacity_mode is None:
+        capacity_mode, _eff_sv = _effective_composed_capacity_mode()
+        if set_value is None:
+            set_value = _eff_sv
+    elif capacity_mode == 'Set_Value' and set_value is None:
+        set_value = float(getattr(settings, 'CAPACITY_SET_VALUE', 6))
+
+    print(f"\n  [cap-composed] {network_label}: base={base_infra} composed={composed_infra} "
+          f"(mode={capacity_mode}{f'@{set_value}' if capacity_mode == 'Set_Value' else ''}, "
+          f"headroom threshold={threshold_tphpd} tphpd)")
+
+    # 1-3. Composed infra + delta train supply → peak/off-peak aggregates + sections.
+    tables = _composed_sections(
+        base_infra, composed_infra, projected_services_path,
+        network_label=network_label, grouping_strategy=grouping_strategy)
+    if tables is None:
+        print("  [cap-composed] no delta service links — nothing to evaluate")
+        return []
+    sta_peak = tables['sta_peak']
+    seg_peak = tables['seg_peak']
+    seg_off = tables['seg_off']
+    junction_numbers = tables['junction_numbers']
+    sections_df = tables['sections_df']
+    service_links = tables['service_links']
+    if sections_df.empty:
+        print("  [cap-composed] no sections built")
+        return []
+
+    # Set_Value override: flat capacity = track_count x set_value (when both SA+CA Set_Value).
+    if capacity_mode == 'Set_Value' and set_value is not None:
+        _apply_set_value(sections_df, set_value)
+
+    composition = _build_composition_lookup(base_infra, composed_infra)
+    termini = _termini_nodes(service_links)
+    # Turnback scope: an explicit terminus set (STP — stations whose terminating-train
+    # count rose, computed by the caller) overrides; otherwise the EXT/FRQ/NDC path —
+    # the nodes of the modified segments (None → all, for a standalone evaluate-everything
+    # call). An EMPTY modified-segment set scopes the turnback to NOTHING (not all).
+    if modified_termini is not None:
+        mod_nodes = set(modified_termini)
+    elif modified_segment_ids is None:
+        mod_nodes = None
+    else:
+        mod_nodes = {n for s in modified_segment_ids for n in _seg_key(s)}
+
+    # 4. Restrict to sections overlapping the modified segments. An explicit EMPTY set
+    #    restricts to NO section (a stop-pattern change raises no segment load → no siding);
+    #    only None means "evaluate every composed section".
+    if modified_segment_ids is not None:
+        mod = {_seg_key(s) for s in modified_segment_ids}
+        keep = sections_df["segment_sequence"].apply(
+            lambda seq: bool(_section_seg_keys(seq) & mod))
+        n_all = len(sections_df)
+        sections_df = sections_df[keep].copy()
+        print(f"  [cap-composed] {len(sections_df)}/{n_all} section(s) overlap "
+              f"{len(mod)} modified segment(s)")
+    else:
+        print(f"  [cap-composed] evaluating all {len(sections_df)} composed section(s)")
+
+    # Station tracks are composed max-per-node across three producers (junctions never
+    # receive platform tracks — they only split sections); sidings are emitted directly.
+    sta_class = {int(r['NR']): str(r.get('Node_Class', ''))
+                 for _, r in sta_peak.iterrows() if pd.notna(r.get('NR'))}
+    station_cands: dict = {}   # nr -> CapacityIntervention with the largest tracks_added
+
+    def _offer_station(interv) -> None:
+        if interv is None or interv.node_id is None:
+            return
+        nr = int(interv.node_id)
+        if sta_class.get(nr) != 'station':      # Fix 4: junction → no platform track
+            return
+        prev = station_cands.get(nr)
+        if prev is None or float(interv.tracks_added or 0) > float(prev.tracks_added or 0):
+            station_cands[nr] = interv
+
+    # Rule A — through/platform tracks (capacity-independent).
+    for interv in _through_track_candidates(modified_segment_ids, sta_peak, seg_peak):
+        _offer_station(interv)
+    # Rule B — turnback tracks (gated on an adjacent over-capacity section).
+    for interv in _turnback_candidates(termini, sta_peak, seg_peak, mod_nodes,
+                                       sections_df, threshold_tphpd):
+        _offer_station(interv)
+
+    interventions: list = []
+    # 5. Capacity-constrained sections (available_capacity < threshold; strict). Single-
+    #    segment → siding (emitted directly); multi-segment → station_track (offered to the
+    #    max-per-node accumulator alongside Rules A/B).
+    constrained = identify_capacity_constrained_sections(
+        sections_df, threshold_tphpd=threshold_tphpd)
+    if not constrained.empty:
+        print(f"  [cap-composed] {len(constrained)} over-capacity section(s) to resolve")
+        sta_aliased = _alias_cols(sta_peak, {'tracks': 'Track_Count', 'platforms': 'Platform_Count'})
+        seg_aliased = _alias_cols(seg_peak, {'length_m': 'Length', 'tracks': 'Num_Tracks',
+                                             'speed': 'Average_Speed'})
+        for _, section in constrained.iterrows():
+            interv = _resolve_section_locally(
+                section, seg_aliased, sta_aliased, sta_peak, seg_peak, seg_off,
+                junction_numbers, 1, grouping_strategy, threshold_tphpd,
+                termini_nodes=termini, capacity_mode=capacity_mode, set_value=set_value)
+            if interv is None:
+                continue
+            if interv.type == 'station_track':
+                _offer_station(interv)
+            else:
+                interventions.append(interv)
+
+    interventions.extend(station_cands.values())
+    if not interventions:
+        print("  [cap-composed] no CAP needed")
+        return []
+    for i, interv in enumerate(interventions, 1):
+        interv.intervention_id = f"INT_{i:04d}"
+        calculate_intervention_cost(interv, composition=composition)
+    print(f"  [cap-composed] designed {len(interventions)} resolving CAP intervention(s)")
+    return interventions
+
+
+def _composed_sections(base_infra, composed_infra, projected_services_path, *,
+                       network_label, grouping_strategy):
+    """Build a composed network's capacity tables (peak/off-peak aggregates + sections).
+
+    Used by capacity_on_composed for CAP design (full, unscoped sections; the caller
+    restricts to the modified segments). Returns dict(sta_peak, seg_peak, seg_off,
+    junction_numbers, sections_df) — or None when the composed network carries no
+    projected service links. (The per-svc-int SA util maps use
+    write_sa_composed_capacity_workbook, which scopes to the study area instead.)
+    """
+    from capacity_calculator import (
+        load_infra_data, load_projected_services, build_stop_lookup,
+        aggregate_station_metrics, aggregate_segment_metrics,
+    )
+    infra_dir = (None if composed_infra == base_infra
+                 else str(Path(paths.get_derived_infra_version_dir(composed_infra)).parent))
+    nodes_df, segments_df, _n2nr, _nr2n = load_infra_data(composed_infra, infra_dir=infra_dir)
+
+    service_links_df = load_projected_services(
+        network_label, composed_infra, gpkg_path=str(projected_services_path))
+    if service_links_df.empty:
+        return None
+    junction_numbers = set(
+        nodes_df.loc[nodes_df["Node_Class"] == "junction", "NR"].astype(int))
+    service_links_df = _expand_unmatched_hops(service_links_df, segments_df,
+                                              junction_numbers)
+
+    sl_peak = build_stop_lookup(service_links_df, "peak")
+    sta_peak = aggregate_station_metrics(nodes_df, service_links_df, junction_numbers, "peak")
+    seg_peak = aggregate_segment_metrics(segments_df, service_links_df, sl_peak,
+                                         junction_numbers, "peak")
+    sl_off = build_stop_lookup(service_links_df, "offpeak")
+    seg_off = aggregate_segment_metrics(segments_df, service_links_df, sl_off,
+                                        junction_numbers, "offpeak")
+    sections_df = _build_sections_dataframe(
+        sta_peak, seg_peak, junction_numbers=junction_numbers,
+        segments_offpeak_df=seg_off, compute_capacity=True,
+        grouping_strategy=grouping_strategy)
+    return {'sta_peak': sta_peak, 'seg_peak': seg_peak, 'seg_off': seg_off,
+            'junction_numbers': junction_numbers, 'sections_df': sections_df,
+            'service_links': service_links_df}
+
+
+def _expand_unmatched_hops(service_links_df: pd.DataFrame,
+                           segments_df: pd.DataFrame,
+                           junction_numbers: set = None) -> pd.DataFrame:
+    """Re-expand service hops whose node pair has no composed segment.
+
+    Base services are projected on the BASE infra, so their path_nodes hop
+    a→b straight over a CC-split host; the composed network only carries the
+    post-split pieces a→j→…→b and aggregate_segment_metrics would silently
+    drop the load exactly where the CAP check runs (5C supply undercount,
+    decision 2026-06-10). Each unmatched hop is walked through the
+    pass-through degree-2 junction chain and credited to every sub-segment;
+    unresolvable hops are kept unchanged (today's behaviour: no segment
+    match, dropped downstream). No-op when everything matches (EXT /
+    baseline: composed == base).
+    """
+    import ints_core as core
+
+    if service_links_df.empty or segments_df.empty:
+        return service_links_df
+    pair_set: set = set()
+    adjacency: dict = {}
+    for fn, tn in zip(segments_df['from_node'].astype(int),
+                      segments_df['to_node'].astype(int)):
+        pair_set.add(tuple(sorted((fn, tn))))
+        adjacency.setdefault(fn, set()).add(tn)
+        adjacency.setdefault(tn, set()).add(fn)
+
+    mask = [tuple(sorted((a, b))) not in pair_set
+            for a, b in zip(service_links_df['seg_from_node'].astype(int),
+                            service_links_df['seg_to_node'].astype(int))]
+    if not any(mask):
+        return service_links_df
+
+    keep = service_links_df.loc[[not m for m in mask]]
+    new_rows: list = []
+    n_walked = n_unres = 0
+    for _, row in service_links_df.loc[mask].iterrows():
+        a, b = int(row['seg_from_node']), int(row['seg_to_node'])
+        path = core.walk_segment_chain(adjacency, a, b,
+                                       pass_nodes=junction_numbers)
+        if path is None:
+            new_rows.append(row)
+            n_unres += 1
+            continue
+        n_walked += 1
+        last = len(path) - 2
+        for i in range(len(path) - 1):
+            r = row.copy()
+            r['seg_from_node'] = path[i]
+            r['seg_to_node'] = path[i + 1]
+            r['is_origin'] = bool(row['is_origin']) and i == 0
+            r['is_destination'] = bool(row['is_destination']) and i == last
+            new_rows.append(r)
+    out = pd.concat([keep, pd.DataFrame(new_rows)], ignore_index=True)
+    print(f"  [cap-composed] split-aware expansion: {n_walked} hop(s) walked "
+          f"onto split sections (+{len(out) - len(service_links_df)} row(s)); "
+          f"{n_unres} unresolvable hop(s) left as-is")
+    return out
+
+
+def write_sa_composed_capacity_workbook(base_infra, composed_infra, projected_services_path, *,
+                                        svc_version, network_label, out_path,
+                                        grouping_strategy=None):
+    """Build a STUDY-AREA-scoped capacity workbook for a composed network + its services.
+
+    Mirrors the Phase-3C Study-Area path exactly — SA node set from the (composed) infra,
+    SA-clipped services via ``load_projected_services_sa`` (the current segment-scoping
+    mechanism, not the retired boundary clip) — so the per-svc-int util maps render
+    identically to the Network/Capacity SA plots. Sheets Stations_Peak / Segments_Peak /
+    Segments_Offpeak / Sections. Returns the path, or None if no SA sections.
+    """
+    from capacity_calculator import (
+        _extract_sa_node_set, load_infra_data_filtered, load_projected_services_sa,
+        build_stop_lookup, aggregate_station_metrics, aggregate_segment_metrics,
+    )
+    if grouping_strategy is None:
+        grouping_strategy = getattr(settings, 'CAPACITY_GROUPING_STRATEGY', 'baseline')
+
+    infra_dir = (None if composed_infra == base_infra
+                 else str(Path(paths.get_derived_infra_version_dir(composed_infra)).parent))
+    sa_node_set = _extract_sa_node_set(composed_infra, infra_dir=infra_dir)
+    nodes_df, segments_df, _n2nr, _nr2n = load_infra_data_filtered(
+        composed_infra, sa_node_set, infra_dir=infra_dir)
+    service_links_df = load_projected_services_sa(
+        svc_version, composed_infra, sa_node_set, gpkg_path=str(projected_services_path))
+    if service_links_df.empty:
+        return None
+    junction_numbers = set(
+        nodes_df.loc[nodes_df["Node_Class"] == "junction", "NR"].astype(int))
+    service_links_df = _expand_unmatched_hops(service_links_df, segments_df,
+                                              junction_numbers)
+    sl_peak = build_stop_lookup(service_links_df, "peak")
+    sta_peak = aggregate_station_metrics(nodes_df, service_links_df, junction_numbers, "peak")
+    seg_peak = aggregate_segment_metrics(segments_df, service_links_df, sl_peak,
+                                         junction_numbers, "peak")
+    sl_off = build_stop_lookup(service_links_df, "offpeak")
+    seg_off = aggregate_segment_metrics(segments_df, service_links_df, sl_off,
+                                        junction_numbers, "offpeak")
+    sections_df = _build_sections_dataframe(
+        sta_peak, seg_peak, junction_numbers=junction_numbers,
+        segments_offpeak_df=seg_off, compute_capacity=True,
+        grouping_strategy=grouping_strategy)
+    if sections_df.empty:
+        return None
+    _floor_capacity_columns(sections_df)
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(out_path, engine=EXCEL_ENGINE) as writer:
+        sta_peak.to_excel(writer,    sheet_name='Stations_Peak',    index=False)
+        seg_peak.to_excel(writer,    sheet_name='Segments_Peak',    index=False)
+        seg_off.to_excel(writer,     sheet_name='Segments_Offpeak', index=False)
+        sections_df.to_excel(writer, sheet_name='Sections',         index=False)
+    return str(out_path)
+
+
+def _termini_nodes(service_links: pd.DataFrame) -> set:
+    """BAV node Numbers where any service of the supply truly terminates/originates.
+
+    Leg-graph termini (true line endpoints), not the per-leg is_origin/is_destination
+    flags which mark every scheduled stop. See capacity_calculator.true_termini.
+    """
+    return true_termini(service_links)
+
+
+def _through_track_candidates(modified_segment_ids, sta_peak: pd.DataFrame,
+                              seg_peak: pd.DataFrame) -> list:
+    """Rule A — through/platform tracks, capacity-INDEPENDENT.
+
+    For a STATION touched by the svc-int (endpoint of a changed-load modified segment),
+    add one track when it is under-tracked versus its busiest neighbour
+    (current < busiest-adjacent track count) or single-tracked (current == 1). Junctions
+    are section splitters only and never receive platform tracks. A None scope
+    (standalone evaluate-everything) yields no Rule A candidates.
+    """
+    from capacity_interventions import CapacityIntervention, _connected_equivalent
+
+    if modified_segment_ids is None:
+        return []
+    touched: set = set()
+    for sid in modified_segment_ids:
+        for n in _seg_key(sid):
+            try:
+                touched.add(int(float(n)))
+            except (TypeError, ValueError):
+                continue
+    by_nr = {int(r['NR']): r for _, r in sta_peak.iterrows() if pd.notna(r.get('NR'))}
+
+    out: list = []
+    for nr in sorted(touched):
+        row = by_nr.get(nr)
+        if row is None or str(row.get('Node_Class', '')) != 'station':
+            continue
+        current = pd.to_numeric(pd.Series([row.get('Track_Count')]), errors='coerce').iloc[0]
+        if pd.isna(current):
+            continue
+        current = int(current)
+        equiv = _connected_equivalent(nr, seg_peak)
+        if not (current < equiv or current == 1):
+            continue
+        platforms = pd.to_numeric(pd.Series([row.get('Platform_Count')]), errors='coerce').iloc[0]
+        out.append(CapacityIntervention(
+            intervention_id=f"INT_TH_{len(out):04d}",
+            section_id=f"through@{nr}",
+            type='station_track',
+            node_id=int(nr),
+            segment_id=None,
+            tracks_added=1.0,
+            affected_segments=[],
+            construction_cost_chf=0.0,
+            maintenance_cost_annual_chf=0.0,
+            length_m=None,
+            current_tracks=float(current),
+            iteration=1,
+            current_platforms=None if pd.isna(platforms) else float(platforms),
+            platforms_added=(1.0 if not pd.isna(platforms) and platforms < 2 else None),
+        ))
+        print(f"    through-track at {row.get('Name', nr)} ({nr}): {current} track(s) "
+              f"< busiest neighbour {int(equiv)} (or single-track) -> +1 track")
+    return out
+
+
+def _turnback_candidates(termini: set, sta_peak: pd.DataFrame, seg_peak: pd.DataFrame,
+                         mod_nodes, sections_df: pd.DataFrame,
+                         threshold_tphpd: float) -> list:
+    """Rule B — turnback CAP, gated on an adjacent over-capacity section.
+
+    For every TRUE terminus station within the modified scope whose Track_Count is short
+    of equiv+1 (the turnback track clear of through traffic), fire a station_track ONLY
+    when a section the terminating service traverses — one whose node sequence includes
+    the station — is over capacity: available_capacity < threshold + 1 (deliberately one
+    tphpd more generous than the strict siding rule, user-confirmed). Stations only;
+    junctions never receive platform tracks.
+    """
+    from capacity_interventions import (
+        CapacityIntervention, _connected_equivalent, _required_station_tracks)
+
+    cls_of = {int(r['NR']): str(r.get('Node_Class', ''))
+              for _, r in sta_peak.iterrows() if pd.notna(r.get('NR'))}
+    has_sec = sections_df is not None and not sections_df.empty
+    avail = (pd.to_numeric(sections_df.get('Capacity_peak'), errors='coerce')
+             - pd.to_numeric(sections_df.get('total_tphpd_peak'), errors='coerce')) \
+        if has_sec else pd.Series(dtype=float)
+
+    def _adjacent_over_capacity(nr) -> bool:
+        if not has_sec:
+            return False
+        token = str(int(nr))
+        for idx, seq in sections_df['node_sequence'].items():
+            if token in str(seq).split() and float(avail.get(idx, 1e9)) < threshold_tphpd + 1:
+                return True
+        return False
+
+    out: list = []
+    for nr in sorted(termini):
+        if mod_nodes is not None and nr not in mod_nodes:
+            continue
+        if cls_of.get(int(nr)) != 'station':
+            continue
+        if not _adjacent_over_capacity(nr):
+            continue
+        row = sta_peak[pd.to_numeric(sta_peak['NR'], errors='coerce') == float(nr)]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+        current = pd.to_numeric(pd.Series([row.get('Track_Count')]),
+                                errors='coerce').iloc[0]
+        if pd.isna(current):
+            continue
+        required = _required_station_tracks(
+            _connected_equivalent(nr, seg_peak), terminating=True, mixed=False)
+        add = required - int(current)
+        if add < 1:
+            continue
+        platforms = pd.to_numeric(pd.Series([row.get('Platform_Count')]),
+                                  errors='coerce').iloc[0]
+        out.append(CapacityIntervention(
+            intervention_id=f"INT_TB_{len(out):04d}",
+            section_id=f"turnback@{nr}",
+            type='station_track',
+            node_id=int(nr),
+            segment_id=None,
+            tracks_added=float(add),
+            affected_segments=[],
+            construction_cost_chf=0.0,
+            maintenance_cost_annual_chf=0.0,
+            length_m=None,
+            current_tracks=float(current),
+            iteration=1,
+            current_platforms=None if pd.isna(platforms) else float(platforms),
+            platforms_added=(1.0 if not pd.isna(platforms) and platforms < 2 else None),
+        ))
+        name = row.get('Name', nr)
+        print(f"    turnback at {name} ({nr}): {int(current)} track(s) < required "
+              f"{required} (adjacent section over capacity) -> +{add} track(s)")
+    return out
+
+
+_COMPOSITION_LOOKUP_CACHE: dict = {}
+
+
+def _build_composition_lookup(base_infra: str, composed_infra: str) -> dict:
+    """Chainage-ordered composition pieces per segment node-pair of the host network.
+
+    Returns {frozenset(from_nr, to_nr): [(structure, length_m, start_m, end_m), …]} for
+    composition-aware CAP pricing (tunnel/bridge at their own rates, mirroring CC F4).
+    Missing composition gpkg → empty dict (callers fall back to flat per-meter rates).
+    """
+    if composed_infra in _COMPOSITION_LOOKUP_CACHE:
+        return _COMPOSITION_LOOKUP_CACHE[composed_infra]
+    import geopandas as gpd
+    from shapely.ops import linemerge
+
+    if composed_infra != base_infra and paths.derived_version_exists(composed_infra):
+        host_dir = Path(paths.get_derived_infra_version_dir(composed_infra))
+    else:
+        host_dir = Path(paths.get_infra_version_dir(base_infra))
+    lookup: dict = {}
+    comp_path = host_dir / 'segments_composition.gpkg'
+    try:
+        nodes = gpd.read_file(host_dir / 'nodes.gpkg')
+        segs = gpd.read_file(host_dir / 'segments.gpkg')
+        comp = gpd.read_file(comp_path)
+    except Exception as exc:
+        print(f"  [cap-cost] composition unavailable ({comp_path.name}: {exc}) — "
+              f"flat per-meter CAP rates")
+        _COMPOSITION_LOOKUP_CACHE[composed_infra] = lookup
+        return lookup
+
+    name_to_nr = {}
+    for _, n in nodes.iterrows():
+        name_to_nr.setdefault(str(n['Name']), pd.to_numeric(
+            pd.Series([n['Number']]), errors='coerce').iloc[0])
+    comp_by_sid = dict(tuple(comp.groupby(comp['Segment_ID'].astype(str))))
+
+    for _, s in segs.iterrows():
+        a = name_to_nr.get(str(s['From_Name']))
+        b = name_to_nr.get(str(s['To_Name']))
+        if a is None or b is None or pd.isna(a) or pd.isna(b):
+            continue
+        rows = comp_by_sid.get(str(s['Segment_ID']))
+        if rows is None or rows.empty:
+            continue
+        geom = s.geometry
+        line = linemerge(geom) if geom is not None and \
+            geom.geom_type == 'MultiLineString' else geom
+        pieces = []
+        for _, p in rows.iterrows():
+            plen = float(pd.to_numeric(pd.Series([p.get('Piece_Length')]),
+                                       errors='coerce').fillna(0.0).iloc[0])
+            if plen <= 0:
+                continue
+            try:
+                chain = float(line.project(p.geometry.centroid))
+            except Exception:
+                chain = float(len(pieces))
+            pieces.append((str(p.get('Engineering_Structure', 'normal')), plen, chain))
+        pieces.sort(key=lambda t: t[2])
+        ordered, cum = [], 0.0
+        for struct, plen, _chain in pieces:
+            ordered.append((struct, plen, cum, cum + plen))
+            cum += plen
+        if ordered:
+            lookup[frozenset((int(a), int(b)))] = ordered
+
+    print(f"  [cap-cost] composition lookup: {len(lookup)} segment(s) with pieces")
+    _COMPOSITION_LOOKUP_CACHE[composed_infra] = lookup
+    return lookup
+
+
+def _resolve_section_locally(section, seg_aliased, sta_aliased, sta_peak, seg_peak,
+                             seg_off, junction_numbers, counter, grouping_strategy,
+                             threshold_tphpd, termini_nodes=None,
+                             capacity_mode='Dynamic', set_value=None):
+    """Design one section's CAP and locally verify it clears the over-capacity.
+
+    Applies the designed track delta on a working copy of the aggregate peak tables,
+    rebuilds sections and checks whether the section's segments are still over capacity.
+    A passing siding that does not clear is escalated to full duplication ('extra_track').
+    No global loop, no recalculate_enhanced_capacity.
+    """
+    from capacity_interventions import (
+        design_section_intervention, identify_capacity_constrained_sections, _seg_mask)
+
+    interv = design_section_intervention(section, seg_aliased, sta_aliased, counter,
+                                         termini_nodes=termini_nodes)
+    if interv is None:
+        # Station already meets its requirement — a station track won't relieve this
+        # multi-segment section (e.g. an already-large hub). No CAP designed here.
+        print(f"    section {section.get('section_id')}: central station already "
+              f"sufficient — no station-track CAP")
+        return None
+    target_keys = _section_seg_keys(section['segment_sequence'])
+
+    def _still_over() -> bool:
+        work_sta = sta_peak.copy()
+        work_seg = seg_peak.copy()
+        if interv.type == 'station_track':
+            m = work_sta['NR'].astype('Int64') == int(interv.node_id)
+            work_sta.loc[m, 'Track_Count'] = (
+                pd.to_numeric(work_sta.loc[m, 'Track_Count'], errors='coerce')
+                + max(1.0, float(interv.tracks_added or 1.0)))
+        else:
+            fn, tn = map(int, str(interv.segment_id).split('-'))
+            m = _seg_mask(work_seg, fn, tn)
+            delta = 1.0 if interv.strategy == 'extra_track' else float(interv.tracks_added)
+            work_seg.loc[m, 'Num_Tracks'] = (
+                pd.to_numeric(work_seg.loc[m, 'Num_Tracks'], errors='coerce') + delta)
+        rebuilt = _build_sections_dataframe(
+            work_sta, work_seg, junction_numbers=junction_numbers,
+            segments_offpeak_df=seg_off, compute_capacity=True,
+            grouping_strategy=grouping_strategy)
+        if capacity_mode == 'Set_Value' and set_value is not None:
+            _apply_set_value(rebuilt, set_value)
+        over = identify_capacity_constrained_sections(rebuilt, threshold_tphpd=threshold_tphpd)
+        if over.empty:
+            return False
+        return bool(over['segment_sequence'].apply(
+            lambda s: bool(_section_seg_keys(s) & target_keys)).any())
+
+    if not _still_over():
+        print(f"    section {section.get('section_id')}: resolved ({interv.type}"
+              f"{'/' + interv.strategy if interv.strategy else ''})")
+        return interv
+
+    # Escalate a passing siding to full duplication and re-check.
+    if interv.type == 'segment_passing_siding' and interv.strategy != 'extra_track':
+        interv.strategy = 'extra_track'
+        interv.tracks_added = 1.0
+        interv.length_m = interv.section_length_m or interv.length_m
+        if not _still_over():
+            print(f"    section {section.get('section_id')}: resolved after "
+                  f"siding→extra_track escalation")
+            return interv
+
+    print(f"    section {section.get('section_id')}: NOT fully resolved by a single-track "
+          f"intervention — keeping strongest ({interv.type}"
+          f"{'/' + interv.strategy if interv.strategy else ''})")
+    return interv
 
 
 # ---------------------------------------------------------------------------
@@ -408,9 +1091,9 @@ def run_study_area_workflow(
     Returns:
         Exit code (0 success, 1 error).
     """
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 160)
     print("STUDY AREA WORKFLOW")
-    print("=" * 70)
+    print("=" * 160)
 
     cap_mode  = capacity_mode or settings.CAPACITY_MODE_SA
     cap_val   = set_value if set_value is not None else settings.CAPACITY_SET_VALUE
@@ -423,7 +1106,7 @@ def run_study_area_workflow(
         out_dir.mkdir(parents=True, exist_ok=True)
         sections_path = out_dir / f"sections_{label}.xlsx"
 
-        print(f"\n{'='*70}")
+        print(f"\n{'='*160}")
         print(f"Infra:     {infra_version}")
         print(f"Service:   {svc_version}")
         print(f"Scope:     Study Area")
@@ -431,13 +1114,13 @@ def run_study_area_workflow(
         if cap_mode == "Dynamic":
             print(f"Strategy:  {grp_strat}")
         print(f"Output:    {out_dir}")
-        print(f"{'='*70}\n")
+        print(f"{'='*160}\n")
 
-        print("Phase 1: Building SA capacity tables ...\n")
+        print("Stage 1: Building SA capacity tables ...\n")
         stations_peak, segments_peak, stations_offpeak, segments_offpeak, junction_numbers, _ = \
             build_capacity_tables_sa(infra_version, svc_version, label, output_dir=out_dir)
 
-        print(f"\nPhase 2: Building sections ({cap_mode}) ...\n")
+        print(f"\nStage 2: Building sections ({cap_mode}) ...\n")
         sections_df = _build_sections_dataframe(
             stations_peak, segments_peak,
             junction_numbers=junction_numbers,
@@ -475,10 +1158,11 @@ def run_study_area_workflow(
         print(f"\n  Sections workbook: {sections_path}")
 
         if visualize:
-            print("\nPhase 3: Plotting ...\n")
+            print("\nStage 3: Plotting ...\n")
             try:
                 from capacity_network_plots import plot_capacity_network, plot_service_network
                 plots_dir.mkdir(parents=True, exist_ok=True)
+                _sa_ext = _boundary_extent(paths.STUDY_AREA_BOUNDARY_GPKG)
                 plot_capacity_network(
                     workbook_path=str(sections_path),
                     sections_workbook_path=str(sections_path),
@@ -486,6 +1170,9 @@ def run_study_area_workflow(
                     infra_version=infra_version,
                     output_dir=plots_dir,
                     lakes_path=paths.LAKES_SA_GPKG,
+                    boundary_path=paths.STUDY_AREA_BOUNDARY_GPKG,
+                    extent=_sa_ext,
+                    ghost_outside=True,
                 )
                 print("  Capacity network plot complete.")
                 plot_service_network(
@@ -493,12 +1180,14 @@ def run_study_area_workflow(
                     network_label=label,
                     output_dir=plots_dir,
                     lakes_path=paths.LAKES_SA_GPKG,
+                    boundary_path=paths.STUDY_AREA_BOUNDARY_GPKG,
+                    extent=_sa_ext,
                 )
                 print("  Service network plot complete.")
             except Exception as exc:
                 print(f"  WARNING: Plot failed: {exc}")
 
-        print(f"\n{'='*70}\nSTUDY AREA WORKFLOW COMPLETE\n{'='*70}\n")
+        print(f"\n{'='*160}\nSTUDY AREA WORKFLOW COMPLETE\n{'='*160}\n")
         return 0
 
     except Exception as exc:
@@ -541,9 +1230,9 @@ def run_catchment_area_workflow(
     Returns:
         Exit code (0 success, 1 error).
     """
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 160)
     print("CATCHMENT AREA WORKFLOW")
-    print("=" * 70)
+    print("=" * 160)
 
     cap_mode_sa = mode_sa or settings.CAPACITY_MODE_SA
     cap_mode_ca = mode_ca or settings.CAPACITY_MODE_CA
@@ -559,7 +1248,7 @@ def run_catchment_area_workflow(
         sections_path = out_dir / f"sections_{label}.xlsx"
         modes_same    = (cap_mode_sa == cap_mode_ca)
 
-        print(f"\n{'='*70}")
+        print(f"\n{'='*160}")
         print(f"Infra:    {infra_version}")
         print(f"Service:  {svc_version}")
         print(f"Scope:    Catchment Area")
@@ -567,14 +1256,14 @@ def run_catchment_area_workflow(
         if "Dynamic" in (cap_mode_sa, cap_mode_ca):
             print(f"Strategy: {grp_strat}")
         print(f"Output:   {out_dir}")
-        print(f"{'='*70}\n")
+        print(f"{'='*160}\n")
 
-        print("Phase 1: Building CA capacity tables ...\n")
+        print("Stage 1: Building CA capacity tables ...\n")
         stations_peak, segments_peak, stations_offpeak, segments_offpeak, \
         junction_numbers, _, sa_node_set = \
             build_capacity_tables_ca(infra_version, svc_version, label, output_dir=out_dir)
 
-        print(f"\nPhase 2: Building sections ...\n")
+        print(f"\nStage 2: Building sections ...\n")
 
         if modes_same:
             # Single run — same method for all sections
@@ -644,10 +1333,11 @@ def run_catchment_area_workflow(
         print(f"\n  Sections workbook: {sections_path}")
 
         if visualize:
-            print("\nPhase 3: CA Plotting ...\n")
+            print("\nStage 3: CA Plotting ...\n")
             try:
                 from capacity_network_plots import plot_capacity_network, plot_service_network
                 plots_dir.mkdir(parents=True, exist_ok=True)
+                _ca_ext = _boundary_extent(paths.CATCHMENT_AREA_BOUNDARY_GPKG)
                 plot_capacity_network(
                     workbook_path=str(sections_path),
                     sections_workbook_path=str(sections_path),
@@ -660,6 +1350,7 @@ def run_catchment_area_workflow(
                     is_catchment=True,
                     network_marker_scale=2.25,
                     boundary_path=paths.CATCHMENT_AREA_BOUNDARY_GPKG,
+                    extent=_ca_ext,
                 )
                 print("  CA capacity network plot complete.")
                 plot_service_network(
@@ -668,13 +1359,15 @@ def run_catchment_area_workflow(
                     output_dir=plots_dir,
                     lakes_path=paths.LAKES_CA_GPKG,
                     include_labels=False,
+                    boundary_path=paths.CATCHMENT_AREA_BOUNDARY_GPKG,
+                    extent=_ca_ext,
                 )
                 print("  CA service network plot complete.")
             except Exception as exc:
                 print(f"  WARNING: CA plot failed: {exc}")
 
             # Also generate SA-scoped plots
-            print("\nPhase 3b: SA Plotting ...\n")
+            print("\nStage 3b: SA Plotting ...\n")
             try:
                 run_study_area_workflow(
                     infra_version, svc_version,
@@ -687,7 +1380,7 @@ def run_catchment_area_workflow(
             except Exception as exc:
                 print(f"  WARNING: SA plots failed: {exc}")
 
-        print(f"\n{'='*70}\nCATCHMENT AREA WORKFLOW COMPLETE\n{'='*70}\n")
+        print(f"\n{'='*160}\nCATCHMENT AREA WORKFLOW COMPLETE\n{'='*160}\n")
         return 0
 
     except Exception as exc:
@@ -724,9 +1417,9 @@ def run_development_workflow(
     Returns:
         Exit code (0 success, 1 error).
     """
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 160)
     print(f"DEVELOPMENT WORKFLOW — Dev ID: {dev_id}")
-    print("=" * 70)
+    print("=" * 160)
 
     cap_mode  = capacity_mode or settings.CAPACITY_MODE
     cap_val   = set_value if set_value is not None else settings.CAPACITY_SET_VALUE
@@ -745,35 +1438,36 @@ def run_development_workflow(
     )
 
 
-def run_enhanced_workflow(
+def run_added_workflow(
     infra_version: str,
     svc_version: str,
-    threshold: float = 2.0,
+    threshold: float = 1.0,
     max_iterations: int = 10,
 ) -> int:
-    """Phase 4: apply iterative capacity interventions to an existing capacity run.
+    """Added workflow: apply iterative capacity interventions to an existing capacity run.
 
     Reads the completed sections workbook from the Study Area or Catchment Area
-    output directory, runs the intervention loop, and writes enhanced outputs to
-    an 'Enhanced' subdirectory.
+    output directory, runs the intervention loop, and writes the resulting outputs to
+    an 'Added' subdirectory. Standalone only — off the main_new path (Phase 5C is the
+    sole, cost-bearing CAP generator).
 
     Args:
         infra_version:  Infrastructure version name.
         svc_version:    Service version name.
-        threshold:      Minimum required available capacity in tphpd (default 2.0).
+        threshold:      Minimum required available capacity in tphpd (default 1.0).
         max_iterations: Maximum intervention iterations (default 10).
 
     Returns:
         Exit code (0 success, 1 error).
     """
-    print("\n" + "=" * 70)
-    print("ENHANCED WORKFLOW — Phase 4 Capacity Interventions")
-    print("=" * 70)
+    print("\n" + "=" * 160)
+    print("ADDED WORKFLOW — Capacity Interventions")
+    print("=" * 160)
 
     label         = _safe(svc_version, infra_version)
     baseline_dir  = CAPACITY_ROOT / infra_version / svc_version
     sections_path = baseline_dir / f"sections_{label}.xlsx"
-    output_dir    = baseline_dir / "Enhanced"
+    output_dir    = baseline_dir / "Added"
 
     print(f"\n  Baseline:   {baseline_dir}")
     print(f"  Sections:   {sections_path}")
@@ -783,19 +1477,19 @@ def run_enhanced_workflow(
 
     if not sections_path.exists():
         print(f"  ERROR: Sections workbook not found at {sections_path}")
-        print("  Run a Study Area or Catchment Area workflow first (Phase 1-3).")
+        print("  Run a Study Area or Catchment Area workflow first (Stage 1-3).")
         return 1
 
     try:
-        print("Loading Phase 3 outputs ...")
+        print("Loading Stage 3 outputs ...")
         stations_df = pd.read_excel(sections_path, sheet_name="Stations_Peak")
         segments_df = pd.read_excel(sections_path, sheet_name="Segments_Peak")
         sections_df = pd.read_excel(sections_path, sheet_name="Sections")
         print(f"  Loaded {len(stations_df)} stations, {len(segments_df)} segments, "
               f"{len(sections_df)} sections\n")
 
-        # Phase 4 internally reads 'Stations'/'Segments' sheets with old column names.
-        # Write a compatible adapter workbook first.
+        # The interventions engine reads 'Stations'/'Segments' sheets with old column
+        # names. Write a compatible adapter workbook first.
         output_dir.mkdir(parents=True, exist_ok=True)
         prep_path = output_dir / f"capacity_{label}_prep.xlsx"
         _make_phase4_prep_workbook(sections_path, prep_path)
@@ -811,46 +1505,31 @@ def run_enhanced_workflow(
             max_iterations=max_iterations,
         )
 
-        if interventions_catalog:
-            print("\nRegistering cap ints to cap_interventions.gpkg ...")
-            new_nodes, new_segs, new_comp = cap_ints_to_spatial(
-                interventions_catalog, infra_version
-            )
-            append_cap_intervention_rows(new_nodes, new_segs, new_comp)
-
-            # Collect the int_ids just registered and build the derived infra version
-            int_ids = []
-            for gdf in (new_nodes, new_segs):
-                if gdf is not None and 'int_id' in gdf.columns:
-                    int_ids.extend(gdf['int_id'].dropna().unique().tolist())
-            int_ids = sorted(set(int_ids))
-            if int_ids:
-                print(f"\nBuilding derived infra version ({len(int_ids)} cap int(s)) ...")
-                derived_name = resolve_or_build(infra_version, int_ids)
-                print(f"  Derived version: {derived_name}")
+        # Phase 5C is the sole, cost-bearing CAP generator: this standalone Added workflow
+        # designs + plots interventions but never registers/composes them into the CAP registry.
 
         # Reload enhanced stations/segments and write combined sections workbook
         enhanced_stations_df = pd.read_excel(enhanced_prep_path, sheet_name="Stations")
         enhanced_segments_df = pd.read_excel(enhanced_prep_path, sheet_name="Segments")
 
-        enhanced_sections_path = output_dir / f"sections_{label}_enhanced.xlsx"
+        enhanced_sections_path = output_dir / f"sections_{label}_added.xlsx"
         with pd.ExcelWriter(enhanced_sections_path, engine="openpyxl") as writer:
             enhanced_stations_df.to_excel(writer, sheet_name="Stations", index=False)
             enhanced_segments_df.to_excel(writer, sheet_name="Segments", index=False)
             final_sections_df.to_excel(writer,    sheet_name="Sections", index=False)
-        print(f"\n  Enhanced sections workbook: {enhanced_sections_path}")
+        print(f"\n  Added sections workbook: {enhanced_sections_path}")
 
         print("\nGenerating visualizations ...")
         visualize_enhanced_network(
             enhanced_prep_path=enhanced_prep_path,
             enhanced_sections_path=enhanced_sections_path,
             interventions_list=interventions_catalog,
-            network_label=f"{label}_enhanced",
+            network_label=f"{label}_added",
         )
 
-        print(f"\n{'='*70}")
-        print("ENHANCED WORKFLOW COMPLETE")
-        print(f"{'='*70}")
+        print(f"\n{'='*160}")
+        print("ADDED WORKFLOW COMPLETE")
+        print(f"{'='*160}")
         print(f"\n  Outputs:")
         print(f"    {enhanced_prep_path}")
         print(f"    {enhanced_sections_path}")
@@ -911,17 +1590,17 @@ def _select_sa_ca_modes() -> Tuple[str, Optional[float], str, Optional[float]]:
 
 
 def main_interactive() -> int:
-    """Interactive workflow selection with Phase 0 version picker."""
-    print("\n" + "=" * 70)
+    """Interactive workflow selection with Stage 0 version picker."""
+    print("\n" + "=" * 160)
     print("RAIL NETWORK CAPACITY ANALYSIS")
-    print("=" * 70)
+    print("=" * 160)
     print("\n  Available Workflows:")
     print("    1) Study Area     — capacity for the study area (SA-filtered data)")
     print("    2) Catchment Area — capacity for the full catchment (SA+CA methods)")
     print("    3) Development    — development network capacity run")
-    print("    4) Enhanced       — Phase 4 capacity interventions")
+    print("    4) Added          — capacity interventions on an existing run")
     print("    0) Exit")
-    print("=" * 70)
+    print("=" * 160)
 
     while True:
         choice = input("\n  Select workflow (0-4): ").strip()
@@ -982,19 +1661,19 @@ def main_interactive() -> int:
             if result is None:
                 continue
             infra_version, svc_version = result
-            threshold_raw = input("  Minimum available capacity threshold (tphpd) [2.0]: ").strip()
+            threshold_raw = input("  Minimum available capacity threshold (tphpd) [1.0]: ").strip()
             try:
-                threshold = float(threshold_raw) if threshold_raw else 2.0
+                threshold = float(threshold_raw) if threshold_raw else 1.0
             except ValueError:
-                print("  Invalid value, using 2.0.")
-                threshold = 2.0
+                print("  Invalid value, using 1.0.")
+                threshold = 1.0
             max_iter_raw = input("  Maximum iterations [10]: ").strip()
             try:
                 max_iterations = int(max_iter_raw) if max_iter_raw else 10
             except ValueError:
                 print("  Invalid value, using 10.")
                 max_iterations = 10
-            return run_enhanced_workflow(
+            return run_added_workflow(
                 infra_version, svc_version,
                 threshold=threshold, max_iterations=max_iterations,
             )
@@ -1023,7 +1702,7 @@ def main() -> None:
             "--infra AS_2026_ZH_enhanced --svc AK_2026 --mode-sa Dynamic --mode-ca Set_Value\n"
             "  python capacity_workflow_wrapper.py development "
             "--dev-id 101032 --infra AS_2026_ZH_enhanced --svc AK_2026\n"
-            "  python capacity_workflow_wrapper.py enhanced "
+            "  python capacity_workflow_wrapper.py added "
             "--infra AS_2026_ZH_enhanced --svc AK_2026"
         ),
     )
@@ -1075,11 +1754,11 @@ def main() -> None:
     _add_version_args(p_dev)
     _add_single_cap_args(p_dev, "CAPACITY_MODE_SA")
 
-    # enhanced
-    p_enh = subparsers.add_parser("enhanced", help="Phase 4 capacity interventions")
+    # added
+    p_enh = subparsers.add_parser("added", help="Capacity interventions on an existing run")
     _add_version_args(p_enh)
-    p_enh.add_argument("--threshold", type=float, default=2.0,
-                       help="Min available capacity in tphpd (default 2.0)")
+    p_enh.add_argument("--threshold", type=float, default=1.0,
+                       help="Min available capacity in tphpd (default 1.0)")
     p_enh.add_argument("--max-iterations", type=int, default=10,
                        help="Maximum intervention iterations (default 10)")
 
@@ -1107,8 +1786,8 @@ def main() -> None:
             grouping_strategy=args.grouping_strategy,
             visualize=not args.no_plot,
         )
-    elif args.workflow == "enhanced":
-        code = run_enhanced_workflow(
+    elif args.workflow == "added":
+        code = run_added_workflow(
             args.infra, args.svc,
             threshold=args.threshold, max_iterations=args.max_iterations,
         )
