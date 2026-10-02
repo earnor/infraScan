@@ -775,8 +775,8 @@ def phase_3b_services(
                 with open(_rt_file, 'a', encoding='utf-8') as _f:
                     _f.write(f"\n--- Enhancement Stats: {enhanced_v} ---\n")
                     _f.write(f"  Total segments         : {_n_total}\n")
-                    _f.write(f"  TT_Stopping filled     : {_n_tt} "
-                             f"({_n_tt / _n_total * 100:.1f}%)\n")
+                    #_f.write(f"  TT_Stopping filled     : {_n_tt} "
+                    #         f"({_n_tt / _n_total * 100:.1f}%)\n")
                     _f.write(f"  speed_source = gtfs    : {_n_gtfs}\n")
                     _f.write(f"  speed_source = formula : {_n_formula}\n")
                     _f.write(f"  speed_source = estimate: {_n_estimate}\n")

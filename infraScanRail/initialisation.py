@@ -11,6 +11,9 @@
 #   data/Catchment_Area/catchment_area_buffer.gpkg   — boundary + GTFS buffer
 
 import os
+#print("PYTHONPATH:", os.environ.get('PYTHONPATH'))
+#print("PATH:", os.environ.get('PATH'))
+os.chdir("C:/Users/spadmin/Documents/infraScan/infraScanRail")
 
 import geopandas as gpd
 import pandas as pd

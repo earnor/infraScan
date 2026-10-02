@@ -3,6 +3,7 @@
 /backup-04-26/
 /infraScanRail/plot/
 /infraScanRail/data/
+/infraScanRail/data1/
 /infraScanRail-deprec
 /infraScanRail/plots/
 infraScanRail/__pycache__
@@ -13,3 +14,4 @@ infraScanRail/_helper_files
 /.claude
 /.vscode
 docs/
+infraScanRail/data1/data_asarris.7z

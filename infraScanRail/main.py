@@ -82,7 +82,7 @@ def infrascanrail():
     st = time.time()
 
     # Compute the catchement area for the status quo and for all developments based on access time to train station
-    if settings.OD_type == 'pt_catchment_perimeter':
+    if settings.OD_TYPE == 'pt_catchment_perimeter':
         get_catchment(use_cache=settings.use_cache_pt_catchment)
 
     #runtimes["Generate The Catchement based on the Bus network"] = time.time() - st
@@ -91,7 +91,7 @@ def infrascanrail():
     # here would code be needed to get all catchements for the different developments, if access point are added
 
 
-    if settings.OD_type == 'canton_ZH':
+    if settings.OD_TYPE == 'canton_BE': # == 'canton_ZH':
         # Filtere Punkte innerhalb von settings.perimeter_demand anstatt innerboundary
         points_in_perimeter = points[points.apply(lambda row: settings.perimeter_demand.contains(row.geometry), axis=1)]
 

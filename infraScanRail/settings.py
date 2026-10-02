@@ -17,12 +17,18 @@ from shapely.geometry import Polygon
 STUDY_AREA_METHOD = 'coordinates'
 
 # Polygon used when STUDY_AREA_METHOD = 'coordinates'  (EPSG:2056)
-perimeter_infra_generation = Polygon([
-    (2700989.862, 1235663.403),
-    (2708491.515, 1239608.529),
-    (2694972.602, 1255514.900),
-    (2687415.817, 1251056.404),
+perimeter_infra_generation = Polygon([ # northern Bern
+    (2597018.962, 1210475.783), # Upper left
+    (2607054.685, 1210487.159), # upper right
+    (2607052.842, 1198603.910), # lower right
+    (2597077.391, 1198516.994), #lower left
 ])
+#perimeter_infra_generation = Polygon([
+#    (2700989.862, 1235663.403), # Dübendorf - Hinwil
+#    (2708491.515, 1239608.529),
+#    (2694972.602, 1255514.900),
+#    (2687415.817, 1251056.404),
+#])
 
 # Used when STUDY_AREA_METHOD = 'admin'
 # Admin level: 'national' | 'cantonal' | 'bezirke' | 'municipal'
@@ -45,42 +51,43 @@ STUDY_AREA_BUFFER_M = 3000                    # margin (m) for feeder network ed
 # Catchment boundary is always admin-based (study area must be fully contained within)
 # Admin level: 'national' | 'cantonal' | 'bezirke' | 'municipal'
 CATCHMENT_AREA_ADMIN_LEVEL = 'cantonal'
-CATCHMENT_AREA_ADMIN_NAMES = ['Zürich']       # list of admin entity names to dissolve
+CATCHMENT_AREA_ADMIN_NAMES = ['Bern']#['Zürich']       # list of admin entity names to dissolve
 CATCHMENT_AREA_ADMIN_SUBDIVISIONS = {'bezirke': [], 'municipal': []}
 CATCHMENT_AREA_BUFFER_M = 5000                # buffer (m) around boundary for GTFS spatial filter
-CATCHMENT_CANTON_ABBREV = 'ZH'               # canton abbreviation — used in folder and file naming
+CATCHMENT_CANTON_ABBREV = 'BE'#'ZH'               # canton abbreviation — used in folder and file naming
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. INFRASTRUCTURE VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Named output folders for the two filter scripts (Phase 2 skip-guards)
-INFRA_RAW_VERSION   = 'Raw_ZH'             # infrabuild_filter_network output: data/Infrastructure/<INFRA_RAW_VERSION>/
+INFRA_RAW_VERSION   = 'Raw_BE'             # infrabuild_filter_network output: data/Infrastructure/<INFRA_RAW_VERSION>/
 
 # 'Build_New'           — run full infrabuild pipeline to create a new named version
 # 'AS_2026_ZH'          — BAV network as-is for 2026 (must already exist on disk)
 # 'AS_2026_ZH_enhanced' — AS_2026_ZH enriched with projected svc travel times and corrections
 # 'AS_2035_ZH'          — BAV network as-is for 2035 (must already exist on disk)
 # 'AS_2035_ZH_enhanced' — AS_2035_ZH enriched with projected svc travel times and corrections
-INFRA_VERSION = 'Build_New'
+# 'AS_2026_BE'          — BAV network as-is for 2026 (must already exist on disk)
+INFRA_VERSION = 'AS_2026_BE'
 
-INFRA_BUILD_NEW_NAME = 'AS_2026_ZH'        # name for the new version — used only when INFRA_VERSION = 'Build_New'
+INFRA_BUILD_NEW_NAME = 'AS_2026_BE'        # name for the new version — used only when INFRA_VERSION = 'Build_New'
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. SERVICES VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 GTFS_RAW_VERSION    = 'GTFS_SVC2026_CH_raw'    # services_filter_gtfs input under data/Network/GTFS_Timetable/
-GTFS_FILTER_VERSION = 'GTFS_SVC2026_ZH'        # services_filter_gtfs output: data/Network/GTFS_Timetable/<GTFS_FILTER_VERSION>/
+GTFS_FILTER_VERSION = 'GTFS_SVC2026_BE'#'GTFS_SVC2026_ZH'        # services_filter_gtfs output: data/Network/GTFS_Timetable/<GTFS_FILTER_VERSION>/
 
 # 'Build_New'   — run full services pipeline to create a new named version
 # 'AK_2026'     — scheduled services as of 2026 timetable
 # 'AK_2026_S18' — AK_2026 with S18 line included
 # 'AK_2035'     — scheduled services as of 2035 timetable
 # 'AK_2035_S18' — AK_2035 with S18 line included
-SVC_VERSION = 'AK_2026_S18'
+SVC_VERSION = 'Build_New'
 
-SVC_BUILD_NEW_NAME = 'AK_2026_S18'                 # name for the new version — used only when SVC_VERSION = 'Build_New'
+SVC_BUILD_NEW_NAME = 'BE_AK_2026'                 # name for the new version — used only when SVC_VERSION = 'Build_New'
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. CAPACITY
@@ -159,7 +166,7 @@ only_demand_from_to_perimeter = True
 
 # 'canton_ZH'              — station OD derived from commune-level cantonal survey data
 # 'pt_catchment_perimeter' — OD derived from PT catchment area
-OD_TYPE = 'canton_ZH'
+OD_TYPE = 'canton_BE' #'canton_ZH'
 
 # Base year for the population/employment grids, OD matrices, and scenario scaling
 POPULATION_BASE_YEAR = 2035
@@ -194,10 +201,10 @@ PLOT_INFRA     = True    # infrabuild network plots (Phase 3A)
 PLOT_SERVICES  = True   # services pipeline plots (Phase 3B)
 PLOT_CAPACITY  = True   # capacity analysis plots (Phase 3C)
 PLOT_CATCHMENT = True   # catchment allocation plots (Phase 4A)
-PLOT_RESULTS   = False   # final CBA/result visualisations
+PLOT_RESULTS   = True   # final CBA/result visualisations
 
-plot_passenger_flow = False
-plot_railway_line_load = False
+plot_passenger_flow = True
+plot_railway_line_load = True
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 10. CACHE

@@ -14,7 +14,9 @@ DEVELOPMENT_DIRECTORY = r"data\Network\processed\developments"
 
 RAIL_NODES_PATH = r"data\Network\Rail_Node.csv"
 RAIL_POINTS_PATH = r"data\Network\processed\points.gpkg"
-OD_KT_ZH_PATH = r'data/Traffic_Flow/OD/Original/KTZH_00001982_00003903.xlsx'
+#OD_KT_ZH_PATH = r'data/Traffic_Flow/OD/Original/KTZH_00001982_00003903.xlsx'
+#OD_KT_BE_PATH = r'data/Traffic_Flow/OD/Bern/BE_2019_Ist2019_DWV.xlsx'
+OD_KT_PATH = r'data/Traffic_Flow/OD/Bern/BE_2019_Ist2019_DWV.csv'
 OD_STATIONS_KT_ZH_PATH      = r'data/Traffic_Flow/OD/Rail/ktzh/od_matrix_stations_ktzh_20.csv'
 OD_STATIONS_KT_ZH_2040_PATH = r'data/Traffic_Flow/OD/Rail/ktzh/od_matrix_stations_ktzh_2040.csv'
 
@@ -325,7 +327,10 @@ POPULATION_CSV_2023 = r"data/Spatial_Data/Land_Use/Population/Inhabitants_2023_C
 EMPLOYMENT_CSV_2023 = r"data/Spatial_Data/Land_Use/Employment/Employment_FTE_2023_CH.csv"
 # Canton Zurich commune-level actuals (population 1962-2025, employment 2011-2023)
 POPULATION_CANTON_ZH_XLSX = r"data/Spatial_Data/Land_Use/Population/Canton_Zurich/KTZH_00000127_00001245.xlsx"
+# POPULATION_CANTON_BE_XLSX = r
+POPULATION_CANTON_XLSX = POPULATION_CANTON_ZH_XLSX
 EMPLOYMENT_CANTON_ZH_CSV  = r"data/Spatial_Data/Land_Use/Employment/Canton_Zurich/ZGZ_Daten_Komplett_vzae_sektor_2026-05-15_144034.csv"
+# EMPLOYMENT_CANTON_BE_XLSX = r
 LAKES_SHP    = r"data/Spatial_Data/Land_Use/Hydrography/swissTLMRegio_Lake.shp"
 LAKES_CA_GPKG = r"data/Spatial_Data/Land_Use/Hydrography/lakes_ca.gpkg"
 LAKES_SA_GPKG = r"data/Spatial_Data/Land_Use/Hydrography/lakes_sa.gpkg"

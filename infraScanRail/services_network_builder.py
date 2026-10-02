@@ -44,13 +44,13 @@ _start_time = time.time()
 # Folder / file name constants — adjust here to target a different GTFS source
 # ---------------------------------------------------------------------------
 
-GTFS_INPUT_FOLDER      = 'GTFS_SVC2026_ZH'          # subfolder of paths.GTFS_TRANSIT_DIR
+GTFS_INPUT_FOLDER      = 'GTFS_SVC2026_BE'          # subfolder of paths.GTFS_TRANSIT_DIR
 
-PT_FEEDER_OUTPUT_FOLDER = 'SVC2026_ZH_network'       # subfolder of paths.FEEDER_LINES_DIR
+PT_FEEDER_OUTPUT_FOLDER = 'SVC2026_BE_network'       # subfolder of paths.FEEDER_LINES_DIR
 PT_FEEDER_STOPS_FILE    = 'pt_feeder_stops.gpkg'
 PT_FEEDER_LINES_FILE    = 'pt_feeder_lines.gpkg'
 
-RAIL_OUTPUT_FOLDER      = 'SVC2026_ZH_network'       # subfolder of paths.RAIL_LINES_DIR
+RAIL_OUTPUT_FOLDER      = 'SVC2026_BE_network'       # subfolder of paths.RAIL_LINES_DIR
 RAIL_STOPS_FILE         = 'rail_stops.gpkg'
 RAIL_LINES_FILE         = 'rail_lines.gpkg'
 

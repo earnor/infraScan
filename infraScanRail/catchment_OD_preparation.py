@@ -286,8 +286,10 @@ def _classify_od(communal_od: pd.DataFrame, in_bnd_bfs: set) -> tuple:
     Returns:
         (internal_df, external_df) — same columns as the input.
     """
-    o_in = communal_od['quelle_code'].isin(in_bnd_bfs)
-    d_in = communal_od['ziel_code'].isin(in_bnd_bfs)
+    #o_in = communal_od['quelle_code'].isin(in_bnd_bfs) # this was the correct version for Kt ZH
+    #d_in = communal_od['ziel_code'].isin(in_bnd_bfs) # this was the correct version for Kt ZH
+    o_in = (communal_od['quelle_code']/10000).astype(int).isin(in_bnd_bfs) # this is correct for Kt BE
+    d_in = (communal_od['ziel_code']/10000).astype(int).isin(in_bnd_bfs) # this is correct for Kt BE
     internal = communal_od[o_in & d_in].copy()
     external = communal_od[~(o_in & d_in)].copy()
     n_both   = int((~o_in & ~d_in).sum())
@@ -303,18 +305,23 @@ def _classify_od(communal_od: pd.DataFrame, in_bnd_bfs: set) -> tuple:
 
 
 def _load_zone_names() -> dict:
-    """Read external-zone names (code > 9999) from the KTZH OD xlsx.
+    """Read external-zone names (code > 9999) from the configured OD file.
 
     Returns dict[int code -> str name]; empty if the name columns are absent.
     """
+    usecols = lambda c: c in ('quelle_code', 'quelle_name',
+                              'ziel_code', 'ziel_name')
     try:
         raw = pd.read_excel(
-            paths.OD_KT_ZH_PATH,
-            usecols=lambda c: c in ('quelle_code', 'quelle_name',
-                                    'ziel_code', 'ziel_name'))
-    except Exception as exc:
-        print(f"    Could not read zone names from OD xlsx: {exc}")
-        return {}
+            paths.OD_KT_PATH,
+            usecols=usecols)
+    except Exception as excel_exc:
+        try:
+            raw = pd.read_csv(paths.OD_KT_PATH, usecols=usecols, sep=';', encoding='utf-8')
+        except Exception as csv_exc:
+            print(f"    Could not read zone names from OD file as Excel "
+                  f"({excel_exc}) or CSV ({csv_exc})")
+            return {}
     names = {}
     for code_col, name_col in (('quelle_code', 'quelle_name'),
                                ('ziel_code', 'ziel_name')):
@@ -325,7 +332,7 @@ def _load_zone_names() -> dict:
                     ci = int(code)
                 except (ValueError, TypeError):
                     continue
-                if ci > 9999:
+                if ci < 9999:
                     names.setdefault(ci, str(name).strip())
     return names
 
@@ -423,19 +430,30 @@ def _normalise_assignment(raw: dict) -> dict:
     Accepts both the legacy single-station format ({code: id}) and the
     multi-station format ({code: [id, ...]}).
     """
+    def _valid_ints(values):
+        valid = []
+        for value in values:
+            try:
+                valid.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return valid
+
     out = {}
     for k, v in raw.items():
         code = int(k)
         if isinstance(v, (list, tuple)):
-            out[code] = [int(x) for x in v]
+            station_ids = _valid_ints(v)
         else:
-            out[code] = [int(v)]
+            station_ids = _valid_ints([v])
+        if station_ids:
+            out[code] = station_ids
     return out
 
 
 def _assign_external_zones(zone_codes, boundary_ids, bs_index, zone_names,
                            json_path) -> dict:
-    """Assign each external GVM zone (code > 9999) to one or more gateway stations.
+    """Assign each external GVM zone (e.g., for Kt ZH: code > 9999) to one or more gateway stations.
 
     Multiple stations per zone are allowed; the zone's demand is later split
     across them by service volume. Persisted to json_path as {code: [ids]}. On
@@ -768,8 +786,8 @@ def _prepare_gateways(external_od, commune_gdf, bfs_col, in_bnd_bfs,
 
     ext_codes = set(external_od['quelle_code']).union(set(external_od['ziel_code']))
     ext_codes = {int(c) for c in ext_codes if int(c) not in in_bnd_bfs}
-    zone_codes    = {c for c in ext_codes if c > 9999}
-    commune_codes = {c for c in ext_codes if c <= 9999}
+    zone_codes    = {c for c in ext_codes if c < 9999}  # these are external GVM Zones, for Kt ZH: >9999+ are communes outside the catchment, for Kt BE: code < 3000000 are external.
+    commune_codes = {c for c in ext_codes if c >= 9999}
 
     gateway_dir = paths.get_gateway_dir(svc_network)
     json_path   = os.path.join(gateway_dir, 'gateway_zone_assignment.json')
@@ -1232,6 +1250,10 @@ def _reaggregate_to_stations(
         Long-format DataFrame: origin_station_id (int), dest_station_id (int), trips (float).
     """
     print("  Reaggregating communal OD to station pairs ...")
+    
+    # the following two lines are a workaround for Kt BE
+    communal_od['quelle_code'] = (communal_od['quelle_code']/10000).astype(int)
+    communal_od['ziel_code'] = (communal_od['ziel_code']/10000).astype(int)
 
     merged = communal_od.merge(
         orig_weights.rename(columns={

@@ -1410,7 +1410,7 @@ def _load_pop_xlsx_gebietszuordnung() -> pd.DataFrame:
     Used to map communes to bezirke for projection disaggregation.
     """
     df = pd.read_excel(
-        paths.POPULATION_CANTON_ZH_XLSX, sheet_name='Gebietszuordnung', header=4
+        paths.POPULATION_CANTON_XLSX, sheet_name='Gebietszuordnung', header=4
     )
     df.columns = [str(c).strip() for c in df.columns]
     df = df[pd.to_numeric(df['BFS-NR'], errors='coerce').notna()].copy()

@@ -314,7 +314,7 @@ def phase_3_baseline_capacity_analysis(runtimes: dict) -> tuple:
     st = time.time()
 
     # Prompt user for capacity enhancement parameters
-    print(f"  Network to enhance: {settings.rail_network}")
+    print(f"  Network to enhance: {settings.INFRA_VERSION}") #rail.network
     print(f"\n  Configure capacity enhancement parameters:")
     print(f"  Default threshold: {settings.capacity_threshold} tphpd")
     print(f"  Default max iterations: {settings.max_enhancement_iterations}")
@@ -357,12 +357,12 @@ def phase_3_baseline_capacity_analysis(runtimes: dict) -> tuple:
         print("  → Skipping enhanced network visualizations")
 
     # Run Phase 4 iterative capacity enhancement
-    print(f"\n  Running Phase 4 enhancement workflow for {settings.rail_network}...")
+    print(f"\n  Running Phase 4 enhancement workflow for {settings.INFRA_VERSION}...")#{settings.rail_network}...")
     print(f"  Threshold: {capacity_threshold} tphpd")
     print(f"  Max iterations: {max_iterations}\n")
 
     enhanced_exit_code = run_enhanced_workflow(
-        network_label=settings.rail_network,
+        network_label=settings.INFRA_VERSION, #settings.rail_network,
         threshold=capacity_threshold,
         max_iterations=max_iterations,
     )
@@ -374,16 +374,16 @@ def phase_3_baseline_capacity_analysis(runtimes: dict) -> tuple:
         )
 
     # Determine enhanced network label
-    enhanced_network_label = f"{settings.rail_network}_enhanced"
+    enhanced_network_label = f"{settings.INFRA_VERSION}_enhanced" #.rail_network}_enhanced"
 
     # NOTE: Development workflow uses the BASELINE network for enrichment
     # (run_capacity_analysis.py only looks in Baseline/ directory, not Enhanced/)
     # The enhanced baseline is for reference/validation purposes only
-    settings.baseline_network_for_developments = settings.rail_network  # Use base, not enhanced
+    settings.baseline_network_for_developments = settings.INFRA_VERSION#settings.rail_network  # Use base, not enhanced
 
     print(f"\n  ✓ Baseline enhancement complete")
     print(f"  Enhanced network: {enhanced_network_label}")
-    print(f"  → Developments will use baseline network ({settings.rail_network}) for enrichment\n")
+    print(f"  → Developments will use baseline network ({settings.INFRA_VERSION}) for enrichment\n") #settings.rail_network
 
     runtimes["Enhance baseline network"] = time.time() - st
 
@@ -678,7 +678,7 @@ def phase_6_travel_time_computation(dev_id_lookup: pd.DataFrame, runtimes: dict)
     st = time.time()
 
     od_times_dev, od_times_status_quo, G_status_quo, G_development = create_travel_time_graphs(
-        settings.rail_network,
+        settings.INFRA_VERSION,
         settings.use_cache_traveltime_graph,
         dev_id_lookup
     )
@@ -1512,7 +1512,7 @@ def infrascanrail_cap():
     ##################################################################################
     # PHASE 8: SCENARIO GENERATION
     ##################################################################################
-    if settings.OD_type == 'canton_ZH':
+    if settings.OD_type == 'canton_BE':
         phase_8_scenario_generation(runtimes)
 
     ##################################################################################
@@ -1836,7 +1836,7 @@ def import_process_network(use_cache):
     network_ak2035, points = create_railway_services_AK2035()
     create_railway_services_AK2035_extended(network_ak2035, points)
     create_railway_services_2024_extended()
-    reformat_rail_edges(settings.rail_network)
+    reformat_rail_edges(settings.INFRA_VERSION) #settings.rail_network 
     add_construction_info_to_network()
     network_in_corridor(poly=settings.perimeter_infra_generation)
     return points

@@ -3,15 +3,15 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
 ================================================================================
   RUN CONFIGURATION
 ================================================================================
-  Infrastructure   : Build_New  -->  build as 'AS_2026_ZH'
-  Raw version      : Raw_ZH
-  Services         : AK_2026_S18
-  GTFS version     : GTFS_SVC2026_ZH
-  Canton           : ZH
+  Infrastructure   : Build_New  -->  build as 'AS_2026_BE'
+  Raw version      : Raw_BE
+  Services         : Build_New  [needs projection]
+  GTFS version     : GTFS_SVC2026_BE
+  Canton           : BE
   Catchment method : PT_Feeder  (OD: feeder_weighted)
   Travel cost      : absolute  (transfer: explicit)
   Capacity mode    : Dynamic
-  OD type          : canton_ZH  (base year 2035)
+  OD type          : canton_BE  (base year 2035)
   Population base  : 2035
   Scenarios        : 100 x [2018-2100]
 --------------------------------------------------------------------------------
@@ -37,17 +37,16 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
   -------------+------------+-----------
   Mean         |     1.1223 |     1.1226
 
-  Total population  :    1,609,779 (2023) →    1,802,726 (2035)
-  Total employment  :      914,349 (2023) →    1,021,643 (2035)
+  Total population  :    1,070,185 (2023) →    1,070,185 (2035)
+  Total employment  :      554,347 (2023) →      554,348 (2035)
 
---- Enhancement Stats: AS_2026_ZH_enhanced ---
-  Total segments         : 691
-  TT_Stopping filled     : 664 (96.1%)
-  speed_source = gtfs    : 691
+--- Enhancement Stats: AS_2026_BE_enhanced ---
+  Total segments         : 642
+  speed_source = gtfs    : 642
   speed_source = formula : 0
   speed_source = estimate: 0
   speed_source = design  : 0
-  Feeder-derived segs    : 27
+  Feeder-derived segs    : 0
 
 ================================================================================
   CALIBRATION INPUTS (Phase 4A)
@@ -86,16 +85,3 @@ INFRASCANRAIL NEW PIPELINE - RUN LOG
     BUFFER_BUS_M  = 500 m
 ================================================================================
 
-PHASE RUNTIMES
-================================================================================
-
-Phase 1: Initialisation..................................... 0m 0s (0.77s)
-Phase 2: Data Preparation................................... 0m 53s (53.02s)
-Phase 3A: Infrastructure Network Build...................... 0m 20s (20.82s)
-Phase 3B: Services Network Build............................ 1m 24s (84.46s)
-Phase 3C: Capacity Analysis................................. 0m 4s (4.98s)
-Phase 4A: Catchment Allocation.............................. 2m 44s (164.82s)
-
-================================================================================
-TOTAL TIME.................................................. 5m 28s (328.87s)
-================================================================================
